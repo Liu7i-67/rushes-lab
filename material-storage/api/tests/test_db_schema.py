@@ -16,6 +16,10 @@ def test_all_tables_in_metadata() -> None:
         "assets",
         "audit_events",
         "approvals",
+        "request_link_tokens",
+        "groups",
+        "group_memberships",
+        "notifications",
     }
 
 

@@ -200,7 +200,7 @@ async def main() -> int:
                 await perms.bootstrap_project(
                     project_id=str(project.id),
                     organization_tenant_key=tenant_key,
-                    creator_open_id=u.feishu_open_id,
+                    creator_user_id=str(u.id),
                 )
                 # 3) 建 folder tree
                 n_folders = await _create_folder_tree(

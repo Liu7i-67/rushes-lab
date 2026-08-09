@@ -1,4 +1,4 @@
-"""FastAPI Dependency Injection — iter a1 加 CurrentUser(同时给 SQL UUID 和飞书 open_id)。"""
+"""FastAPI Dependency Injection — CurrentUser(SQL UUID 作 FK + OpenFGA subject;open_id 仅飞书遗留)。"""
 from __future__ import annotations
 
 import logging
@@ -22,10 +22,18 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class CurrentUser:
-    """authn 结果 — 同时拿 SQL UUID(FK 用)和飞书 open_id(OpenFGA subject 用)。"""
+    """authn 结果 — id 是 SQL UUID,同时做 FK 和 OpenFGA subject(#148 起)。
+
+    open_id 仅为飞书遗留(OIDC 登录 / IM 发卡寻址)保留,不再用作权限 subject。
+    """
     id: uuid.UUID
     open_id: str
     name: str
+
+    @property
+    def subject(self) -> str:
+        """OpenFGA user subject:#148 起一律 user:<users.id UUID>。"""
+        return f"user:{self.id}"
 
 
 def settings_dep() -> Settings:
@@ -126,10 +134,10 @@ async def require_admin(
     if org:
         _, tenant_key = org
         if await perms.is_org_admin(
-            user_open_id=user.open_id, organization_tenant_key=tenant_key,
+            user_id=str(user.id), organization_tenant_key=tenant_key,
         ):
             return user
-    if await perms.has_any_project_admin(user_open_id=user.open_id):
+    if await perms.has_any_project_admin(user_id=str(user.id)):
         return user
     raise HTTPException(403, "admin permission required")
 
@@ -150,7 +158,7 @@ async def require_system_admin(
         raise HTTPException(500, "no default organization configured")
     _, tenant_key = org
     if not await perms.is_org_admin(
-        user_open_id=user.open_id, organization_tenant_key=tenant_key,
+        user_id=str(user.id), organization_tenant_key=tenant_key,
     ):
         raise HTTPException(403, "system admin permission required(只有系统管理员可执行此操作)")
     return user
@@ -175,7 +183,7 @@ async def get_is_system_admin(
     _, tenant_key = org
     try:
         return await perms.is_org_admin(
-            user_open_id=user.open_id, organization_tenant_key=tenant_key,
+            user_id=str(user.id), organization_tenant_key=tenant_key,
         )
     except Exception:  # noqa: BLE001
         return False

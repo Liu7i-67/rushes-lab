@@ -5,9 +5,8 @@
 
 PR-1 backend only;PR-2 加 frontend RequestLinkLandingPage + Create modal + 入口 button。
 
-切记:link 限定 receiver_open_id 时,**enforce 必须在 backend approval 创建路径**,
-不能只靠 frontend 隐藏 UI。本期暂未在 approvals 路径加 `via_link` enforce —
-本 PR 标记为 PR-2 一起做(否则 link receiver 限制是假的,advisor risk #3)。
+切记:link 限定 receiver_user_id 时,**enforce 必须在 backend approval 创建路径**,
+不能只靠 frontend 隐藏 UI(已在 approvals POST 的 via_link 路径 enforce)。
 """
 from __future__ import annotations
 
@@ -43,8 +42,8 @@ class CreateIn(BaseModel):
         ..., min_length=1, max_length=2,
         description="可申请的动作集;access 仅适用 sensitive_folder",
     )
-    receiver_open_id: str | None = Field(
-        None, description="限定只此 open_id 可用(null = 任意登录用户)",
+    receiver_user_id: uuid.UUID | None = Field(
+        None, description="限定只此 user 可用(users.id UUID;null = 任意登录用户)",
     )
     ttl_seconds: int | None = Field(
         None, ge=60, le=MAX_TTL_SECONDS,
@@ -67,7 +66,7 @@ class ResolveOut(BaseModel):
     allowed_actions: list[str]
     expires_at: datetime
     inviter_name: str | None
-    # 接收者是否受限(true = link 指定了 receiver_open_id);后端会 enforce
+    # 接收者是否受限(true = link 指定了 receiver_user_id);后端会 enforce
     # 当 caller 不匹配 expected 时,前端可以直接显 "此链接不是给你的"
     receiver_restricted: bool
     receiver_match: bool
@@ -96,7 +95,7 @@ async def create_link(
     # v4 model:asset/folder/sensitive_folder/project 都用 can_admin 一致 relation
     if not is_system_admin:
         ok = await permissions.check(
-            user_subject=f"user:{user.open_id}",
+            user_subject=user.subject,
             relation="can_admin",
             object_type=payload.target_type,
             object_id=str(payload.target_id),
@@ -114,7 +113,7 @@ async def create_link(
             target_type=payload.target_type,
             target_id=payload.target_id,
             allowed_actions=list(payload.allowed_actions),
-            receiver_open_id=payload.receiver_open_id,
+            receiver_user_id=payload.receiver_user_id,
             ttl_seconds=payload.ttl_seconds,
         )
     except RequestLinkError as e:
@@ -135,8 +134,8 @@ async def resolve(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> ResolveOut:
-    """落地查询。任意登录 user 可访问;receiver_open_id 限制由前端结合本接口
-    返回的 receiver_match 字段显示提示,实际 enforce 在 PR-2 加到 approvals 创建路径。"""
+    """落地查询。任意登录 user 可访问;receiver_user_id 限制由前端结合本接口
+    返回的 receiver_match 字段显示提示,实际 enforce 在 approvals 创建路径(via_link)。"""
     info = await resolve_request_link(db, token)
     if info is None:
         raise HTTPException(404, "链接不存在或已过期")
@@ -144,9 +143,9 @@ async def resolve(
     # fire-and-forget audit used_at
     await mark_used(db, token)
 
-    expected = info["receiver_open_id"]
-    receiver_restricted = bool(expected)
-    receiver_match = (not receiver_restricted) or (expected == user.open_id)
+    expected = info["receiver_user_id"]
+    receiver_restricted = expected is not None
+    receiver_match = (not receiver_restricted) or (expected == user.id)
 
     return ResolveOut(
         token=info["token"],

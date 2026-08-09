@@ -53,16 +53,16 @@ async def create_project(
     user_id = user.id
     from app.db.tables import Organization, User
 
-    # 校验 admin 是真 user(存在 db + 飞书 open_id)
+    # 校验 admin 是真 user(存在 db + active)
     from sqlalchemy import select as _select
     res = await db.execute(_select(User).where(
-        User.feishu_open_id == payload.admin_user_open_id,
+        User.id == payload.admin_user_id,
         User.is_active.is_(True),
     ))
     admin_user = res.scalar_one_or_none()
     if admin_user is None:
         raise HTTPException(
-            400, f"admin user not found:{payload.admin_user_open_id}(需先 OIDC 登录过)"
+            400, f"admin user not found:{payload.admin_user_id}(需是已存在的 active user)"
         )
 
     # 解析 org_id
@@ -108,7 +108,7 @@ async def create_project(
     await permissions.bootstrap_project(
         project_id=str(project.id),
         organization_tenant_key=tenant_key,
-        creator_open_id=payload.admin_user_open_id,
+        creator_user_id=str(admin_user.id),
     )
 
     await audit.write(
@@ -118,7 +118,7 @@ async def create_project(
         details={
             "code": project.code, "name": project.name,
             "visibility": project.visibility,
-            "admin_user_open_id": payload.admin_user_open_id,
+            "admin_user_id": str(admin_user.id),
             "admin_name": admin_user.name,
         },
         **ctx,
@@ -142,29 +142,39 @@ async def _fill_project_admins(
     from app.models import AdminBrief
 
     out: dict[uuid.UUID, list] = {}
-    all_open_ids: set[str] = set()
-    project_to_open_ids: dict[uuid.UUID, list[str]] = {}
+    all_user_ids: set[str] = set()
+    project_to_user_ids: dict[uuid.UUID, list[str]] = {}
     for p in projects:
         ids = await permissions.list_users_with_relation(
             object_type="project", object_id=str(p.id), relation="admin",
         )
-        project_to_open_ids[p.id] = ids
-        all_open_ids.update(ids)
+        project_to_user_ids[p.id] = ids
+        all_user_ids.update(ids)
 
-    name_by_open_id: dict[str, str] = {}
-    if all_open_ids:
+    name_by_user_id: dict[str, str] = {}
+    user_uuids = _parse_uuids(all_user_ids)
+    if user_uuids:
         res = await db.execute(
-            select(User.feishu_open_id, User.name).where(
-                User.feishu_open_id.in_(all_open_ids)
-            )
+            select(User.id, User.name).where(User.id.in_(user_uuids))
         )
-        name_by_open_id = {row[0]: row[1] for row in res.all()}
+        name_by_user_id = {str(row[0]): row[1] for row in res.all()}
 
-    for pid, ids in project_to_open_ids.items():
+    for pid, ids in project_to_user_ids.items():
         out[pid] = [
-            AdminBrief(open_id=oid, name=name_by_open_id.get(oid, oid[:12] + "…"))
-            for oid in ids
+            AdminBrief(user_id=uid, name=name_by_user_id.get(uid, uid[:12] + "…"))
+            for uid in ids
         ]
+    return out
+
+
+def _parse_uuids(ids: list[str] | set[str]) -> list[uuid.UUID]:
+    """subject_id 字符串 → UUID,容错非法值(老 open_id 存量数据)直接跳过。"""
+    out: list[uuid.UUID] = []
+    for s in ids:
+        try:
+            out.append(uuid.UUID(s))
+        except ValueError:
+            continue
     return out
 
 
@@ -182,8 +192,6 @@ async def list_projects(
     系统 admin(organization.admin)→ 见全部 active project,无 filter
     普通 user → OpenFGA list_objects(can_view, project) UNION visibility=public
     """
-    user_open_id = user.open_id
-
     if is_system_admin:
         stmt = (
             select(Project)
@@ -193,7 +201,7 @@ async def list_projects(
         )
     else:
         member_ids = await permissions.list_objects(
-            user_subject=f"user:{user_open_id}", relation="can_view", object_type="project",
+            user_subject=user.subject, relation="can_view", object_type="project",
         )
         member_uuids = [uuid.UUID(s) for s in member_ids]
         stmt = (
@@ -214,7 +222,7 @@ async def list_projects(
     # batch fill admins + my_roles
     admins_by_pid = await _fill_project_admins(db, permissions, rows)
     my_roles_by_pid = await _fill_my_roles(
-        permissions, user_open_id, rows, is_system_admin=is_system_admin,
+        permissions, user.subject, rows, is_system_admin=is_system_admin,
     )
     out: list[ProjectOut] = []
     for r in rows:
@@ -230,7 +238,7 @@ _PROJECT_ROLES: tuple[str, ...] = ("admin", "uploader", "downloader", "viewer")
 
 async def _fill_my_roles(
     permissions: PermissionsService,
-    user_open_id: str,
+    user_subject: str,
     projects: list,
     *,
     is_system_admin: bool,
@@ -249,7 +257,6 @@ async def _fill_my_roles(
     if not projects:
         return out
 
-    user_subject = f"user:{user_open_id}"
     role_lists = await asyncio.gather(*[
         permissions.list_objects(
             user_subject=user_subject, relation=role, object_type="project",
@@ -274,14 +281,14 @@ async def get_project(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ProjectOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "project not found")
 
     if not is_system_admin and project.visibility != "public":
         allowed = await permissions.check(
-            user_subject=f"user:{user_open_id}",
+            user_subject=user.subject,
             relation="can_view",
             object_type="project",
             object_id=str(project_id),
@@ -300,7 +307,7 @@ async def get_project(
     admins_by_pid = await _fill_project_admins(db, permissions, [project])
     po.admins = admins_by_pid.get(project.id, [])
     my_roles_by_pid = await _fill_my_roles(
-        permissions, user_open_id, [project], is_system_admin=is_system_admin,
+        permissions, user.subject, [project], is_system_admin=is_system_admin,
     )
     po.my_roles = my_roles_by_pid.get(project.id, [])
     return po
@@ -312,13 +319,13 @@ PROJECT_ROLES = ("admin", "uploader", "downloader", "viewer")
 
 async def _enforce_project_admin(
     permissions: PermissionsService, audit: AuditService,
-    user_id: uuid.UUID, user_open_id: str, project_id: uuid.UUID, action: str, ctx: dict,
+    user_id: uuid.UUID, user_subject: str, project_id: uuid.UUID, action: str, ctx: dict,
     *, is_system_admin: bool = False,
 ) -> None:
     if is_system_admin:
         return  # 系统 admin 直通,所有项目都可管理
     ok = await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user_subject, relation="can_admin",
         object_type="project", object_id=str(project_id),
     )
     if not ok:
@@ -346,12 +353,12 @@ async def list_project_members(
     返:[{subject, kind, subject_id, name, roles: [admin|viewer|downloader|uploader, ...]}]
     同一 subject 多 role 聚合。需 can_admin project。
     """
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
     await _enforce_project_admin(
-        permissions, audit, user_id, user_open_id, project_id, "list_members", ctx,
+        permissions, audit, user_id, user.subject, project_id, "list_members", ctx,
         is_system_admin=is_system_admin,
     )
 
@@ -381,14 +388,14 @@ async def list_project_members(
                 user_subject_ids.append(sid)
         by_subject[key]["roles"].append(rel)
 
-    # user batch db lookup
+    # user batch db lookup(subject_id 是 users.id UUID 字符串,容错非法值)
     if user_subject_ids:
-        stmt = select(_User).where(_User.feishu_open_id.in_(user_subject_ids))
+        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
         res = await db.execute(stmt)
-        name_by_open_id = {u.feishu_open_id: u.name for u in res.scalars().all()}
+        name_by_user_id = {str(u.id): u.name for u in res.scalars().all()}
         for m in by_subject.values():
             if m["kind"] == "user":
-                m["name"] = name_by_open_id.get(m["subject_id"], m["subject_id"][:12] + "…")
+                m["name"] = name_by_user_id.get(m["subject_id"], m["subject_id"][:12] + "…")
     for m in by_subject.values():
         if m["name"] is None:
             label = "用户组" if m["kind"] == "group" else "部门" if m["kind"] == "department" else m["kind"]
@@ -419,17 +426,17 @@ async def add_project_member(
     """加 project 成员。
 
     body: {
-      user_open_id?: str | group_id?: str | department_id?: str,  # 三选一
+      user_id?: str | group_id?: str | department_id?: str,  # 三选一(user_id = users.id UUID)
       role: 'admin'|'viewer'|'downloader'|'uploader'
     }
     需 can_admin project。
     """
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
     await _enforce_project_admin(
-        permissions, audit, user_id, user_open_id, project_id, "add_member", ctx,
+        permissions, audit, user_id, user.subject, project_id, "add_member", ctx,
         is_system_admin=is_system_admin,
     )
 
@@ -438,13 +445,13 @@ async def add_project_member(
         raise HTTPException(400, f"role must be one of {PROJECT_ROLES}")
 
     provided = [
-        ("user", payload.get("user_open_id")),
+        ("user", payload.get("user_id")),
         ("group", payload.get("group_id")),
         ("department", payload.get("department_id")),
     ]
     chosen = [(k, v) for k, v in provided if v]
     if len(chosen) != 1:
-        raise HTTPException(400, "must specify exactly one of user_open_id / group_id / department_id")
+        raise HTTPException(400, "must specify exactly one of user_id / group_id / department_id")
     if role == "admin" and chosen[0][0] != "user":
         # model v4 限 admin: [user, group#member] — 不允许 department#member
         if chosen[0][0] == "department":
@@ -477,12 +484,12 @@ async def remove_project_member(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
     await _enforce_project_admin(
-        permissions, audit, user_id, user_open_id, project_id, "remove_member", ctx,
+        permissions, audit, user_id, user.subject, project_id, "remove_member", ctx,
         is_system_admin=is_system_admin,
     )
 
@@ -491,7 +498,7 @@ async def remove_project_member(
     # (a) 不允许撤销后项目 admin 归零(兜底:group-admin 间接 user 也计入,接受 OpenFGA
     #     list_users 透传 leaf users 的语义 — 不完美但能拦住典型死循环路径)
     if role == "admin":
-        if subject == f"user:{user_open_id}":
+        if subject == user.subject:
             raise HTTPException(
                 409,
                 "不允许撤销自己的项目管理员角色;请先邀请其他管理员,再让对方撤销你",
@@ -548,12 +555,12 @@ async def list_project_grants_endpoint(
     返:[{subject, kind, subject_id, name, object_type, object_id, object_name,
          relation, level, permanent, expires_at?}]
     """
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
     await _enforce_project_admin(
-        permissions, audit, user_id, user_open_id, project_id, "list_grants", ctx,
+        permissions, audit, user_id, user.subject, project_id, "list_grants", ctx,
         is_system_admin=is_system_admin,
     )
     from app.services.grant_overview import list_project_grants
@@ -576,12 +583,12 @@ async def revoke_project_grant(
 ) -> None:
     """撤回一条授权 grant(#138)。四元组 (object_type, object_id, subject, relation)
     与 list_project_grants 输出对齐;校验 object 属于本 project 防跨项目撤回。"""
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, "project not found")
     await _enforce_project_admin(
-        permissions, audit, user_id, user_open_id, project_id, "revoke_grant", ctx,
+        permissions, audit, user_id, user.subject, project_id, "revoke_grant", ctx,
         is_system_admin=is_system_admin,
     )
 
@@ -609,7 +616,7 @@ async def revoke_project_grant(
             if not subject.startswith("user:"):
                 raise HTTPException(400, "project 级授权 subject 只能是 user")
             await permissions.revoke_explicit_download(
-                user_open_id=subject.split(":", 1)[1], object_type="project", object_id=oid,
+                user_id=subject.split(":", 1)[1], object_type="project", object_id=oid,
             )
         elif object_type == "folder":
             await permissions.revoke_folder_explicit_subject(

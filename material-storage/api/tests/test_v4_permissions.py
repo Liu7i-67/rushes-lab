@@ -1,5 +1,8 @@
 """iter a1 e2e 集成测试 — 跑在 ms-api 容器里(`docker exec ms-api pytest`)。
 
+#148:OpenFGA subject 已从飞书 open_id 切到 users.id UUID;
+member/grant payload 用 user_id(users.id UUID),断言的 subject 为 user:<uuid>。
+
 预期前置:
   1. seed_demo_data.py 已跑过(创建 3 项目 / 40 folder / 真 user Evan / fake outsider)
   2. OpenFGA store / model 已 push
@@ -246,7 +249,7 @@ async def test_project_members_list(client: AsyncClient) -> None:
     r = await client.get(f"/api/v1/projects/{PROJECT_WEDDING}/members", headers=_h(EVAN_ID))
     assert r.status_code == 200, r.text
     items = r.json()
-    assert any(m["kind"] == "user" and m["subject_id"].startswith("ou_") and "admin" in m["roles"]
+    assert any(m["kind"] == "user" and m["subject_id"] == EVAN_ID and "admin" in m["roles"]
                for m in items), f"应至少有一个 user admin: {items}"
 
 
@@ -262,7 +265,7 @@ async def test_project_member_add_remove_cycle(client: AsyncClient) -> None:
     """Evan 加 outsider 为 viewer → 再撤 → 验列表回退。"""
     add = await client.post(
         f"/api/v1/projects/{PROJECT_EVENT}/members",
-        json={"user_open_id": "ou_fake_outsider", "role": "viewer"},
+        json={"user_id": OUTSIDER_ID, "role": "viewer"},
         headers=_h(EVAN_ID),
     )
     assert add.status_code == 204, add.text
@@ -270,19 +273,19 @@ async def test_project_member_add_remove_cycle(client: AsyncClient) -> None:
     r1 = await client.get(f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID))
     assert r1.status_code == 200
     members1 = r1.json()
-    assert any(m["subject"] == "user:ou_fake_outsider" and "viewer" in m["roles"]
+    assert any(m["subject"] == f"user:{OUTSIDER_ID}" and "viewer" in m["roles"]
                for m in members1)
 
     rev = await client.delete(
         f"/api/v1/projects/{PROJECT_EVENT}/members",
-        params={"subject": "user:ou_fake_outsider", "role": "viewer"},
+        params={"subject": f"user:{OUTSIDER_ID}", "role": "viewer"},
         headers=_h(EVAN_ID),
     )
     assert rev.status_code == 204
 
     r2 = await client.get(f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID))
     members2 = r2.json()
-    assert not any(m["subject"] == "user:ou_fake_outsider" for m in members2)
+    assert not any(m["subject"] == f"user:{OUTSIDER_ID}" for m in members2)
 
 
 # ─── a2:GET /users 搜索 ─────────────────────────────────────────────────────
@@ -337,19 +340,19 @@ async def test_folder_grants_cycle(client: AsyncClient) -> None:
     # add outsider downloader
     add = await client.post(
         f"/api/v1/folders/{fid}/grants",
-        json={"user_open_id": "ou_fake_outsider", "level": "downloader"},
+        json={"user_id": OUTSIDER_ID, "level": "downloader"},
         headers=_h(EVAN_ID),
     )
     assert add.status_code == 204, add.text
 
     r2 = await client.get(f"/api/v1/folders/{fid}/grants", headers=_h(EVAN_ID))
-    assert any(g["subject"] == "user:ou_fake_outsider" and g["level"] == "downloader"
+    assert any(g["subject"] == f"user:{OUTSIDER_ID}" and g["level"] == "downloader"
                for g in r2.json())
 
     # delete
     rev = await client.delete(
         f"/api/v1/folders/{fid}/grants",
-        params={"subject": "user:ou_fake_outsider", "level": "downloader"},
+        params={"subject": f"user:{OUTSIDER_ID}", "level": "downloader"},
         headers=_h(EVAN_ID),
     )
     assert rev.status_code == 204

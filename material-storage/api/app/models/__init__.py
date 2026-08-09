@@ -20,13 +20,12 @@ class ProjectCreateIn(BaseModel):
     organization_id: uuid.UUID | None = None
     minio_bucket: str = Field(..., max_length=63)
     # 必填:指派的项目 admin(系统 admin 创建,需要明确指派 sub-admin;
-    # 可以是自己 = me.open_id;UI 默认填创建者)
-    admin_user_open_id: str = Field(..., min_length=1, max_length=64,
-                                    description="项目管理员的飞书 open_id")
+    # 可以是自己 = me.id;UI 默认填创建者)
+    admin_user_id: uuid.UUID = Field(..., description="项目管理员的 users.id UUID")
 
 
 class AdminBrief(BaseModel):
-    open_id: str
+    user_id: str
     name: str
 
 
@@ -138,10 +137,10 @@ class FolderOut(ORMModel):
 
 
 class FolderInviteIn(BaseModel):
-    # subject 三选一(飞书 ID)— 任选其一传:
-    user_open_id: str | None = None       # 单人 user (飞书 open_id)
-    group_id: str | None = None           # 飞书用户组
-    department_id: str | None = None      # 飞书部门(含子部门 via OpenFGA 自递归)
+    # subject 三选一 — 任选其一传(#148 起 user/group 都用本地 UUID):
+    user_id: uuid.UUID | None = None      # 单人 user(users.id UUID)
+    group_id: str | None = None           # 本地用户组(groups.id UUID)
+    department_id: str | None = None      # 飞书部门(已废弃,ADR-0007;保留到 P4 清理)
     # 邀请等级(v4 新增,旧调用方默认 viewer)
     level: str = Field("viewer", pattern=r"^(viewer|downloader)$")
     duration_seconds: int | None = Field(None, ge=60, le=365 * 24 * 3600,

@@ -49,14 +49,14 @@ async def create_upload(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> UploadMultipartCreateOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder = await db.get(Folder, payload.folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
 
     # check can_upload folder(v4:uploader 隐含上传 + 创建 sub folder);系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}",
+        user_subject=user.subject,
         relation="can_upload",
         object_type="folder" if not folder.is_sensitive else "sensitive_folder",
         object_id=str(folder.id),
@@ -109,7 +109,7 @@ async def complete_upload(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> AssetOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder_id = await _resolve_folder_by_key(db, payload.bucket, payload.key)
     if not folder_id:
         raise HTTPException(400, detail=f"folder for key {payload.key} not found")
@@ -120,7 +120,7 @@ async def complete_upload(
 
     # 再次 check(防 user create_upload 后被 revoke);系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}",
+        user_subject=user.subject,
         relation="can_upload",
         object_type="folder" if not folder.is_sensitive else "sensitive_folder",
         object_id=str(folder.id),
@@ -196,7 +196,6 @@ async def abort_upload(
     presign: PresignService = Depends(get_presign),
     user: CurrentUser = Depends(get_current_user),
 ) -> None:
-    user_id, user_open_id = user.id, user.open_id
     """主动 abort multipart;凡是认证 user 都可 abort 自己 upload。"""
     presign.abort_multipart_upload(bucket, key, upload_id)
 
@@ -212,14 +211,13 @@ async def list_assets(
     limit: int = 100,
     offset: int = 0,
 ) -> list[AssetOut]:
-    user_id, user_open_id = user.id, user.open_id
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
 
     # check can_view folder;系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}",
+        user_subject=user.subject,
         relation="can_view",
         object_type="folder" if not folder.is_sensitive else "sensitive_folder",
         object_id=str(folder.id),
@@ -251,7 +249,7 @@ async def get_download_link(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> DownloadLinkOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     """签 presigned GET URL;check can_download asset + audit signed_url_issued。
     系统 admin 直通(audit 仍记)。"""
     asset = await db.get(Asset, asset_id)
@@ -259,7 +257,7 @@ async def get_download_link(
         raise HTTPException(404, "asset not found")
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}",
+        user_subject=user.subject,
         relation="can_download",
         object_type="asset",
         object_id=str(asset_id),
@@ -327,7 +325,7 @@ async def delete_asset(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     """soft delete:置 deleted_at;MinIO object 保留(由 bucket lifecycle 异步清)。
 
     权限:asset.can_admin(model v4:= can_admin from parent folder/project);系统 admin 直通。
@@ -338,7 +336,7 @@ async def delete_asset(
         raise HTTPException(404, "asset not found")
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="asset", object_id=str(asset_id),
     )
     if not allowed:

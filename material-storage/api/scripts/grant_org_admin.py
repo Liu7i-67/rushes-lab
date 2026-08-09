@@ -1,9 +1,9 @@
 """后台指定系统 admin — 不可 UI promote/demote(默认 1 个,可加多个)。
 
-用法:
-  docker exec ms-api python -m scripts.grant_org_admin ou_xxx           # add
-  docker exec ms-api python -m scripts.grant_org_admin --revoke ou_xxx  # remove
-  docker exec ms-api python -m scripts.grant_org_admin --list           # 列当前所有
+用法(#148 起参数为 users.id UUID,不再是飞书 open_id):
+  docker exec ms-api python -m scripts.grant_org_admin <user-uuid>           # add
+  docker exec ms-api python -m scripts.grant_org_admin --revoke <user-uuid>  # remove
+  docker exec ms-api python -m scripts.grant_org_admin --list                # 列当前所有
 
 系统 admin = OpenFGA `organization:<tenant_key>#admin` 关系。
 只有系统 admin 可创建项目。普通用户只能由系统 admin 通过 ProjectMembersDrawer 添加为
@@ -29,7 +29,7 @@ log = logging.getLogger("grant-org-admin")
 
 async def main() -> int:
     parser = argparse.ArgumentParser(description="系统 admin 管理(后台命令)")
-    parser.add_argument("open_id", nargs="?", help="飞书 open_id;--list 时可省")
+    parser.add_argument("user_id", nargs="?", help="users.id UUID;--list 时可省")
     parser.add_argument("--revoke", action="store_true", help="撤销 admin")
     parser.add_argument("--list", action="store_true", help="列当前 admin")
     args = parser.parse_args()
@@ -57,23 +57,23 @@ async def main() -> int:
         await perms.close()
         return 0
 
-    if not args.open_id:
-        parser.error("open_id required(unless --list)")
+    if not args.user_id:
+        parser.error("user_id required(unless --list)")
         return 2
 
     op = "delete" if args.revoke else "write"
     tup = ClientTuple(
-        user=f"user:{args.open_id}",
+        user=f"user:{args.user_id}",
         relation="admin",
         object=f"organization:{tenant_key}",
     )
     try:
         if args.revoke:
             await perms._client.write(ClientWriteRequest(deletes=[tup]))
-            log.info("revoked system admin: %s", args.open_id)
+            log.info("revoked system admin: %s", args.user_id)
         else:
             await perms._client.write(ClientWriteRequest(writes=[tup]))
-            log.info("granted system admin: %s", args.open_id)
+            log.info("granted system admin: %s", args.user_id)
     except Exception as e:  # noqa: BLE001
         log.error("%s fail: %s", op, e)
         await perms.close()

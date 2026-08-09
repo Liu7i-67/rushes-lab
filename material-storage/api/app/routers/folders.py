@@ -44,6 +44,17 @@ log = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _parse_uuids(ids: list[str]) -> list[uuid.UUID]:
+    """subject_id 字符串 → UUID,容错非法值(老 open_id 存量数据)直接跳过。"""
+    out: list[uuid.UUID] = []
+    for s in ids:
+        try:
+            out.append(uuid.UUID(s))
+        except ValueError:
+            continue
+    return out
+
+
 @router.post("", response_model=FolderOut, status_code=201)
 async def create_folder(
     payload: FolderCreateIn,
@@ -54,7 +65,7 @@ async def create_folder(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> FolderOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     # 1) 权限:create folder 需 can_upload(model v4:uploader 隐含创建子目录)
     #    - 在 project 下建 root folder → check project.can_upload
     #    - 在 folder 下建 sub folder → check parent folder.can_upload
@@ -71,7 +82,7 @@ async def create_folder(
         check_id = str(payload.project_id)
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}",
+        user_subject=user.subject,
         relation="can_upload",
         object_type=check_type,
         object_id=check_id,
@@ -127,7 +138,7 @@ async def create_folder(
         # — sensitive model 不让 admin 隐式 can_view,创建者若无显式 invite 会看不到自建 folder(#87)
         await permissions.invite_to_sensitive_folder(
             sensitive_folder_id=str(folder.id),
-            subject=f"user:{user_open_id}",
+            subject=user.subject,
             level="downloader",
             duration_seconds=None,
         )
@@ -173,14 +184,13 @@ async def list_folders(
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
 ) -> list[FolderOut]:
-    user_id, user_open_id = user.id, user.open_id
     # project 可见 check(public 直通,否则 can_view);系统 admin 直通
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "project not found")
     if not is_system_admin and project.visibility != "public":
         allowed = await permissions.check(
-            user_subject=f"user:{user_open_id}", relation="can_view",
+            user_subject=user.subject, relation="can_view",
             object_type="project", object_id=str(project_id),
         )
         if not allowed:
@@ -192,7 +202,7 @@ async def list_folders(
         stmt = select(Folder).where(Folder.project_id == project_id).order_by(Folder.minio_prefix)
     else:
         sensitive_ids_str = await permissions.list_objects(
-            user_subject=f"user:{user_open_id}", relation="can_view", object_type="sensitive_folder"
+            user_subject=user.subject, relation="can_view", object_type="sensitive_folder"
         )
         sensitive_uuids = [uuid.UUID(s) for s in sensitive_ids_str]
         stmt = select(Folder).where(
@@ -214,7 +224,6 @@ async def get_folder(
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
 ) -> FolderOut:
-    user_id, user_open_id = user.id, user.open_id
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -225,7 +234,7 @@ async def get_folder(
     else:
         async def _c(rel: str) -> bool:
             return await permissions.check(
-                user_subject=f"user:{user_open_id}", relation=rel,
+                user_subject=user.subject, relation=rel,
                 object_type=obj_type, object_id=str(folder.id),
             )
         can_view, can_download, can_upload, can_admin = await asyncio.gather(
@@ -258,7 +267,7 @@ async def invite(
     """邀请 user / group / department 进入 sensitive_folder(admin 操作)。
 
     审批驱动的邀请走 /api/v1/approvals。subject 三选一。"""
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -267,18 +276,18 @@ async def invite(
 
     # subject 三选一(普通 OR 排除,只允许一个非 None)
     provided = [
-        ("user", payload.user_open_id),
+        ("user", payload.user_id),
         ("group", payload.group_id),
         ("department", payload.department_id),
     ]
     chosen = [(k, v) for k, v in provided if v]
     if len(chosen) != 1:
-        raise HTTPException(400, "must specify exactly one of user_open_id / group_id / department_id")
+        raise HTTPException(400, "must specify exactly one of user_id / group_id / department_id")
     subject_kind, subject_id = chosen[0]
 
     # admin check;系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="sensitive_folder", object_id=str(folder_id),
     )
     if not allowed:
@@ -293,7 +302,7 @@ async def invite(
         raise HTTPException(403, "no admin permission on this folder")
 
     from app.services.permissions import fmt_subject
-    subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
+    subject = fmt_subject(subject_kind, str(subject_id))  # type: ignore[arg-type]
     await permissions.invite_to_sensitive_folder(
         sensitive_folder_id=str(folder_id),
         subject=subject,
@@ -317,12 +326,9 @@ async def invite(
 
     # iter4 IM 卡:仅 user 类型推送(group/department 没 open_id 集中地址)
     if subject_kind == "user":
-        # 通过 open_id 反查 internal user.id(invite_notify 现 signature 要 internal UUID;
-        # 等待 invite_notify 重构后改;先按 open_id 查 db)
-        from sqlalchemy import select as _select
+        # #148:subject_id 已是 users.id UUID,直接主键查
         from app.db.tables import User as _User
-        u_res = await db.execute(_select(_User).where(_User.feishu_open_id == subject_id))
-        invitee = u_res.scalar_one_or_none()
+        invitee = await db.get(_User, uuid.UUID(str(subject_id)))
         if invitee is not None:
             background.add_task(
                 run_notify_folder_invite_bg,
@@ -346,10 +352,9 @@ async def list_members(
     """sensitive_folder 当前成员列表 — D iter3 前端 FolderInvitePanel 用。
 
     返:[{subject, kind, name, level, permanent, expires_at?}]
-    subject 形如 "user:ou_xxx" / "group:gid#member" / "department:did#member"
+    subject 形如 "user:<users.id UUID>" / "group:<gid>#member" / "department:<did>#member"
     需 can_admin folder;系统 admin 直通。
     """
-    user_id, user_open_id = user.id, user.open_id
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -357,7 +362,7 @@ async def list_members(
         raise HTTPException(400, "not a sensitive_folder")
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="sensitive_folder", object_id=str(folder_id),
     )
     if not allowed:
@@ -371,7 +376,7 @@ async def list_members(
     )
 
     members: list[dict] = []
-    user_subject_open_ids: list[str] = []
+    user_subject_ids: list[str] = []
     user_records: list[dict] = []   # 后面合并 db 名
 
     INVITE_RELATIONS = {
@@ -416,20 +421,20 @@ async def list_members(
             "expires_at": expires_at,
         }
         if kind == "user":
-            user_subject_open_ids.append(sid)
+            user_subject_ids.append(sid)
             user_records.append(record)
         else:
             # group / department:目前没拉 db,显示 id
             record["name"] = f"{('用户组' if kind == 'group' else '部门')} {sid[:12]}…"
             members.append(record)
 
-    # user 批量查 db 拿 name
-    if user_subject_open_ids:
-        stmt = select(_User).where(_User.feishu_open_id.in_(user_subject_open_ids))
+    # user 批量查 db 拿 name(subject_id = users.id UUID 字符串,容错非法值)
+    if user_subject_ids:
+        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
         res = await db.execute(stmt)
-        name_by_open_id = {u.feishu_open_id: u.name for u in res.scalars().all()}
+        name_by_user_id = {str(u.id): u.name for u in res.scalars().all()}
         for r in user_records:
-            r["name"] = name_by_open_id.get(r["subject_id"], r["subject_id"][:12] + "…")
+            r["name"] = name_by_user_id.get(r["subject_id"], r["subject_id"][:12] + "…")
         members.extend(user_records)
 
     # 排序:user 在前,group/department 在后;name 字典序
@@ -440,7 +445,7 @@ async def list_members(
 @router.delete("/{folder_id}/invite", status_code=204)
 async def revoke_invite(
     folder_id: uuid.UUID,
-    subject: str = Query(..., description="完整 subject 字符串,例:user:ou_xxx / group:gid#member / department:did#member"),
+    subject: str = Query(..., description="完整 subject 字符串,例:user:<users.id UUID> / group:<gid>#member / department:<did>#member"),
     level: str = Query("viewer", pattern=r"^(viewer|downloader)$"),
     permanent: bool = Query(True, description="True=删 invited(永久);False=删 explicit_invited(临时)"),
     db: AsyncSession = Depends(get_db),
@@ -450,7 +455,7 @@ async def revoke_invite(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -458,7 +463,7 @@ async def revoke_invite(
         raise HTTPException(400, "not a sensitive_folder")
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="sensitive_folder", object_id=str(folder_id),
     )
     if not allowed:
@@ -511,7 +516,6 @@ async def list_folder_grants(
     返:[{subject, kind, subject_id, name, role: explicit_viewer|downloader|uploader}]
     需 can_admin folder + folder 为一级;系统 admin 直通。
     """
-    user_id, user_open_id = user.id, user.open_id
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(404, "folder not found")
@@ -520,7 +524,7 @@ async def list_folder_grants(
     _enforce_level1_folder(folder)
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="folder", object_id=str(folder_id),
     )
     if not allowed:
@@ -557,9 +561,9 @@ async def list_folder_grants(
             grants.append(rec)
 
     if user_subject_ids:
-        stmt = select(_User).where(_User.feishu_open_id.in_(user_subject_ids))
+        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
         res = await db.execute(stmt)
-        name_by = {u.feishu_open_id: u.name for u in res.scalars().all()}
+        name_by = {str(u.id): u.name for u in res.scalars().all()}
         for r in user_rows:
             r["name"] = name_by.get(r["subject_id"], r["subject_id"][:12] + "…")
         grants.extend(user_rows)
@@ -579,8 +583,9 @@ async def add_folder_grant(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    """body:{user_open_id|group_id|department_id, level: viewer|downloader|uploader}"""
-    user_id, user_open_id = user.id, user.open_id
+    """body:{user_id|group_id|department_id, level: viewer|downloader|uploader}
+    (user_id = users.id UUID,#148 起)"""
+    user_id = user.id
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(404, "folder not found")
@@ -589,7 +594,7 @@ async def add_folder_grant(
     _enforce_level1_folder(folder)
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="folder", object_id=str(folder_id),
     )
     if not allowed:
@@ -599,19 +604,19 @@ async def add_folder_grant(
     if level not in FOLDER_GRANT_KINDS:
         raise HTTPException(400, f"level must be one of {FOLDER_GRANT_KINDS}")
     provided = [
-        ("user", payload.get("user_open_id")),
+        ("user", payload.get("user_id")),
         ("group", payload.get("group_id")),
         ("department", payload.get("department_id")),
     ]
     chosen = [(k, v) for k, v in provided if v]
     if len(chosen) != 1:
         raise HTTPException(
-            400, "must specify exactly one of user_open_id / group_id / department_id"
+            400, "must specify exactly one of user_id / group_id / department_id"
         )
     subject_kind, subject_id = chosen[0]
 
     from app.services.permissions import fmt_subject
-    subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
+    subject = fmt_subject(subject_kind, str(subject_id))  # type: ignore[arg-type]
     await permissions.grant_folder_explicit_subject(
         folder_id=str(folder_id), subject=subject,
         kind=f"explicit_{level}",  # type: ignore[arg-type]
@@ -637,7 +642,7 @@ async def remove_folder_grant(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(404, "folder not found")
@@ -646,7 +651,7 @@ async def remove_folder_grant(
     _enforce_level1_folder(folder)
 
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_admin",
+        user_subject=user.subject, relation="can_admin",
         object_type="folder", object_id=str(folder_id),
     )
     if not allowed:

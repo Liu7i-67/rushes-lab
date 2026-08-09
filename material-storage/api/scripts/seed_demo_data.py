@@ -36,7 +36,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s — %(message)s")
 log = logging.getLogger("seed")
 
 ORG_ID = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
-# v4 model:OpenFGA subject 用飞书 ID;PoC 假数据用 stable 的 dev 字符串
+# #148:OpenFGA user subject 用 users.id UUID;group/department demo id 字符串照旧
 TENANT_KEY = "dev_tenant_001"
 DEPT_EDITING = "dep_editing"        # 部门:剪辑组
 DEPT_MOTION = "dep_motion_design"   # 子部门:动效设计(挂在 editing 下)
@@ -176,7 +176,7 @@ async def main() -> None:
             from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
             await permissions._client.write(
                 ClientWriteRequest(writes=[
-                    ClientTuple(user=f"user:{u.feishu_open_id}", relation="admin",
+                    ClientTuple(user=f"user:{u.id}", relation="admin",
                                 object=f"organization:{TENANT_KEY}"),
                 ])
             )
@@ -184,15 +184,15 @@ async def main() -> None:
             log.debug("org admin tuple exists: %s", e)
         # org member
         await permissions.add_user_to_organization(
-            organization_tenant_key=TENANT_KEY, user_open_id=u.feishu_open_id
+            organization_tenant_key=TENANT_KEY, user_id=str(u.id)
         )
         # editing 部门(模拟,真飞书事件同步在 a2 iter 接)
         await permissions.add_user_to_department(
-            department_id=DEPT_EDITING, user_open_id=u.feishu_open_id
+            department_id=DEPT_EDITING, user_id=str(u.id)
         )
         # editors group
         await permissions.add_user_to_group(
-            group_id=GRP_EDITORS, user_open_id=u.feishu_open_id
+            group_id=GRP_EDITORS, user_id=str(u.id)
         )
         log.info("升 admin + 部门/组:%s (%s)", u.name, u.feishu_open_id[:12])
 
@@ -237,16 +237,16 @@ async def main() -> None:
     log.info("DB:%d folders", total_folders)
 
     # ─── 4) OpenFGA bootstrap + 默认权限 ────────────────────────────────────
-    creator_open_id = real_users[0].feishu_open_id if real_users else None
+    creator_user_id = str(real_users[0].id) if real_users else None
 
     for proj in DEMO_PROJECTS:
         # bootstrap_project:org parent + creator admin(creator 兜底:tenant 本身)
-        if creator_open_id:
+        if creator_user_id:
             try:
                 await permissions.bootstrap_project(
                     project_id=str(proj["id"]),
                     organization_tenant_key=TENANT_KEY,
-                    creator_open_id=creator_open_id,
+                    creator_user_id=creator_user_id,
                 )
             except Exception as e:
                 log.debug("bootstrap_project exists: %s", e)
@@ -297,14 +297,14 @@ async def main() -> None:
             except Exception as e:
                 log.debug("folder tuple exists: %s", e)
 
-        # 给创建者 sensitive folder 邀请 viewer(否则连看都看不见)
-        if creator_open_id:
+        # 给创建者 sensitive folder 邀请 downloader(否则连看都看不见)
+        if creator_user_id:
             for f in flat_by_proj[proj["id"]]:
                 if f["is_sensitive"]:
                     try:
                         await permissions.invite_to_sensitive_folder(
                             sensitive_folder_id=str(f["id"]),
-                            subject=f"user:{creator_open_id}",
+                            subject=f"user:{creator_user_id}",
                             level="downloader",
                         )
                     except Exception:

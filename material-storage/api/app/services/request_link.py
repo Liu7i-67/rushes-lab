@@ -42,7 +42,7 @@ async def create_request_link(
     target_type: str,
     target_id: uuid.UUID,
     allowed_actions: list[str],
-    receiver_open_id: str | None = None,
+    receiver_user_id: uuid.UUID | None = None,
     ttl_seconds: int | None = None,
 ) -> RequestLinkToken:
     """创建 request link token。
@@ -88,7 +88,7 @@ async def create_request_link(
         target_id=target_id,
         allowed_actions=allowed_actions,
         inviter_user_id=inviter_user_id,
-        receiver_open_id=receiver_open_id,
+        receiver_user_id=receiver_user_id,
         expires_at=expires_at,
     )
     db.add(row)
@@ -106,8 +106,8 @@ async def resolve_request_link(
 
     None = 不存在 / 已过期(同一处理,不泄漏存在性)。
     返:{token, target_type, target_id, target_name, allowed_actions, expires_at,
-         receiver_open_id, inviter_user_id, inviter_name}
-    receiver_open_id 由调用方 enforce(对比 current_user.open_id)。
+         receiver_user_id, inviter_user_id, inviter_name}
+    receiver_user_id 由调用方 enforce(对比 current_user.id)。
     """
     row = await db.get(RequestLinkToken, token)
     if row is None:
@@ -131,7 +131,7 @@ async def resolve_request_link(
         "target_name": target_name,
         "allowed_actions": row.allowed_actions,
         "expires_at": row.expires_at,
-        "receiver_open_id": row.receiver_open_id,
+        "receiver_user_id": row.receiver_user_id,
         "inviter_user_id": row.inviter_user_id,
         "inviter_name": inviter_name,
     }
@@ -150,10 +150,10 @@ async def mark_used(db: AsyncSession, token: str) -> None:
 
 async def check_receiver_allowed(
     link: RequestLinkToken | dict[str, Any],
-    current_user_open_id: str,
+    current_user_id: uuid.UUID,
 ) -> bool:
-    """若 link 限定了 receiver_open_id,必须匹配 current user;否则任意登录 user OK。"""
-    expected = link.receiver_open_id if isinstance(link, RequestLinkToken) else link["receiver_open_id"]
+    """若 link 限定了 receiver_user_id,必须匹配 current user;否则任意登录 user OK。"""
+    expected = link.receiver_user_id if isinstance(link, RequestLinkToken) else link["receiver_user_id"]
     if not expected:
         return True
-    return expected == current_user_open_id
+    return expected == current_user_id

@@ -147,8 +147,18 @@ async def main() -> None:
             mid = m.get("member_id")
             if not mid:
                 continue
+            # #148:subject 用 users.id — 按飞书 open_id 反查本地 user(未同步过的跳过)
+            async with sm() as db:
+                from sqlalchemy import select
+
+                from app.db.tables import User
+                res = await db.execute(select(User).where(User.feishu_open_id == mid))
+                member = res.scalar_one_or_none()
+            if member is None:
+                log.debug("group member open_id=%s 不在本地 users,跳过", mid)
+                continue
             try:
-                await permissions.add_user_to_group(group_id=gid, user_open_id=mid)
+                await permissions.add_user_to_group(group_id=gid, user_id=str(member.id))
                 group_member_count += 1
             except Exception as e:  # noqa: BLE001
                 log.debug("add_user_to_group tolerate: %s", e)

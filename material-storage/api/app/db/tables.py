@@ -59,6 +59,11 @@ class User(Base, TimestampMixin):
     feishu_union_id: Mapped[str | None] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255))
+    # 本地账号密码登录(ADR-0007,P1 #149 启用);password_hash NULL = 未设密码
+    password_hash: Mapped[str | None] = mapped_column(String(255))
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean, server_default="true", default=True, nullable=False
+    )
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     resigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
@@ -130,6 +135,10 @@ class Asset(Base, TimestampMixin):
     content_type: Mapped[str | None] = mapped_column(String(255))
     media_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     tags: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    # 用户自由标签(标签 + 盲搜发现 UX 地基,#148 wave0;GIN 索引见 __table_args__)
+    user_labels: Mapped[list[str]] = mapped_column(
+        ARRAY(String(64)), default=list, server_default="{}", nullable=False
+    )
 
     uploader_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
@@ -143,6 +152,9 @@ class Asset(Base, TimestampMixin):
                          name="uq_asset_minio_object_version"),
         Index("ix_asset_folder_created", "folder_id", "created_at"),
         Index("ix_asset_filename", "filename"),
+        Index("ix_asset_user_labels", "user_labels", postgresql_using="gin"),
+        Index("ix_asset_filename_trgm", "filename", postgresql_using="gin",
+              postgresql_ops={"filename": "gin_trgm_ops"}),
     )
 
 
@@ -262,8 +274,9 @@ class RequestLinkToken(Base):
     inviter_user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True,
     )
-    # nullable = 任意登录用户;非空 = 限定只此 open_id 可用(backend POST approvals 时强制 check)
-    receiver_open_id: Mapped[str | None] = mapped_column(String(64))
+    # nullable = 任意登录用户;非空 = 限定只此 user 可用(backend POST approvals 时强制 check)
+    # #148:receiver_open_id(飞书)→ receiver_user_id(users.id UUID;软关联,不加 FK)
+    receiver_user_id: Mapped[uuid.UUID | None] = mapped_column()
 
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -274,4 +287,51 @@ class RequestLinkToken(Base):
     __table_args__ = (
         Index("ix_request_link_target", "target_type", "target_id"),
         Index("ix_request_link_expires", "expires_at"),
+    )
+
+
+class Group(Base, TimestampMixin):
+    """本地用户组(ADR-0007)— OpenFGA group subject 从飞书 gid 迁到本地 groups.id。
+
+    subject 形如 group:<groups.id UUID>#member;飞书同步来的组在
+    scripts/migrate_subjects_to_uuid.py 里以 uuid5(NAMESPACE_DNS, "feishu:group:{gid}")
+    落成本地行(idempotent)。
+    """
+    __tablename__ = "groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024))
+
+
+class GroupMembership(Base):
+    """group ↔ user 成员关系(复合主键;无 updated_at,成员关系只增删)。"""
+    __tablename__ = "group_memberships"
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Notification(Base):
+    """应用内通知(ADR-0007 弃飞书后的最小通知通道;#148 wave0 只建表)。"""
+    __tablename__ = "notifications"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str | None] = mapped_column(String(2000))
+    link: Mapped[str | None] = mapped_column(String(1024))
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

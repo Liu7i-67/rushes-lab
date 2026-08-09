@@ -161,18 +161,23 @@ async def list_project_grants(
             object_name=fname, relations=rels, now=now,
         ))
 
-    # 批量查 user name(group/department 显 id 占位,与 folders.list_members 一致)
+    # 批量查 user name(subject_id = users.id UUID 字符串;group/department 显 id 占位,
+    # 与 folders.list_members 一致)
     user_sids = [r["subject_id"] for r in records if r["kind"] == "user"]
-    if user_sids:
+    user_uuids: list[uuid.UUID] = []
+    for s in user_sids:
+        try:
+            user_uuids.append(uuid.UUID(s))
+        except ValueError:
+            continue  # 老 open_id 存量数据,跳过(显示 id 占位)
+    if user_uuids:
         ures = await db.execute(
-            select(User.feishu_open_id, User.name).where(
-                User.feishu_open_id.in_(user_sids)
-            )
+            select(User.id, User.name).where(User.id.in_(user_uuids))
         )
-        name_by_oid = {oid: name for oid, name in ures.all()}
+        name_by_uid = {str(uid): name for uid, name in ures.all()}
         for r in records:
             if r["kind"] == "user":
-                r["name"] = name_by_oid.get(r["subject_id"], r["subject_id"][:12] + "…")
+                r["name"] = name_by_uid.get(r["subject_id"], r["subject_id"][:12] + "…")
     for r in records:
         if r["kind"] != "user" and r["name"] is None:
             label = "用户组" if r["kind"] == "group" else "部门"

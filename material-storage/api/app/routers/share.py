@@ -89,14 +89,14 @@ async def share_asset(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ShareCreateOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     asset = await db.get(Asset, asset_id)
     if asset is None or asset.deleted_at is not None:
         raise HTTPException(404, "asset not found")
 
     # 分享者必须 can_download 该 asset;系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_download",
+        user_subject=user.subject, relation="can_download",
         object_type="asset", object_id=str(asset_id),
     )
     if not allowed:
@@ -146,7 +146,7 @@ async def share_folder(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ShareCreateOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(404, "folder not found")
@@ -154,7 +154,7 @@ async def share_folder(
     object_type = "sensitive_folder" if folder.is_sensitive else "folder"
     # 系统 admin 直通
     allowed = is_system_admin or await permissions.check(
-        user_subject=f"user:{user_open_id}", relation="can_view",
+        user_subject=user.subject, relation="can_view",
         object_type=object_type, object_id=str(folder_id),
     )
     if not allowed:
@@ -202,7 +202,7 @@ async def resolve(
     user: CurrentUser = Depends(get_current_user),
     ctx: dict = Depends(get_request_context),
 ) -> ShareResolveOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     """解析短链 → 返 metadata + presigned download_url(asset)。
 
     minimal 版:始终 require login(get_current_user 401 时前端 SPA 引导 OIDC)。

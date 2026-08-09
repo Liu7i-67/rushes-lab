@@ -75,7 +75,7 @@ async def create_approval(
     background: BackgroundTasks,
     via_link: str | None = Query(
         None, description="若来自 request-link 落地页,带 token 让 backend enforce "
-                          "(target 必须匹配,receiver_open_id 限定时必须匹配当前 user)",
+                          "(target 必须匹配,receiver_user_id 限定时必须匹配当前 user)",
     ),
     db: AsyncSession = Depends(get_db),
     audit: AuditService = Depends(get_audit),
@@ -84,7 +84,7 @@ async def create_approval(
     user: CurrentUser = Depends(get_current_user),
     ctx: dict = Depends(get_request_context),
 ) -> ApprovalOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     if payload.action == "access" and payload.target_type != "sensitive_folder":
         raise HTTPException(400, "action=access 仅适用于 target_type=sensitive_folder")
     if payload.action == "download" and payload.duration_seconds is None:
@@ -106,7 +106,7 @@ async def create_approval(
                 f"该申请链接不允许 action={payload.action};"
                 f"可申请:{link['allowed_actions']}",
             )
-        if link["receiver_open_id"] and link["receiver_open_id"] != user_open_id:
+        if link["receiver_user_id"] and link["receiver_user_id"] != user_id:
             raise HTTPException(403, "该申请链接仅限定的接收者可用")
 
     approval = ApprovalRequest(
@@ -161,7 +161,7 @@ async def list_approvals(
     limit: int = 50,
     offset: int = 0,
 ) -> list[ApprovalOut]:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     stmt = select(ApprovalRequest)
     if scope == "self":
         stmt = stmt.where(ApprovalRequest.applicant_user_id == user_id)
@@ -178,7 +178,7 @@ async def get_approval(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> ApprovalOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     approval = await db.get(ApprovalRequest, approval_id)
     if not approval:
         raise HTTPException(404, "approval not found")
@@ -201,13 +201,12 @@ async def approve(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ApprovalOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     try:
         approval = await decide(
             db=db,
             approval_id=approval_id,
             decider_user_id=user_id,
-            decider_open_id=user_open_id,
             decision="approve",
             decision_note=payload.decision_note,
             permissions=permissions,
@@ -240,13 +239,12 @@ async def reject(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ApprovalOut:
-    user_id, user_open_id = user.id, user.open_id
+    user_id = user.id
     try:
         approval = await decide(
             db=db,
             approval_id=approval_id,
             decider_user_id=user_id,
-            decider_open_id=user_open_id,
             decision="reject",
             decision_note=payload.decision_note,
             permissions=permissions,

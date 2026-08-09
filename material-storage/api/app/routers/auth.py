@@ -119,7 +119,7 @@ async def me(
         perms = request.app.state.permissions
         try:
             is_system_admin = await perms.is_org_admin(
-                user_open_id=user.feishu_open_id, organization_tenant_key=tenant_key,
+                user_id=str(user.id), organization_tenant_key=tenant_key,
             )
         except Exception:  # noqa: BLE001
             pass

@@ -120,10 +120,13 @@ async def sync_user(
         user.resigned_at = datetime.now(timezone.utc)
         await db.commit()
 
+    # #148:OpenFGA subject 一律 users.id UUID(open_id 仅作飞书侧标识)
+    uid = str(user.id)
+
     # 2) 离职 → 全 OpenFGA tuple 撤
     if not is_active:
         try:
-            n = await permissions.revoke_user_completely(open_id)
+            n = await permissions.revoke_user_completely(uid)
             log.info("sync_user revoked %d tuples for resigned/inactive user=%s", n, open_id)
         except Exception as e:  # noqa: BLE001
             log.warning("sync_user revoke fail user=%s err=%s", open_id, e)
@@ -132,7 +135,7 @@ async def sync_user(
     # 3) OpenFGA org member
     try:
         await permissions.add_user_to_organization(
-            organization_tenant_key=organization_tenant_key, user_open_id=open_id,
+            organization_tenant_key=organization_tenant_key, user_id=uid,
         )
     except Exception as e:  # noqa: BLE001
         log.debug("add_user_to_organization tolerate: %s", e)
@@ -145,7 +148,7 @@ async def sync_user(
         for dep in prev - new:
             try:
                 await permissions.remove_user_from_department(
-                    department_id=dep, user_open_id=open_id,
+                    department_id=dep, user_id=uid,
                 )
                 log.info("sync_user remove user=%s from dept=%s", open_id, dep)
             except Exception as e:  # noqa: BLE001
@@ -153,7 +156,7 @@ async def sync_user(
         for dep in new - prev:
             try:
                 await permissions.add_user_to_department(
-                    department_id=dep, user_open_id=open_id,
+                    department_id=dep, user_id=uid,
                 )
                 log.info("sync_user add user=%s to dept=%s", open_id, dep)
             except Exception as e:  # noqa: BLE001
@@ -163,7 +166,7 @@ async def sync_user(
         for dep in new_dept_ids:
             try:
                 await permissions.add_user_to_department(
-                    department_id=dep, user_open_id=open_id,
+                    department_id=dep, user_id=uid,
                 )
             except Exception as e:  # noqa: BLE001
                 log.debug("add_user_to_department tolerate: %s", e)
@@ -221,18 +224,22 @@ async def handle_user_deleted(
 
     返被撤的 OpenFGA tuple 数。
     """
-    # 1) 找 db user
+    # 1) 找 db user(open_id 是飞书事件侧标识,subject 用 users.id)
     from sqlalchemy import select
     res = await db.execute(select(User).where(User.feishu_open_id == open_id))
     user = res.scalar_one_or_none()
-    if user is not None:
-        user.is_active = False
-        if user.resigned_at is None:
-            user.resigned_at = datetime.now(timezone.utc)
-        await db.commit()
+    if user is None:
+        # 查不到本地 user → 没有新格式 tuple 可撤(旧 open_id 格式存量由
+        # scripts/migrate_subjects_to_uuid.py 处理),log + skip
+        log.warning("handle_user_deleted: no local user for open_id=%s — skip revoke", open_id)
+        return 0
+    user.is_active = False
+    if user.resigned_at is None:
+        user.resigned_at = datetime.now(timezone.utc)
+    await db.commit()
     # 2) OpenFGA revoke
     try:
-        n = await permissions.revoke_user_completely(open_id)
+        n = await permissions.revoke_user_completely(str(user.id))
         log.info("handle_user_deleted revoked %d tuples user=%s", n, open_id)
         return n
     except Exception as e:  # noqa: BLE001

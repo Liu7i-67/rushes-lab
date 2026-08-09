@@ -22,19 +22,22 @@
 
 ## 3. Subject 字典(谁拥有权限)
 
-OpenFGA `type user` 的 subject ID 全部用飞书 ID:
+> **2026-08-09 修订(ADR-0007 / issue #148)**:subject 已从飞书 ID 全量切换为本地 ID。
+> 下表为现行约定;迁移脚本 `scripts/migrate_subjects_to_uuid.py` 负责存量 tuple 重写。
+
+OpenFGA `type user` 的 subject ID 一律用本地 ID:
 
 | OpenFGA type | ID 来源 | 关系 |
 |---|---|---|
-| `user:<open_id>` | 飞书 `open_id`(`ou_xxx`) | 叶子 subject |
-| `department:<dept_id>` | 飞书 `open_department_id` | `member: [user, department#member]` 自递归 |
-| `group:<group_id>` | 飞书"用户组" `group_id`(管理员后台自建) | `member: [user, department#member]` |
-| `organization:<tenant_key>` | 飞书 `tenant_key`(整个企业) | `admin/member: [user, group#member, department#member]` |
+| `user:<users.id UUID>` | 本地 `users.id`(PG UUID PK;飞书同步来的 user 为 `uuid5(NAMESPACE_DNS, "feishu:user:{open_id}")`) | 叶子 subject |
+| `group:<groups.id UUID>` | 本地 `groups.id`(#148 新建 `groups` / `group_memberships` 表;飞书迁移来的组为 `uuid5(NAMESPACE_DNS, "feishu:group:{gid}")`) | `member: [user, department#member]` |
+| `department:<dept_id>` | **已废弃(ADR-0007)**:存量 tuple 不迁、保留原样,代码随 #154 / P4 飞书下线一并清理 | `member: [user, department#member]` 自递归 |
+| `organization:<tenant_key>` | 飞书 `tenant_key`(整个企业;组织轴保留不变) | `admin/member: [user, group#member, department#member]` |
 
-为什么不用 internal UUID:
-- 飞书事件直接带 `open_id`,转换 UUID 又要查 db,徒增延迟 + 单点
-- 管理员在飞书后台改组织,事件流直接更新 OpenFGA,无需中转
-- `角色`(functional_role)飞书 OpenAPI 无 list/event,**不引入**,业务上用"飞书用户组"替代(语义重合 + API 全)
+历史决策记录(原"为什么不用 internal UUID",已被 ADR-0007 推翻):
+- ~~飞书事件直接带 `open_id`,转换 UUID 又要查 db,徒增延迟 + 单点~~
+- ~~管理员在飞书后台改组织,事件流直接更新 OpenFGA,无需中转~~
+- `角色`(functional_role)飞书 OpenAPI 无 list/event,**不引入**;弃飞书后由本地 `groups` 表承担"用户组"语义
 
 ---
 
@@ -162,6 +165,9 @@ PoC 自动 + D iter3 UI 配置:
 
 ## 8. 飞书事件同步(a2 iter 落地)
 
+> **(随 #154 / P4 飞书代码下线删除,ADR-0007)** — 本节描述的飞书事件流同步将随飞书集
+> 成整体下线;#148 起 OpenFGA 写入已全部改用 `user:<users.id UUID>` subject。
+
 | 飞书 event | OpenFGA 动作 |
 |---|---|
 | `contact.user.created_v3` | `add_user_to_organization` + `add_user_to_department`(若 user.department_ids 非空) |
@@ -202,3 +208,14 @@ PoC 自动 + D iter3 UI 配置:
 - Tests:`material-storage/api/tests/test_permissions_v4.py`(a1 iter 加)
 - Seed:`material-storage/api/scripts/seed_demo_data.py`
 - 飞书事件 handler:`material-storage/api/app/routers/webhooks.py`(a2 iter 实施)
+
+---
+
+## 修订记录
+
+- **2026-08-09(ADR-0007 / issue #148)**:OpenFGA subject 从飞书 ID 全量迁移到本地 ID
+  —— `user:<open_id>` → `user:<users.id UUID>`;group 从飞书 gid 迁到本地 `groups.id`
+  UUID(新表 `groups` / `group_memberships`);department 轴废弃(存量 tuple 不迁,代码随
+  P4 / #154 清理);organization 轴不变。存量 tuple 由
+  `material-storage/api/scripts/migrate_subjects_to_uuid.py` 重写;§3 subject 字典已改为
+  现行约定,§8 飞书事件同步标注待删除。

@@ -194,7 +194,7 @@ async def main() -> None:
         await permissions.bootstrap_project(
             project_id=str(PROJECT_ID),
             organization_tenant_key=str(ORG_ID),
-            creator_open_id=ADMIN_OPEN_ID,
+            creator_user_id=str(ADMIN_USER_ID),
         )
     except Exception as e:  # noqa: BLE001 — tuple 已存在的常见错,可忽略
         log.info("project bootstrap tuples may already exist: %s", e)
@@ -220,7 +220,7 @@ async def main() -> None:
     try:
         await permissions.invite_to_sensitive_folder(
             sensitive_folder_id=str(SENSITIVE_FOLDER_ID),
-            subject=f"user:{ADMIN_OPEN_ID}",
+            subject=f"user:{ADMIN_USER_ID}",
             level="downloader",
             duration_seconds=None,
         )
