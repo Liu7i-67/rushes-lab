@@ -11,10 +11,9 @@
 # 如果只想兜底用密码,设 SSH_PASS 即走 sshpass 路径(需要 brew install sshpass)。
 #
 # ⚠️ .env 处理(踩过坑,2026-05-17):
-#   默认 *不会* 覆盖 server2 已有的 .env(怕 clobber 手工调过的飞书 app 凭据等)
+#   默认 *不会* 覆盖 server2 已有的 .env(怕 clobber 手工调过的凭据)
 #   首次 bootstrap 或确实想重置时:`INIT_ENV=1 bash scripts/deploy_server2.sh`
-#   heredoc 里飞书凭据全是占位符(#152 起 — 泄露过的旧 app 值已清换)— 真实凭据
-#   只在本机 server.md 维护,或通过 env 注入(FEISHU_APP_ID/FEISHU_APP_SECRET 等)。
+#   heredoc 里敏感值全是占位符 — 真实凭据只在本机 server.md 维护,或通过 env 注入。
 set -euo pipefail
 
 HOST="${HOST:-8.156.34.238}"
@@ -129,15 +128,6 @@ MINIO_THUMBNAIL_BUCKET=ms-dev
 OPENFGA_API_URL=http://poc-openfga:8080
 OPENFGA_STORE_ID=__WILL_FILL__
 
-# ⚠️ 占位符 — 真实飞书凭据只维护在本地 server.md,严禁进 git history。
-# 老 PoC app(cli_aa8c58fae5391be7)的 secret/token 曾泄露于旧 heredoc,已清换占位符;
-# 该 app 已不用于线上(线上是 cli_aa8dbee01fb99bb3),请在飞书后台注销/轮换它。
-# bootstrap 后必须人工把 server.md 里"新的 feishu app"凭据 sed 进 .env + force-recreate。
-FEISHU_APP_ID=cli_REPLACE_WITH_REAL_APP_ID
-FEISHU_APP_SECRET=REPLACE_WITH_REAL_SECRET_FROM_SERVER_MD
-FEISHU_REDIRECT_URI=https://rusheslab.taoxiplan.com/api/v1/auth/callback
-FEISHU_VERIFICATION_TOKEN=REPLACE_WITH_REAL_TOKEN_FROM_SERVER_MD
-
 WEB_APP_BASE_URL=https://rusheslab.taoxiplan.com/ms-static/web/
 DEFAULT_ORGANIZATION_ID=00000000-0000-0000-0000-0000000000a1
 
@@ -150,7 +140,7 @@ else
   if ssh_run "test -f $REMOTE_DIR/.env"; then
     ok "已存在 server2 .env,保留不动(如需重置:INIT_ENV=1)"
   else
-    echo "❌ server2 $REMOTE_DIR/.env 不存在;首次部署请用 INIT_ENV=1 跑一次,然后人工核对飞书凭据等再正式 deploy"
+    echo "❌ server2 $REMOTE_DIR/.env 不存在;首次部署请用 INIT_ENV=1 跑一次,然后人工核对凭据等再正式 deploy"
     exit 1
   fi
 fi

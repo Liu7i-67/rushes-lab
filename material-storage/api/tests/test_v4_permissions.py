@@ -37,19 +37,13 @@ PROJECT_EVENT = "11111111-1111-1111-1111-111111111103"     # public
 
 # ─── 单元测试 ─────────────────────────────────────────────────────────────────
 class TestFmtSubject:
-    """fmt_subject:user / organization 不加 #member;group / department 加。"""
+    """fmt_subject:user 不加 #member;group 加(#154:department / organization 下线)。"""
 
     def test_user(self) -> None:
         assert fmt_subject("user", "ou_xxx") == "user:ou_xxx"
 
-    def test_organization(self) -> None:
-        assert fmt_subject("organization", "t1") == "organization:t1"
-
     def test_group(self) -> None:
         assert fmt_subject("group", "g1") == "group:g1#member"
-
-    def test_department(self) -> None:
-        assert fmt_subject("department", "d1") == "department:d1#member"
 
 
 # ─── HTTP 集成 fixture(session 级:asyncpg 不能跨 loop;同时减少 lifespan 反复) ─
@@ -371,18 +365,4 @@ async def test_folder_grants_sensitive_rejected(client: AsyncClient) -> None:
     assert r2.status_code == 400
 
 
-# ─── admin endpoint:feishu health(polish 2 起需 admin)──────────────────────
-@pytest.mark.asyncio
-async def test_admin_feishu_health_no_auth_401(client: AsyncClient) -> None:
-    r = await client.get("/api/v1/admin/feishu/health")
-    assert r.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_admin_feishu_health_denied_for_non_admin(client: AsyncClient) -> None:
-    """outsider 既不是 org admin 也不应是任何 project admin。
-    若测试数据污染(被 grant 过 admin)则跳过本断言。
-    """
-    r = await client.get("/api/v1/admin/feishu/health", headers=_h(OUTSIDER_ID))
-    # 接受 403(干净状态)或 200(测试数据污染:outsider 被 grant 了 project admin)
-    assert r.status_code in (200, 403)
+# #154:admin feishu health / test-card 测试随飞书下线删除(ADR-0007)
