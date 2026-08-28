@@ -206,5 +206,5 @@ sudo systemctl start postgresql redis-server
 
 ## 8. 建议顺手做的两件事
 
-1. **`scripts/local_up.sh`** —— 把 §2 的步骤(建 store + 推 model + migrate + seed + 打印入口 URL)收成一条命令。现在每次重来都要手抄 OpenFGA store id,是最容易出错的一步。
+1. ~~`scripts/local_up.sh`~~ ✅ **已落地(2026-08-28,`api/scripts/local_up.sh`)** —— §2 全流程(起依赖栈 `-p poc-pigsty-minio` + 建 store/推 model(幂等复用)+ 生成 `.env` + build + migrate + 双 seed)收成一条命令,Git Bash(Windows)与 Linux 均可跑。配套改动:Dockerfile 的 apt/pip 源抽成 build arg(默认仍清华;部分网络对清华源包文件 403,可用 `APT_MIRROR` / `PIP_INDEX_URL` 换阿里云,local_up.sh 默认阿里云);vite.config.ts 删掉 `'/ms-static' → :8200` 代理(该条会劫持 BrowserRouter 的整个 SPA base,vite dev 无法自渲染 —— HashRouter 时代遗留)。用法:`bash scripts/local_up.sh`(`--web` 顺带起前端,`--refresh-model` 重推 model)。
 2. **`scripts/set_password.py`** —— 给指定 user 设密码 / 清 `must_change_password`。现在想让一个 seed 用户走真实登录流程,只能先用 dev 通道进管理后台建号;有这个脚本可以直接把 alice 变成可密码登录的账号,e2e 脚本也能用。
