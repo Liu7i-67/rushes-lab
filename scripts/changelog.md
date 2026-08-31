@@ -4,6 +4,8 @@
 
 ## 2026-08-31
 
+- 项目邀请面板重做:角色改为多选 toggle chips(选中=色块填充+勾号+描边,一眼可辨),支持一次勾选多个角色批量授予,不再逐个反复邀请;后端 `POST /projects/{id}/members` 接受 `roles` 数组(旧单 `role` 字段兼容),重复授予改幂等(原先重复邀请同角色会 500)
+
 - agent 长期上下文维持 `CLAUDE.md` 为正本(尊重文件历史);新增极简 `AGENTS.md` 指针引用它,作 ZCode / Codex 等跨代理入口
 - 本地开发全面切换账号密码登录:dev 与生产同链路(`/login` + session cookie,不再依赖 dev-login 通道),利于实测不同账号/角色;测试账号 alice / bob / evan / outsider 由 `local_up.sh` 自动设好固定 dev 密码(3c51b0c)
 - 新增 `api/scripts/set_password.py`:给任意用户设密码 / 登录名;支持 `--list` 核对账号、`--must-change` 测首登强制改密、省略 `--password` 生成一次性临时密码(3c51b0c)

@@ -427,7 +427,8 @@ async def add_project_member(
 
     body: {
       user_id?: str | group_id?: str,  # 二选一(user_id = users.id UUID;#154:department 轴下线)
-      role: 'admin'|'viewer'|'downloader'|'uploader'
+      role?: 'admin'|'viewer'|'downloader'|'uploader',   # 旧单角色(仍兼容)
+      roles?: ['admin'|'viewer'|'downloader'|'uploader', ...]  # 一次授多角色
     }
     需 can_admin project。
     """
@@ -440,9 +441,14 @@ async def add_project_member(
         is_system_admin=is_system_admin,
     )
 
-    role = payload.get("role")
-    if role not in PROJECT_ROLES:
-        raise HTTPException(400, f"role must be one of {PROJECT_ROLES}")
+    # roles(多选,新)优先;旧单 role 字段继续兼容
+    raw_roles = payload.get("roles") or ([payload["role"]] if payload.get("role") else [])
+    bad = [r for r in raw_roles if r not in PROJECT_ROLES]
+    if bad:
+        raise HTTPException(400, f"role must be one of {PROJECT_ROLES}: got {bad}")
+    if not raw_roles:
+        raise HTTPException(400, "role(或 roles)必填")
+    roles = [r for r in PROJECT_ROLES if r in set(raw_roles)]  # 去重 + 固定顺序
 
     provided = [
         ("user", payload.get("user_id")),
@@ -451,23 +457,32 @@ async def add_project_member(
     chosen = [(k, v) for k, v in provided if v]
     if len(chosen) != 1:
         raise HTTPException(400, "must specify exactly one of user_id / group_id")
-    if role == "admin" and chosen[0][0] != "user":
+    if "admin" in roles and chosen[0][0] != "user":
         # model v4 限 admin: [user, group#member]
         raise HTTPException(400, "admin 不允许直接给 group;请改给 user")
     subject_kind, subject_id = chosen[0]
 
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
-    await permissions.add_project_subject(
-        project_id=str(project_id), subject=subject, role=role,  # type: ignore[arg-type]
-    )
-
-    await audit.write(
-        event_type="project_member_added",
-        actor_user_id=user_id, target_project_id=project_id,
-        details={"subject": subject, "role": role, "kind": subject_kind},
-        **ctx,
-    )
+    for role in roles:
+        try:
+            await permissions.add_project_subject(
+                project_id=str(project_id), subject=subject, role=role,  # type: ignore[arg-type]
+            )
+        except Exception as e:
+            # OpenFGA 对重复 tuple 返回 400 already-exists —— 重复邀请 / 多角色部分
+            # 重叠时终态已是管理员想要的,按幂等成功跳过;真错误继续抛(→ 500)
+            if "already exists" not in str(e):
+                raise
+            continue
+        # 每个角色一条 audit:保持 project_member_added 单角色 detail 形状,
+        # 下游按 event_type 过滤的查询不用改
+        await audit.write(
+            event_type="project_member_added",
+            actor_user_id=user_id, target_project_id=project_id,
+            details={"subject": subject, "role": role, "kind": subject_kind},
+            **ctx,
+        )
 
 
 @router.delete("/{project_id}/members", status_code=204)
