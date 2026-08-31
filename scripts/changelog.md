@@ -4,6 +4,7 @@
 
 ## 2026-08-31
 
+- folder 授权(grant)面板与邀请面板同款优化:权限改为多选 toggle chips(选中=色块填充+勾号+描边),一次勾选多个 level 批量授予;后端 `POST /folders/{id}/grants` 接受 `levels` 数组(旧单 `level` 兼容)+ 重复授予幂等(原先重复 grant 同 level 会 500)
 - 项目邀请面板重做:角色改为多选 toggle chips(选中=色块填充+勾号+描边,一眼可辨),支持一次勾选多个角色批量授予,不再逐个反复邀请;后端 `POST /projects/{id}/members` 接受 `roles` 数组(旧单 `role` 字段兼容),重复授予改幂等(原先重复邀请同角色会 500)
 
 - agent 长期上下文维持 `CLAUDE.md` 为正本(尊重文件历史);新增极简 `AGENTS.md` 指针引用它,作 ZCode / Codex 等跨代理入口

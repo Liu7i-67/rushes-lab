@@ -586,7 +586,8 @@ async def add_folder_grant(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    """body:{user_id|group_id, level: viewer|downloader|uploader}
+    """body:{user_id|group_id, level?: viewer|downloader|uploader, levels?: [...]}
+    levels 一次授多 level;旧单 level 字段继续兼容
     (user_id = users.id UUID,#148 起;#154:department 轴写入下线)"""
     user_id = user.id
     folder = await db.get(Folder, folder_id)
@@ -603,9 +604,14 @@ async def add_folder_grant(
     if not allowed:
         raise HTTPException(403, "no admin permission on this folder")
 
-    level = payload.get("level")
-    if level not in FOLDER_GRANT_KINDS:
-        raise HTTPException(400, f"level must be one of {FOLDER_GRANT_KINDS}")
+    raw_levels = payload.get("levels") or ([payload["level"]] if payload.get("level") else [])
+    bad = [l for l in raw_levels if l not in FOLDER_GRANT_KINDS]
+    if bad:
+        raise HTTPException(400, f"level must be one of {FOLDER_GRANT_KINDS}: got {bad}")
+    if not raw_levels:
+        raise HTTPException(400, "level(或 levels)必填")
+    levels = [l for l in FOLDER_GRANT_KINDS if l in set(raw_levels)]  # 去重 + 固定序
+
     provided = [
         ("user", payload.get("user_id")),
         ("group", payload.get("group_id")),
@@ -619,17 +625,24 @@ async def add_folder_grant(
 
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, str(subject_id))  # type: ignore[arg-type]
-    await permissions.grant_folder_explicit_subject(
-        folder_id=str(folder_id), subject=subject,
-        kind=f"explicit_{level}",  # type: ignore[arg-type]
-    )
-
-    await audit.write(
-        event_type="folder_grant_added",
-        actor_user_id=user_id, target_project_id=folder.project_id,
-        details={"folder_id": str(folder_id), "subject": subject, "level": level},
-        **ctx,
-    )
+    for level in levels:
+        try:
+            await permissions.grant_folder_explicit_subject(
+                folder_id=str(folder_id), subject=subject,
+                kind=f"explicit_{level}",  # type: ignore[arg-type]
+            )
+        except Exception as e:
+            # OpenFGA 重复 tuple 400 already-exists —— 重复 grant / 多 level 部分
+            # 重叠按幂等成功跳过;真错误继续抛
+            if "already exists" not in str(e):
+                raise
+            continue
+        await audit.write(
+            event_type="folder_grant_added",
+            actor_user_id=user_id, target_project_id=folder.project_id,
+            details={"folder_id": str(folder_id), "subject": subject, "level": level},
+            **ctx,
+        )
 
 
 @router.delete("/{folder_id}/grants", status_code=204)
