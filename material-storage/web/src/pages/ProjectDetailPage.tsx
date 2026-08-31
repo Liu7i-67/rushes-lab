@@ -43,6 +43,10 @@ export default function ProjectDetailPage() {
   const isMobile = !screens.md;
 
   const { data: project } = useProject(projectId);
+  // 项目级上传权限(uploader/admin):建根目录、FolderTree 新建入口用;
+  // 后端对建目录/上传都强制 can_upload,这里只是 UI 门控
+  const canUploadProject = !!project?.my_roles?.includes('admin')
+    || !!project?.my_roles?.includes('uploader');
   const { data: me } = useMe();
   const { data: folders, isLoading: foldersLoading } = useFolders(projectId);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(paramFolderId ?? null);
@@ -133,13 +137,17 @@ export default function ProjectDetailPage() {
           }}>本项目还没有文件夹</div>
           <p style={{ margin: 0, fontSize: 13, color: 'var(--ms-ink-muted)',
                       maxWidth: 320, marginInline: 'auto' }}>
-            新建一个开始管理素材,或申请加入已有的 sensitive 目录。
+            {canUploadProject
+              ? '新建一个开始管理素材,或申请加入已有的 sensitive 目录。'
+              : '该项目还没有文件夹;无上传权限,如需上传素材请联系项目管理员。'}
           </p>
           <Space style={{ marginTop: 24 }}>
-            <Button type="primary" icon={<FolderPlus size={14} strokeWidth={2} />}
-                    onClick={() => setNewFolderMode('root')}>
-              新建第一个文件夹
-            </Button>
+            {canUploadProject && (
+              <Button type="primary" icon={<FolderPlus size={14} strokeWidth={2} />}
+                      onClick={() => setNewFolderMode('root')}>
+                新建第一个文件夹
+              </Button>
+            )}
             <Button onClick={() => setApplySensitive(true)}
                     icon={<Key size={14} strokeWidth={2} />}>
               申请 sensitive 目录
@@ -260,8 +268,9 @@ export default function ProjectDetailPage() {
             projectName={project?.name}
             activeFolderId={activeFolderId}
             onSelect={onFolderSelect}
-            onCreateRoot={() => setNewFolderMode('root')}
-            onCreateChild={() => setNewFolderMode('child')}
+            onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
+            onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
+            canUpload={canUploadProject}
           />
         </Layout.Sider>
       )}
@@ -346,14 +355,21 @@ export default function ProjectDetailPage() {
           </span>
           <div style={{ flex: 1 }} />
           <Space size={6}>
-            <Button type="primary" size="small"
-                    icon={<Upload size={13} strokeWidth={2} />}
-                    onClick={() => activeFolderId && upload.open(activeFolderId)}>上传</Button>
+            {/* 上传/打标需 folder can_upload(uploader),删除需 can_admin —— 后端
+                对每个操作都强制;这里禁用按钮避免无权限用户选完文件才被 403 */}
+            <Tooltip title={folder?.my_can_upload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
+              <Button type="primary" size="small"
+                      icon={<Upload size={13} strokeWidth={2} />}
+                      disabled={!folder?.my_can_upload}
+                      onClick={() => activeFolderId && upload.open(activeFolderId)}>上传</Button>
+            </Tooltip>
             {/* #151: 批量打标 — 命中标签后可盲搜 */}
-            <Button size="small" icon={<Tags size={13} strokeWidth={2} />}
-                    disabled={!hasSelection} onClick={() => setBulkTagOpen(true)}>
-              打标{hasSelection ? ` ${selectedIds.length}` : ''}
-            </Button>
+            <Tooltip title={!hasSelection ? '' : folder?.my_can_upload ? '' : '无编辑权限(需 uploader 角色)'}>
+              <Button size="small" icon={<Tags size={13} strokeWidth={2} />}
+                      disabled={!hasSelection || !folder?.my_can_upload} onClick={() => setBulkTagOpen(true)}>
+                打标{hasSelection ? ` ${selectedIds.length}` : ''}
+              </Button>
+            </Tooltip>
             <Button size="small" icon={<RotateCw size={13} strokeWidth={2} />}
                     onClick={() => refetch()}>刷新</Button>
             <Button size="small" icon={<Download size={13} strokeWidth={2} />}
@@ -364,13 +380,15 @@ export default function ProjectDetailPage() {
               title={`删除 ${selectedIds.length} 个文件?`}
               description="软删除,可由管理员恢复"
               okText="删除" okButtonProps={{ danger: true }}
-              disabled={!hasSelection}
+              disabled={!hasSelection || !folder?.my_can_admin}
               onConfirm={handleBulkDelete}
             >
-              <Button size="small" danger icon={<Trash2 size={13} strokeWidth={2} />}
-                      disabled={!hasSelection} loading={del.isPending}>
-                删除{hasSelection ? ` ${selectedIds.length}` : ''}
-              </Button>
+              <Tooltip title={!hasSelection ? '' : folder?.my_can_admin ? '' : '无删除权限(需管理员角色)'}>
+                <Button size="small" danger icon={<Trash2 size={13} strokeWidth={2} />}
+                        disabled={!hasSelection || !folder?.my_can_admin} loading={del.isPending}>
+                  删除{hasSelection ? ` ${selectedIds.length}` : ''}
+                </Button>
+              </Tooltip>
             </Popconfirm>
           </Space>
         </div>
@@ -403,7 +421,7 @@ export default function ProjectDetailPage() {
                             style={{ color: 'var(--ms-hairline)' }} />
                   <div style={{
                     marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
-                  }}>空文件夹 — 上传文件开始</div>
+                  }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
                 </div>
               ),
             }}
