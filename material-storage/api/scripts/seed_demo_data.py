@@ -169,8 +169,14 @@ async def main() -> None:
         await session.commit()
 
         # 真飞书 user 列表
+        # ou_fake_outsider 同样不以 dev_ 开头 — 首跑时它尚不存在不受影响,
+        # 但重复跑会把 outsider 一起升成 org admin(负向测试账号拿到全库权限),
+        # 故显式排除;dev_bootstrap 的 alice/bob 用 dev_ 前缀天然排除
         res = await session.execute(
-            select(User).where(~User.feishu_open_id.like("dev_%"))
+            select(User).where(
+                ~User.feishu_open_id.like("dev_%"),
+                User.feishu_open_id != "ou_fake_outsider",
+            )
         )
         real_users = list(res.scalars())
 

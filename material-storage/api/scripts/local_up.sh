@@ -140,22 +140,38 @@ for i in $(seq 1 30); do
 done
 ok "ms-api healthz OK"
 
-# ─── 5) migrate + seed(幂等)─────────────────────────────────────────
-step "5/6 alembic + seed"
+# ─── 5) migrate + seed + dev 密码(幂等)─────────────────────────────
+step "5/6 alembic + seed + dev 密码"
 dc exec -T ms-api alembic upgrade head
 dc exec -T ms-api python -m scripts.seed_demo_data 2>&1 | tail -1
 dc exec -T ms-api python -m scripts.dev_bootstrap 2>&1 | tail -1
-ok "迁移 + 双 seed 完成(seed_demo_data=集成测试契约数据 / dev_bootstrap=alice+bob demo)"
+# seed 账号设固定 dev 密码 → 浏览器走 /login 账号密码登录测角色(与生产同链路,
+# 不再依赖 X-User-Id dev 通道;alice/bob 首次用 email 匹配,之后 username 已设。
+# 注意:exec 会吃掉循环 stdin,必须 </dev/null,否则 heredoc 剩余行被吞)
+while read -r ident user pw; do
+  dc exec -T ms-api python -m scripts.set_password "$ident" --username "$user" --password "$pw" </dev/null >/dev/null \
+    || die "set_password $ident 失败"
+done <<EOF
+alice@dev.local alice alice2026
+bob@dev.local bob bobdev2026
+evan@dev.local evan evan2026
+Outsider outsider outsider2026
+EOF
+ok "迁移 + 双 seed + dev 密码完成"
 
 # ─── 6) 汇总 ──────────────────────────────────────────────────────────
 step "6/6 就绪"
 cat <<EOF
   前端(先起):  cd material-storage/web && pnpm dev
-                → http://localhost:5173/ms-static/web/dev-login
-                → 填 alice: 00000000-0000-0000-0000-000000000001
+  密码登录:     http://localhost:5173/ms-static/web/login(与生产同链路)
+                  alice     / alice2026     org admin + 系统 admin
+                  bob       / bob2026       项目 member(无敏感目录权限)
+                  evan      / evan2026      demo org admin(seed 契约账号)
+                  outsider  / outsider2026  无权限账号(负向测试)
   API:          $API_URL/healthz
   MinIO Console: http://localhost:6101(minioadmin / minioadmin-poc-2026)
   OpenFGA:       http://localhost:3001/playground · store $STORE_ID
+  dev 通道:      /ms-static/web/dev-login(X-User-Id,冒烟任意 UUID 用)
   集成测试:      docker cp tests ms-api:/app/tests && \\
                 docker compose -f $API_DIR/docker-compose.yml exec -T ms-api python -m pytest tests/ -v
                 (容器需先装 dev 依赖:… exec -T ms-api pip install pytest pytest-asyncio freezegun aiosqlite;

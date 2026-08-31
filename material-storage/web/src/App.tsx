@@ -98,12 +98,14 @@ function AppShell() {
   }
 
   if (isError || !me) {
+    // 登录/改密页自身放行(必须在弹回判断之前,否则 /login 上无限自跳重载)
+    if (onAuthPage) return <RouterRoutes />;
     if (import.meta.env.DEV || window.location.search.includes('dev=1')) {
-      window.location.href = '/ms-static/web/dev-login';
+      // dev 也统一走账号密码登录(与生产同链路,利于测角色);X-User-Id 通道见 /dev-login
+      window.location.href = '/ms-static/web/login';
       return null;
     }
     // #149: 未登录 → 本地登录页(飞书入口在页内);next 带完整路径回业务前端
-    if (onAuthPage) return <RouterRoutes />;
     const next = window.location.pathname + window.location.search;
     window.location.href = `/ms-static/web/login?next=${encodeURIComponent(next)}`;
     return null;
