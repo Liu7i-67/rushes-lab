@@ -4,7 +4,7 @@
 
 ## 2026-08-31
 
-- 仓库级 agent 长期上下文迁至 `AGENTS.md`(跨代理通用标准);`CLAUDE.md` 保留为一行指针,内容以 AGENTS.md 为正本(c97543a 后续提交)
+- agent 长期上下文维持 `CLAUDE.md` 为正本(尊重文件历史);新增极简 `AGENTS.md` 指针引用它,作 ZCode / Codex 等跨代理入口
 - 本地开发全面切换账号密码登录:dev 与生产同链路(`/login` + session cookie,不再依赖 dev-login 通道),利于实测不同账号/角色;测试账号 alice / bob / evan / outsider 由 `local_up.sh` 自动设好固定 dev 密码(3c51b0c)
 - 新增 `api/scripts/set_password.py`:给任意用户设密码 / 登录名;支持 `--list` 核对账号、`--must-change` 测首登强制改密、省略 `--password` 生成一次性临时密码(3c51b0c)
 - 修:栈重建后浏览器残留的旧 session cookie 造成 401 循环弹回登录页 —— dev 模式下无效 session 自动回落 `X-User-Id`,生产行为不变(3c51b0c)
