@@ -229,7 +229,16 @@ async def get_folder(
     if is_system_admin:
         can_view = can_download = can_upload = can_admin = True
     else:
+        # public 项目非敏感 folder:组织内可浏览(「公开」语义,与 assets 列表 /
+        # thumbnail-url 的"信任组织内可见性"一致);下载/上传/删除仍走各自权限
+        public_browse = False
+        if not folder.is_sensitive:
+            project = await db.get(Project, folder.project_id)
+            public_browse = project is not None and project.visibility == "public"
+
         async def _c(rel: str) -> bool:
+            if rel == "can_view" and public_browse:
+                return True
             return await permissions.check(
                 user_subject=user.subject, relation=rel,
                 object_type=obj_type, object_id=str(folder.id),
