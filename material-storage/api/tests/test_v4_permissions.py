@@ -153,9 +153,31 @@ async def test_folders_outsider_sees_only_public_project_normal_folders(client: 
 
 
 # ─── approval 流程 ────────────────────────────────────────────────────────────
+async def _cleanup_wedding_download_approvals() -> None:
+    """确定性清场:删掉本目标全部 download 申请(含历史 pending),保证测试可重入。
+
+    API reject 之外兜底 —— reject 与 create 注册的 notify 后台任务在同行上有
+    低概率竞态(观测过 reject 200 但未落库),不能依赖它收敛历史状态。
+    """
+    from sqlalchemy import delete
+
+    from app.db.session import get_sessionmaker
+    from app.db.tables import ApprovalRequest
+
+    async with get_sessionmaker()() as db:
+        res = await db.execute(delete(ApprovalRequest).where(
+            ApprovalRequest.target_type == "project",
+            ApprovalRequest.target_id == PROJECT_WEDDING,
+            ApprovalRequest.action == "download",
+        ))
+        print(f"[cleanup] deleted rows: {res.rowcount}")
+        await db.commit()
+
+
 @pytest.mark.asyncio
 async def test_approval_create_and_pending_state(client: AsyncClient) -> None:
-    """Evan 提交一个 approval — 应返 201 + status=pending。"""
+    """Evan 提交 approval → 201 + pending;重复提交 → 400;结束清理保证可重入。"""
+    await _cleanup_wedding_download_approvals()
     body = {
         "target_type": "project",
         "target_id": PROJECT_WEDDING,
@@ -169,14 +191,36 @@ async def test_approval_create_and_pending_state(client: AsyncClient) -> None:
     assert a["status"] == "pending"
     assert a["target_id"] == PROJECT_WEDDING
 
-    # outsider 也能提(任何人可申请);但 approve 不通过(无 admin)
+    # 同人同目标同动作重复提交 → 400(防刷屏)
+    r_dup = await client.post("/api/v1/approvals", json=body, headers=_h(EVAN_ID))
+    assert r_dup.status_code == 400
+
+    # outsider 也能提(不同申请人不冲突);但 approve 不通过(无 admin)
     body2 = dict(body, reason="outsider 申请")
     r2 = await client.post("/api/v1/approvals", json=body2, headers=_h(OUTSIDER_ID))
     assert r2.status_code == 201
+    # outsider 同目标重复 → 400
+    r3 = await client.post("/api/v1/approvals", json=body2, headers=_h(OUTSIDER_ID))
+    assert r3.status_code == 400
+
+    # 清理:管理员(Evan)拒掉两条 pending,测试可重入(残留 pending 会让下次运行 400)。
+    # reject 与 create 注册的 notify 后台任务在同行上有低概率竞态,重试一次兜底
+    for aid in (a["id"], r2.json()["id"]):
+        rr = await client.post(
+            f"/api/v1/approvals/{aid}/reject", json={"decision_note": "test cleanup"},
+            headers=_h(EVAN_ID),
+        )
+        if rr.status_code != 200:
+            rr = await client.post(
+                f"/api/v1/approvals/{aid}/reject", json={"decision_note": "test cleanup retry"},
+                headers=_h(EVAN_ID),
+            )
+        assert rr.status_code == 200, rr.text
 
 
 @pytest.mark.asyncio
 async def test_approval_reject_by_non_admin_returns_403(client: AsyncClient) -> None:
+    await _cleanup_wedding_download_approvals()
     # Evan 创建,然后 outsider 尝试 approve → 403
     body = {
         "target_type": "project", "target_id": PROJECT_WEDDING,
@@ -191,6 +235,12 @@ async def test_approval_reject_by_non_admin_returns_403(client: AsyncClient) -> 
         headers=_h(OUTSIDER_ID),
     )
     assert r2.status_code == 403
+    # 清理:Evan(项目 admin)拒掉,免得残留 pending 卡住下次运行
+    rr = await client.post(
+        f"/api/v1/approvals/{aid}/reject", json={"decision_note": "test cleanup"},
+        headers=_h(EVAN_ID),
+    )
+    assert rr.status_code == 200
 
 
 # ─── share 短链 ─────────────────────────────────────────────────────────────
