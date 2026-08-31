@@ -258,11 +258,13 @@ export default function ApprovalsPage() {
       </div>
 
       {/* #111 修复:删掉"新建申请"按钮,因为它要求 user 手填 36 位 UUID 无法获取。
-          发起申请的入口收敛到资源页(项目 / 文件夹卡片旁的「申请权限」按钮 → RequestAccessModal)。 */}
+          发起申请的入口在资源详情面板:无下载权限的文件会显示「申请下载」,
+          或直接点「下载」被 403 拒绝时自动弹出申请(RequestAccessModal)。 */}
       <Alert
         type="info"
         showIcon
-        message="如需发起新申请,请到具体的项目 / 文件夹页面,点资源旁边的「申请权限」按钮。"
+        message="如何发起新申请?"
+        description="进入项目 → 选中无权限的文件 → 右侧详情面板点「申请下载」;或直接点「下载」,系统会自动弹出权限申请。提交后在本页「我的申请」跟踪进度,项目管理员在「全部」里审批。"
         style={{ marginBottom: 'var(--ms-sp-md)' }}
       />
 
