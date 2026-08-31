@@ -190,5 +190,4 @@ subject 一律是**本地身份**(#148 起,不再用飞书 ID):`user:<users.id U
 - 提交身份必须是**仓库级**配置的 `Evan <kevinfitzroy715@gmail.com>`,不能回退到全局邮箱。第一次 commit 前先确认 `git config user.email`。
 - **不直推 `main`**。feature branch → PR → squash merge。远端走 SSH alias `kevinfitzroy.github.com`。
 - Issue 走 `.github/ISSUE_TEMPLATE/` 三个模板:`bug.yml` / `feature.yml` / `frontend-feature.yml`。
-- **变更记录写 `scripts/changelog.md`**:以天为单位、二级标题日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表逐项记更新(一句话说清 + commit hash 可溯)。完成一批工作后当天追加,不删旧条目。
 - 工作区本地还有 `CLAUDE.md` / `git.md` / `refs/` 不进本仓库,写文件前先确认目标路径在 `rushes-lab/` 内。
