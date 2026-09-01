@@ -292,6 +292,19 @@ async def search_assets(
                 user_subject=user.subject, relation="can_view", object_type=obj_type,
             )
             folder_ids.extend(uuid.UUID(s) for s in ids_str)
+        # public 项目非敏感 folder 对组织内可浏览(与 GET /assets、GET /folders/{id}
+        # 同语义,PR #176 review P1-2):否则公开项目内容「列表看得到、盲搜搜不到」。
+        # sensitive folder 不在此列 —— 仍只走 list_objects(can_view),零泄露语义不变。
+        public_rows = await db.execute(
+            select(Folder.id)
+            .join(Project, Folder.project_id == Project.id)
+            .where(
+                Project.visibility == "public",
+                Folder.is_sensitive.is_(False),
+            )
+        )
+        folder_ids.extend(public_rows.scalars().all())
+        folder_ids = list({*folder_ids})  # 去重
         if not folder_ids:
             return []  # 无可达 folder → 结果必为空,不跑 SQL
         folder_filter = Asset.folder_id.in_(folder_ids)

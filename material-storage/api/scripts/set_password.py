@@ -27,7 +27,6 @@ from typing import Any
 
 from redis.asyncio import Redis
 from sqlalchemy import func, select
-from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: F401  (保留:未来 upsert 场景)
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_sessionmaker

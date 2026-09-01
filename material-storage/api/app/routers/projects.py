@@ -31,7 +31,7 @@ from app.deps import (
 )
 from app.models import ProjectCreateIn, ProjectOut
 from app.services.audit import AuditService
-from app.services.permissions import PermissionsService
+from app.services.permissions import PermissionsService, is_already_exists_error
 
 router = APIRouter()
 
@@ -441,9 +441,15 @@ async def add_project_member(
         is_system_admin=is_system_admin,
     )
 
-    # roles(多选,新)优先;旧单 role 字段继续兼容
-    raw_roles = payload.get("roles") or ([payload["role"]] if payload.get("role") else [])
-    bad = [r for r in raw_roles if r not in PROJECT_ROLES]
+    # roles(多选,新)优先;旧单 role 字段继续兼容。
+    # P2-1:先校验类型 —— 客户端误传字符串("admin")时 for 会按字符迭代,
+    # 报出 ['a','d','m','i','n'] 这种费解文案,必须在语义校验前拦下。
+    raw_roles = payload.get("roles")
+    if raw_roles is not None and not isinstance(raw_roles, list):
+        raise HTTPException(400, "roles 必须是数组")
+    legacy_role = payload.get("role")
+    raw_roles = raw_roles or ([legacy_role] if legacy_role else [])
+    bad = [r for r in raw_roles if not isinstance(r, str) or r not in PROJECT_ROLES]
     if bad:
         raise HTTPException(400, f"role must be one of {PROJECT_ROLES}: got {bad}")
     if not raw_roles:
@@ -464,15 +470,17 @@ async def add_project_member(
 
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
+    # 部分成功语义:重复(已存在)按幂等跳过;真错误中止 —— 此前角色已生效并留有
+    # audit,客户端重试可幂等补齐(P2-2)。
     for role in roles:
         try:
             await permissions.add_project_subject(
                 project_id=str(project_id), subject=subject, role=role,  # type: ignore[arg-type]
             )
         except Exception as e:
-            # OpenFGA 对重复 tuple 返回 400 already-exists —— 重复邀请 / 多角色部分
-            # 重叠时终态已是管理员想要的,按幂等成功跳过;真错误继续抛(→ 500)
-            if "already exists" not in str(e):
+            # OpenFGA 重复 tuple —— 重复邀请 / 多角色部分重叠时终态已是管理员想要的,
+            # 按幂等成功跳过;真错误继续抛(→ 500)
+            if not is_already_exists_error(e):
                 raise
             continue
         # 每个角色一条 audit:保持 project_member_added 单角色 detail 形状,

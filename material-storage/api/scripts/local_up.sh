@@ -16,8 +16,10 @@
 #
 # 环境:
 #   - Git Bash(Windows)与 Linux 均可跑;需 docker compose v2 + curl + openssl
-#   - 镜像源:部分网络对清华源包文件 403,默认走阿里云;可用环境变量覆盖:
-#       APT_MIRROR=mirrors.tuna.tsinghua.edu.cn PIP_INDEX_URL=https://... bash scripts/local_up.sh
+#   - 镜像源口径(有意与 Dockerfile/compose 默认不同):Dockerfile/compose 默认清华源,
+#     本脚本默认阿里云 —— 本机网络对清华源包文件 403,不换源 build 必失败。
+#     可用环境变量覆盖回清华或其它:
+#       APT_MIRROR=mirrors.tuna.tsinghua.edu.cn PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple bash scripts/local_up.sh
 #   - 跑集成测试前先清登录限流:docker compose exec -T ms-redis redis-cli FLUSHALL
 set -euo pipefail
 

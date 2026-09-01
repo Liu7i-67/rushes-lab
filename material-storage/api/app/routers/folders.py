@@ -35,7 +35,7 @@ from app.deps import (
 from app.models import FolderCreateIn, FolderInviteIn, FolderOut
 from app.services.audit import AuditService
 from app.services.notifications import run_notify_folder_invite_bg
-from app.services.permissions import PermissionsService
+from app.services.permissions import PermissionsService, is_already_exists_error
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -604,8 +604,13 @@ async def add_folder_grant(
     if not allowed:
         raise HTTPException(403, "no admin permission on this folder")
 
-    raw_levels = payload.get("levels") or ([payload["level"]] if payload.get("level") else [])
-    bad = [l for l in raw_levels if l not in FOLDER_GRANT_KINDS]
+    # P2-1:levels 类型先校验(客户端误传字符串时按字符迭代,报错费解)
+    raw_levels = payload.get("levels")
+    if raw_levels is not None and not isinstance(raw_levels, list):
+        raise HTTPException(400, "levels 必须是数组")
+    legacy_level = payload.get("level")
+    raw_levels = raw_levels or ([legacy_level] if legacy_level else [])
+    bad = [l for l in raw_levels if not isinstance(l, str) or l not in FOLDER_GRANT_KINDS]
     if bad:
         raise HTTPException(400, f"level must be one of {FOLDER_GRANT_KINDS}: got {bad}")
     if not raw_levels:
@@ -625,6 +630,9 @@ async def add_folder_grant(
 
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, str(subject_id))  # type: ignore[arg-type]
+    # 部分成功语义:重复(已存在)按幂等跳过;真错误中止 —— 此前 level 已生效并
+    # 留有 audit,客户端重试可幂等补齐(P2-2)。注意 folder grant 由服务层内部
+    # 先删后写刷新到期时间(grant_folder_explicit_subject),不会走到这里。
     for level in levels:
         try:
             await permissions.grant_folder_explicit_subject(
@@ -632,9 +640,9 @@ async def add_folder_grant(
                 kind=f"explicit_{level}",  # type: ignore[arg-type]
             )
         except Exception as e:
-            # OpenFGA 重复 tuple 400 already-exists —— 重复 grant / 多 level 部分
-            # 重叠按幂等成功跳过;真错误继续抛
-            if "already exists" not in str(e):
+            # OpenFGA 重复 tuple —— 重复 grant / 多 level 部分重叠按幂等成功跳过;
+            # 真错误继续抛
+            if not is_already_exists_error(e):
                 raise
             continue
         await audit.write(
