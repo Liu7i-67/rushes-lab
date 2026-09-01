@@ -4,6 +4,7 @@
 
 ## 2026-08-31
 
+- 内网 dev 环境部署 liuqi 分支(b2054a7):deploy_lan.sh 增强 —— SSH 反向隧道抖动重试(ssh_r 包装,8×6s)、无 rsync 环境的 tar 流兜底(Git Bash 可跑)、目标机 sudo 缺省时自动降级为普通同步;前端 SPA 本地构建后单独同步(rsync 范围排除 static/web)
 - PR #176 review 修复:① 重复 tuple 判定收敛为 `is_already_exists_error()`(SDK 异常类型 + 稳定子串,替代易随版本漂移的报错文案匹配;OpenFGA 镜像同步按 digest 固定);② 标签盲搜对 public 项目非敏感 folder 放开(消「列表看得到、盲搜搜不到」断层,敏感目录零泄露不变);③ `roles`/`levels` 参数先校验数组类型(误传字符串不再报费解文案);④ dev 未登录跳转补回 `next` 参数(登录后回跳原页);⑤ `set_password.py` 死 import 清理、local_up.sh 镜像源口径说明对齐
 - 审批申请体验修复三连:① 有效期 Segmented 选中态全局加深(墨底白字,统一修掉所有 Segmented "看不出选了哪个"的问题);② 修「自定义」有效期点了没反应的 bug(默认秒数与预设重合导致弹回,现显式记录模式,自定义输入框正常弹出);③ 重复申请防护 —— 已拥有目标权限或已有同目标待审申请时提交会被明确拒绝(400 + 文案)
 - 审批列表信息补全:每行显示**申请人姓名**,资源名可点击直接跳转到所在位置(后端列表接口补充 requester_name / folder_id)
