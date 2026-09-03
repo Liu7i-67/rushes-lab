@@ -552,4 +552,30 @@ async def test_folder_delete_sensitive_still_requires_admin(client: AsyncClient)
         assert rev.status_code == 204, rev.text
 
 
+@pytest.mark.asyncio
+async def test_folder_delete_concurrent_double_delete(client: AsyncClient) -> None:
+    """#177 并发回归:同时删同一文件夹,FOR UPDATE 串行化 → 恰好一个 204、
+    另一个 404(锁等待后行已不存在),绝不出现 500。"""
+    import asyncio
+
+    uniq = uuid.uuid4().hex[:8]
+    r = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_race_{uniq}"},
+        headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+
+    results = await asyncio.gather(
+        client.delete(f"/api/v1/folders/{fid}", headers=_h(EVAN_ID)),
+        client.delete(f"/api/v1/folders/{fid}", headers=_h(EVAN_ID)),
+        return_exceptions=True,
+    )
+    codes = sorted(
+        500 if isinstance(r_, BaseException) else r_.status_code for r_ in results
+    )
+    assert codes == [204, 404], f"expected [204, 404], got {codes}"
+
+
 # #154:admin feishu health / test-card 测试随飞书下线删除(ADR-0007)

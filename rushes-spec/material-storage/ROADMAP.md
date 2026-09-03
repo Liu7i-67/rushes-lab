@@ -142,7 +142,11 @@ vertical slice 已 ship(PR #102 + #103 deploy 修)。剩:
   tuple 尽力清理 + `folder_deleted` audit)。
   **权限:普通夹 `can_upload` / sensitive 夹 `can_admin`** —— 普通夹与创建对称
   (model v4:uploader 隐含建子目录,uploader 自主管理目录结构);sensitive 夹例外,
-  因其 `can_upload` 实为 downloader 级(model v4),当删除门槛太宽且邀请配置价值高
+  因其 `can_upload` 实为 downloader 级(model v4),当删除门槛太宽且邀请配置价值高。
+  **并发安全(#177,2026-09-03 修)**:`SELECT … FOR UPDATE` 锁 folder 行后判空
+  (并发子夹/资产 INSERT 被 FK key-share 锁阻塞,提交后各自干净撞 FK);OpenFGA
+  tuple 清理在 **commit 成功之后**(顺序与 directory 删组相反 —— folder 有会失败
+  的 RESTRICT 子引用,先清 tuple 会在回滚时断权限图);commit 包 IntegrityError → 409
 - **设计决策:空夹硬删而非原计划的软删**。软删对空文件夹无收益(无 MinIO 对象可延迟清理、重建成本
   一次点击),且 `uq_folder_project_prefix` 是**全量**唯一约束,软删行占位会让同名重建撞 409
   ——硬删天然释放约束位。非空拒绝而非级联(assets.folder_id 是 RESTRICT,子树删除的产品语义未定)。

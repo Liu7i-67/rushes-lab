@@ -279,9 +279,16 @@ async def delete_folder(
     权限:普通 folder 用 can_upload(与创建对称,uploader 自主管理目录结构,
     model 里 uploader 隐含建子目录);sensitive folder 维持 can_admin ——
     sensitive 的 can_upload 实为 downloader 级(model v4),拿它当删除门槛太宽,
-    且邀请配置价值高。系统 admin 直通。OpenFGA tuple(parent / explicit_* /
-    invited_*)尽力清理,失败不阻塞 DB 删除(孤儿 tuple 随 UUID 不复用而天然
-    失效,同 directory 删组惯例)。
+    且邀请配置价值高。系统 admin 直通。
+
+    并发安全(#177):判空后先 `SELECT … FOR UPDATE` 锁 folder 行再删,
+    同窗口内并发的子夹 / 资产 INSERT 因 FK 取父行 key-share 锁会被阻塞到
+    本事务提交,之后各自干净地撞 FK 报错(不会被我级联/500);delete+commit
+    包 IntegrityError → 409 兜底。OpenFGA tuple 清理放在 **commit 成功之后**
+    (与 directory 删组顺序相反:folder 有会失败的 RESTRICT 子引用,先清
+    tuple 会在 DB 回滚时留下"活对象 + 空权限图"的断链且无自助修复入口;
+    反过来,commit 成功后清理失败只留下已删对象上的孤儿 tuple —— UUID 不
+    复用即天然失效,无害)。
     """
     user_id = user.id
     folder = await db.get(Folder, folder_id)
@@ -305,6 +312,16 @@ async def delete_folder(
         )
         raise HTTPException(403, "no permission to delete this folder")
 
+    # 锁住 folder 行:判空、删除、提交全程持有,并发写子引用被挡在门外
+    # (OpenFGA 权限检查在上面完成,不让锁跨 HTTP 调用)
+    locked = (
+        await db.execute(
+            select(Folder).where(Folder.id == folder_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        raise HTTPException(404, "folder not found")
+
     child_id = await db.scalar(
         select(Folder.id).where(Folder.parent_folder_id == folder_id).limit(1)
     )
@@ -318,7 +335,20 @@ async def delete_folder(
             409, "文件夹不为空(可能含已软删的文件),请先彻底清空后再删除"
         )
 
-    # OpenFGA tuple 清理:该 object 上的所有 tuple(parent + explicit_* / invited_*)
+    name, prefix, is_sensitive, project_id = (
+        folder.name, folder.minio_prefix, folder.is_sensitive, folder.project_id,
+    )
+    try:
+        await db.delete(folder)
+        await db.commit()
+    except IntegrityError as e:
+        # 理论上被上面的行锁挡住;兜底防御(如未来新增引用路径),不裸 500
+        await db.rollback()
+        raise HTTPException(
+            409, "文件夹状态刚发生变化(可能新增了子文件夹或文件),请刷新后重试"
+        ) from e
+
+    # ── 以下都在 DB 删除成功之后:tuple 清理失败只留无害孤儿 ──────────────
     try:
         from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
         from openfga_sdk.models import ReadRequestTupleKey
@@ -338,11 +368,6 @@ async def delete_folder(
     except Exception as e:
         log.warning("delete folder tuple cleanup fail folder=%s err=%s", folder_id, e)
 
-    name, prefix, is_sensitive, project_id = (
-        folder.name, folder.minio_prefix, folder.is_sensitive, folder.project_id,
-    )
-    await db.delete(folder)
-    await db.commit()
     await audit.write(
         event_type="folder_deleted",
         actor_user_id=user_id,

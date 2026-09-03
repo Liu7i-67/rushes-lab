@@ -4,6 +4,7 @@
 
 ## 2026-09-03
 
+- 修复 #177 删除文件夹并发竞态(发布门禁):① 判空/删除前先 `SELECT … FOR UPDATE` 锁 folder 行,并发窗口内落库的子夹/资产 INSERT 被 FK 锁阻塞后干净报错,不再 500/不再 CASCADE 静默删他人空子夹;② OpenFGA tuple 清理移到 **DB commit 成功之后**(原顺序在 DB 回滚时会留下"活对象+空权限图"断链且无自助修复入口);③ delete/commit 包 IntegrityError → 409 兜底;新增并发双删回归测试(恰好一个 204 一个 404)
 - 新增删除文件夹功能(一期:仅空文件夹硬删):后端 `DELETE /api/v1/folders/{id}`(判空 = 无子夹/无文件[含软删],OpenFGA tuple 尽力清理,`folder_deleted` audit);前端文件夹 header 对有权限者显示「删除文件夹」按钮,非空禁用并提示;集成测试覆盖空夹删除/非空 409/无权限 403/硬删后同名可立即重建(0bb9853)
 - 删除文件夹权限定档:普通夹 `can_upload`(与创建对称,uploader 自主管理目录结构)、sensitive 夹维持 `can_admin`(sensitive 的 can_upload 实为 downloader 级,当删除门槛太宽);前端按钮门控同规则,测试补 uploader 可删 / sensitive 例外两例
 - 设计决策记录:文件夹删除不做软删 —— 空夹软删无收益且 `uq_folder_project_prefix` 全量唯一约束会让同名重建撞 409;非空删除二期方案(软删 + partial unique index)已写入 ROADMAP D iter2
