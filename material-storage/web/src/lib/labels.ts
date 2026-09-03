@@ -16,6 +16,8 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   approval_state_changed: '审批状态变更',
   approval_submitted: '审批申请已提交',
   asset_deleted: '文件删除',
+  asset_restored: '文件恢复',
+  asset_purged: '文件彻底删除',
   asset_tag_updated: '文件标签更新',  // #151
   download: '下载',
   download_denied: '下载被拒',

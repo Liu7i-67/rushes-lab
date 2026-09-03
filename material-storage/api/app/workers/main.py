@@ -6,13 +6,18 @@
 tasks:
   - generate_thumbnail(asset_id):图片 → Pillow thumbnail 1024 → MinIO thumbnails/
   - generate_video_thumbnail(asset_id):视频 → ffmpeg 抽帧 → MinIO thumbnails/(B-4 iter2, #101)
+  - generate_livp_thumbnail(asset_id):iOS Live Photo(.livp = zip)→ 静态图 thumbnail
+    + 实况短片 H.264 转码(实况预览)
   - mark_expired_approvals:cron 扫已过期 approval,改 status
 """
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import uuid
+import zipfile
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -25,6 +30,14 @@ from app.db.tables import Asset
 from app.settings import get_settings
 
 log = logging.getLogger("worker")
+
+# pillow-heif 可选:livp 内的静态图在「高效」格式 iPhone 上是 HEIC。
+# 缺依赖时 JPEG/PNG 静态图仍可处理,HEIC 单独失败并记 thumbnail_failed
+try:
+    from pillow_heif import register_heif_opener  # type: ignore[import-untyped]
+    register_heif_opener()
+except ImportError:  # pragma: no cover
+    log.warning("pillow_heif 不可用,HEIC 静态图的 livp 预览将失败")
 
 # image content_types we handle
 _IMAGE_PREFIXES = ("image/",)
@@ -166,6 +179,189 @@ _VIDEO_PREFIXES = ("video/",)
 _VIDEO_THUMBNAIL_MAX_BYTES = 50 * 1024 * 1024   # 50MB cap pilot(ROADMAP §63 风险段)
 _VIDEO_HEAD_RANGE = 10 * 1024 * 1024            # 只拉头部 10MB 给 ffmpeg 用,避免大文件拉全
 _FFMPEG_TIMEOUT_SEC = 30                         # subprocess 硬上限
+
+# ─── livp(iOS Live Photo)────────────────────────────────────────────────────
+# .livp 实为 zip:内含静态图(IMG_x.JPG.jpeg / .HEIC)+ 实况短片(IMG_x.JPG.mov)。
+# 浏览器不识别该格式 → 上传侧按扩展名分派本 worker;预览 = 静态图缩略图 + 转码短片
+_LIVP_IMAGE_EXTS = (".jpg", ".jpeg", ".heic", ".heif", ".png")
+_LIVP_VIDEO_EXTS = (".mov", ".mp4")
+_LIVP_MAX_BYTES = 200 * 1024 * 1024             # 防御上限:正常 livp 几 MB~几十 MB
+_LIVP_VIDEO_SECS = 3                            # Live Photo 实况约 3s,转码截断到同长
+_LIVP_FFMPEG_TIMEOUT_SEC = 45                    # 需低于 WorkerSettings.job_timeout(60)
+
+
+def _pick_livp_entries(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo | None, zipfile.ZipInfo | None]:
+    """从 livp zip 里挑(最大静态图, 最大视频)条目。
+
+    取最大而非首个:iPhone 导出可能带同名多份或小占位文件;条目名形如
+    IMG_1234.JPG.jpeg / IMG_1234.mov,扩展名判类。
+    """
+    still: zipfile.ZipInfo | None = None
+    video: zipfile.ZipInfo | None = None
+    for info in zf.infolist():
+        if info.is_dir():
+            continue
+        ext = Path(info.filename).suffix.lower()
+        if ext in _LIVP_IMAGE_EXTS and (still is None or info.file_size > still.file_size):
+            still = info
+        elif ext in _LIVP_VIDEO_EXTS and (video is None or info.file_size > video.file_size):
+            video = info
+    return still, video
+
+
+def _transcode_live_video(in_path: Path, out_path: Path, timeout: int) -> bool:
+    """实况短片 → H.264 MP4(浏览器兼容;原片多为 HEVC,Chrome 常放不了)。
+
+    截 _LIVP_VIDEO_SECS + faststart(边下边播);失败返回 False,由调用方跳过
+    实况部分(静态图缩略图不受影响)。
+    """
+    import subprocess
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error",
+        "-i", str(in_path), "-t", str(_LIVP_VIDEO_SECS),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-vf", "scale=1024:-2",
+        "-c:a", "aac", "-b:a", "96k",
+        "-movflags", "+faststart",
+        "-y", str(out_path),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False
+    return proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0
+
+
+async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
+    """livp 预览生成:静态图缩略图(必做)+ 实况短片转码(best-effort)。
+
+    产物(缩略图 MinIO / SSD):
+      - thumbnails/{asset_id}.jpg   ← 静态图,复用通用缩略图链路(tags.thumbnail_key)
+      - previews/{asset_id}_live.mp4 ← 实况短片,经
+        GET /assets/{id}/live-preview-url 签发(走 can_download enforce)
+    """
+    settings = get_settings()
+    sm = get_sessionmaker()
+    aid = uuid.UUID(asset_id)
+
+    async with sm() as db:
+        asset = await db.get(Asset, aid)
+        if asset is None:
+            return {"status": "asset_not_found", "asset_id": asset_id}
+        if asset.deleted_at is not None:
+            return {"status": "asset_deleted", "asset_id": asset_id}
+        if not (asset.filename or "").lower().endswith(".livp"):
+            return {"status": "skip_not_livp", "filename": asset.filename}
+        if asset.size_bytes and asset.size_bytes > _LIVP_MAX_BYTES:
+            return {"status": "skip_too_large", "size_bytes": asset.size_bytes}
+        bucket = asset.minio_bucket
+        src_key = asset.minio_key
+
+    s3 = boto3.client(
+        "s3",
+        endpoint_url=settings.minio_endpoint_internal,
+        aws_access_key_id=settings.minio_access_key,
+        aws_secret_access_key=settings.minio_secret_key,
+        config=Config(signature_version="s3v4", region_name="us-east-1"),
+    )
+    thumb_s3 = _thumb_s3_client(settings)
+    _ensure_thumbnail_bucket(thumb_s3, settings)
+
+    import tempfile
+    tmpdir = Path(tempfile.mkdtemp(prefix=f"livp-{asset_id}-"))
+    zip_path = tmpdir / "in.livp"
+    vid_in_path = tmpdir / "live.mov"
+    vid_out_path = tmpdir / "live.mp4"
+    thumbnail_key = f"thumbnails/{asset_id}.jpg"
+    live_key = f"previews/{asset_id}_live.mp4"
+    thumbnail_size = 0
+    try:
+        s3.download_file(bucket, src_key, str(zip_path))
+
+        with zipfile.ZipFile(zip_path) as zf:
+            still_info, video_info = _pick_livp_entries(zf)
+            if still_info is None:
+                raise RuntimeError("livp 内未找到静态图条目(jpg/heic/png)")
+
+            # 1) 静态图 → 1024 JPEG(与 generate_thumbnail 同规格)
+            with zf.open(still_info) as f:
+                img = Image.open(f)
+                with contextlib.suppress(Exception):
+                    from PIL import ImageOps
+                    img = ImageOps.exif_transpose(img)
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                img.thumbnail((_THUMBNAIL_MAX_PX, _THUMBNAIL_MAX_PX),
+                              Image.Resampling.LANCZOS)
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=_THUMBNAIL_QUALITY, optimize=True)
+            out.seek(0)
+            thumbnail_size = out.getbuffer().nbytes
+            thumb_s3.put_object(
+                Bucket=settings.minio_thumbnail_bucket, Key=thumbnail_key, Body=out,
+                ContentType="image/jpeg",
+                Metadata={"source_asset": asset_id, "kind": "livp_still"},
+            )
+
+            # 2) 静态图先落库(转码失败不影响照片预览)
+            async with sm() as db:
+                a = await db.get(Asset, aid)
+                if a:
+                    tags = dict(a.tags or {})
+                    tags["thumbnail_key"] = thumbnail_key
+                    tags["thumbnail_size_bytes"] = thumbnail_size
+                    tags["thumbnail_width"] = img.width
+                    tags["thumbnail_height"] = img.height
+                    tags.pop("thumbnail_failed", None)
+                    a.tags = tags
+                    await db.commit()
+
+            # 3) 实况短片转码(best-effort:HEVC 解码器缺失等失败 → 仅无实况)
+            if video_info is not None:
+                # worker 全函数按同步阻塞写(arq 既有风格;文件小,阻塞可忽略)
+                with zf.open(video_info) as f, vid_in_path.open("wb") as vf:  # noqa: ASYNC230
+                    import shutil
+                    shutil.copyfileobj(f, vf)
+                if _transcode_live_video(vid_in_path, vid_out_path, _LIVP_FFMPEG_TIMEOUT_SEC):
+                    live_size = vid_out_path.stat().st_size
+                    with vid_out_path.open("rb") as f:  # noqa: ASYNC230
+                        thumb_s3.put_object(
+                            Bucket=settings.minio_thumbnail_bucket, Key=live_key, Body=f,
+                            ContentType="video/mp4",
+                            Metadata={"source_asset": asset_id, "kind": "livp_video"},
+                        )
+                    async with sm() as db:
+                        a = await db.get(Asset, aid)
+                        if a:
+                            tags = dict(a.tags or {})
+                            tags["live_video_key"] = live_key
+                            tags["live_video_size_bytes"] = live_size
+                            a.tags = tags
+                            await db.commit()
+                    log.info("livp live video asset=%s key=%s size=%d",
+                             asset_id, live_key, live_size)
+                else:
+                    log.warning("livp live transcode fail asset=%s(跳过实况,静态图已生成)",
+                                asset_id)
+        return {
+            "status": "ok", "asset_id": asset_id,
+            "thumbnail_key": thumbnail_key, "size_bytes": thumbnail_size,
+            "live_video": video_info is not None,
+        }
+    except Exception as e:
+        log.exception("livp thumbnail fail asset=%s err=%s", asset_id, e)
+        async with sm() as db:
+            a = await db.get(Asset, aid)
+            if a:
+                tags = dict(a.tags or {})
+                tags["thumbnail_failed"] = str(e)[:200]
+                a.tags = tags
+                await db.commit()
+        return {"status": "failed", "asset_id": asset_id, "error": str(e)[:200]}
+    finally:
+        import shutil as _shutil
+        with contextlib.suppress(Exception):  # noqa: ASYNC240
+            _shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 def _extract_video_frame(in_path: Any, out_path: Any, timeout: int) -> bool:
@@ -334,8 +530,10 @@ async def mark_expired_approvals(ctx: dict) -> dict[str, Any]:
     注:OpenFGA grant 本身因 non_expired_grant condition 已自动失效,
     这里只更新 status 字段让 UI 显示一致。
     """
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
+
     from sqlalchemy import select, update
+
     from app.db.tables import ApprovalRequest
 
     sm = get_sessionmaker()
@@ -383,7 +581,7 @@ def _build_redis_settings() -> RedisSettings:
 
 
 # cron schedule: 每 5min(/5 0..55)跑一次 mark_expired_approvals
-from arq.cron import cron   # noqa: E402
+from arq.cron import cron  # noqa: E402
 
 _CRON_JOBS = [
     cron(mark_expired_approvals, minute=set(range(0, 60, 5))),
@@ -391,7 +589,12 @@ _CRON_JOBS = [
 
 
 class WorkerSettings:
-    functions = [generate_thumbnail, generate_video_thumbnail, mark_expired_approvals]
+    functions = [
+        generate_thumbnail,
+        generate_video_thumbnail,
+        generate_livp_thumbnail,
+        mark_expired_approvals,
+    ]
     cron_jobs = _CRON_JOBS
     redis_settings = _build_redis_settings()
     max_jobs = 4

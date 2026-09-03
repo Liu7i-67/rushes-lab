@@ -6,20 +6,21 @@ import {
   Space, Table, Tooltip,
 } from 'antd';
 import {
-  Download, FileText, Folder as FolderIcon, FolderPlus, Key,
+  Archive, Download, FileText, Folder as FolderIcon, FolderPlus, Key,
   Link2, Lock, RotateCw, Tags, Trash2, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import {
   useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
-  useFolder, useFolders, useMe, useProject, useUpdateAssetMeta,
+  useFolder, useFolders, useMe, useProject, useTrashAssets, useUpdateAssetMeta,
 } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { FolderTree } from '../components/FolderTree';
 import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 import { AssetTagEditor } from '../components/AssetTagEditor';
 import { AssetThumbnail } from '../components/AssetThumbnail';
+import { FolderTrashModal } from '../components/FolderTrashModal';
 import { ProjectMembersDrawer } from '../components/ProjectMembersDrawer';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
@@ -93,6 +94,12 @@ export default function ProjectDetailPage() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   // #129: folder admin 才显"申请链接"按钮 — folder 级精细化授权入口
   const [linkOpen, setLinkOpen] = useState(false);
+  // 回收站:folder admin 可查看/恢复/彻底清除本夹软删文件
+  const [trashOpen, setTrashOpen] = useState(false);
+  const { data: trashAssets } = useTrashAssets(
+    activeFolderId ?? undefined, !!folder?.my_can_admin,
+  );
+  const trashCount = trashAssets?.length ?? 0;
 
   const onFolderSelect = (fid: string) => {
     setActiveFolderId(fid);
@@ -356,16 +363,19 @@ export default function ProjectDetailPage() {
                 </Button>
               </Tooltip>
             )}
-            {/* 删除文件夹:仅空文件夹可删(硬删,不可恢复)。普通夹需 can_upload
-                (与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce */}
+            {/* 删除文件夹:活跃文件须清空(硬删,不可恢复)。普通夹需 can_upload
+                (与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce。
+                回收站软删文件前端看不见,不阻断;删除时后端将其一并彻底清除 */}
             {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
               <Popconfirm
                 title={`删除文件夹「${folder.name}」?`}
-                description="仅可删除空文件夹;删除后不可恢复"
+                description={trashCount > 0
+                  ? `回收站还有 ${trashCount} 个已删文件,将随文件夹一并彻底清除`
+                  : '仅可删除已清空活跃文件的文件夹;删除后不可恢复'}
                 okText="删除" okButtonProps={{ danger: true }}
                 onConfirm={handleDeleteFolder}
               >
-                <Tooltip title={folderIsEmpty ? '删除当前文件夹(不可恢复)' : '仅可删除空文件夹(无子文件夹、无文件)'}>
+                <Tooltip title={folderIsEmpty ? '删除当前文件夹(不可恢复)' : '先删除文件夹内所有文件'}>
                   <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
                           disabled={!folderIsEmpty} loading={delFolder.isPending}>
                     删除文件夹
@@ -427,9 +437,16 @@ export default function ProjectDetailPage() {
                     disabled={!hasSelection} onClick={handleBulkDownload}>
               下载{hasSelection ? ` ${selectedIds.length}` : ''}
             </Button>
+            {/* 回收站:folder admin 专属(列表/恢复/彻底清除;后端 can_admin enforce) */}
+            {folder?.my_can_admin && (
+              <Button size="small" icon={<Archive size={13} strokeWidth={2} />}
+                      onClick={() => setTrashOpen(true)}>
+                回收站{trashCount > 0 ? ` ${trashCount}` : ''}
+              </Button>
+            )}
             <Popconfirm
               title={`删除 ${selectedIds.length} 个文件?`}
-              description="软删除,可由管理员恢复"
+              description="软删除;管理员可在回收站恢复或彻底清除"
               okText="删除" okButtonProps={{ danger: true }}
               disabled={!hasSelection || !folder?.my_can_admin}
               onConfirm={handleBulkDelete}
@@ -553,6 +570,15 @@ export default function ProjectDetailPage() {
         onClose={() => setBulkTagOpen(false)}
         assets={selectedAssets}
       />
+
+      {/* 回收站:本文件夹软删文件(恢复 / 彻底清除) */}
+      {folder && (
+        <FolderTrashModal
+          folderId={folder.id}
+          open={trashOpen}
+          onClose={() => setTrashOpen(false)}
+        />
+      )}
     </Layout>
   );
 }

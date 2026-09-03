@@ -91,6 +91,8 @@ export interface Asset {
   size_bytes: number;
   content_type: string | null;
   created_at: string;
+  // 软删时间;普通列表恒 null,回收站列表有值
+  deleted_at?: string | null;
   // #151: 手工标签 + 备注(盲搜素材)
   user_labels: string[];
   notes: string | null;
@@ -99,6 +101,8 @@ export interface Asset {
     thumbnail_width?: number;
     thumbnail_height?: number;
     thumbnail_failed?: string;
+    // livp 实况短片(ffmpeg 转码的 H.264);预览走 live-preview-url 签名
+    live_video_key?: string;
     [k: string]: unknown;
   };
 }

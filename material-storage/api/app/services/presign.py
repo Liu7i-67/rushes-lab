@@ -68,6 +68,15 @@ class PresignService:
             ExpiresIn=expires_seconds,
         )
 
+    def delete_object(self, bucket: str, key: str) -> None:
+        """删除主存储对象(purge 用;软删本身不删对象)。"""
+        self._s3_internal.delete_object(Bucket=bucket, Key=key)
+
+    @property
+    def thumbnail_bucket(self) -> str:
+        """缩略图 MinIO 的 bucket 名(ADR-0008 P1;清理派生对象用)。"""
+        return self._settings.minio_thumbnail_bucket
+
     def sign_put_url(self, bucket: str, key: str, expires_seconds: int) -> str:
         return self._s3_signer.generate_presigned_url(
             "put_object",

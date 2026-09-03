@@ -33,6 +33,8 @@ dependencies = [
     # 媒体处理(worker)
     "ffmpeg-python>=0.2",
     "pillow>=11.0",
+    # livp 静态图为 HEIC(iPhone「高效」格式)时的解码(worker,见 workers/main.py)
+    "pillow-heif>=0.13",
 ]
 
 [dependency-groups]

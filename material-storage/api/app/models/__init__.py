@@ -57,6 +57,8 @@ class AssetOut(ORMModel):
     size_bytes: int
     content_type: str | None
     created_at: datetime
+    # 软删时间;普通列表恒 None(已删的查不到),回收站列表有值
+    deleted_at: datetime | None = None
     # B-4:worker 生成的缩略图 / 标签等 metadata;前端按需读
     tags: dict = {}
     # 标签 + 盲搜(#151):用户自由标签 + 备注

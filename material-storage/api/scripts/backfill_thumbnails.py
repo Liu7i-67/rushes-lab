@@ -5,8 +5,9 @@
   docker exec ms-api python -m scripts.backfill_thumbnails --force     # 全部重生成(切 ms-thumbs 用)
 
 行为:
-  - 默认:扫 content_type=image/* 或 video/* 且 tags 无 thumbnail_key 的 asset → enqueue
-    (image → generate_thumbnail;video → generate_video_thumbnail)
+  - 默认:扫 content_type=image/* 或 video/*、或 .livp 文件名,且 tags 无 thumbnail_key
+    的 asset → enqueue(image → generate_thumbnail;video → generate_video_thumbnail;
+    .livp → generate_livp_thumbnail)
   - --force:忽略已有 thumbnail_key,全部重新 enqueue —— 切独立缩略图 bucket
     (MINIO_THUMBNAIL_BUCKET=ms-thumbs)后,存量图默认 skip(普通 backfill 是 no-op),
     必须 --force 重生成到新 bucket
@@ -43,6 +44,8 @@ async def main() -> None:
                 or_(
                     Asset.content_type.like("image/%"),
                     Asset.content_type.like("video/%"),
+                    # livp 浏览器不识别 content-type(octet-stream),按扩展名捞
+                    Asset.filename.ilike("%.livp"),
                 ),
                 Asset.deleted_at.is_(None),
             )
@@ -56,11 +59,12 @@ async def main() -> None:
         if not FORCE and tags.get("thumbnail_key"):
             skipped += 1
             continue
-        job = (
-            "generate_video_thumbnail"
-            if (a.content_type or "").startswith("video/")
-            else "generate_thumbnail"
-        )
+        if (a.filename or "").lower().endswith(".livp"):
+            job = "generate_livp_thumbnail"
+        elif (a.content_type or "").startswith("video/"):
+            job = "generate_video_thumbnail"
+        else:
+            job = "generate_thumbnail"
         await pool.enqueue_job(job, str(a.id))
         enqueued += 1
         if enqueued % 50 == 0:

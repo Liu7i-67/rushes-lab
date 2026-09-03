@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -34,6 +35,7 @@ from app.models import (
     UploadPartUrlOut,
     UploadUrlRequest,
 )
+from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
 from app.services.permissions import PermissionsService
 from app.services.presign import PresignService
@@ -200,8 +202,12 @@ async def complete_upload(
     )
 
     # B-4:enqueue thumbnail 生成 — image 走 Pillow worker;video 走 ffmpeg worker (B-4 iter2 #101)
+    # .livp(iOS Live Photo,实为 zip)浏览器不识别 content-type,按扩展名分派专属 worker
     ct = asset.content_type or ""
-    if ct.startswith("image/"):
+    if asset.filename.lower().endswith(".livp"):
+        from app.services.arq_pool import enqueue_livp_thumbnail
+        await enqueue_livp_thumbnail(request.app.state.arq_pool, str(asset.id))
+    elif ct.startswith("image/"):
         from app.services.arq_pool import enqueue_thumbnail
         await enqueue_thumbnail(request.app.state.arq_pool, str(asset.id))
     elif ct.startswith("video/"):
@@ -265,6 +271,87 @@ async def list_assets(
     )
     res = await db.execute(stmt)
     return [AssetOut.model_validate(r) for r in res.scalars().all()]
+
+
+# ─── 回收站(软删列表 / 恢复 / 彻底删除)─────────────────────────────────────
+@router.get("/trash", response_model=list[AssetOut])
+async def list_trash(
+    folder_id: uuid.UUID = Query(...),
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+) -> list[AssetOut]:
+    """列 folder 内已软删的文件(回收站)。需 folder can_admin / 系统 admin。
+
+    比 list_assets 收紧一档:软删内容对普通 viewer 不可见,恢复/清除本来就是
+    管理动作,可见性与之对齐。"""
+    folder = await db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "folder not found")
+
+    allowed = is_system_admin or await permissions.check(
+        user_subject=user.subject,
+        relation="can_admin",
+        object_type="folder" if not folder.is_sensitive else "sensitive_folder",
+        object_id=str(folder.id),
+    )
+    if not allowed:
+        raise HTTPException(403, "no admin permission on this folder")
+
+    stmt = (
+        select(Asset)
+        .where(Asset.folder_id == folder_id, Asset.deleted_at.is_not(None))
+        .order_by(Asset.deleted_at.desc())
+        .limit(500)
+    )
+    res = await db.execute(stmt)
+    return [AssetOut.model_validate(r) for r in res.scalars().all()]
+
+
+@router.post("/{asset_id}/restore", status_code=204)
+async def restore_asset(
+    asset_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+    ctx: dict = Depends(get_request_context),
+) -> None:
+    """恢复软删文件(deleted_at 置回 NULL)。需 asset.can_admin / 系统 admin。
+
+    软删不动 OpenFGA tuple 与 MinIO 对象,恢复即回到删除前的权限/内容状态。"""
+    user_id = user.id
+    asset = await db.get(Asset, asset_id)
+    if not asset:
+        raise HTTPException(404, "asset not found")
+
+    allowed = is_system_admin or await permissions.check(
+        user_subject=user.subject, relation="can_admin",
+        object_type="asset", object_id=str(asset_id),
+    )
+    if not allowed:
+        await audit.write(
+            event_type="access_denied", actor_user_id=user_id,
+            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            details={"action": "restore_asset", "reason": "openfga can_admin false"},
+            **ctx,
+        )
+        raise HTTPException(403, "no restore permission")
+
+    if asset.deleted_at is None:
+        raise HTTPException(409, "文件未被删除(或已恢复)")
+
+    asset.deleted_at = None
+    await db.commit()
+
+    await audit.write(
+        event_type="asset_restored", actor_user_id=user_id,
+        target_asset_id=asset_id, target_minio_key=asset.minio_key,
+        details={"filename": asset.filename},
+        **ctx,
+    )
 
 
 # ─── 盲搜(标签 + 跨 folder,#151)────────────────────────────────────────────
@@ -502,23 +589,26 @@ async def get_thumbnail_url(
     return {"url": url, "expires_in": ttl}
 
 
-# ─── delete(soft)──────────────────────────────────────────────────────────
+# ─── delete(soft / hard)───────────────────────────────────────────────────
 @router.delete("/{asset_id}", status_code=204)
 async def delete_asset(
     asset_id: uuid.UUID,
+    hard: bool = Query(False, description="true=彻底删除(仅对已软删的文件)"),
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
+    presign: PresignService = Depends(get_presign),
     audit: AuditService = Depends(get_audit),
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
     user_id = user.id
-    """soft delete:置 deleted_at;MinIO object 保留(由 bucket lifecycle 异步清)。
+    """删除文件。默认软删:置 deleted_at,MinIO 对象保留,可在回收站恢复。
 
-    权限:asset.can_admin(model v4:= can_admin from parent folder/project);系统 admin 直通。
+    hard=true 为彻底删除:删 DB 行 + MinIO 原对象 + 缩略图派生对象 + OpenFGA
+    tuple,不可恢复 —— 须先软删(两步制,防误操作一击穿底)。权限均为
+    asset.can_admin;系统 admin 直通。
     """
-    from datetime import datetime, timezone
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
@@ -536,6 +626,49 @@ async def delete_asset(
         )
         raise HTTPException(403, "no delete permission")
 
+    if hard:
+        if asset.deleted_at is None:
+            raise HTTPException(409, "请先删除(软删)后再彻底清除")
+        # commit 前快照:delete 后实例属性过期不可读
+        snapshot = {
+            "bucket": asset.minio_bucket, "key": asset.minio_key,
+            "tags": dict(asset.tags or {}), "filename": asset.filename,
+        }
+        await db.delete(asset)
+        await db.commit()
+
+        # ── DB 删除成功之后:清理失败只留无害孤儿 ──
+        purge_asset_storage(presign, snapshot["bucket"], snapshot["key"], snapshot["tags"])
+        try:
+            from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
+            from openfga_sdk.models import ReadRequestTupleKey
+            resp = await permissions._client.read(  # type: ignore[attr-defined]
+                ReadRequestTupleKey(object=f"asset:{asset_id}")
+            )
+            for t in resp.tuples:
+                try:
+                    await permissions._client.write(  # type: ignore[attr-defined]
+                        ClientWriteRequest(deletes=[ClientTuple(
+                            user=t.key.user, relation=t.key.relation, object=t.key.object,
+                        )])
+                    )
+                except Exception:
+                    log.debug("asset tuple delete tolerate %s %s %s",
+                              t.key.user, t.key.relation, t.key.object)
+        except Exception as e:
+            log.warning("purge asset tuple cleanup fail asset=%s err=%s", asset_id, e)
+
+        # audit 落库:不能带 target_asset_id —— 行已删,audit_events.target_asset_id
+        # 的 FK 会 violations;溯源用 target_minio_key(无 FK)+ details.asset_id
+        await audit.write(
+            event_type="asset_purged", actor_user_id=user_id,
+            target_minio_key=snapshot["key"],
+            details={"asset_id": str(asset_id), "filename": snapshot["filename"],
+                     "hard": True},
+            **ctx,
+        )
+        return
+
     if asset.deleted_at is not None:
         return  # idempotent
 
@@ -548,6 +681,59 @@ async def delete_asset(
         details={"filename": asset.filename, "soft": True},
         **ctx,
     )
+
+
+# ─── livp 实况视频预览 URL ────────────────────────────────────────────────────
+@router.get("/{asset_id}/live-preview-url")
+async def get_live_preview_url(
+    asset_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    presign: PresignService = Depends(get_presign),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+    ctx: dict = Depends(get_request_context),
+) -> dict:
+    """livp 实况视频(ffmpeg 转码的 H.264 短片)presigned URL。
+
+    与缩略图不同:实况视频是接近原片的内容,不走「缩略图不过 enforce」的豁免,
+    按 can_download 强制 + audit(与 download-link 同门槛;预览弹窗本就先过
+    download-link,权限语义一致)。无 live_video_key(非 livp / 转码失败)→ 404。
+    """
+    user_id = user.id
+    asset = await db.get(Asset, asset_id)
+    if asset is None or asset.deleted_at is not None:
+        raise HTTPException(404, "asset not found")
+    live_key = (asset.tags or {}).get("live_video_key")
+    if not live_key:
+        raise HTTPException(404, "no live preview(非 livp 或实况转码未生成)")
+
+    allowed = is_system_admin or await permissions.check(
+        user_subject=user.subject,
+        relation="can_download",
+        object_type="asset",
+        object_id=str(asset_id),
+    )
+    if not allowed:
+        await audit.write(
+            event_type="download_denied", actor_user_id=user_id,
+            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            details={"reason": "openfga can_download false", "kind": "live_preview"},
+            **ctx,
+        )
+        raise HTTPException(403, "no permission to preview(可申请审批)")
+
+    ttl = 1800
+    url = presign.sign_thumbnail_url(str(live_key), ttl)
+    await audit.signed_url_issued(
+        actor_user_id=user_id,
+        target_asset_id=asset.id,
+        target_minio_key=asset.minio_key,
+        details={"kind": "live_preview", "expires_in_seconds": ttl},
+        **ctx,
+    )
+    return {"url": url, "expires_in": ttl}
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────────

@@ -200,6 +200,43 @@ export const useDeleteAsset = () => {
   });
 };
 
+// ─── 回收站(软删列表 / 恢复 / 彻底删除)────────────────────────────────────
+export const useTrashAssets = (folderId: string | undefined, enabled = true) =>
+  useQuery({
+    queryKey: ['assets-trash', folderId],
+    queryFn: async () =>
+      (await http.get<Asset[]>('/api/v1/assets/trash', { params: { folder_id: folderId } }))
+        .data,
+    enabled: !!folderId && enabled,
+  });
+
+export const useRestoreAsset = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (assetId: string) => {
+      await http.post(`/api/v1/assets/${assetId}/restore`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets-trash'] });
+      qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+  });
+};
+
+// 彻底删除:仅对已软删的文件(后端 enforce 两步制)
+export const usePurgeAsset = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (assetId: string) => {
+      await http.delete(`/api/v1/assets/${assetId}`, { params: { hard: true } });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets-trash'] });
+      qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+  });
+};
+
 // #151: 跨 folder 盲搜(文件名 / 标签 / 备注;后端已按 can_view 过滤)
 export const useSearchAssets = (q: string | null) =>
   useQuery({
