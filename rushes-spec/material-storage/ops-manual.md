@@ -447,6 +447,32 @@ ssh root@8.156.34.238 'docker exec ms-api rm -rf /app/tests && docker cp /root/m
 
 `force-recreate` 后 dev 依赖(pytest)需重装。
 
+### 6.6 deploy_lan.sh「卡住不动」— 多半已经部署完了(2026-09-03 实录)
+
+**症状**:脚本长时间无输出、本地任务不退出。当天两次都是这个样子,而远端实际
+**早就同步 + 重启完毕**。
+
+**根因(两层叠加)**:
+
+1. `ssh_r()` 的 `ConnectTimeout=8` 只管**建连阶段**。内网反向隧道(经跳板中转)
+   会在**建连之后**周期性断流,ssh 没配 `ServerAliveInterval`,session 死了也
+   不报错,就永远挂着 —— 通常挂在脚本最后一步 `cat DEPLOYED.md` 的回显上,
+   而真实工作(同步 / 版本记录 / restart)早已完成。
+2. 若外层再套 `| grep` 过滤输出,管道会缓冲到结束才吐字 —— 脚本明明在正常跑
+   也看起来像死了。**跑部署脚本不要套 grep 管道**。
+
+**诊断口诀:不信本地任务状态,直接探远端事实源**:
+
+```bash
+ssh hh2 'grep -A1 "git commit" /home/msdev/ms/DEPLOYED.md | head -2; \
+         cd /home/msdev/ms/api && docker compose ps --format "{{.Name}}\t{{.Status}}"'
+# DEPLOYED.md 已是新 hash + 容器已重启 = 部署完成,挂的只是收尾回显;
+# 本地杀掉僵住的任务/ssh 即可,远端不用动。之后补做脚本范围外的 SPA tar 同步。
+```
+
+**待办根修**:`ssh_r()` 加 `-o ServerAliveInterval=15 -o ServerAliveCountMax=3`,
+让建连后的断流在 ~45s 内显式失败并走既有重试,而不是无限挂起(尚未落地)。
+
 ---
 
 ## 7. 数据库 / OpenFGA 重置(灾后或开发期清理)

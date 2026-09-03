@@ -123,6 +123,14 @@ docker compose exec ms-api python -m scripts.set_initial_admin admin \
 **仍未做**:① 物化 department 存量授权 → ② 跑 `scripts/migrate_subjects_to_uuid.py`
 → ③ 实测 `backup_prod.sh --mirror` 的 HDD 路径。见 ops-manual §10。
 
+### 部署 D:内网 hh2 同步(deploy_lan.sh,dev + prod)
+
+`cd material-storage && bash scripts/deploy_lan.sh <dev|prod> [--restart]`,同步代码 +
+重写目标机 `DEPLOYED.md`(版本事实源)+ 可选重启;`.env` / override / `static/web` 不同步,
+**SPA 要 build 后单独 tar 同步**。⚠ 该脚本经反向隧道跑,末尾回显可能无限挂起
+(`ConnectTimeout` 只管建连;grep 管道还会缓冲输出):**看着卡死 ≠ 部署没完成**,
+先探 `ssh hh2 'grep git commit ~/ms/DEPLOYED.md'` 再决定杀不杀,详见 ops-manual §6.6。
+
 ## 架构要点(跨文件才看得出来的)
 
 ### 服务实例走 `app.state`,不是模块级单例

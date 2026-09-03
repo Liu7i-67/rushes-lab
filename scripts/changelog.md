@@ -4,6 +4,7 @@
 
 ## 2026-09-03
 
+- 沉淀 deploy_lan.sh「假死」排查经验到长期上下文(ops-manual §6.6 新增 + CLAUDE.md 部署 D 提要):ssh_r 的 ConnectTimeout 只管建连,隧道建连后断流会让末尾回显无限挂起而实际部署早已完成;诊断口诀 = 探远端 DEPLOYED.md 事实源;待办根修 = ssh_r 加 ServerAliveInterval
 - 修复审查发现的 4 个问题(F1-F4):① 前端删除排序第一的根文件夹后 UI 卡幽灵文件夹 —— 改为顺延到剩余列表第一个 + effect 加「选中项已不在可见列表则纠正」兜底;② `complete_upload` 并发窗口 INSERT 撞已删文件夹的 FK 裸 500 —— 包 IntegrityError → 409 明确文案,孤儿 MinIO 对象记日志留清理通道;③ 删除已提交后 `audit.write` 失败不再让客户端收到误导性 500(记 warning);④ sensitive 例外测试的 finally 不再 assert(避免掩盖原始失败,清理失败改告警)
 - 修复 #177 删除文件夹并发竞态(发布门禁):① 判空/删除前先 `SELECT … FOR UPDATE` 锁 folder 行,并发窗口内落库的子夹/资产 INSERT 被 FK 锁阻塞后干净报错,不再 500/不再 CASCADE 静默删他人空子夹;② OpenFGA tuple 清理移到 **DB commit 成功之后**(原顺序在 DB 回滚时会留下"活对象+空权限图"断链且无自助修复入口);③ delete/commit 包 IntegrityError → 409 兜底;新增并发双删回归测试(恰好一个 204 一个 404)
 - 新增删除文件夹功能(一期:仅空文件夹硬删):后端 `DELETE /api/v1/folders/{id}`(判空 = 无子夹/无文件[含软删],OpenFGA tuple 尽力清理,`folder_deleted` audit);前端文件夹 header 对有权限者显示「删除文件夹」按钮,非空禁用并提示;集成测试覆盖空夹删除/非空 409/无权限 403/硬删后同名可立即重建(0bb9853)
