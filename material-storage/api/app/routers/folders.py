@@ -7,8 +7,8 @@ endpoints:
                                                     (普通 folder by project member +
                                                      sensitive_folder by list_objects can_view)
   GET    /api/v1/folders/{id}                     — 单条(can_view)
-  DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删,can_admin only;
-                                                    一期方案见 ROADMAP D iter2)
+  DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删;
+                                                    普通夹 can_upload / sensitive 夹 can_admin)
   POST   /api/v1/folders/{id}/invite              — sensitive_folder 邀请(can_admin only)
   DELETE /api/v1/folders/{id}/invite/user/{uid}   — 撤销(can_admin only)
 """
@@ -276,9 +276,12 @@ async def delete_folder(
     非空拒绝而非级联:assets.folder_id 是 RESTRICT,且子树删除的产品语义未定。
 
     空 = 无子文件夹 且 无资产行(含软删 —— 软删行仍占 RESTRICT FK)。
-    权限:folder / sensitive_folder 的 can_admin(从 parent project 继承),
-    系统 admin 直通。OpenFGA tuple(parent / explicit_* / invited_*)尽力清理,
-    失败不阻塞 DB 删除(孤儿 tuple 随 UUID 不复用而天然失效,同 directory 删组惯例)。
+    权限:普通 folder 用 can_upload(与创建对称,uploader 自主管理目录结构,
+    model 里 uploader 隐含建子目录);sensitive folder 维持 can_admin ——
+    sensitive 的 can_upload 实为 downloader 级(model v4),拿它当删除门槛太宽,
+    且邀请配置价值高。系统 admin 直通。OpenFGA tuple(parent / explicit_* /
+    invited_*)尽力清理,失败不阻塞 DB 删除(孤儿 tuple 随 UUID 不复用而天然
+    失效,同 directory 删组惯例)。
     """
     user_id = user.id
     folder = await db.get(Folder, folder_id)
@@ -286,8 +289,9 @@ async def delete_folder(
         raise HTTPException(404, "folder not found")
 
     obj_type = "sensitive_folder" if folder.is_sensitive else "folder"
+    del_relation = "can_admin" if folder.is_sensitive else "can_upload"
     allowed = is_system_admin or await permissions.check(
-        user_subject=user.subject, relation="can_admin",
+        user_subject=user.subject, relation=del_relation,
         object_type=obj_type, object_id=str(folder_id),
     )
     if not allowed:
@@ -296,10 +300,10 @@ async def delete_folder(
             actor_user_id=user_id,
             target_project_id=folder.project_id,
             details={"action": "delete_folder", "folder_id": str(folder_id),
-                     "reason": "openfga can_admin false"},
+                     "reason": f"openfga {del_relation} false"},
             **ctx,
         )
-        raise HTTPException(403, "no admin permission on this folder")
+        raise HTTPException(403, "no permission to delete this folder")
 
     child_id = await db.scalar(
         select(Folder.id).where(Folder.parent_folder_id == folder_id).limit(1)

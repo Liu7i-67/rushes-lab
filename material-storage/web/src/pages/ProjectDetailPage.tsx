@@ -345,8 +345,9 @@ export default function ProjectDetailPage() {
                 </Button>
               </Tooltip>
             )}
-            {/* 删除文件夹:仅空文件夹可删(硬删,不可恢复);后端 enforce can_admin */}
-            {folder && folder.my_can_admin && (
+            {/* 删除文件夹:仅空文件夹可删(硬删,不可恢复)。普通夹需 can_upload
+                (与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce */}
+            {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
               <Popconfirm
                 title={`删除文件夹「${folder.name}」?`}
                 description="仅可删除空文件夹;删除后不可恢复"

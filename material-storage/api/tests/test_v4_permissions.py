@@ -480,7 +480,11 @@ async def test_folder_delete_nonempty_rejected(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_folder_delete_denied_for_non_admin(client: AsyncClient) -> None:
-    """无 can_admin(public 项目普通 folder 对 outsider 只有浏览)→ 403。"""
+    """无任何角色的 outsider(public 项目普通 folder)→ 403。
+
+    普通夹删除门槛是 can_upload(uploader 可删空夹);outsider 既无
+    can_upload 也无 can_admin,两个 relation 都过不了。
+    """
     r = await client.get(
         "/api/v1/folders", params={"project_id": PROJECT_EVENT}, headers=_h(EVAN_ID),
     )
@@ -489,6 +493,63 @@ async def test_folder_delete_denied_for_non_admin(client: AsyncClient) -> None:
 
     r2 = await client.delete(f"/api/v1/folders/{fid}", headers=_h(OUTSIDER_ID))
     assert r2.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_folder_delete_uploader_can_delete(client: AsyncClient) -> None:
+    """普通夹删除降级为 can_upload:显式 uploader(非 admin)可删空 folder。"""
+    uniq = uuid.uuid4().hex[:8]
+    r = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_uploader_{uniq}"},
+        headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+
+    # Evan 给 outsider 授 folder 显式 uploader(一级普通夹,走 /grants)
+    add = await client.post(
+        f"/api/v1/folders/{fid}/grants",
+        json={"user_id": OUTSIDER_ID, "level": "uploader"},
+        headers=_h(EVAN_ID),
+    )
+    assert add.status_code == 204, add.text
+
+    r2 = await client.delete(f"/api/v1/folders/{fid}", headers=_h(OUTSIDER_ID))
+    assert r2.status_code == 204, r2.text
+
+
+@pytest.mark.asyncio
+async def test_folder_delete_sensitive_still_requires_admin(client: AsyncClient) -> None:
+    """sensitive 夹例外:invited downloader 隐含 can_upload,但删除仍需 can_admin。"""
+    # 找 wedding 项目的 sensitive folder
+    r = await client.get(
+        "/api/v1/folders", params={"project_id": PROJECT_WEDDING}, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 200
+    sens = next(f for f in r.json() if f["is_sensitive"])
+
+    # Evan 邀 outsider 作 downloader(→ sensitive 的 can_upload 为 true)
+    inv = await client.post(
+        f"/api/v1/folders/{sens['id']}/invite",
+        json={"user_id": OUTSIDER_ID, "level": "downloader"},
+        headers=_h(EVAN_ID),
+    )
+    assert inv.status_code == 204, inv.text
+    try:
+        r2 = await client.delete(
+            f"/api/v1/folders/{sens['id']}", headers=_h(OUTSIDER_ID),
+        )
+        assert r2.status_code == 403, r2.text
+    finally:
+        # 清理:撤销邀请,不污染 seed 数据
+        rev = await client.delete(
+            f"/api/v1/folders/{sens['id']}/invite",
+            params={"subject": f"user:{OUTSIDER_ID}", "level": "downloader",
+                    "permanent": "true"},
+            headers=_h(EVAN_ID),
+        )
+        assert rev.status_code == 204, rev.text
 
 
 # #154:admin feishu health / test-card 测试随飞书下线删除(ADR-0007)
