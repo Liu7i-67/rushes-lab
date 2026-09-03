@@ -70,6 +70,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.redis.aclose()
 
 
+class _SpaStaticFiles(StaticFiles):
+    """SPA 静态资源缓存策略(发版后用户停留在旧页面的根因即 index.html 被启发式缓存):
+
+    - index.html → ``no-cache``:允许存但每次必须 revalidate(etag 命中即 304,代价小)
+    - assets/*   → ``max-age=31536000, immutable``:文件名带内容指纹,可永久缓存
+    - 其余        → 默认(etag 协商缓存)
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        resp = super().file_response(full_path, stat_result, scope, status_code)
+        posix_path = str(full_path).replace("\\", "/")
+        if posix_path.endswith(".html"):
+            resp.headers["Cache-Control"] = "no-cache"
+        elif "/assets/" in posix_path:
+            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return resp
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
@@ -124,9 +142,11 @@ def create_app() -> FastAPI:
     static_dir = pathlib.Path(__file__).parent / "static"
     web_dir = static_dir / "web"
 
-    # SPA catch-all:必须在 mount /static 之前定义,FastAPI 路由 order 优先
-    # 行为:/static/web/{path} 命中本 route,若 path 是实际 file 则返 file,
-    # 否则返 index.html(BrowserRouter 深链直接刷新支持)
+    # SPA 静态资源缓存策略:发版换的是 index.html 引用的带指纹 assets,若
+    # index.html 被浏览器启发式缓存(无 Cache-Control 时约 last-modified 10%
+    # 时长内不发 revalidate),用户会一直停在旧页面直到强刷。因此:
+    #   index.html → no-cache(存但每次 revalidate,etag 命中 304 很快)
+    #   assets/*   → immutable 永久缓存(内容变 = 指纹变,不会错配)
     @app.get("/static/web/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str):
         target = (web_dir / full_path).resolve()
@@ -138,7 +158,7 @@ def create_app() -> FastAPI:
         idx = web_dir / "index.html"
         if not idx.exists():
             raise HTTPException(status_code=404, detail="web dist not deployed")
-        return FileResponse(idx)
+        return FileResponse(idx, headers={"Cache-Control": "no-cache"})
 
     # 无尾斜杠 root(/static/web)— StaticFiles 默认会 307 到 /static/web/,
     # 走到 nginx 时 Location 把 /ms-static/ 漏丢 + http 降级,导致 SPA basename 错位崩。
@@ -148,10 +168,10 @@ def create_app() -> FastAPI:
         idx = web_dir / "index.html"
         if not idx.exists():
             raise HTTPException(status_code=404, detail="web dist not deployed")
-        return FileResponse(idx)
+        return FileResponse(idx, headers={"Cache-Control": "no-cache"})
 
     if static_dir.exists():
-        app.mount("/static", StaticFiles(directory=str(static_dir), html=True), name="static")
+        app.mount("/static", _SpaStaticFiles(directory=str(static_dir), html=True), name="static")
 
     return app
 
