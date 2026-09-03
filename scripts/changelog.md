@@ -2,6 +2,11 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
+## 2026-09-03
+
+- 新增删除文件夹功能(一期:仅空文件夹硬删):后端 `DELETE /api/v1/folders/{id}`(can_admin + 无子夹/无文件[含软删]校验,OpenFGA tuple 尽力清理,`folder_deleted` audit);前端文件夹 header 对 admin 显示「删除文件夹」按钮,非空禁用并提示;集成测试覆盖空夹删除/非空 409/无权限 403/硬删后同名可立即重建(liuqi 分支,待合入)
+- 设计决策记录:文件夹删除不做软删 —— 空夹软删无收益且 `uq_folder_project_prefix` 全量唯一约束会让同名重建撞 409;非空删除二期方案(软删 + partial unique index)已写入 ROADMAP D iter2
+
 ## 2026-08-31
 
 - 内网 dev 环境部署 liuqi 分支(b2054a7):deploy_lan.sh 增强 —— SSH 反向隧道抖动重试(ssh_r 包装,8×6s)、无 rsync 环境的 tar 流兜底(Git Bash 可跑)、目标机 sudo 缺省时自动降级为普通同步;前端 SPA 本地构建后单独同步(rsync 范围排除 static/web)

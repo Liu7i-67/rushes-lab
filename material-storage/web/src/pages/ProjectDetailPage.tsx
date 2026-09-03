@@ -12,7 +12,7 @@ import {
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  useAssets, useDeleteAsset, useDownloadLink,
+  useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
   useFolder, useFolders, useMe, useProject, useUpdateAssetMeta,
 } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
@@ -75,6 +75,7 @@ export default function ProjectDetailPage() {
   const downloads = useDownloads();
   const dlLink = useDownloadLink();
   const del = useDeleteAsset();
+  const delFolder = useDeleteFolder();
   const { message } = App.useApp();
 
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
@@ -115,6 +116,28 @@ export default function ProjectDetailPage() {
     if (ok > 0) message.success(`删除 ${ok} 个文件${fail > 0 ? ` · 失败 ${fail}` : ''}`);
     setSelectedIds([]);
     refetch();
+  };
+
+  // 删除文件夹:仅空文件夹(无子夹 + 无文件)。UI 预判只为按钮禁用态,
+  // 真实判空以后端为准(软删文件前端看不见,点了会收到 409 提示)
+  const folderChildCount = folders?.filter(f => f.parent_folder_id === activeFolderId).length ?? 0;
+  const folderIsEmpty = (assets?.length ?? 0) === 0 && folderChildCount === 0;
+
+  const handleDeleteFolder = async () => {
+    if (!folder || !projectId) return;
+    const parentId = folder.parent_folder_id;
+    try {
+      await delFolder.mutateAsync({ folder_id: folder.id, project_id: projectId });
+      message.success(`文件夹「${folder.name}」已删除`);
+      // 回上一级:有父文件夹则切到父,否则回项目页(effect 会自动选中首个可见文件夹)
+      if (parentId) onFolderSelect(parentId);
+      else {
+        setActiveFolderId(null);
+        navigate(`/projects/${projectId}`);
+      }
+    } catch (e) {
+      message.error(errorMessage(e, '删除文件夹失败'));
+    }
   };
 
   if (foldersLoading) return <Skeleton active />;
@@ -321,6 +344,22 @@ export default function ProjectDetailPage() {
                   申请链接
                 </Button>
               </Tooltip>
+            )}
+            {/* 删除文件夹:仅空文件夹可删(硬删,不可恢复);后端 enforce can_admin */}
+            {folder && folder.my_can_admin && (
+              <Popconfirm
+                title={`删除文件夹「${folder.name}」?`}
+                description="仅可删除空文件夹;删除后不可恢复"
+                okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={handleDeleteFolder}
+              >
+                <Tooltip title={folderIsEmpty ? '删除当前文件夹(不可恢复)' : '仅可删除空文件夹(无子文件夹、无文件)'}>
+                  <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
+                          disabled={!folderIsEmpty} loading={delFolder.isPending}>
+                    删除文件夹
+                  </Button>
+                </Tooltip>
+              </Popconfirm>
             )}
           </div>
           {folder?.minio_prefix && (

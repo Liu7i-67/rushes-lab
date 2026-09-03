@@ -7,6 +7,8 @@ endpoints:
                                                     (普通 folder by project member +
                                                      sensitive_folder by list_objects can_view)
   GET    /api/v1/folders/{id}                     — 单条(can_view)
+  DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删,can_admin only;
+                                                    一期方案见 ROADMAP D iter2)
   POST   /api/v1/folders/{id}/invite              — sensitive_folder 邀请(can_admin only)
   DELETE /api/v1/folders/{id}/invite/user/{uid}   — 撤销(can_admin only)
 """
@@ -23,7 +25,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Folder, Project
+from app.db.tables import Asset, Folder, Project
 from app.deps import (
     get_audit,
     CurrentUser,
@@ -255,6 +257,102 @@ async def get_folder(
     out.my_can_upload = can_upload
     out.my_can_admin = can_admin
     return out
+
+
+@router.delete("/{folder_id}", status_code=204)
+async def delete_folder(
+    folder_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+    ctx: dict = Depends(get_request_context),
+) -> None:
+    """删除文件夹 — 仅允许空文件夹,硬删(ROADMAP D iter2 一期)。
+
+    不做软删的原因:空文件夹无对象可延迟清理、重建成本一次点击,软删无收益;
+    且 uq_folder_project_prefix 是全量唯一约束,软删占位会让同名重建撞 409。
+    非空拒绝而非级联:assets.folder_id 是 RESTRICT,且子树删除的产品语义未定。
+
+    空 = 无子文件夹 且 无资产行(含软删 —— 软删行仍占 RESTRICT FK)。
+    权限:folder / sensitive_folder 的 can_admin(从 parent project 继承),
+    系统 admin 直通。OpenFGA tuple(parent / explicit_* / invited_*)尽力清理,
+    失败不阻塞 DB 删除(孤儿 tuple 随 UUID 不复用而天然失效,同 directory 删组惯例)。
+    """
+    user_id = user.id
+    folder = await db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "folder not found")
+
+    obj_type = "sensitive_folder" if folder.is_sensitive else "folder"
+    allowed = is_system_admin or await permissions.check(
+        user_subject=user.subject, relation="can_admin",
+        object_type=obj_type, object_id=str(folder_id),
+    )
+    if not allowed:
+        await audit.write(
+            event_type="access_denied",
+            actor_user_id=user_id,
+            target_project_id=folder.project_id,
+            details={"action": "delete_folder", "folder_id": str(folder_id),
+                     "reason": "openfga can_admin false"},
+            **ctx,
+        )
+        raise HTTPException(403, "no admin permission on this folder")
+
+    child_id = await db.scalar(
+        select(Folder.id).where(Folder.parent_folder_id == folder_id).limit(1)
+    )
+    if child_id is not None:
+        raise HTTPException(409, "文件夹下还有子文件夹,请先删除子文件夹")
+    asset_id = await db.scalar(
+        select(Asset.id).where(Asset.folder_id == folder_id).limit(1)
+    )
+    if asset_id is not None:
+        raise HTTPException(
+            409, "文件夹不为空(可能含已软删的文件),请先彻底清空后再删除"
+        )
+
+    # OpenFGA tuple 清理:该 object 上的所有 tuple(parent + explicit_* / invited_*)
+    try:
+        from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
+        from openfga_sdk.models import ReadRequestTupleKey
+        resp = await permissions._client.read(  # type: ignore[attr-defined]
+            ReadRequestTupleKey(object=f"{obj_type}:{folder_id}")
+        )
+        for t in resp.tuples:
+            try:
+                await permissions._client.write(  # type: ignore[attr-defined]
+                    ClientWriteRequest(deletes=[ClientTuple(
+                        user=t.key.user, relation=t.key.relation, object=t.key.object,
+                    )])
+                )
+            except Exception:
+                log.debug("folder tuple delete tolerate %s %s %s",
+                          t.key.user, t.key.relation, t.key.object)
+    except Exception as e:
+        log.warning("delete folder tuple cleanup fail folder=%s err=%s", folder_id, e)
+
+    name, prefix, is_sensitive, project_id = (
+        folder.name, folder.minio_prefix, folder.is_sensitive, folder.project_id,
+    )
+    await db.delete(folder)
+    await db.commit()
+    await audit.write(
+        event_type="folder_deleted",
+        actor_user_id=user_id,
+        target_project_id=project_id,
+        details={
+            "folder_id": str(folder_id),
+            "name": name,
+            "minio_prefix": prefix,
+            "is_sensitive": is_sensitive,
+        },
+        **ctx,
+    )
+    log.info("folder deleted id=%s name=%s sensitive=%s by user=%s",
+             folder_id, name, is_sensitive, user_id)
 
 
 @router.post("/{folder_id}/invite", status_code=204)

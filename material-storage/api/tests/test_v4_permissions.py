@@ -415,4 +415,80 @@ async def test_folder_grants_sensitive_rejected(client: AsyncClient) -> None:
     assert r2.status_code == 400
 
 
+# ─── folder 删除(一期:仅空文件夹硬删)────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_folder_delete_empty_hard(client: AsyncClient) -> None:
+    """空 folder:Evan 创建 → 删 204 → GET 404 → 重复删 404(硬删无 tombstone)。"""
+    uniq = uuid.uuid4().hex[:8]
+    r = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_empty_{uniq}"},
+        headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+
+    r2 = await client.delete(f"/api/v1/folders/{fid}", headers=_h(EVAN_ID))
+    assert r2.status_code == 204, r2.text
+
+    r3 = await client.get(f"/api/v1/folders/{fid}", headers=_h(EVAN_ID))
+    assert r3.status_code == 404
+
+    r4 = await client.delete(f"/api/v1/folders/{fid}", headers=_h(EVAN_ID))
+    assert r4.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_folder_delete_nonempty_rejected(client: AsyncClient) -> None:
+    """非空:有子文件夹时删父 409;先删子、父变空后可删(同名也能立刻重建)。"""
+    uniq = uuid.uuid4().hex[:8]
+    r = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_parent_{uniq}"},
+        headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 201, r.text
+    parent = r.json()["id"]
+
+    r2 = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_child_{uniq}",
+              "parent_folder_id": parent},
+        headers=_h(EVAN_ID),
+    )
+    assert r2.status_code == 201, r2.text
+    child = r2.json()["id"]
+
+    r3 = await client.delete(f"/api/v1/folders/{parent}", headers=_h(EVAN_ID))
+    assert r3.status_code == 409
+
+    r4 = await client.delete(f"/api/v1/folders/{child}", headers=_h(EVAN_ID))
+    assert r4.status_code == 204, r4.text
+    r5 = await client.delete(f"/api/v1/folders/{parent}", headers=_h(EVAN_ID))
+    assert r5.status_code == 204
+
+    # 硬删释放 uq_folder_project_prefix:同名可立即重建
+    r6 = await client.post(
+        "/api/v1/folders",
+        json={"project_id": PROJECT_EVENT, "name": f"zz_del_parent_{uniq}"},
+        headers=_h(EVAN_ID),
+    )
+    assert r6.status_code == 201, r6.text
+    r7 = await client.delete(f"/api/v1/folders/{r6.json()['id']}", headers=_h(EVAN_ID))
+    assert r7.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_folder_delete_denied_for_non_admin(client: AsyncClient) -> None:
+    """无 can_admin(public 项目普通 folder 对 outsider 只有浏览)→ 403。"""
+    r = await client.get(
+        "/api/v1/folders", params={"project_id": PROJECT_EVENT}, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 200
+    fid = r.json()[0]["id"]
+
+    r2 = await client.delete(f"/api/v1/folders/{fid}", headers=_h(OUTSIDER_ID))
+    assert r2.status_code == 403
+
+
 # #154:admin feishu health / test-card 测试随飞书下线删除(ADR-0007)
