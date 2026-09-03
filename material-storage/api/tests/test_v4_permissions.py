@@ -542,14 +542,22 @@ async def test_folder_delete_sensitive_still_requires_admin(client: AsyncClient)
         )
         assert r2.status_code == 403, r2.text
     finally:
-        # 清理:撤销邀请,不污染 seed 数据
+        # 清理:撤销邀请,不污染 seed 数据。撤销失败只告警 —— finally 里
+        # assert 会掩盖 try 内真正的断言失败;残留 tuple 需人工清
+        import warnings
+
         rev = await client.delete(
             f"/api/v1/folders/{sens['id']}/invite",
             params={"subject": f"user:{OUTSIDER_ID}", "level": "downloader",
                     "permanent": "true"},
             headers=_h(EVAN_ID),
         )
-        assert rev.status_code == 204, rev.text
+        if rev.status_code != 204:
+            warnings.warn(
+                f"sensitive invite cleanup failed ({rev.status_code}): {rev.text};"
+                f" outsider 对 {sens['id']} 残留 invited_downloader tuple",
+                stacklevel=2,
+            )
 
 
 @pytest.mark.asyncio

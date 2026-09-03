@@ -51,11 +51,18 @@ export default function ProjectDetailPage() {
   const { data: folders, isLoading: foldersLoading } = useFolders(projectId);
   const [activeFolderId, setActiveFolderId] = useState<string | null>(paramFolderId ?? null);
 
-  // 选中 folder 默认为 path 参数;无则 = 首个可见 folder
+  // 选中 folder 默认为 path 参数;无则 = 首个可见 folder;
+  // activeFolderId 指向的文件夹已不在可见列表(被删/失权)时纠正到首个可见,
+  // 避免幽灵选中(header 挂着已删夹且 staleTime 内无自愈)
   useEffect(() => {
     if (paramFolderId) {
       setActiveFolderId(paramFolderId);
     } else if (!activeFolderId && folders && folders.length > 0) {
+      setActiveFolderId(folders[0].id);
+    } else if (
+      activeFolderId && folders && folders.length > 0
+      && !folders.some(f => f.id === activeFolderId)
+    ) {
       setActiveFolderId(folders[0].id);
     }
   }, [paramFolderId, folders, activeFolderId]);
@@ -129,8 +136,12 @@ export default function ProjectDetailPage() {
     try {
       await delFolder.mutateAsync({ folder_id: folder.id, project_id: projectId });
       message.success(`文件夹「${folder.name}」已删除`);
-      // 回上一级:有父文件夹则切到父,否则回项目页(effect 会自动选中首个可见文件夹)
+      // 回上一级:有父文件夹则切到父;根夹顺延到剩余列表第一个。不能回项目页
+      // 依赖自动选中 effect —— 它跑在 folders 旧缓存上,被删夹排序第一时会被
+      // 重新选回且 staleTime 内无自愈(幽灵文件夹)
+      const rest = (folders ?? []).filter(f => f.id !== folder.id);
       if (parentId) onFolderSelect(parentId);
+      else if (rest.length > 0) onFolderSelect(rest[0].id);
       else {
         setActiveFolderId(null);
         navigate(`/projects/${projectId}`);

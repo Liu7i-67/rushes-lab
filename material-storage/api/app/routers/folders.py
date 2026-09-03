@@ -368,18 +368,24 @@ async def delete_folder(
     except Exception as e:
         log.warning("delete folder tuple cleanup fail folder=%s err=%s", folder_id, e)
 
-    await audit.write(
-        event_type="folder_deleted",
-        actor_user_id=user_id,
-        target_project_id=project_id,
-        details={
-            "folder_id": str(folder_id),
-            "name": name,
-            "minio_prefix": prefix,
-            "is_sensitive": is_sensitive,
-        },
-        **ctx,
-    )
+    # audit 落库失败不应让客户端误以为删除失败(删除已提交、不可逆,500 只会
+    # 误导用户重试并吃 404)。仅此一处偏离「audit 失败即 500」的惯例:audit
+    # 位于不可逆 commit 之后
+    try:
+        await audit.write(
+            event_type="folder_deleted",
+            actor_user_id=user_id,
+            target_project_id=project_id,
+            details={
+                "folder_id": str(folder_id),
+                "name": name,
+                "minio_prefix": prefix,
+                "is_sensitive": is_sensitive,
+            },
+            **ctx,
+        )
+    except Exception:
+        log.warning("folder_deleted audit write fail folder=%s", folder_id, exc_info=True)
     log.info("folder deleted id=%s name=%s sensitive=%s by user=%s",
              folder_id, name, is_sensitive, user_id)
 

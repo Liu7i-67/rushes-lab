@@ -4,11 +4,13 @@ Phase B-2 iter4:每 endpoint 加 OpenFGA check + audit 落库。
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import ColumnElement, func, or_, select, true
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -38,6 +40,7 @@ from app.services.presign import PresignService
 from app.settings import get_settings
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 # ─── multipart upload(uppy AwsS3 plugin)─────────────────────────────────────
@@ -153,7 +156,24 @@ async def complete_upload(
         uploader_id=user_id,
     )
     db.add(asset)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        # #177 同款并发窗口的 insert 侧:multipart 已在 MinIO complete 后,
+        # folder 被并发删除 → INSERT 撞 assets_folder_id_fkey。对象成为
+        # 孤儿(无法 abort 已完结的 multipart),记日志留给清理通道;
+        # rollback 后重查区分「folder 没了」与「其他唯一约束(重复提交)」
+        await db.rollback()
+        still_there = await db.get(Folder, folder_id)
+        if still_there is None:
+            log.warning(
+                "orphan minio object (folder deleted mid-upload): bucket=%s key=%s",
+                payload.bucket, payload.key,
+            )
+            raise HTTPException(
+                409, "文件夹已被删除,上传无法完成(文件未入库,请选择其他文件夹重新上传)"
+            ) from e
+        raise HTTPException(409, "上传写入失败(可能重复提交),请刷新后重试") from e
     await db.refresh(asset)
 
     await permissions.bootstrap_asset(
