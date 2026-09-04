@@ -148,10 +148,12 @@ async def test_folder_delete_blocked_until_trash_emptied(client: AsyncClient) ->
     fid = r.json()["id"]
     aid = await _insert_asset(fid, f"zz_purge_{uniq}.txt", deleted=True)
 
-    # 软删行占位 → 阻断,报错指向回收站
+    # 软删行占位 → 阻断,报错指向回收站;文案不带计数(删夹门槛 can_upload
+    # 低于回收站可见门槛 can_admin,数字会暴露给看不到回收站的 uploader)
     r = await client.delete(f"/api/v1/folders/{fid}", headers=_h())
     assert r.status_code == 409, r.text
     assert "回收站" in r.json()["detail"]
+    assert not any(ch.isdigit() for ch in r.json()["detail"]), r.json()["detail"]
 
     # 清空回收站(彻底删除)→ 放行
     r = await client.delete(f"/api/v1/assets/{aid}?hard=true", headers=_h())

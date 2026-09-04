@@ -58,8 +58,12 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
   const handleClearAll = async () => {
     if (items.length === 0) {
       // total>0 但窗口为空的快照错位:刷新一次再让用户重试
-      await refetch();
-      message.info('列表已刷新,请再点一次清空');
+      try {
+        await refetch();
+        message.info('列表已刷新,请再点一次清空');
+      } catch {
+        message.error('刷新失败,请重试');
+      }
       return;
     }
     setClearing(true);

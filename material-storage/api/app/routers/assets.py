@@ -536,7 +536,13 @@ async def update_asset_meta(
         asset.user_labels = _normalize_labels(payload.user_labels)
     if payload.notes is not None:
         asset.notes = payload.notes[:2000] if payload.notes else ""
-    await db.commit()
+    try:
+        await db.commit()
+    except StaleDataError as e:
+        # 打标与并发 hard purge 竞速(0 行 UPDATE 同抛 StaleDataError,
+        # 容器内已实证)→ 幂等 404,与 restore / 软删分支同款
+        await db.rollback()
+        raise HTTPException(404, "asset not found") from e
     await db.refresh(asset)
 
     await audit.write(

@@ -331,10 +331,10 @@ async def delete_folder(
     if child_id is not None:
         raise HTTPException(409, "文件夹下还有子文件夹,请先删除子文件夹")
 
-    # sensitive 夹的判空 409 统一为无计数、不区分分支的文案 —— 删夹门槛
-    # can_admin 含项目 admin(从父项目继承,但其无 can_view):报文若带回收站
-    # 精确计数 / 区分"有活文件 vs 仅回收站未清",就成了对敏感目录内容规模的
-    # 持续探测通道(F2;系统 admin 本就能看回收站,信息无损)
+    # 判空 409 文案一律不带计数:删夹门槛(can_upload)低于回收站可见门槛
+    # (can_admin),仅 uploader 者看不到回收站却会从报文拿到精确计数;sensitive
+    # 夹再统一为不区分分支的模糊文案(防内容规模探测,F2)。数字对能看回收站
+    # 的 admin 是冗余(角标/弹窗都有)
     _SENSITIVE_NONEMPTY_MSG = "文件夹不为空(或回收站未清空),请先彻底清空后再删除"
     live_id = await db.scalar(
         select(Asset.id)
@@ -354,9 +354,7 @@ async def delete_folder(
         if folder.is_sensitive:
             raise HTTPException(409, _SENSITIVE_NONEMPTY_MSG)
         raise HTTPException(
-            409,
-            f"回收站内还有 {trash_count} 个已删除文件,"
-            "请先在回收站中彻底清空后再删除文件夹",
+            409, "回收站内还有已删除文件,请先在回收站中彻底清空后再删除文件夹",
         )
 
     name, prefix, is_sensitive, project_id = (
