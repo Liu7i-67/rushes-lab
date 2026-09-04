@@ -114,6 +114,12 @@ export interface SearchResult extends Asset {
   project_name: string;
 }
 
+/** 回收站列表 = items 分页窗口(上限 500)+ total 全量计数(角标/清空提示用)。*/
+export interface TrashAssets {
+  items: Asset[];
+  total: number;
+}
+
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired';
 export type ApprovalAction = 'download' | 'access';
 // #129: 加 folder 支持精细化临时 download 申请

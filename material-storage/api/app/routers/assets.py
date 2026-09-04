@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import ColumnElement, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.session import get_db
 from app.db.tables import Asset, Folder, Project
@@ -30,6 +31,7 @@ from app.models import (
     AssetOut,
     DownloadLinkOut,
     SearchResultOut,
+    TrashOut,
     UploadCompleteIn,
     UploadMultipartCreateOut,
     UploadPartUrlOut,
@@ -274,39 +276,56 @@ async def list_assets(
 
 
 # ─── 回收站(软删列表 / 恢复 / 彻底删除)─────────────────────────────────────
-@router.get("/trash", response_model=list[AssetOut])
+@router.get("/trash", response_model=TrashOut)
 async def list_trash(
     folder_id: uuid.UUID = Query(...),
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
-) -> list[AssetOut]:
-    """列 folder 内已软删的文件(回收站)。需 folder can_admin / 系统 admin。
+    limit: int = Query(500, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> TrashOut:
+    """列 folder 内已软删的文件(回收站)。普通 folder 需 can_admin。
 
-    比 list_assets 收紧一档:软删内容对普通 viewer 不可见,恢复/清除本来就是
-    管理动作,可见性与之对齐。"""
+    **sensitive folder 仅系统 admin**:敏感目录 can_view 不含项目 admin(受邀制),
+    项目 admin 虽有 can_admin(可删/清文件)但不能把回收站当成窥探文件名/标签/
+    备注的侧信道(「活的看不见、删掉的反而看得见」);sensitive 回收站的恢复/
+    彻底清空同理由系统 admin 兜底。
+
+    items 为分页窗口(上限 500),total 为全量计数 —— 角标与「清空回收站」的
+    规模提示不被截断误导;超 500 时前端提示分批清空。
+    """
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
 
-    allowed = is_system_admin or await permissions.check(
-        user_subject=user.subject,
-        relation="can_admin",
-        object_type="folder" if not folder.is_sensitive else "sensitive_folder",
-        object_id=str(folder.id),
-    )
+    if folder.is_sensitive:
+        allowed = is_system_admin
+    else:
+        allowed = is_system_admin or await permissions.check(
+            user_subject=user.subject,
+            relation="can_admin",
+            object_type="folder",
+            object_id=str(folder.id),
+        )
     if not allowed:
         raise HTTPException(403, "no admin permission on this folder")
 
+    where = (Asset.folder_id == folder_id, Asset.deleted_at.is_not(None))
+    total = await db.scalar(select(func.count()).select_from(Asset).where(*where))
     stmt = (
         select(Asset)
-        .where(Asset.folder_id == folder_id, Asset.deleted_at.is_not(None))
+        .where(*where)
         .order_by(Asset.deleted_at.desc())
-        .limit(500)
+        .limit(limit)
+        .offset(offset)
     )
     res = await db.execute(stmt)
-    return [AssetOut.model_validate(r) for r in res.scalars().all()]
+    return TrashOut(
+        items=[AssetOut.model_validate(r) for r in res.scalars().all()],
+        total=total or 0,
+    )
 
 
 @router.post("/{asset_id}/restore", status_code=204)
@@ -345,6 +364,13 @@ async def restore_asset(
 
     asset.deleted_at = None
     await db.commit()
+
+    # 并发兜底:行被并发 hard purge 删掉时,上面的 UPDATE 匹配 0 行但**不报错**
+    # (无 version 列,ORM 不校验 UPDATE rowcount),commit 是 no-op —— 此时绝不能
+    # 再写 audit(target_asset_id 的 FK 悬空必 500)。commit 后重查以真实状态为准
+    if await db.get(Asset, asset_id) is None:
+        await db.rollback()
+        raise HTTPException(404, "文件已被彻底删除,无法恢复")
 
     await audit.write(
         event_type="asset_restored", actor_user_id=user_id,
@@ -637,8 +663,14 @@ async def delete_asset(
             "bucket": asset.minio_bucket, "key": asset.minio_key,
             "tags": dict(asset.tags or {}), "filename": asset.filename,
         }
-        await db.delete(asset)
-        await db.commit()
+        try:
+            await db.delete(asset)
+            await db.commit()
+        except StaleDataError as e:
+            # 并发 hard purge 竞速:另一请求已删行(ORM 校验 DELETE rowcount 报
+            # StaleDataError)—— 幂等处理为 404,不裸 500 误导重试
+            await db.rollback()
+            raise HTTPException(404, "文件已被彻底删除") from e
 
         # ── DB 删除成功之后:清理失败只留无害孤儿 ──
         purge_asset_storage(presign, snapshot["bucket"], snapshot["key"], snapshot["tags"])

@@ -84,6 +84,16 @@ class AssetMetaUpdateIn(BaseModel):
     notes: str | None = None
 
 
+class TrashOut(BaseModel):
+    """回收站列表 — items 为分页窗口(上限 500),total 为全量计数。
+
+    total 独立返回:角标计数与「清空回收站」的规模提示不能被窗口截断误导。
+    """
+
+    items: list[AssetOut]
+    total: int
+
+
 # ─── upload presigned ─────────────────────────────────────────────────────────
 class UploadUrlRequest(BaseModel):
     folder_id: uuid.UUID

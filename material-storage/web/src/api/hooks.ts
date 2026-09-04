@@ -18,6 +18,7 @@ import type {
   SearchResult,
   ShareCreateOut,
   ShareResolve,
+  TrashAssets,
 } from './types';
 
 // ─── auth ──────────────────────────────────────────────────────────────────
@@ -209,7 +210,7 @@ export const useTrashAssets = (folderId: string | undefined, enabled = true) =>
   useQuery({
     queryKey: ['assets-trash', folderId],
     queryFn: async () =>
-      (await http.get<Asset[]>('/api/v1/assets/trash', { params: { folder_id: folderId } }))
+      (await http.get<TrashAssets>('/api/v1/assets/trash', { params: { folder_id: folderId } }))
         .data,
     enabled: !!folderId && enabled,
   });

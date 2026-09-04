@@ -16,12 +16,16 @@ from app.db.session import get_sessionmaker
 from app.db.tables import Asset
 from app.main import create_app
 
-EVAN_ID = "3f1b659e-9ef1-4e65-aa03-4407ad7bcfc4"
-PROJECT_EVENT = "11111111-1111-1111-1111-111111111103"
+EVAN_ID = "3f1b659e-9ef1-4e65-aa03-4407ad7bcfc4"        # 系统 admin(org admin)
+BOB_ID = "00000000-0000-0000-0000-000000000002"        # 普通 member(非系统 admin;
+# 注:alice 在 dev_bootstrap 里被设为 org admin,不能当"非系统 admin"用)
+PROJECT_EVENT = "11111111-1111-1111-1111-111111111103"  # public
+PROJECT_WEDDING = "11111111-1111-1111-1111-111111111101"  # private
+SENSITIVE_WEDDING = "2c0b99a0-e8a1-5775-9c18-6e29e7ae2fab"  # 家庭合影(VIP)
 
 
-def _h() -> dict[str, str]:
-    return {"X-User-Id": EVAN_ID}
+def _h(uid: str = EVAN_ID) -> dict[str, str]:
+    return {"X-User-Id": uid}
 
 
 async def _insert_asset(
@@ -87,9 +91,10 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     assert r.status_code == 200 and len(r.json()) == 0
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
     assert r.status_code == 200, r.text
-    trash = r.json()
-    assert len(trash) == 1 and trash[0]["id"] == str(aid)
-    assert trash[0]["deleted_at"] is not None
+    body = r.json()
+    assert body["total"] == 1
+    assert len(body["items"]) == 1 and body["items"][0]["id"] == str(aid)
+    assert body["items"][0]["deleted_at"] is not None
 
     # 回收站缩略图:软删行 thumbnail-url 照常 200(硬删后才 404)
     r = await client.get(f"/api/v1/assets/{aid}/thumbnail-url", headers=_h())
@@ -106,7 +111,7 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     r = await client.get(f"/api/v1/assets?folder_id={fid}", headers=_h())
     assert r.status_code == 200 and len(r.json()) == 1
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
-    assert r.status_code == 200 and len(r.json()) == 0
+    assert r.status_code == 200 and r.json()["total"] == 0
     r = await client.post(f"/api/v1/assets/{aid}/download-link", headers=_h())
     assert r.status_code == 200, r.text
 
@@ -124,7 +129,7 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     r = await client.get(f"/api/v1/assets/{aid}/thumbnail-url", headers=_h())
     assert r.status_code == 404
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
-    assert r.status_code == 200 and len(r.json()) == 0
+    assert r.status_code == 200 and r.json()["total"] == 0
 
     # 清理 folder
     r = await client.delete(f"/api/v1/folders/{fid}", headers=_h())
@@ -183,3 +188,36 @@ async def test_folder_delete_still_blocked_by_live_assets(client: AsyncClient) -
     assert r.status_code == 204, r.text
     r = await client.delete(f"/api/v1/folders/{fid}", headers=_h())
     assert r.status_code == 204, r.text
+
+
+@pytest.mark.asyncio
+async def test_sensitive_trash_visible_only_to_system_admin(client: AsyncClient) -> None:
+    """sensitive folder 的回收站仅系统 admin 可见 —— 项目 admin 虽有 can_admin
+    (可删/清文件)但不能借回收站窥探文件名/标签/备注(受邀制语义)。"""
+    # alice 升为 wedding 项目 admin(非系统 admin;finally 撤销)
+    r = await client.post(
+        f"/api/v1/projects/{PROJECT_WEDDING}/members",
+        json={"user_id": BOB_ID, "roles": ["admin"]},
+        headers=_h(),
+    )
+    assert r.status_code == 204, r.text
+    try:
+        r = await client.get(
+            f"/api/v1/assets/trash?folder_id={SENSITIVE_WEDDING}",
+            headers=_h(BOB_ID),
+        )
+        assert r.status_code == 403, r.text
+    finally:
+        r = await client.delete(
+            f"/api/v1/projects/{PROJECT_WEDDING}/members",
+            params={"subject": f"user:{BOB_ID}", "role": "admin"},
+            headers=_h(),
+        )
+        assert r.status_code == 204, r.text
+
+    # 系统 admin 可见(空回收站)
+    r = await client.get(
+        f"/api/v1/assets/trash?folder_id={SENSITIVE_WEDDING}", headers=_h(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["total"] == 0

@@ -25,7 +25,9 @@ function fmtBytes(n: number): string {
 
 export function FolderTrashModal({ folderId, open, onClose }: Props) {
   const { message } = App.useApp();
-  const { data: items, isLoading } = useTrashAssets(folderId, open);
+  const { data, isLoading } = useTrashAssets(folderId, open);
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
   const restore = useRestoreAsset();
   const purge = usePurgeAsset();
   const [clearing, setClearing] = useState(false);
@@ -48,8 +50,9 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
     }
   };
 
+  // 清空当前已加载的条目(单窗口上限 500);total 更大时清完自动刷新,可再点
   const handleClearAll = async () => {
-    if (!items || items.length === 0) return;
+    if (items.length === 0) return;
     setClearing(true);
     let ok = 0, fail = 0;
     for (const a of items) {
@@ -120,25 +123,32 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
       width="min(720px, 92vw)"
       destroyOnClose
       footer={
-        <Popconfirm
-          title={`彻底清空回收站的 ${(items ?? []).length} 个文件?`}
-          description="MinIO 原对象一并删除,不可恢复;清空后才能删除文件夹"
-          okText="全部彻底删除" okButtonProps={{ danger: true }}
-          disabled={(items ?? []).length === 0 || clearing}
-          onConfirm={handleClearAll}
-        >
-          <Button danger icon={<Trash2 size={13} strokeWidth={2} />}
-                  disabled={(items ?? []).length === 0} loading={clearing}>
-            清空回收站{items && items.length > 0 ? `(${items.length})` : ''}
-          </Button>
-        </Popconfirm>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+          {total > items.length && (
+            <span style={{ fontSize: 12, color: 'var(--ms-ink-muted)' }}>
+              共 {total} 个,本次先清前 {items.length} 个,清完自动刷新可继续
+            </span>
+          )}
+          <Popconfirm
+            title={`彻底清空回收站的 ${total} 个文件?`}
+            description="MinIO 原对象一并删除,不可恢复;清空后才能删除文件夹"
+            okText="全部彻底删除" okButtonProps={{ danger: true }}
+            disabled={total === 0 || clearing}
+            onConfirm={handleClearAll}
+          >
+            <Button danger icon={<Trash2 size={13} strokeWidth={2} />}
+                    disabled={total === 0} loading={clearing}>
+              清空回收站{total > 0 ? `(${total})` : ''}
+            </Button>
+          </Popconfirm>
+        </div>
       }
     >
       <div style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)', marginBottom: 12 }}>
         软删除的文件保留在此,可恢复或彻底删除;文件夹需在回收站清空后才能删除。
       </div>
       <Table
-        dataSource={items ?? []}
+        dataSource={items}
         rowKey="id"
         loading={isLoading}
         columns={cols}

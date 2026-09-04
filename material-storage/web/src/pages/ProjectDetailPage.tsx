@@ -94,12 +94,13 @@ export default function ProjectDetailPage() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   // #129: folder admin 才显"申请链接"按钮 — folder 级精细化授权入口
   const [linkOpen, setLinkOpen] = useState(false);
-  // 回收站:folder admin 可查看/恢复/彻底清除本夹软删文件
+  // 回收站:普通夹 folder admin 可管理;sensitive 夹仅系统 admin(后端同规则 —
+  // 敏感目录 can_view 不含项目 admin,回收站不能成为其窥探文件名的侧信道)
   const [trashOpen, setTrashOpen] = useState(false);
-  const { data: trashAssets } = useTrashAssets(
-    activeFolderId ?? undefined, !!folder?.my_can_admin,
-  );
-  const trashCount = trashAssets?.length ?? 0;
+  const canSeeTrash = !!folder?.my_can_admin
+    && (!folder.is_sensitive || !!me?.is_system_admin);
+  const { data: trash } = useTrashAssets(activeFolderId ?? undefined, canSeeTrash);
+  const trashCount = trash?.total ?? 0;
 
   const onFolderSelect = (fid: string) => {
     setActiveFolderId(fid);
@@ -441,8 +442,8 @@ export default function ProjectDetailPage() {
                     disabled={!hasSelection} onClick={handleBulkDownload}>
               下载{hasSelection ? ` ${selectedIds.length}` : ''}
             </Button>
-            {/* 回收站:folder admin 专属(列表/恢复/彻底清除;后端 can_admin enforce) */}
-            {folder?.my_can_admin && (
+            {/* 回收站:普通夹 folder admin;sensitive 夹仅系统 admin(后端同规则 enforce) */}
+            {canSeeTrash && (
               <Button size="small" icon={<Archive size={13} strokeWidth={2} />}
                       onClick={() => setTrashOpen(true)}>
                 回收站{trashCount > 0 ? ` ${trashCount}` : ''}
