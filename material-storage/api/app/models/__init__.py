@@ -94,6 +94,17 @@ class TrashOut(BaseModel):
     total: int
 
 
+class AssetListOut(BaseModel):
+    """文件夹文件列表 — items 为分页窗口(默认 100,上限 500)+ total 全量计数。
+
+    服务端分页:此前固定 limit=100 且前端不翻页,folder 超 100 后旧文件在
+    列表里静默消失(数据仍在);total 独立返回让分页器展示真实规模。
+    """
+
+    items: list[AssetOut]
+    total: int
+
+
 # ─── upload presigned ─────────────────────────────────────────────────────────
 class UploadUrlRequest(BaseModel):
     folder_id: uuid.UUID

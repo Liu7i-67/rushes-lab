@@ -1,11 +1,12 @@
 /** react-query hooks — 包 ms-api endpoints。*/
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { http } from './client';
 import type {
   Approval,
   ApprovalAction,
   ApprovalTargetType,
   Asset,
+  AssetList,
   DirectoryGroup,
   DirectoryGroupMember,
   DirectoryUser,
@@ -177,12 +178,22 @@ export const useRevokeFolder = () => {
 };
 
 // ─── assets ────────────────────────────────────────────────────────────────
-export const useAssets = (folderId: string | undefined) =>
+// 服务端分页(page/pageSize 进 queryKey,各页独立缓存);上传/删除等失效走
+// ['assets'] 前缀,天然命中所有页。placeholderData 保旧页,翻页不白屏。
+export const ASSETS_PAGE_SIZE = 30;
+export const useAssets = (
+  folderId: string | undefined,
+  page = 1,
+  pageSize: number = ASSETS_PAGE_SIZE,
+) =>
   useQuery({
-    queryKey: ['assets', folderId],
+    queryKey: ['assets', folderId, page, pageSize],
     queryFn: async () =>
-      (await http.get<Asset[]>('/api/v1/assets', { params: { folder_id: folderId } })).data,
+      (await http.get<AssetList>('/api/v1/assets', {
+        params: { folder_id: folderId, limit: pageSize, offset: (page - 1) * pageSize },
+      })).data,
     enabled: !!folderId,
+    placeholderData: keepPreviousData,
   });
 
 export const useDownloadLink = () =>

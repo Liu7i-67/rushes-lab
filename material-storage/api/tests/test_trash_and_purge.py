@@ -89,7 +89,7 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     r = await client.delete(f"/api/v1/assets/{aid}", headers=_h())
     assert r.status_code == 204, r.text
     r = await client.get(f"/api/v1/assets?folder_id={fid}", headers=_h())
-    assert r.status_code == 200 and len(r.json()) == 0
+    assert r.status_code == 200 and r.json()["total"] == 0
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
     assert r.status_code == 200, r.text
     body = r.json()
@@ -110,7 +110,7 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     r = await client.post(f"/api/v1/assets/{aid}/restore", headers=_h())
     assert r.status_code == 204, r.text
     r = await client.get(f"/api/v1/assets?folder_id={fid}", headers=_h())
-    assert r.status_code == 200 and len(r.json()) == 1
+    assert r.status_code == 200 and r.json()["total"] == 1
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
     assert r.status_code == 200 and r.json()["total"] == 0
     r = await client.post(f"/api/v1/assets/{aid}/download-link", headers=_h())
@@ -255,4 +255,71 @@ async def test_sensitive_trash_visible_only_to_system_admin(client: AsyncClient)
     r = await client.delete(f"/api/v1/assets/{sid}", headers=_h())
     assert r.status_code == 204, r.text
     r = await client.delete(f"/api/v1/assets/{sid}?hard=true", headers=_h())
+    assert r.status_code == 204, r.text
+
+
+@pytest.mark.asyncio
+async def test_asset_list_pagination(client: AsyncClient) -> None:
+    """普通列表 {items,total} 分页契约:total 全量计数,limit/offset 切窗口。
+
+    回归:此前 list 固定 limit=100 且无 total,folder 超 100 后旧文件在
+    前端静默消失(数据仍在)。
+    """
+    uniq = uuid.uuid4().hex[:8]
+    r = await client.post("/api/v1/folders", json={
+        "project_id": PROJECT_EVENT, "name": f"zz_page_{uniq}",
+    }, headers=_h())
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+    ids = {str(await _insert_asset(fid, f"zz_page_{uniq}_{i}.txt")) for i in range(3)}
+
+    # 第一页(2 条)+ 第二页(1 条)= 全量,且 total 恒为 3
+    r = await client.get(
+        "/api/v1/assets", params={"folder_id": fid, "limit": 2}, headers=_h(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 3 and len(body["items"]) == 2
+    page1 = {a["id"] for a in body["items"]}
+
+    r = await client.get(
+        "/api/v1/assets", params={"folder_id": fid, "limit": 2, "offset": 2}, headers=_h(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 3 and len(body["items"]) == 1
+    assert {a["id"] for a in body["items"]} | page1 == ids
+
+    # 越界 offset:空窗口,total 不变(分页器不因翻过头而误报规模)
+    r = await client.get(
+        "/api/v1/assets", params={"folder_id": fid, "offset": 99}, headers=_h(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 3 and body["items"] == []
+
+    # 软删不计入 total / items(与列表语义一致)
+    victim = ids.pop()
+    r = await client.delete(f"/api/v1/assets/{victim}", headers=_h())
+    assert r.status_code == 204, r.text
+    r = await client.get("/api/v1/assets", params={"folder_id": fid}, headers=_h())
+    body = r.json()
+    assert body["total"] == 2 and {a["id"] for a in body["items"]} == ids
+
+    # 参数校验:limit 上限 500
+    r = await client.get(
+        "/api/v1/assets", params={"folder_id": fid, "limit": 501}, headers=_h(),
+    )
+    assert r.status_code == 422
+
+    # 清理:删夹须「无活文件 + 回收站空」—— victim 已软删只差 hard purge,
+    # 其余两条先软删再彻底清除,最后删夹
+    r = await client.delete(f"/api/v1/assets/{victim}?hard=true", headers=_h())
+    assert r.status_code == 204, r.text
+    for rest_id in ids:
+        r = await client.delete(f"/api/v1/assets/{rest_id}", headers=_h())
+        assert r.status_code == 204, r.text
+        r = await client.delete(f"/api/v1/assets/{rest_id}?hard=true", headers=_h())
+        assert r.status_code == 204, r.text
+    r = await client.delete(f"/api/v1/folders/{fid}", headers=_h())
     assert r.status_code == 204, r.text

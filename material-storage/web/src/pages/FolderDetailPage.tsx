@@ -1,8 +1,8 @@
-import { App, Button, Empty, List, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { App, Button, Empty, List, Pagination, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import { CloudDownloadOutlined, KeyOutlined, UploadOutlined } from '@ant-design/icons';
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { useAssets, useDownloadLink, useFolder } from '../api/hooks';
+import { ASSETS_PAGE_SIZE, useAssets, useDownloadLink, useFolder } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 import { useUpload } from '../lib/upload-store';
@@ -20,7 +20,17 @@ function fmtBytes(n: number) {
 export default function FolderDetailPage() {
   const { folderId } = useParams<{ folderId: string }>();
   const { data: folder } = useFolder(folderId);
-  const { data: assets, isLoading } = useAssets(folderId);
+  // 服务端分页:此前列表被后端默认 limit=100 静默截断,超出的旧文件看不见。
+  // 切夹回第一页用 render 期比较旧值重置(不走 setState-in-effect)
+  const [page, setPage] = useState(1);
+  const [prevFolderId, setPrevFolderId] = useState(folderId);
+  if (prevFolderId !== folderId) {
+    setPrevFolderId(folderId);
+    setPage(1);
+  }
+  const { data, isLoading, isFetching } = useAssets(folderId, page, ASSETS_PAGE_SIZE);
+  const items = data?.items ?? [];
+  const total = data?.total ?? 0;
   const dlLink = useDownloadLink();
   const { message } = App.useApp();
   const upload = useUpload();
@@ -73,35 +83,48 @@ export default function FolderDetailPage() {
 
       {isLoading ? (
         <Skeleton active />
-      ) : (assets ?? []).length === 0 ? (
+      ) : total === 0 ? (
         <Empty description={canUpload ? '空文件夹 — 点上传文件添加内容' : '空文件夹(无上传权限,如需上传请联系项目管理员)'} />
       ) : (
-        <List
-          bordered
-          dataSource={assets!}
-          renderItem={(a) => (
-            <List.Item
-              actions={[
-                <Tooltip title="拿 presigned URL 直下" key="dl">
-                  <Button type="link" icon={<CloudDownloadOutlined />}
-                          loading={dlLink.isPending && dlLink.variables === a.id}
-                          onClick={() => handleDownload(a)}>下载</Button>
-                </Tooltip>,
-              ]}
-            >
-              <List.Item.Meta
-                title={a.filename}
-                description={
-                  <Space size="middle" style={{ fontSize: 12, color: '#999' }}>
-                    <span>{fmtBytes(a.size_bytes)}</span>
-                    <span>{a.content_type ?? '—'}</span>
-                    <span>{new Date(a.created_at).toLocaleString()}</span>
-                  </Space>
-                }
-              />
-            </List.Item>
-          )}
-        />
+        <>
+          <List
+            bordered
+            loading={isFetching}
+            dataSource={items}
+            renderItem={(a) => (
+              <List.Item
+                actions={[
+                  <Tooltip title="拿 presigned URL 直下" key="dl">
+                    <Button type="link" icon={<CloudDownloadOutlined />}
+                            loading={dlLink.isPending && dlLink.variables === a.id}
+                            onClick={() => handleDownload(a)}>下载</Button>
+                  </Tooltip>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={a.filename}
+                  description={
+                    <Space size="middle" style={{ fontSize: 12, color: '#999' }}>
+                      <span>{fmtBytes(a.size_bytes)}</span>
+                      <span>{a.content_type ?? '—'}</span>
+                      <span>{new Date(a.created_at).toLocaleString()}</span>
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+          <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+            <Pagination
+              current={page}
+              pageSize={ASSETS_PAGE_SIZE}
+              total={total}
+              onChange={setPage}
+              showSizeChanger={false}
+              showTotal={(t) => `共 ${t} 个文件`}
+            />
+          </div>
+        </>
       )}
 
       {applyAsset && (

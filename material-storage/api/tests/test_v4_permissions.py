@@ -256,7 +256,7 @@ async def test_share_create_and_resolve(client: AsyncClient) -> None:
         "/api/v1/assets", params={"folder_id": normal_folder["id"]}, headers=_h(EVAN_ID),
     )
     assert r2.status_code == 200, r2.text
-    assets = r2.json()
+    assets = r2.json()["items"]
     assert assets, "seed 应至少 1 个 asset"
     asset = assets[0]
 

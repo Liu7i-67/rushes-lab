@@ -28,6 +28,7 @@ from app.deps import (
     get_request_context,
 )
 from app.models import (
+    AssetListOut,
     AssetMetaUpdateIn,
     AssetOut,
     DownloadLinkOut,
@@ -233,16 +234,16 @@ async def abort_upload(
 
 
 # ─── list assets ──────────────────────────────────────────────────────────────
-@router.get("", response_model=list[AssetOut])
+@router.get("", response_model=AssetListOut)
 async def list_assets(
     folder_id: uuid.UUID = Query(...),
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
-    limit: int = 100,
-    offset: int = 0,
-) -> list[AssetOut]:
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> AssetListOut:
     folder = await db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -265,15 +266,22 @@ async def list_assets(
         # 不暴露 folder 存在性,403 不写 audit(避免攻击者通过 audit 推断结构)
         raise HTTPException(403, "no permission")
 
+    where = (Asset.folder_id == folder_id, Asset.deleted_at.is_(None))
+    total = await db.scalar(select(func.count()).select_from(Asset).where(*where))
     stmt = (
         select(Asset)
-        .where(Asset.folder_id == folder_id, Asset.deleted_at.is_(None))
-        .order_by(Asset.created_at.desc())
+        .where(*where)
+        # id 唯一 tiebreaker:同一事务批量入夹的资产 created_at 全并列,只按
+        # created_at 排序在 PG 里窗口切片不稳定(翻页重复/漏行)
+        .order_by(Asset.created_at.desc(), Asset.id.desc())
         .limit(limit)
         .offset(offset)
     )
     res = await db.execute(stmt)
-    return [AssetOut.model_validate(r) for r in res.scalars().all()]
+    return AssetListOut(
+        items=[AssetOut.model_validate(r) for r in res.scalars().all()],
+        total=total or 0,
+    )
 
 
 # ─── 回收站(软删列表 / 恢复 / 彻底删除)─────────────────────────────────────

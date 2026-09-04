@@ -81,7 +81,7 @@ async def _folder_id(client: AsyncClient, project_id: str, name: str) -> str:
 async def _first_asset_id(client: AsyncClient, folder_id: str) -> str:
     r = await client.get("/api/v1/assets", params={"folder_id": folder_id}, headers=_h(EVAN_ID))
     assert r.status_code == 200, r.text
-    assets = r.json()
+    assets = r.json()["items"]
     assert assets, f"folder {folder_id} 应至少 1 个 seed asset"
     return assets[0]["id"]
 
@@ -151,7 +151,7 @@ async def test_tag_denied_for_outsider(client: AsyncClient) -> None:
     fid = await _folder_id(client, PROJECT_EVENT, "现场视频")
     # outsider 对 public 项目无 uploader → 403
     r = await client.get("/api/v1/assets", params={"folder_id": fid}, headers=_h(EVAN_ID))
-    aid = r.json()[0]["id"]
+    aid = r.json()["items"][0]["id"]
     r2 = await client.patch(
         f"/api/v1/assets/{aid}/meta",
         json={"user_labels": ["x"]},
@@ -171,7 +171,7 @@ async def test_search_sensitive_zero_leak_for_outsider(client: AsyncClient) -> N
     sfid = await _folder_id(client, PROJECT_WEDDING, WEDDING_SENSITIVE_NAME)
     r = await client.get("/api/v1/assets", params={"folder_id": sfid}, headers=_h(EVAN_ID))
     assert r.status_code == 200
-    s_assets = r.json()
+    s_assets = r.json()["items"]
     assert s_assets, "seed sensitive folder 应至少 1 个 asset"
     s_aid = s_assets[0]["id"]
     s_filename = s_assets[0]["filename"]
@@ -206,7 +206,7 @@ async def test_search_evan_sees_sensitive(client: AsyncClient) -> None:
     """Evan 被 seed 邀请进 sensitive folder → 搜得到(对照上面 outsider 零泄露)。"""
     sfid = await _folder_id(client, PROJECT_WEDDING, WEDDING_SENSITIVE_NAME)
     r = await client.get("/api/v1/assets", params={"folder_id": sfid}, headers=_h(EVAN_ID))
-    s_aid = r.json()[0]["id"]
+    s_aid = r.json()["items"][0]["id"]
 
     r2 = await client.get(
         "/api/v1/assets/search", params={"q": "demo-0"}, headers=_h(EVAN_ID),

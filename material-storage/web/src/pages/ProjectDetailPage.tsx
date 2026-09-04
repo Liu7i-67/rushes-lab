@@ -12,7 +12,7 @@ import {
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useState } from 'react';
 import {
-  useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
+  ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
   useFolder, useFolders, useMe, useProject, useTrashAssets, useUpdateAssetMeta,
 } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
@@ -69,14 +69,27 @@ export default function ProjectDetailPage() {
   }, [paramFolderId, folders, activeFolderId]);
 
   const { data: folder } = useFolder(activeFolderId ?? undefined);
-  const { data: assets, isLoading: assetsLoading, refetch } = useAssets(activeFolderId ?? undefined);
+  // 服务端分页:超一页的 folder 走后端 limit/offset,旧文件不再被 100 条截断吞掉
+  const [page, setPage] = useState(1);
+  const { data: assets, isLoading: assetsLoading, isFetching, refetch } =
+    useAssets(activeFolderId ?? undefined, page, ASSETS_PAGE_SIZE);
+  const assetItems = assets?.items ?? [];
+  const assetTotal = assets?.total ?? 0;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  useEffect(() => setSelectedIds([]), [activeFolderId]);
+  // 切 folder 回第一页并清空选择:分页选择只针对当前窗口,跨页保留会产生
+  // 「选中但未加载 → 批量操作静默漏掉」的错位。render 期比较旧值重置
+  // (React「adjust state on prop change」模式,不走 setState-in-effect)
+  const [prevFolder, setPrevFolder] = useState<string | null>(activeFolderId);
+  if (prevFolder !== activeFolderId) {
+    setPrevFolder(activeFolderId);
+    setPage(1);
+    setSelectedIds([]);
+  }
 
   const selectedAssets = useMemo(
-    () => (assets ?? []).filter(a => selectedIds.includes(a.id)),
-    [assets, selectedIds],
+    () => assetItems.filter(a => selectedIds.includes(a.id)),
+    [assetItems, selectedIds],
   );
 
   const upload = useUpload();
@@ -130,13 +143,15 @@ export default function ProjectDetailPage() {
     }
     if (ok > 0) message.success(`删除 ${ok} 个文件${fail > 0 ? ` · 失败 ${fail}` : ''}`);
     setSelectedIds([]);
-    refetch();
+    // 删光当前页时回退一页,避免停在空尾页(page 变化触发重取,无需再 refetch)
+    if (page > 1 && ok >= assetItems.length) setPage(page - 1);
+    else refetch();
   };
 
   // 删除文件夹:须 文件夹空(无子夹 + 无活跃文件)**且 回收站空**。
   // UI 预判只为按钮禁用态,真实判定以后端为准(后端 enforce 同规则)
   const folderChildCount = folders?.filter(f => f.parent_folder_id === activeFolderId).length ?? 0;
-  const folderIsEmpty = (assets?.length ?? 0) === 0 && folderChildCount === 0;
+  const folderIsEmpty = assetTotal === 0 && folderChildCount === 0;
   const folderDeletable = folderIsEmpty && trashCount === 0;
 
   const handleDeleteFolder = async () => {
@@ -406,17 +421,18 @@ export default function ProjectDetailPage() {
           display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
           background: 'var(--ms-canvas)',
         }}>
+          {/* 全选只作用于当前页(服务端分页只加载本页);跨页批量请逐页操作 */}
           <Checkbox
-            indeterminate={hasSelection && selectedIds.length < (assets?.length ?? 0)}
-            checked={hasSelection && selectedIds.length === (assets?.length ?? 0) && (assets?.length ?? 0) > 0}
-            onChange={(e) => setSelectedIds(e.target.checked ? (assets ?? []).map(a => a.id) : [])}
+            indeterminate={hasSelection && selectedIds.length < assetItems.length}
+            checked={hasSelection && assetItems.length > 0 && selectedIds.length === assetItems.length}
+            onChange={(e) => setSelectedIds(e.target.checked ? assetItems.map(a => a.id) : [])}
           />
           <span style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
             {hasSelection ? (
               <>已选 <span className="ms-mono" style={{ color: 'var(--ms-accent)', fontWeight: 500 }}>
-                {selectedIds.length}</span> / {assets?.length ?? 0}</>
+                {selectedIds.length}</span> / 本页 {assetItems.length}</>
             ) : (
-              <>共 <span className="ms-mono">{assets?.length ?? 0}</span> 个文件</>
+              <>共 <span className="ms-mono">{assetTotal}</span> 个文件</>
             )}
           </span>
           <div style={{ flex: 1 }} />
@@ -469,13 +485,20 @@ export default function ProjectDetailPage() {
         {/* asset table */}
         <div style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
           <Table
-            dataSource={assets ?? []}
+            dataSource={assetItems}
             rowKey="id"
-            loading={assetsLoading}
+            loading={assetsLoading || isFetching}
             columns={cols}
             size="middle"
             scroll={{ x: 600 }}
-            pagination={{ pageSize: 30, hideOnSinglePage: true }}
+            pagination={{
+              current: page,
+              pageSize: ASSETS_PAGE_SIZE,
+              total: assetTotal,
+              onChange: (p) => { setPage(p); setSelectedIds([]); },
+              showSizeChanger: false,
+              hideOnSinglePage: true,
+            }}
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys as string[]),

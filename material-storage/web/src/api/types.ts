@@ -120,6 +120,12 @@ export interface TrashAssets {
   total: number;
 }
 
+/** 文件夹文件列表 = items 分页窗口(服务端分页)+ total 全量计数(分页器用)。*/
+export interface AssetList {
+  items: Asset[];
+  total: number;
+}
+
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired';
 export type ApprovalAction = 'download' | 'access';
 // #129: 加 folder 支持精细化临时 download 申请
