@@ -2,6 +2,10 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
+## 2026-09-04
+
+- 回收站三项体验修复(tester 验收反馈):① 删除文件后「回收站 N」角标不更新 —— `useDeleteAsset` 补失效 `assets-trash` 缓存;② 回收站列表里软删文件拉 `thumbnail-url` 404 —— endpoint 对软删行(deleted_at 置位)照常签发,彻底删除后行不存在才 404(回收站缩略图与既有"缩略图组织内可见"语义一致);③ 删除文件夹规则定档为「文件夹空 **且** 回收站空」—— 回收站非空时删夹 409(报错指向回收站),不再隐性连带清除,回收站弹窗新增「清空回收站」一键彻底删除(带二次确认);前端删夹按钮门控同规则
+
 ## 2026-09-03
 
 - 新增文件回收站,修复「删了文件却删不掉文件夹」死路(tester 反馈:删文件后删夹报「请先彻底清空」,但系统根本没有彻底清空/恢复的入口,前端「可由管理员恢复」提示是空头支票):后端新增 `GET /assets/trash`(folder can_admin)、`POST /assets/{id}/restore`、`DELETE /assets/{id}?hard=true`(两步制防误删;DB 行 + MinIO 原对象 + 派生缩略图/实况 + OpenFGA tuple 一并清,purge audit 不带 target_asset_id —— 行已删会撞 audit_events FK);删文件夹判空放宽为「无**活跃**资产行」,回收站文件随夹一并彻底清除(folder_deleted audit 记 purged_assets 数);前端 folder admin 可见「回收站 N」按钮 + 弹窗(恢复/彻底删除),删除确认文案与实际语义对齐。容器集成测试新增 3 例,既有 6 例删除用例全绿(77640de)

@@ -1,9 +1,10 @@
 /**
  * FolderTrashModal — 当前文件夹的回收站(软删文件列表)。
- * 对 folder admin 开放:恢复(回到文件列表)/ 彻底删除(硬删,不可恢复)。
+ * 对 folder admin 开放:恢复(回到文件列表)/ 彻底删除(硬删,不可恢复)/ 一键清空。
  */
 import { App, Button, Empty, Modal, Popconfirm, Table, Tooltip } from 'antd';
 import { RotateCcw, Trash2 } from 'lucide-react';
+import { useState } from 'react';
 import { AssetThumbnail } from './AssetThumbnail';
 import { errorMessage } from '../api/client';
 import { usePurgeAsset, useRestoreAsset, useTrashAssets } from '../api/hooks';
@@ -27,6 +28,7 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
   const { data: items, isLoading } = useTrashAssets(folderId, open);
   const restore = useRestoreAsset();
   const purge = usePurgeAsset();
+  const [clearing, setClearing] = useState(false);
 
   const handleRestore = async (a: Asset) => {
     try {
@@ -44,6 +46,19 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
     } catch (e) {
       message.error(errorMessage(e, '彻底删除失败'));
     }
+  };
+
+  const handleClearAll = async () => {
+    if (!items || items.length === 0) return;
+    setClearing(true);
+    let ok = 0, fail = 0;
+    for (const a of items) {
+      try { await purge.mutateAsync(a.id); ok++; }
+      catch { fail++; }
+    }
+    setClearing(false);
+    if (ok > 0) message.success(`已彻底删除 ${ok} 个文件${fail > 0 ? ` · 失败 ${fail}` : ''}`);
+    else if (fail > 0) message.error(`清空失败(${fail} 个文件)`);
   };
 
   const cols = [
@@ -102,12 +117,25 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
       title="回收站(已删除文件)"
       open={open}
       onCancel={onClose}
-      footer={null}
       width="min(720px, 92vw)"
       destroyOnClose
+      footer={
+        <Popconfirm
+          title={`彻底清空回收站的 ${(items ?? []).length} 个文件?`}
+          description="MinIO 原对象一并删除,不可恢复;清空后才能删除文件夹"
+          okText="全部彻底删除" okButtonProps={{ danger: true }}
+          disabled={(items ?? []).length === 0 || clearing}
+          onConfirm={handleClearAll}
+        >
+          <Button danger icon={<Trash2 size={13} strokeWidth={2} />}
+                  disabled={(items ?? []).length === 0} loading={clearing}>
+            清空回收站{items && items.length > 0 ? `(${items.length})` : ''}
+          </Button>
+        </Popconfirm>
+      }
     >
       <div style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)', marginBottom: 12 }}>
-        软删除的文件保留在此;删除文件夹时,回收站内的文件会被一并彻底清除。
+        软删除的文件保留在此,可恢复或彻底删除;文件夹需在回收站清空后才能删除。
       </div>
       <Table
         dataSource={items ?? []}

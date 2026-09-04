@@ -196,7 +196,11 @@ export const useDeleteAsset = () => {
     mutationFn: async (assetId: string) => {
       await http.delete(`/api/v1/assets/${assetId}`);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['assets'] }),
+    // 软删也进回收站:角标计数(assets-trash)必须一起失效,否则「回收站 N」不更新
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['assets-trash'] });
+    },
   });
 };
 

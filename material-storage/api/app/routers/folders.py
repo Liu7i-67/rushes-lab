@@ -7,8 +7,8 @@ endpoints:
                                                     (普通 folder by project member +
                                                      sensitive_folder by list_objects can_view)
   GET    /api/v1/folders/{id}                     — 单条(can_view)
-  DELETE /api/v1/folders/{id}                     — 删除文件夹(硬删;活跃文件须
-                                                    已清空,软删资产随夹彻底清除;
+  DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删;无子夹、
+                                                    无活跃文件、回收站已清空;
                                                     普通夹 can_upload / sensitive 夹 can_admin)
   POST   /api/v1/folders/{id}/invite              — sensitive_folder 邀请(can_admin only)
   DELETE /api/v1/folders/{id}/invite/user/{uid}   — 撤销(can_admin only)
@@ -21,27 +21,24 @@ import uuid
 from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.db.tables import Asset, Folder, Project
 from app.deps import (
-    CurrentUser,
     get_audit,
+    CurrentUser,
     get_current_user,
     get_is_system_admin,
     get_permissions,
-    get_presign,
     get_request_context,
 )
 from app.models import FolderCreateIn, FolderInviteIn, FolderOut
-from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService
 from app.services.notifications import run_notify_folder_invite_bg
 from app.services.permissions import PermissionsService, is_already_exists_error
-from app.services.presign import PresignService
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -268,21 +265,20 @@ async def delete_folder(
     folder_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
-    presign: PresignService = Depends(get_presign),
     audit: AuditService = Depends(get_audit),
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    """删除文件夹 — 活跃文件清空后可删,硬删(ROADMAP D iter2 一期)。
+    """删除文件夹 — 仅允许空文件夹(无活跃文件 **且回收站已清空**),硬删。
 
     不做软删的原因:空文件夹无对象可延迟清理、重建成本一次点击,软删无收益;
     且 uq_folder_project_prefix 是全量唯一约束,软删占位会让同名重建撞 409。
     非空拒绝而非级联:assets.folder_id 是 RESTRICT,且子树删除的产品语义未定。
 
-    空 = 无子文件夹 且 无**活跃**资产行。仅有软删资产时不阻断:文件夹删除即
-    它们的「彻底清空」—— 一并硬删(行 + MinIO 对象 + 派生缩略图),不可恢复
-    (此前软删行占 RESTRICT FK 导致"删了文件却删不掉夹"的死路)。
+    空 = 无子文件夹 且 无资产行(含软删)。软删文件须先在回收站里**显式**
+    彻底清空(tester 定档:删除文件夹不做隐性连带清除,防"顺手删夹"把回收站
+    里本可恢复的东西一并抹掉)。
     权限:普通 folder 用 can_upload(与创建对称,uploader 自主管理目录结构,
     model 里 uploader 隐含建子目录);sensitive folder 维持 can_admin ——
     sensitive 的 can_upload 实为 downloader 级(model v4),拿它当删除门槛太宽,
@@ -335,25 +331,28 @@ async def delete_folder(
     if child_id is not None:
         raise HTTPException(409, "文件夹下还有子文件夹,请先删除子文件夹")
 
-    # 活跃文件阻断;软删行随夹一并硬删(commit 前快照,delete 后属性过期不可读)
-    asset_rows = (
-        await db.scalars(select(Asset).where(Asset.folder_id == folder_id))
-    ).all()
-    if any(a.deleted_at is None for a in asset_rows):
-        raise HTTPException(409, "文件夹不为空,请先删除其中所有文件后再删除")
-    purged_snapshots = [
-        {
-            "id": str(a.id), "bucket": a.minio_bucket, "key": a.minio_key,
-            "tags": dict(a.tags or {}),
-        }
-        for a in asset_rows
-    ]
+    live_id = await db.scalar(
+        select(Asset.id)
+        .where(Asset.folder_id == folder_id, Asset.deleted_at.is_(None))
+        .limit(1)
+    )
+    if live_id is not None:
+        raise HTTPException(409, "文件夹不为空,请先删除其中所有文件")
+    trash_count = await db.scalar(
+        select(func.count())
+        .select_from(Asset)
+        .where(Asset.folder_id == folder_id, Asset.deleted_at.is_not(None))
+    )
+    if trash_count:
+        raise HTTPException(
+            409,
+            f"回收站内还有 {trash_count} 个已删除文件,"
+            "请先在回收站中彻底清空后再删除文件夹",
+        )
 
     name, prefix, is_sensitive, project_id = (
         folder.name, folder.minio_prefix, folder.is_sensitive, folder.project_id,
     )
-    for a in asset_rows:
-        await db.delete(a)
     try:
         await db.delete(folder)
         await db.commit()
@@ -364,30 +363,7 @@ async def delete_folder(
             409, "文件夹状态刚发生变化(可能新增了子文件夹或文件),请刷新后重试"
         ) from e
 
-    # ── 以下都在 DB 删除成功之后:清理失败只留无害孤儿 ──────────────────────
-    # ① 被一并 purge 的软删资产:MinIO 原对象 + 缩略图派生对象 + asset tuples
-    for snap in purged_snapshots:
-        purge_asset_storage(presign, snap["bucket"], snap["key"], snap["tags"])
-        try:
-            from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
-            from openfga_sdk.models import ReadRequestTupleKey
-            resp = await permissions._client.read(  # type: ignore[attr-defined]
-                ReadRequestTupleKey(object=f"asset:{snap['id']}")
-            )
-            for t in resp.tuples:
-                try:
-                    await permissions._client.write(  # type: ignore[attr-defined]
-                        ClientWriteRequest(deletes=[ClientTuple(
-                            user=t.key.user, relation=t.key.relation, object=t.key.object,
-                        )])
-                    )
-                except Exception:
-                    log.debug("asset tuple delete tolerate %s %s %s",
-                              t.key.user, t.key.relation, t.key.object)
-        except Exception as e:
-            log.warning("purge asset tuple cleanup fail asset=%s err=%s", snap["id"], e)
-
-    # ② folder 自身的 tuples
+    # ── 以下都在 DB 删除成功之后:tuple 清理失败只留无害孤儿 ──────────────
     try:
         from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
         from openfga_sdk.models import ReadRequestTupleKey
@@ -420,14 +396,13 @@ async def delete_folder(
                 "name": name,
                 "minio_prefix": prefix,
                 "is_sensitive": is_sensitive,
-                "purged_assets": len(purged_snapshots),
             },
             **ctx,
         )
     except Exception:
         log.warning("folder_deleted audit write fail folder=%s", folder_id, exc_info=True)
-    log.info("folder deleted id=%s name=%s sensitive=%s purged_assets=%d by user=%s",
-             folder_id, name, is_sensitive, len(purged_snapshots), user_id)
+    log.info("folder deleted id=%s name=%s sensitive=%s by user=%s",
+             folder_id, name, is_sensitive, user_id)
 
 
 @router.post("/{folder_id}/invite", status_code=204)

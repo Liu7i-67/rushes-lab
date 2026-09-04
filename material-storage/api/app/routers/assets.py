@@ -573,11 +573,13 @@ async def get_thumbnail_url(
     """缩略图 presigned URL — 至少要登录;不再做 per-asset OpenFGA check
     (缩略图 1024px 模糊化,信息密度低,信任组织内可见性)。
 
-    无 thumbnail_key(还没生成 / 非图)→ 404。
+    软删(deleted_at 置位)行照常返回 —— 回收站列表(管理员可见)的缩略图
+    走同一 endpoint,拒绝会让回收站里每行都打一个 404;彻底删除后行不存
+    在才 404。无 thumbnail_key(还没生成 / 非图)→ 404。
     """
     _ = user.id  # 至少要认证
     asset = await db.get(Asset, asset_id)
-    if asset is None or asset.deleted_at is not None:
+    if asset is None:
         raise HTTPException(404, "asset not found")
     thumbnail_key = (asset.tags or {}).get("thumbnail_key")
     if not thumbnail_key:

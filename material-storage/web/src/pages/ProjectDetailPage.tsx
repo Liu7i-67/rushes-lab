@@ -132,10 +132,11 @@ export default function ProjectDetailPage() {
     refetch();
   };
 
-  // 删除文件夹:仅空文件夹(无子夹 + 无文件)。UI 预判只为按钮禁用态,
-  // 真实判空以后端为准(软删文件前端看不见,点了会收到 409 提示)
+  // 删除文件夹:须 文件夹空(无子夹 + 无活跃文件)**且 回收站空**。
+  // UI 预判只为按钮禁用态,真实判定以后端为准(后端 enforce 同规则)
   const folderChildCount = folders?.filter(f => f.parent_folder_id === activeFolderId).length ?? 0;
   const folderIsEmpty = (assets?.length ?? 0) === 0 && folderChildCount === 0;
+  const folderDeletable = folderIsEmpty && trashCount === 0;
 
   const handleDeleteFolder = async () => {
     if (!folder || !projectId) return;
@@ -363,21 +364,24 @@ export default function ProjectDetailPage() {
                 </Button>
               </Tooltip>
             )}
-            {/* 删除文件夹:活跃文件须清空(硬删,不可恢复)。普通夹需 can_upload
-                (与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce。
-                回收站软删文件前端看不见,不阻断;删除时后端将其一并彻底清除 */}
+            {/* 删除文件夹:须空夹 + 回收站已清空(硬删,不可恢复)。普通夹需
+                can_upload(与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce */}
             {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
               <Popconfirm
                 title={`删除文件夹「${folder.name}」?`}
                 description={trashCount > 0
-                  ? `回收站还有 ${trashCount} 个已删文件,将随文件夹一并彻底清除`
-                  : '仅可删除已清空活跃文件的文件夹;删除后不可恢复'}
+                  ? `回收站内还有 ${trashCount} 个已删除文件,请先清空回收站`
+                  : '删除后不可恢复'}
                 okText="删除" okButtonProps={{ danger: true }}
                 onConfirm={handleDeleteFolder}
               >
-                <Tooltip title={folderIsEmpty ? '删除当前文件夹(不可恢复)' : '先删除文件夹内所有文件'}>
+                <Tooltip title={folderDeletable
+                  ? '删除当前文件夹(不可恢复)'
+                  : trashCount > 0
+                    ? `请先清空回收站(还有 ${trashCount} 个已删除文件)`
+                    : '先删除文件夹内所有文件'}>
                   <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
-                          disabled={!folderIsEmpty} loading={delFolder.isPending}>
+                          disabled={!folderDeletable} loading={delFolder.isPending}>
                     删除文件夹
                   </Button>
                 </Tooltip>
