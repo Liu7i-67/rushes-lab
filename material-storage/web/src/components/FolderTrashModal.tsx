@@ -5,8 +5,9 @@
 import { App, Button, Empty, Modal, Popconfirm, Table, Tooltip } from 'antd';
 import { RotateCcw, Trash2 } from 'lucide-react';
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { AssetThumbnail } from './AssetThumbnail';
-import { errorMessage } from '../api/client';
+import { errorMessage, http } from '../api/client';
 import { usePurgeAsset, useRestoreAsset, useTrashAssets } from '../api/hooks';
 import type { Asset } from '../api/types';
 
@@ -25,7 +26,8 @@ function fmtBytes(n: number): string {
 
 export function FolderTrashModal({ folderId, open, onClose }: Props) {
   const { message } = App.useApp();
-  const { data, isLoading } = useTrashAssets(folderId, open);
+  const qc = useQueryClient();
+  const { data, isLoading, refetch } = useTrashAssets(folderId, open);
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
   const restore = useRestoreAsset();
@@ -50,18 +52,36 @@ export function FolderTrashModal({ folderId, open, onClose }: Props) {
     }
   };
 
-  // 清空当前已加载的条目(单窗口上限 500);total 更大时清完自动刷新,可再点
+  // 清空当前已加载的条目(单窗口上限 500)。走裸请求 + 循环结束统一失效缓存:
+  // 走 usePurgeAsset 会每条触发两组列表重取(500 条 = 1000 次请求);条目被他人
+  // 并发清掉得 404 视为"已清",不计失败。total 更大时清完自动刷新,可再点
   const handleClearAll = async () => {
-    if (items.length === 0) return;
+    if (items.length === 0) {
+      // total>0 但窗口为空的快照错位:刷新一次再让用户重试
+      await refetch();
+      message.info('列表已刷新,请再点一次清空');
+      return;
+    }
     setClearing(true);
-    let ok = 0, fail = 0;
+    let ok = 0, gone = 0, fail = 0;
     for (const a of items) {
-      try { await purge.mutateAsync(a.id); ok++; }
-      catch { fail++; }
+      try {
+        await http.delete(`/api/v1/assets/${a.id}`, { params: { hard: true } });
+        ok++;
+      } catch (e) {
+        const err = e as { response?: { status?: number } };
+        if (err.response?.status === 404) gone++;
+        else fail++;
+      }
     }
     setClearing(false);
-    if (ok > 0) message.success(`已彻底删除 ${ok} 个文件${fail > 0 ? ` · 失败 ${fail}` : ''}`);
-    else if (fail > 0) message.error(`清空失败(${fail} 个文件)`);
+    qc.invalidateQueries({ queryKey: ['assets-trash'] });
+    qc.invalidateQueries({ queryKey: ['assets'] });
+    const goneNote = gone > 0 ? ` · ${gone} 个已被他人清掉` : '';
+    if (fail === 0 && ok > 0) message.success(`已彻底删除 ${ok} 个文件${goneNote}`);
+    else if (fail === 0 && ok === 0) message.info(`没有需要删除的文件${goneNote}`);
+    else if (ok > 0) message.warning(`已删除 ${ok} 个 · 失败 ${fail}${goneNote}`);
+    else message.error(`清空失败(${fail} 个)`);
   };
 
   const cols = [

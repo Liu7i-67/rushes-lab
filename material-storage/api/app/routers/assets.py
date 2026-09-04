@@ -349,16 +349,6 @@ async def restore_asset(
     if not asset:
         raise HTTPException(404, "asset not found")
 
-    folder = await db.get(Folder, asset.folder_id)
-    if folder is not None and folder.is_sensitive and not is_system_admin:
-        await audit.write(
-            event_type="access_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
-            details={"action": "restore_asset", "reason": "sensitive non-system-admin"},
-            **ctx,
-        )
-        raise HTTPException(403, "sensitive 资产的恢复仅系统 admin 可操作")
-
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
         object_type="asset", object_id=str(asset_id),
@@ -372,18 +362,29 @@ async def restore_asset(
         )
         raise HTTPException(403, "no restore permission")
 
+    # sensitive 门在 can_admin 之后:零权限探测者只见上面的通用 403,不借文案
+    # 得知"该资产是否敏感"(分类元数据);到这里的只有项目 admin / 系统 admin
+    folder = await db.get(Folder, asset.folder_id)
+    if folder is not None and folder.is_sensitive and not is_system_admin:
+        await audit.write(
+            event_type="access_denied", actor_user_id=user_id,
+            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            details={"action": "restore_asset", "reason": "sensitive non-system-admin"},
+            **ctx,
+        )
+        raise HTTPException(403, "sensitive 资产的恢复仅系统 admin 可操作")
+
     if asset.deleted_at is None:
         raise HTTPException(409, "文件未被删除(或已恢复)")
 
     asset.deleted_at = None
-    await db.commit()
-
-    # 并发兜底:行被并发 hard purge 删掉时,上面的 UPDATE 匹配 0 行但**不报错**
-    # (无 version 列,ORM 不校验 UPDATE rowcount),commit 是 no-op —— 此时绝不能
-    # 再写 audit(target_asset_id 的 FK 悬空必 500)。commit 后重查以真实状态为准
-    if await db.get(Asset, asset_id) is None:
+    try:
+        await db.commit()
+    except StaleDataError as e:
+        # 并发 hard purge 竞速:asyncpg 方言对 0 行 UPDATE 同样校验 rowcount 抛
+        # StaleDataError(与 DELETE 同款,容器内已实测)—— 行已不在,幂等 404
         await db.rollback()
-        raise HTTPException(404, "文件已被彻底删除,无法恢复")
+        raise HTTPException(404, "文件已被彻底删除,无法恢复") from e
 
     await audit.write(
         event_type="asset_restored", actor_user_id=user_id,
@@ -657,18 +658,6 @@ async def delete_asset(
     if not asset:
         raise HTTPException(404, "asset not found")
 
-    if hard:
-        folder = await db.get(Folder, asset.folder_id)
-        if folder is not None and folder.is_sensitive and not is_system_admin:
-            await audit.write(
-                event_type="access_denied", actor_user_id=user_id,
-                target_asset_id=asset_id, target_minio_key=asset.minio_key,
-                details={"action": "delete_asset",
-                         "reason": "sensitive non-system-admin (hard)"},
-                **ctx,
-            )
-            raise HTTPException(403, "sensitive 资产的彻底删除仅系统 admin 可操作")
-
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
         object_type="asset", object_id=str(asset_id),
@@ -681,6 +670,20 @@ async def delete_asset(
             **ctx,
         )
         raise HTTPException(403, "no delete permission")
+
+    # sensitive 门在 can_admin 之后(同 restore:零权限者只见通用 403,不借文案
+    # 得知资产敏感分类);仅 hard 分支 —— 软删为存量语义维持不变
+    if hard:
+        folder = await db.get(Folder, asset.folder_id)
+        if folder is not None and folder.is_sensitive and not is_system_admin:
+            await audit.write(
+                event_type="access_denied", actor_user_id=user_id,
+                target_asset_id=asset_id, target_minio_key=asset.minio_key,
+                details={"action": "delete_asset",
+                         "reason": "sensitive non-system-admin (hard)"},
+                **ctx,
+            )
+            raise HTTPException(403, "sensitive 资产的彻底删除仅系统 admin 可操作")
 
     if hard:
         if asset.deleted_at is None:
@@ -740,7 +743,12 @@ async def delete_asset(
         return  # idempotent
 
     asset.deleted_at = datetime.now(timezone.utc)
-    await db.commit()
+    try:
+        await db.commit()
+    except StaleDataError as e:
+        # 软删与并发 hard purge 竞速(0 行 UPDATE 同样抛 StaleDataError)→ 幂等 404
+        await db.rollback()
+        raise HTTPException(404, "文件已被彻底删除") from e
 
     await audit.write(
         event_type="asset_deleted", actor_user_id=user_id,

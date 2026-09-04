@@ -544,7 +544,8 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
                 await db.commit()
         return {"status": "failed", "asset_id": asset_id, "error": "ffmpeg_timeout"}
     except Exception as e:
-        log.warning("video thumbnail fail asset=%s err=%s", asset_id, e)
+        # log.exception:thumbnail_failed 只存类型名(F5),完整 traceback 是唯一排查入口
+        log.exception("video thumbnail fail asset=%s err=%s", asset_id, e)
         async with sm() as db:
             a = await db.get(Asset, aid)
             if a:

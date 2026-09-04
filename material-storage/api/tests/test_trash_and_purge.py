@@ -19,6 +19,7 @@ from app.main import create_app
 EVAN_ID = "3f1b659e-9ef1-4e65-aa03-4407ad7bcfc4"        # 系统 admin(org admin)
 BOB_ID = "00000000-0000-0000-0000-000000000002"        # 普通 member(非系统 admin;
 # 注:alice 在 dev_bootstrap 里被设为 org admin,不能当"非系统 admin"用)
+OUTSIDER_ID = "00000000-0000-0000-0000-0000000000aa"    # 无任何角色
 PROJECT_EVENT = "11111111-1111-1111-1111-111111111103"  # public
 PROJECT_WEDDING = "11111111-1111-1111-1111-111111111101"  # private
 SENSITIVE_WEDDING = "2c0b99a0-e8a1-5775-9c18-6e29e7ae2fab"  # 家庭合影(VIP)
@@ -206,6 +207,14 @@ async def test_sensitive_trash_visible_only_to_system_admin(client: AsyncClient)
     assert r.status_code == 204, r.text
     # 敏感夹里放一条软删资产(回收站非空,供 F1/F2 断言;测试尾部由系统 admin 清掉)
     sid = await _insert_asset(SENSITIVE_WEDDING, "zz_sensitive_ops.txt", deleted=True)
+
+    # 零权限者对敏感资产只见通用 403 文案 —— sensitive 门在 can_admin 之后,
+    # 不向探测者泄露"该资产是否敏感"的分类元数据
+    r = await client.post(f"/api/v1/assets/{sid}/restore", headers=_h(OUTSIDER_ID))
+    assert r.status_code == 403 and r.json()["detail"] == "no restore permission"
+    r = await client.delete(f"/api/v1/assets/{sid}?hard=true", headers=_h(OUTSIDER_ID))
+    assert r.status_code == 403 and r.json()["detail"] == "no delete permission"
+
     try:
         # 列表:项目 admin 403
         r = await client.get(
