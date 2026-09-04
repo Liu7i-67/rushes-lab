@@ -50,30 +50,41 @@ echo "═══ 同步 $ENVNAME ($GIT_COMMIT on $GIT_BRANCH) ═══"
 [[ "$DIRTY" != "0" ]] && echo "⚠️  本机有 $DIRTY 个未提交改动,部署的不完全等于 $GIT_COMMIT"
 
 # --inplace:nginx conf 等是 bind mount,换 inode 会让容器内看到 stale 文件
+# ⚠ 排除项一律用**不带 ./** 的裸名:tar/rsync 的 './xxx' 是锚定根路径的,
+#    拦不住 poc/minio/data 这类深层同名目录(Windows Git Bash tar 兜底分支
+#    实测把本地 MinIO 数据打进了包;裸名在任何层级都匹配)。
 if command -v rsync >/dev/null 2>&1; then
   rsync -a --inplace \
     --exclude '.git' --exclude '.env' --exclude 'node_modules' --exclude 'uv.lock' \
     --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' --exclude 'static/web' \
     --exclude 'data' --exclude 'data-dev' --exclude 'data-thumbs' --exclude 'backup-mirror' \
+    --exclude 'poc/minio/data' --exclude 'poc/minio/data-dev' --exclude 'poc/minio/data-thumbs' \
     --exclude 'docker-compose.override.yml' \
     ./ "$HOST:/tmp/ms-sync-$ENVNAME/"
 else
   # 无 rsync 的环境(如 Windows Git Bash):tar 流替代,排除项与 rsync 对齐
   tar -cf - \
-    --exclude='./.git' --exclude='./.env' --exclude='./node_modules' --exclude='./uv.lock' \
-    --exclude='__pycache__' --exclude='*.pyc' --exclude='./.venv' --exclude='static/web' \
-    --exclude='./data' --exclude='./data-dev' --exclude='./data-thumbs' --exclude='./backup-mirror' \
-    --exclude='./docker-compose.override.yml' \
+    --exclude='.git' --exclude='.env' --exclude='node_modules' --exclude='uv.lock' \
+    --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' --exclude='static/web' \
+    --exclude='data' --exclude='data-dev' --exclude='data-thumbs' --exclude='backup-mirror' \
+    --exclude='poc/minio/data' --exclude='poc/minio/data-dev' --exclude='poc/minio/data-thumbs' \
+    --exclude='docker-compose.override.yml' \
     . | ssh_r "mkdir -p /tmp/ms-sync-$ENVNAME && tar -xpf - -C /tmp/ms-sync-$ENVNAME/"
 fi
 
 # msdev 对自己的 home 有完整写权限 —— 先试无 sudo(sudo 需 TTY 密码的环境也能跑);
-# 真有 root 属主文件(如容器 bind mount 产物)时再退回 sudo
+# 真有 root 属主文件(如容器 bind mount 产物)时再退回 sudo。
+# MinIO 数据目录在此再拦一道:即使暂存目录混入了数据目录(上游排除被改坏),
+# 也绝不写进目标机的存储层。
+MINIO_DATA_EXCLUDES=(--exclude 'poc/minio/data' --exclude 'poc/minio/data-dev'
+  --exclude 'poc/minio/data-thumbs')
 if ! ssh_r "rsync -a --inplace \
     --exclude .env --exclude docker-compose.override.yml --exclude 'static/web' \
+    ${MINIO_DATA_EXCLUDES[*]} \
     /tmp/ms-sync-$ENVNAME/ $REMOTE_DIR/"; then
   ssh_r "sudo rsync -a --inplace \
       --exclude .env --exclude docker-compose.override.yml --exclude 'static/web' \
+      ${MINIO_DATA_EXCLUDES[*]} \
       /tmp/ms-sync-$ENVNAME/ $REMOTE_DIR/ && \
     sudo chown -R $SSH_USER:$SSH_USER $REMOTE_DIR"
 fi
