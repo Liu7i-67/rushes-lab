@@ -193,20 +193,38 @@ async def test_folder_delete_still_blocked_by_live_assets(client: AsyncClient) -
 @pytest.mark.asyncio
 async def test_sensitive_trash_visible_only_to_system_admin(client: AsyncClient) -> None:
     """sensitive folder 的回收站仅系统 admin 可见 —— 项目 admin 虽有 can_admin
-    (可删/清文件)但不能借回收站窥探文件名/标签/备注(受邀制语义)。"""
-    # alice 升为 wedding 项目 admin(非系统 admin;finally 撤销)
+    (可删/清文件)但不能借回收站窥探文件名/标签/备注(受邀制语义)。
+
+    F1/F2 收口同步覆盖:敏感资产的 restore/hard purge 仅系统 admin;
+    删夹 409 对敏感夹不带计数、不区分分支(防内容规模探测)。"""
+    # bob 升为 wedding 项目 admin(非系统 admin;finally 撤销)
     r = await client.post(
         f"/api/v1/projects/{PROJECT_WEDDING}/members",
         json={"user_id": BOB_ID, "roles": ["admin"]},
         headers=_h(),
     )
     assert r.status_code == 204, r.text
+    # 敏感夹里放一条软删资产(回收站非空,供 F1/F2 断言;测试尾部由系统 admin 清掉)
+    sid = await _insert_asset(SENSITIVE_WEDDING, "zz_sensitive_ops.txt", deleted=True)
     try:
+        # 列表:项目 admin 403
         r = await client.get(
             f"/api/v1/assets/trash?folder_id={SENSITIVE_WEDDING}",
             headers=_h(BOB_ID),
         )
         assert r.status_code == 403, r.text
+
+        # F1:restore / hard purge 仅系统 admin(项目 admin 继承 can_admin 但无 can_view)
+        r = await client.post(f"/api/v1/assets/{sid}/restore", headers=_h(BOB_ID))
+        assert r.status_code == 403, r.text
+        r = await client.delete(f"/api/v1/assets/{sid}?hard=true", headers=_h(BOB_ID))
+        assert r.status_code == 403, r.text
+
+        # F2:删夹 409 报文不区分分支、不含数字(防敏感目录内容规模探测)
+        r = await client.delete(f"/api/v1/folders/{SENSITIVE_WEDDING}", headers=_h(BOB_ID))
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert not any(ch.isdigit() for ch in detail), detail
     finally:
         r = await client.delete(
             f"/api/v1/projects/{PROJECT_WEDDING}/members",
@@ -215,9 +233,15 @@ async def test_sensitive_trash_visible_only_to_system_admin(client: AsyncClient)
         )
         assert r.status_code == 204, r.text
 
-    # 系统 admin 可见(空回收站)
+    # 系统 admin:列表可见 / 可恢复 / 可再清掉(F1 反向 + 测试数据清理)
     r = await client.get(
         f"/api/v1/assets/trash?folder_id={SENSITIVE_WEDDING}", headers=_h(),
     )
     assert r.status_code == 200, r.text
-    assert r.json()["total"] == 0
+    assert r.json()["total"] >= 1
+    r = await client.post(f"/api/v1/assets/{sid}/restore", headers=_h())
+    assert r.status_code == 204, r.text
+    r = await client.delete(f"/api/v1/assets/{sid}", headers=_h())
+    assert r.status_code == 204, r.text
+    r = await client.delete(f"/api/v1/assets/{sid}?hard=true", headers=_h())
+    assert r.status_code == 204, r.text

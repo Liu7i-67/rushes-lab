@@ -151,7 +151,7 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             a = await db.get(Asset, aid)
             if a:
                 tags = dict(a.tags or {})
-                tags["thumbnail_failed"] = str(e)[:200]
+                tags["thumbnail_failed"] = _thumb_fail_token(e)
                 a.tags = tags
                 await db.commit()
         return {"status": "failed", "asset_id": asset_id, "error": str(e)[:200]}
@@ -237,6 +237,28 @@ def _copy_livp_entry(src: Any, dst_path: Path, max_bytes: int) -> None:
             f.write(chunk)
 
 
+def _read_livp_entry_capped(src: Any, max_bytes: int) -> bytes:
+    """zip 条目全量读入内存,带硬性字节上限(静态图路径;与 _copy_livp_entry
+    同款兜底 —— zip 声明的 file_size 可伪造,真实流计数才作数)。"""
+    out = bytearray()
+    while True:
+        chunk = src.read(_LIVP_COPY_CHUNK)
+        if not chunk:
+            return bytes(out)
+        out += chunk
+        if len(out) > max_bytes:
+            raise RuntimeError(
+                f"livp 条目解压超上限(>{max_bytes} bytes,疑似异常文件)"
+            )
+
+
+def _thumb_fail_token(e: BaseException) -> str:
+    """tags['thumbnail_failed'] 的入库值 —— 只存异常类型名:完整报错可能含
+    容器内部路径,而该字段随 AssetOut 下发给能列到资产的用户(F5);
+    排查细节看 worker 日志(有完整 traceback)。"""
+    return type(e).__name__[:64]
+
+
 def _transcode_live_video(in_path: Path, out_path: Path, timeout: int) -> bool:
     """实况短片 → H.264 MP4(浏览器兼容;原片多为 HEVC,Chrome 常放不了)。
 
@@ -311,16 +333,18 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             if still_info is None:
                 raise RuntimeError("livp 内未找到静态图条目(jpg/heic/png)")
 
-            # 1) 静态图 → 1024 JPEG(与 generate_thumbnail 同规格)
+            # 1) 静态图 → 1024 JPEG(与 generate_thumbnail 同规格);解压带真实
+            #    流硬上限(声明值可伪造,F4)
             with zf.open(still_info) as f:
-                img = Image.open(f)
-                with contextlib.suppress(Exception):
-                    from PIL import ImageOps
-                    img = ImageOps.exif_transpose(img)
-                if img.mode not in ("RGB", "L"):
-                    img = img.convert("RGB")
-                img.thumbnail((_THUMBNAIL_MAX_PX, _THUMBNAIL_MAX_PX),
-                              Image.Resampling.LANCZOS)
+                still_bytes = _read_livp_entry_capped(f, _LIVP_IMAGE_MAX_BYTES)
+            img = Image.open(io.BytesIO(still_bytes))
+            with contextlib.suppress(Exception):
+                from PIL import ImageOps
+                img = ImageOps.exif_transpose(img)
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            img.thumbnail((_THUMBNAIL_MAX_PX, _THUMBNAIL_MAX_PX),
+                          Image.Resampling.LANCZOS)
             out = io.BytesIO()
             img.save(out, format="JPEG", quality=_THUMBNAIL_QUALITY, optimize=True)
             out.seek(0)
@@ -388,7 +412,7 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             a = await db.get(Asset, aid)
             if a:
                 tags = dict(a.tags or {})
-                tags["thumbnail_failed"] = str(e)[:200]
+                tags["thumbnail_failed"] = _thumb_fail_token(e)
                 a.tags = tags
                 await db.commit()
         return {"status": "failed", "asset_id": asset_id, "error": str(e)[:200]}
@@ -525,7 +549,7 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             a = await db.get(Asset, aid)
             if a:
                 tags = dict(a.tags or {})
-                tags["thumbnail_failed"] = str(e)[:200]
+                tags["thumbnail_failed"] = _thumb_fail_token(e)
                 a.tags = tags
                 await db.commit()
         return {"status": "failed", "asset_id": asset_id, "error": str(e)[:200]}

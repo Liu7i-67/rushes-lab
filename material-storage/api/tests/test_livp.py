@@ -6,7 +6,7 @@ import zipfile
 
 import pytest
 
-from app.workers.main import _copy_livp_entry, _pick_livp_entries
+from app.workers.main import _copy_livp_entry, _pick_livp_entries, _read_livp_entry_capped
 
 
 def _zip_from(entries: dict[str, bytes]) -> zipfile.ZipFile:
@@ -102,3 +102,13 @@ def test_copy_livp_entry_enforces_limit(tmp_path) -> None:  # type: ignore[no-un
     with zf.open("v.mov") as f:
         _copy_livp_entry(f, tmp_path / "out2.bin", 200)
     assert (tmp_path / "out2.bin").read_bytes() == b"a" * 100
+
+
+def test_read_livp_entry_capped() -> None:
+    """静态图路径的真实流上限(F4):超限即断,上限内原样读出。"""
+    zf = _zip_from({"still.jpg": b"j" * 300})
+    with zf.open("still.jpg") as f:
+        with pytest.raises(RuntimeError, match="超上限"):
+            _read_livp_entry_capped(f, 100)
+    with zf.open("still.jpg") as f:
+        assert _read_livp_entry_capped(f, 500) == b"j" * 300

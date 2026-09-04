@@ -4,6 +4,7 @@ Phase B-2 iter4:每 endpoint 加 OpenFGA check + audit 落库。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -340,11 +341,23 @@ async def restore_asset(
 ) -> None:
     """恢复软删文件(deleted_at 置回 NULL)。需 asset.can_admin / 系统 admin。
 
-    软删不动 OpenFGA tuple 与 MinIO 对象,恢复即回到删除前的权限/内容状态。"""
+    软删不动 OpenFGA tuple 与 MinIO 对象,恢复即回到删除前的权限/内容状态。
+    sensitive 资产仅系统 admin:项目 admin 从父项目继承 can_admin 但无 can_view
+    (受邀制),不能对看不见的敏感内容做恢复(F1,与 list_trash 收口同口径)。"""
     user_id = user.id
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
+
+    folder = await db.get(Folder, asset.folder_id)
+    if folder is not None and folder.is_sensitive and not is_system_admin:
+        await audit.write(
+            event_type="access_denied", actor_user_id=user_id,
+            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            details={"action": "restore_asset", "reason": "sensitive non-system-admin"},
+            **ctx,
+        )
+        raise HTTPException(403, "sensitive 资产的恢复仅系统 admin 可操作")
 
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
@@ -636,11 +649,25 @@ async def delete_asset(
 
     hard=true 为彻底删除:删 DB 行 + MinIO 原对象 + 缩略图派生对象 + OpenFGA
     tuple,不可恢复 —— 须先软删(两步制,防误操作一击穿底)。权限均为
-    asset.can_admin;系统 admin 直通。
+    asset.can_admin;系统 admin 直通。**hard 分支对 sensitive 资产仅系统 admin**
+    (F1):项目 admin 继承 can_admin 但无 can_view,不能对受邀制内容做不可逆
+    销毁(与 list_trash / restore 收口同口径;软删为存量能力,维持不变)。
     """
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
+
+    if hard:
+        folder = await db.get(Folder, asset.folder_id)
+        if folder is not None and folder.is_sensitive and not is_system_admin:
+            await audit.write(
+                event_type="access_denied", actor_user_id=user_id,
+                target_asset_id=asset_id, target_minio_key=asset.minio_key,
+                details={"action": "delete_asset",
+                         "reason": "sensitive non-system-admin (hard)"},
+                **ctx,
+            )
+            raise HTTPException(403, "sensitive 资产的彻底删除仅系统 admin 可操作")
 
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
@@ -673,7 +700,12 @@ async def delete_asset(
             raise HTTPException(404, "文件已被彻底删除") from e
 
         # ── DB 删除成功之后:清理失败只留无害孤儿 ──
-        purge_asset_storage(presign, snapshot["bucket"], snapshot["key"], snapshot["tags"])
+        # MinIO 删除是同步 boto3(重试+超时最坏数分钟),丢线程池执行,
+        # 防止 MinIO 抖动时阻塞事件循环冻结整个 API
+        await asyncio.to_thread(
+            purge_asset_storage,
+            presign, snapshot["bucket"], snapshot["key"], snapshot["tags"],
+        )
         try:
             from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
             from openfga_sdk.models import ReadRequestTupleKey
