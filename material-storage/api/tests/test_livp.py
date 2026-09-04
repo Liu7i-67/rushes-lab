@@ -4,7 +4,9 @@ from __future__ import annotations
 import io
 import zipfile
 
-from app.workers.main import _pick_livp_entries
+import pytest
+
+from app.workers.main import _copy_livp_entry, _pick_livp_entries
 
 
 def _zip_from(entries: dict[str, bytes]) -> zipfile.ZipFile:
@@ -72,3 +74,31 @@ def test_pick_ignores_dirs_and_unknown_exts() -> None:
     still, video = _pick_livp_entries(zf)
     assert still is not None and still.filename == "IMG_1.jpg"
     assert video is None
+
+
+def test_pick_skips_oversized_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """zip 炸弹防护:声明大小超上限的条目直接忽略,不参与挑选。"""
+    from app.workers import main as w
+    monkeypatch.setattr(w, "_LIVP_IMAGE_MAX_BYTES", 10)
+    monkeypatch.setattr(w, "_LIVP_VIDEO_MAX_BYTES", 10)
+    zf = _zip_from({
+        "big.jpg": b"x" * 100,   # 超限静态图 → 跳过
+        "big.mov": b"y" * 100,   # 超限视频 → 跳过
+        "ok.jpg": b"j",          # 正常静态图 → 选中
+    })
+    still, video = w._pick_livp_entries(zf)
+    assert still is not None and still.filename == "ok.jpg"
+    assert video is None
+
+
+def test_copy_livp_entry_enforces_limit(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """计数拷贝兜底:实际解压量超上限(声明值伪造小)即断,不写满磁盘。"""
+    zf = _zip_from({"v.mov": b"a" * 100})
+    with zf.open("v.mov") as f:
+        with pytest.raises(RuntimeError, match="超上限"):
+            _copy_livp_entry(f, tmp_path / "out.bin", 50)
+
+    # 上限内正常落盘
+    with zf.open("v.mov") as f:
+        _copy_livp_entry(f, tmp_path / "out2.bin", 200)
+    assert (tmp_path / "out2.bin").read_bytes() == b"a" * 100

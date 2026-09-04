@@ -52,6 +52,16 @@ class PresignService:
             aws_secret_access_key=settings.minio_secret_key,
             config=Config(signature_version="s3v4", region_name="us-east-1"),
         )
+        # 内部视角的缩略图 client(删除派生对象用)—— 与 worker 的 _thumb_s3_client
+        # 同构:指独立 SSD 实例,留空回落主 MinIO。不能复用 _s3_internal:分层部署
+        # 下主/缩略图是两个实例,用主实例删 ms-thumbs 会打错地方(NoSuchBucket 被吞)
+        self._s3_thumb_internal = boto3.client(
+            "s3",
+            endpoint_url=settings.minio_thumbnail_endpoint_internal or settings.minio_endpoint_internal,
+            aws_access_key_id=settings.minio_access_key,
+            aws_secret_access_key=settings.minio_secret_key,
+            config=Config(signature_version="s3v4", region_name="us-east-1"),
+        )
         self._sts = boto3.client(
             "sts",
             endpoint_url=settings.minio_endpoint_internal,
@@ -71,6 +81,12 @@ class PresignService:
     def delete_object(self, bucket: str, key: str) -> None:
         """删除主存储对象(purge 用;软删本身不删对象)。"""
         self._s3_internal.delete_object(Bucket=bucket, Key=key)
+
+    def delete_thumbnail_object(self, key: str) -> None:
+        """删除缩略图 MinIO(SSD,ADR-0008 P1 独立实例)上的派生对象。"""
+        self._s3_thumb_internal.delete_object(
+            Bucket=self._settings.minio_thumbnail_bucket, Key=key,
+        )
 
     @property
     def thumbnail_bucket(self) -> str:

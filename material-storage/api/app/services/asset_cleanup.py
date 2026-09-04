@@ -4,9 +4,10 @@
 (不可见、无权限含义),不会出现"对象没了行还在"的断链。这与文件夹删除的
 tuple 清理放在 commit 后是同一取舍。
 
-清理范围:
-  - 主存储原对象(bucket/key)
-  - 缩略图 MinIO 上的派生对象:tags['thumbnail_key']、tags['live_video_key']
+清理范围(ADR-0008 分层):
+  - 主存储原对象(bucket/key,HDD 实例)
+  - 缩略图 MinIO(SSD 实例)上的派生对象:tags['thumbnail_key']、tags['live_video_key']
+    —— 两个实例 endpoint 不同,必须各走各的 client,删错实例会 NoSuchBucket 被吞
 """
 from __future__ import annotations
 
@@ -17,16 +18,21 @@ from app.services.presign import PresignService
 
 log = logging.getLogger(__name__)
 
+# 派生对象 tag key → 清理通道(均存缩略图 MinIO)
+_DERIVED_TAG_KEYS = ("thumbnail_key", "live_video_key")
+
 
 def purge_asset_storage(presign: PresignService, bucket: str, key: str, tags: dict[str, Any]) -> None:
     """删主对象 + 缩略图派生对象;单项失败只 log,不抛(孤儿对象无害)。"""
-    targets: list[tuple[str, str]] = [(bucket, key)]
-    thumb_bucket = presign.thumbnail_bucket
-    for tag in ("thumbnail_key", "live_video_key"):
-        if tags.get(tag):
-            targets.append((thumb_bucket, str(tags[tag])))
-    for b, k in targets:
+    try:
+        presign.delete_object(bucket, key)
+    except Exception as e:  # noqa: BLE001
+        log.warning("purge asset object fail bucket=%s key=%s err=%s", bucket, key, e)
+    for tag in _DERIVED_TAG_KEYS:
+        derived = tags.get(tag)
+        if not derived:
+            continue
         try:
-            presign.delete_object(b, k)
+            presign.delete_thumbnail_object(str(derived))
         except Exception as e:  # noqa: BLE001
-            log.warning("purge asset object fail bucket=%s key=%s err=%s", b, k, e)
+            log.warning("purge derived object fail key=%s err=%s", derived, e)

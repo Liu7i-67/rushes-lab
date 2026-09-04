@@ -525,9 +525,10 @@ async def get_download_link(
 ) -> DownloadLinkOut:
     user_id = user.id
     """签 presigned GET URL;check can_download asset + audit signed_url_issued。
-    系统 admin 直通(audit 仍记)。"""
+    系统 admin 直通(audit 仍记)。软删行 404 —— 回收站语义:要取回先 restore
+    (与 meta / live-preview / share 同口径,唯本 endpoint 此前漏查)。"""
     asset = await db.get(Asset, asset_id)
-    if not asset:
+    if not asset or asset.deleted_at is not None:
         raise HTTPException(404, "asset not found")
 
     allowed = is_system_admin or await permissions.check(

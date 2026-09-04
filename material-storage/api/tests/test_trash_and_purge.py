@@ -96,13 +96,19 @@ async def test_trash_restore_purge_flow(client: AsyncClient) -> None:
     assert r.status_code == 200, r.text
     assert "url" in r.json()
 
-    # 恢复 → 回到普通列表、回收站清空
+    # 软删后原片不可再签下载链接(回收站语义;与 meta / live-preview / share 同口径)
+    r = await client.post(f"/api/v1/assets/{aid}/download-link", headers=_h())
+    assert r.status_code == 404, r.text
+
+    # 恢复 → 回到普通列表、回收站清空;下载链接恢复可用
     r = await client.post(f"/api/v1/assets/{aid}/restore", headers=_h())
     assert r.status_code == 204, r.text
     r = await client.get(f"/api/v1/assets?folder_id={fid}", headers=_h())
     assert r.status_code == 200 and len(r.json()) == 1
     r = await client.get(f"/api/v1/assets/trash?folder_id={fid}", headers=_h())
     assert r.status_code == 200 and len(r.json()) == 0
+    r = await client.post(f"/api/v1/assets/{aid}/download-link", headers=_h())
+    assert r.status_code == 200, r.text
 
     # 未删文件不能直接 hard purge(两步制)
     r = await client.delete(f"/api/v1/assets/{aid}?hard=true", headers=_h())

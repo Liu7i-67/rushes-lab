@@ -4,6 +4,7 @@
 
 ## 2026-09-04
 
+- P0 审查后续修复(2×P1 + 1×P2):① 彻底删除的派生对象(缩略图/livp 实况视频)此前经主 MinIO client 删独立 SSD 缩略图实例,分层部署(ADR-0008)下必打错实例被吞成 NoSuchBucket —— `PresignService` 新增内部缩略图 client(`delete_thumbnail_object`,endpoint 同 worker `_thumb_s3_client` 构型),`asset_cleanup` 派生对象改走它;② livp worker zip 炸弹防护 —— 条目挑选按 zip 声明大小设上限(图 100MB/视频 500MB)+ 解压落盘改计数拷贝硬限(声明可伪造),实况段整体 best-effort 化(解压超限/转码失败只跳过实况,不再误标 thumbnail_failed);③ `download-link` 补查软删行 404(此前 meta/live-preview/share 都拒,唯它漏查,软删原片仍可签 URL);worker 修复中发现并清除 `_pick_livp_entries` 重复定义残留(旧版覆盖新版致上限不生效);e2e 实证:purge 后原片 + 缩略图 + 实况视频三个对象全部从对应实例删除,单测补 zip 限额/计数拷贝 2 例、download-link 软删 404 断言,容器内 11 例全绿(fe4fa1e);顺手修 api/.gitignore 里 uv.lock 行尾注释致模式失效的问题
 - 回收站三项体验修复(tester 验收反馈):① 删除文件后「回收站 N」角标不更新 —— `useDeleteAsset` 补失效 `assets-trash` 缓存;② 回收站列表里软删文件拉 `thumbnail-url` 404 —— endpoint 对软删行(deleted_at 置位)照常签发,彻底删除后行不存在才 404(回收站缩略图与既有"缩略图组织内可见"语义一致);③ 删除文件夹规则定档为「文件夹空 **且** 回收站空」—— 回收站非空时删夹 409(报错指向回收站),不再隐性连带清除,回收站弹窗新增「清空回收站」一键彻底删除(带二次确认);前端删夹按钮门控同规则(96053ac)
 
 ## 2026-09-03

@@ -186,15 +186,23 @@ _FFMPEG_TIMEOUT_SEC = 30                         # subprocess 硬上限
 _LIVP_IMAGE_EXTS = (".jpg", ".jpeg", ".heic", ".heif", ".png")
 _LIVP_VIDEO_EXTS = (".mov", ".mp4")
 _LIVP_MAX_BYTES = 200 * 1024 * 1024             # 防御上限:正常 livp 几 MB~几十 MB
+# 解压后条目大小上限(zip 元数据可伪造,超限条目直接忽略)。静态图走内存 +
+# Pillow DecompressionBomb 守卫,视频走磁盘解压 —— 无上限时恶意 zip(全零高
+# 压缩比 ~1000:1)可把 200MB 包解出上百 GB 写满 worker 磁盘。iPhone 真实量级
+# ~2-10MB,这里放两个数量级冗余
+_LIVP_IMAGE_MAX_BYTES = 100 * 1024 * 1024
+_LIVP_VIDEO_MAX_BYTES = 500 * 1024 * 1024
 _LIVP_VIDEO_SECS = 3                            # Live Photo 实况约 3s,转码截断到同长
 _LIVP_FFMPEG_TIMEOUT_SEC = 45                    # 需低于 WorkerSettings.job_timeout(60)
+_LIVP_COPY_CHUNK = 1024 * 1024
 
 
 def _pick_livp_entries(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo | None, zipfile.ZipInfo | None]:
-    """从 livp zip 里挑(最大静态图, 最大视频)条目。
+    """从 livp zip 里挑(最大静态图, 最大视频)条目;超大小上限的条目跳过。
 
     取最大而非首个:iPhone 导出可能带同名多份或小占位文件;条目名形如
-    IMG_1234.JPG.jpeg / IMG_1234.mov,扩展名判类。
+    IMG_1234.JPG.jpeg / IMG_1234.mov,扩展名判类。file_size 是 zip 中央目录
+    元数据(攻击者可控),只用作初筛 —— 真实落盘量由 _copy_livp_entry 计数兜底。
     """
     still: zipfile.ZipInfo | None = None
     video: zipfile.ZipInfo | None = None
@@ -202,11 +210,31 @@ def _pick_livp_entries(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo | None, zip
         if info.is_dir():
             continue
         ext = Path(info.filename).suffix.lower()
-        if ext in _LIVP_IMAGE_EXTS and (still is None or info.file_size > still.file_size):
+        if ext in _LIVP_IMAGE_EXTS and info.file_size <= _LIVP_IMAGE_MAX_BYTES and (
+            still is None or info.file_size > still.file_size
+        ):
             still = info
-        elif ext in _LIVP_VIDEO_EXTS and (video is None or info.file_size > video.file_size):
+        elif ext in _LIVP_VIDEO_EXTS and info.file_size <= _LIVP_VIDEO_MAX_BYTES and (
+            video is None or info.file_size > video.file_size
+        ):
             video = info
     return still, video
+
+
+def _copy_livp_entry(src: Any, dst_path: Path, max_bytes: int) -> None:
+    """zip 条目流式落盘,带硬性字节上限(声明值可再伪造,超限即断)。"""
+    written = 0
+    with dst_path.open("wb") as f:  # noqa: ASYNC230
+        while True:
+            chunk = src.read(_LIVP_COPY_CHUNK)
+            if not chunk:
+                return
+            written += len(chunk)
+            if written > max_bytes:
+                raise RuntimeError(
+                    f"livp 条目解压超上限(>{max_bytes} bytes,疑似异常文件)"
+                )
+            f.write(chunk)
 
 
 def _transcode_live_video(in_path: Path, out_path: Path, timeout: int) -> bool:
@@ -316,33 +344,39 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
                     a.tags = tags
                     await db.commit()
 
-            # 3) 实况短片转码(best-effort:HEVC 解码器缺失等失败 → 仅无实况)
+            # 3) 实况短片转码(best-effort:解压超限 / HEVC 解码缺失 / ffmpeg 失败
+            #    → 仅无实况,静态图已落库,不误标 thumbnail_failed)
             if video_info is not None:
-                # worker 全函数按同步阻塞写(arq 既有风格;文件小,阻塞可忽略)
-                with zf.open(video_info) as f, vid_in_path.open("wb") as vf:  # noqa: ASYNC230
-                    import shutil
-                    shutil.copyfileobj(f, vf)
-                if _transcode_live_video(vid_in_path, vid_out_path, _LIVP_FFMPEG_TIMEOUT_SEC):
-                    live_size = vid_out_path.stat().st_size
-                    with vid_out_path.open("rb") as f:  # noqa: ASYNC230
-                        thumb_s3.put_object(
-                            Bucket=settings.minio_thumbnail_bucket, Key=live_key, Body=f,
-                            ContentType="video/mp4",
-                            Metadata={"source_asset": asset_id, "kind": "livp_video"},
-                        )
-                    async with sm() as db:
-                        a = await db.get(Asset, aid)
-                        if a:
-                            tags = dict(a.tags or {})
-                            tags["live_video_key"] = live_key
-                            tags["live_video_size_bytes"] = live_size
-                            a.tags = tags
-                            await db.commit()
-                    log.info("livp live video asset=%s key=%s size=%d",
-                             asset_id, live_key, live_size)
-                else:
-                    log.warning("livp live transcode fail asset=%s(跳过实况,静态图已生成)",
-                                asset_id)
+                try:
+                    with zf.open(video_info) as f:  # noqa: ASYNC230
+                        _copy_livp_entry(f, vid_in_path, _LIVP_VIDEO_MAX_BYTES)
+                    if _transcode_live_video(
+                        vid_in_path, vid_out_path, _LIVP_FFMPEG_TIMEOUT_SEC,
+                    ):
+                        live_size = vid_out_path.stat().st_size
+                        with vid_out_path.open("rb") as f:  # noqa: ASYNC230
+                            thumb_s3.put_object(
+                                Bucket=settings.minio_thumbnail_bucket, Key=live_key, Body=f,
+                                ContentType="video/mp4",
+                                Metadata={"source_asset": asset_id, "kind": "livp_video"},
+                            )
+                        async with sm() as db:
+                            a = await db.get(Asset, aid)
+                            if a:
+                                tags = dict(a.tags or {})
+                                tags["live_video_key"] = live_key
+                                tags["live_video_size_bytes"] = live_size
+                                a.tags = tags
+                                await db.commit()
+                        log.info("livp live video asset=%s key=%s size=%d",
+                                 asset_id, live_key, live_size)
+                    else:
+                        log.warning(
+                            "livp live transcode fail asset=%s(跳过实况,静态图已生成)",
+                            asset_id)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("livp live extract/transcode fail asset=%s err=%s"
+                                "(跳过实况,静态图已生成)", asset_id, e)
         return {
             "status": "ok", "asset_id": asset_id,
             "thumbnail_key": thumbnail_key, "size_bytes": thumbnail_size,
