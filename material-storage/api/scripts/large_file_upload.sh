@@ -69,7 +69,7 @@ ok "全部 part 上传完毕,耗时 ${TOTAL_TIME}s ($(( SIZE_MB / (TOTAL_TIME > 
 
 step "complete_multipart_upload"
 RESP=$(curl -sS -X POST -H "X-User-Id: $MEMBER" -H "Content-Type: application/json" \
-  -d "{\"upload_id\":\"$UPLOAD_ID\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY\",\"parts\":$PARTS_JSON}" \
+  -d "{\"folder_id\":\"$NORMAL_F\",\"upload_id\":\"$UPLOAD_ID\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY\",\"parts\":$PARTS_JSON}" \
   "${API_BASE}/api/v1/assets/uploads/$UPLOAD_ID/complete")
 ASSET_ID=$(echo "$RESP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 ok "ASSET_ID=$ASSET_ID"

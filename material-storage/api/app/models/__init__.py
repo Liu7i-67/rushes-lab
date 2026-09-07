@@ -126,6 +126,10 @@ class UploadPartUrlOut(BaseModel):
 
 class UploadCompleteIn(BaseModel):
     upload_id: str
+    # 必填:complete 按主键解析 folder。按 key 目录前缀反查在生产库会命中跨
+    # project 的同名目录树(uq_folder_project_prefix 是 (project_id, prefix)
+    # 维度,跨 project 同前缀合法)→ scalar_one_or_none 多行命中裸 500
+    folder_id: uuid.UUID
     bucket: str
     key: str
     parts: list[dict[str, int | str]]

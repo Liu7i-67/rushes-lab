@@ -113,7 +113,7 @@ ok "part 1 ETag=$ETAG"
 
 # complete
 r=$(as "$MEMBER" POST "/api/v1/assets/uploads/$UPLOAD_ID/complete" \
-  "{\"upload_id\":\"$UPLOAD_ID\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY\",\"parts\":[{\"PartNumber\":1,\"ETag\":\"$ETAG\"}]}")
+  "{\"folder_id\":\"$NORMAL_F\",\"upload_id\":\"$UPLOAD_ID\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY\",\"parts\":[{\"PartNumber\":1,\"ETag\":\"$ETAG\"}]}")
 assert_status "$r" 200 "complete upload"
 ASSET_ID=$(extract_json "$r" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 ok "asset_id=$ASSET_ID"
@@ -170,7 +170,7 @@ PART_URL2=$(as "$ADMIN" GET "/api/v1/assets/uploads/$UPLOAD2/parts/1?bucket=$BUC
 dd if=/dev/urandom of=/tmp/vip.bin bs=512 count=1 2>/dev/null
 ETAG2=$(curl -sS -i -X PUT --data-binary @/tmp/vip.bin "$PART_URL2" 2>/dev/null | awk 'BEGIN{IGNORECASE=1} /^etag:/{gsub(/\r/,"");gsub(/"/,"");sub(/^[^:]+: */,"");print;exit}')
 r=$(as "$ADMIN" POST "/api/v1/assets/uploads/$UPLOAD2/complete" \
-  "{\"upload_id\":\"$UPLOAD2\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY2\",\"parts\":[{\"PartNumber\":1,\"ETag\":\"$ETAG2\"}]}")
+  "{\"folder_id\":\"$SENSITIVE_F\",\"upload_id\":\"$UPLOAD2\",\"bucket\":\"$BUCKET\",\"key\":\"$KEY2\",\"parts\":[{\"PartNumber\":1,\"ETag\":\"$ETAG2\"}]}")
 assert_status "$r" 200 "alice complete sensitive upload"
 SENSITIVE_ASSET_ID=$(extract_json "$r" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 

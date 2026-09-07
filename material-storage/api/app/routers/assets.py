@@ -84,6 +84,9 @@ async def create_upload(
         )
         raise HTTPException(403, "no permission to upload to this folder")
 
+    # filename 带 "/" 会把 key 拼到 folder 前缀之外(complete 的前缀校验必 400),create 期拦掉
+    if "/" in payload.filename:
+        raise HTTPException(400, "filename 不能包含路径分隔符")
     key = f"{folder.minio_prefix.rstrip('/')}/{payload.filename}"
     bucket = await _project_bucket(db, folder.project_id)
 
@@ -122,13 +125,20 @@ async def complete_upload(
     ctx: dict = Depends(get_request_context),
 ) -> AssetOut:
     user_id = user.id
-    folder_id = await _resolve_folder_by_key(db, payload.bucket, payload.key)
-    if not folder_id:
-        raise HTTPException(400, detail=f"folder for key {payload.key} not found")
-
-    folder = await db.get(Folder, folder_id)
+    folder = await db.get(Folder, payload.folder_id)
     if not folder:
-        raise HTTPException(500, "folder lookup race")
+        raise HTTPException(404, "folder not found")
+
+    # key 必须落在该 folder 的 minio_prefix 下:create_upload 按
+    # f"{minio_prefix.rstrip('/')}/{filename}" 拼 key,这里按同一规则反推校验
+    # (folder_id 由契约显式携带 —— 按 key 前缀反查在跨 project 同名目录树
+    # 下会多行命中,已退役)
+    key_prefix = payload.key.rsplit("/", 1)[0] + "/" if "/" in payload.key else ""
+    if key_prefix != f"{folder.minio_prefix.rstrip('/')}/":
+        raise HTTPException(400, "key 与 folder 不匹配,请重新上传")
+    # bucket 是客户端回传值,可能与 folder 所属项目的 bucket 不一致(多项目共用/多 bucket 部署)
+    if payload.bucket != await _project_bucket(db, folder.project_id):
+        raise HTTPException(400, "bucket 与 folder 所属项目不匹配")
 
     # 再次 check(防 user create_upload 后被 revoke);系统 admin 直通
     allowed = is_system_admin or await permissions.check(
@@ -151,7 +161,7 @@ async def complete_upload(
 
     asset = Asset(
         id=uuid.uuid4(),
-        folder_id=folder_id,
+        folder_id=payload.folder_id,
         filename=payload.key.rsplit("/", 1)[-1],
         minio_bucket=payload.bucket,
         minio_key=payload.key,
@@ -170,7 +180,7 @@ async def complete_upload(
         # 孤儿(无法 abort 已完结的 multipart),记日志留给清理通道;
         # rollback 后重查区分「folder 没了」与「其他唯一约束(重复提交)」
         await db.rollback()
-        still_there = await db.get(Folder, folder_id)
+        still_there = await db.get(Folder, payload.folder_id)
         if still_there is None:
             log.warning(
                 "orphan minio object (folder deleted mid-upload): bucket=%s key=%s",
@@ -859,11 +869,3 @@ async def _project_bucket(db: AsyncSession, project_id: uuid.UUID) -> str:
     if not project:
         raise HTTPException(400, "project not found")
     return project.minio_bucket
-
-
-async def _resolve_folder_by_key(db: AsyncSession, bucket: str, key: str) -> uuid.UUID | None:
-    prefix = key.rsplit("/", 1)[0] + "/" if "/" in key else ""
-    stmt = select(Folder).where(Folder.minio_prefix == prefix)
-    res = await db.execute(stmt)
-    folder = res.scalar_one_or_none()
-    return folder.id if folder else None

@@ -113,6 +113,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       completeMultipartUpload: async (file: any, opts: any) => {
         const bucket = file.meta?.bucket ?? 'ms-dev';
         await http.post(`/api/v1/assets/uploads/${opts.uploadId}/complete`, {
+          folder_id: folderId,
           upload_id: opts.uploadId,
           bucket, key: opts.key, parts: opts.parts,
         });
