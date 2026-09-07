@@ -1,8 +1,12 @@
 # 生产环境外网映射操作流程(runbook)
 
-> 状态:**待实施**(本文档只记录流程,不含任何已执行动作)。
-> 记录日期 2026-09-04。总方案与设计论证见 [public-fallback-entry.md](./public-fallback-entry.md),
-> 本文是其中"prod 复制 dev 试点"的操作化,dev 侧(8080)已于 2026-09-04 全链路验收通过。
+> 状态:**已于 2026-09-07 实施并验收通过**(入口 `http://47.108.119.221:18080`;外网登录/搜索/缩略图 200/
+> 原片 206,内网 prod/dev 回归 200,12222 运维与 8080 dev 通道无恙)。同日随部署将 prod 代码推进到
+> `662754f`(liuqi,含 fbe5822 分页),SPA `index-nixcEnFQ.js`,`.env` 备份 `/home/huanhua/.env.bak-prod-20260904`。
+> 走的是步骤 2B 形态(阶段 3 未上线,改 .env endpoint),副作用照旧:内网用户图片绕公网 + 公网限流共桶。
+> 实施备注:①私钥 `rusheslab-server-main` 原文件末尾缺换行致 libcrypto 拒载,已补(不改内容);②隧道抖动使
+> SPA 首次 tar 流传输半途断流(远端混合态),改"整包 tgz + md5 校验 + 原子替换"重传成功 —— 大文件同步应照此模式。
+> 总方案与设计论证见 [public-fallback-entry.md](./public-fallback-entry.md)。下文流程留作下次参考。
 
 ---
 
