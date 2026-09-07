@@ -114,12 +114,22 @@ export default function FolderDetailPage() {
               </List.Item>
             )}
           />
-          <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          {/* 分页器吸附视口底部:翻页后自动回顶,不用滚到底找页码 */}
+          <div style={{
+            position: 'sticky', bottom: 0,
+            marginTop: 16, padding: '8px 4px',
+            display: 'flex', justifyContent: 'flex-end',
+            background: 'var(--ms-canvas)',
+            borderTop: '1px solid var(--ms-hairline-soft)',
+          }}>
             <Pagination
               current={page}
               pageSize={ASSETS_PAGE_SIZE}
               total={total}
-              onChange={setPage}
+              onChange={(p) => {
+                setPage(p);
+                window.scrollTo({ top: 0 });
+              }}
               showSizeChanger={false}
               showTotal={(t) => `共 ${t} 个文件`}
             />

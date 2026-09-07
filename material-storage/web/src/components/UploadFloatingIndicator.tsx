@@ -16,13 +16,18 @@ export function UploadFloatingIndicator() {
   const stats = useMemo(() => {
     const all = getAllUppies();
     let upInflight = 0;
+    let upFailed = 0;
     for (const u of all.values()) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const files = (u as any).getFiles() as { progress?: { uploadComplete?: boolean } }[];
-      for (const f of files) if (!f.progress?.uploadComplete) upInflight++;
+      const files = (u as any).getFiles() as { progress?: { uploadComplete?: boolean }; error?: unknown }[];
+      for (const f of files) {
+        if (f.error) upFailed++;
+        else if (!f.progress?.uploadComplete) upInflight++;
+      }
     }
     const dlInflight = tasks.filter(t => t.status === 'pending' || t.status === 'running').length;
-    return { upInflight, dlInflight, total: upInflight + dlInflight };
+    // 失败项计入 badge:全部传完只剩失败时,浮标是任务中心(重试入口)唯一的唤起点
+    return { upInflight, upFailed, dlInflight, total: upInflight + upFailed + dlInflight };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [version, getAllUppies, tasks]);
 
@@ -31,10 +36,10 @@ export function UploadFloatingIndicator() {
 
   return (
     <>
-      <Tooltip title={`上传 ${stats.upInflight} · 下载 ${stats.dlInflight} — 点击查看`} placement="left">
+      <Tooltip title={`上传 ${stats.upInflight} · 失败 ${stats.upFailed} · 下载 ${stats.dlInflight} — 点击查看`} placement="left">
         <FloatButton
           icon={<CloudSyncOutlined />}
-          badge={{ count: stats.total, color: '#1677ff' }}
+          badge={{ count: stats.total, color: stats.upFailed > 0 ? '#ff4d4f' : '#1677ff' }}
           onClick={() => setCenterOpen(true)}
           style={{ right: 24, bottom: 80 }}
         />

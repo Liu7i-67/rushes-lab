@@ -2,7 +2,7 @@
  * 三栏 workspace:左 FolderTree / 中 AssetTable / 右 AssetSummaryPanel,顶 ActionsBar。
  */
 import {
-  App, Button, Checkbox, Grid, Layout, Modal, Popconfirm, Select, Skeleton,
+  App, Button, Checkbox, Grid, Layout, Modal, Pagination, Popconfirm, Select, Skeleton,
   Space, Table, Tooltip,
 } from 'antd';
 import {
@@ -10,7 +10,7 @@ import {
   Link2, Lock, RotateCw, Tags, Trash2, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
   useFolder, useFolders, useMe, useProject, useTrashAssets, useUpdateAssetMeta,
@@ -86,6 +86,11 @@ export default function ProjectDetailPage() {
     setPage(1);
     setSelectedIds([]);
   }
+  // 分页器钉在表格区下方(不随行滚动);翻页/切夹把表格滚回顶部
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    tableScrollRef.current?.scrollTo({ top: 0 });
+  }, [activeFolderId]);
 
   const selectedAssets = useMemo(
     () => assetItems.filter(a => selectedIds.includes(a.id)),
@@ -482,8 +487,8 @@ export default function ProjectDetailPage() {
           </Space>
         </div>
 
-        {/* asset table */}
-        <div style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
+        {/* asset table — 表格区内滚,分页器钉在下方不随行滚动 */}
+        <div ref={tableScrollRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
           <Table
             dataSource={assetItems}
             rowKey="id"
@@ -491,14 +496,7 @@ export default function ProjectDetailPage() {
             columns={cols}
             size="middle"
             scroll={{ x: 600 }}
-            pagination={{
-              current: page,
-              pageSize: ASSETS_PAGE_SIZE,
-              total: assetTotal,
-              onChange: (p) => { setPage(p); setSelectedIds([]); },
-              showSizeChanger: false,
-              hideOnSinglePage: true,
-            }}
+            pagination={false}
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys as string[]),
@@ -523,6 +521,31 @@ export default function ProjectDetailPage() {
             }}
           />
         </div>
+
+        {/* 分页器钉底:翻页后表格自动回顶,不用来回拖滚动条 */}
+        {assetTotal > ASSETS_PAGE_SIZE && (
+          <div style={{
+            flexShrink: 0,
+            borderTop: '1px solid var(--ms-hairline-soft)',
+            padding: '8px 16px',
+            display: 'flex', justifyContent: 'flex-end',
+            background: 'var(--ms-surface)',
+          }}>
+            <Pagination
+              size="small"
+              current={page}
+              pageSize={ASSETS_PAGE_SIZE}
+              total={assetTotal}
+              showSizeChanger={false}
+              showTotal={(t) => `共 ${t} 个文件`}
+              onChange={(p) => {
+                setPage(p);
+                setSelectedIds([]);
+                tableScrollRef.current?.scrollTo({ top: 0 });
+              }}
+            />
+          </div>
+        )}
       </Layout.Content>
 
       {/* 右:summary */}

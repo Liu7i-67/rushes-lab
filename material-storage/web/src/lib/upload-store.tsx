@@ -4,20 +4,44 @@
  * - 关 drawer 只 hide UI,uppy 在后台继续上传
  * - dynamic import uppy(保持 code splitting,首屏不加载 uppy chunk)
  */
-import { App } from 'antd';
 import { useQueryClient } from '@tanstack/react-query';
 import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useRef,
   useState,
   type ReactNode,
 } from 'react';
-import { apiBase, errorMessage, http } from '../api/client';
+import { apiBase, http } from '../api/client';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UppyAny = any;
+
+export interface UploadStats {
+  total: number;    // 全部文件数
+  success: number;  // uploadComplete
+  failed: number;   // error 非空
+  inflight: number; // 未完成且无 error(排队 + 上传中)
+  loaded: number;   // bytesUploaded 之和
+  bytesTotal: number; // 各文件 size 之和
+}
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function computeUploadStats(files: UppyAny[]): UploadStats {
+  const stats: UploadStats = { total: 0, success: 0, failed: 0, inflight: 0, loaded: 0, bytesTotal: 0 };
+  for (const f of files) {
+    stats.total++;
+    // else-if 链保证三数互斥且合计 = total;error 优先(失败不应再计成功)
+    if (f.error) stats.failed++;
+    else if (f.progress?.uploadComplete) stats.success++;
+    else stats.inflight++;
+    stats.loaded += f.progress?.bytesUploaded ?? 0;
+    stats.bytesTotal += f.size ?? 0;
+  }
+  return stats;
+}
 
 interface UploadCtx {
   activeFolderId: string | null;
@@ -31,6 +55,7 @@ interface UploadCtx {
 
 const Ctx = createContext<UploadCtx | null>(null);
 
+// eslint-disable-next-line react-refresh/only-export-components
 export function useUpload() {
   const v = useContext(Ctx);
   if (!v) throw new Error('useUpload 必须在 UploadProvider 内');
@@ -40,8 +65,9 @@ export function useUpload() {
 export function UploadProvider({ children }: { children: ReactNode }) {
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null);
   const uppies = useRef<Map<string, UppyAny>>(new Map());
+  // per-folder 列表刷新 debounce timer
+  const refreshTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const [version, setVersion] = useState(0);
-  const { message } = App.useApp();
   const qc = useQueryClient();
 
   const buildUppy = useCallback(async (folderId: string): Promise<UppyAny> => {
@@ -53,7 +79,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
     const u: UppyAny = new Uppy({
       locale,
-      restrictions: { maxNumberOfFiles: 50, maxFileSize: 5 * 1024 * 1024 * 1024 },
+      restrictions: { maxNumberOfFiles: 10000, maxFileSize: 5 * 1024 * 1024 * 1024 },
       autoProceed: false,
     }).use(AwsS3, {
       shouldUseMultipart: true,
@@ -102,23 +128,32 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       },
     });
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    u.on('upload-success', (file: any) => {
-      message.success(`${file?.name ?? ''} 上传成功`);
-      qc.invalidateQueries({ queryKey: ['assets', folderId] });
+    // 列表刷新走 per-folder 2s trailing debounce,大批量时避免每个文件成功都打一次接口
+    u.on('upload-success', () => {
+      const prev = refreshTimers.current.get(folderId);
+      if (prev) clearTimeout(prev);
+      refreshTimers.current.set(folderId, setTimeout(() => {
+        refreshTimers.current.delete(folderId);
+        qc.invalidateQueries({ queryKey: ['assets', folderId] });
+      }, 2000));
       setVersion(v => v + 1);
     });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    u.on('upload-error', (file: any, err: any) => {
-      message.error(`${file?.name ?? ''} 上传失败:${errorMessage(err)}`);
-      setVersion(v => v + 1);
-    });
+    u.on('upload-error', () => setVersion(v => v + 1));
     u.on('progress', () => setVersion(v => v + 1));
     u.on('file-added', () => setVersion(v => v + 1));
     u.on('file-removed', () => setVersion(v => v + 1));
+    u.on('upload-retry', () => setVersion(v => v + 1));
+    // 批次结束立即 flush debounce 并刷列表
+    u.on('complete', () => {
+      const t = refreshTimers.current.get(folderId);
+      if (t) clearTimeout(t);
+      refreshTimers.current.delete(folderId);
+      qc.invalidateQueries({ queryKey: ['assets', folderId] });
+      setVersion(v => v + 1);
+    });
 
     return u;
-  }, [message, qc]);
+  }, [qc]);
 
   const open = useCallback(async (folderId: string) => {
     if (!uppies.current.has(folderId)) {
@@ -131,6 +166,33 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   const close = useCallback(() => setActiveFolderId(null), []);
   const getUppy = useCallback((folderId: string) => uppies.current.get(folderId), []);
   const getAllUppies = useCallback(() => uppies.current, []);
+
+  // 有在上传/排队的文件时拦截页面关闭防误关(失败文件已停止推进,不算 in-flight)
+  useEffect(() => {
+    const hasInflight = () => {
+      for (const u of uppies.current.values()) {
+        for (const f of u.getFiles()) {
+          if (!f.progress?.uploadComplete && !f.error) return true;
+        }
+      }
+      return false;
+    };
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    if (hasInflight()) window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [version]);
+
+  // 卸载时清空所有列表刷新 timer
+  useEffect(() => {
+    const timers = refreshTimers.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
 
   return (
     <Ctx.Provider value={{ activeFolderId, open, close, getUppy, getAllUppies, version }}>
