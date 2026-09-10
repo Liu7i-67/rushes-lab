@@ -128,11 +128,43 @@ ssh hh2 'docker exec ms-api-dev grep -c <本次新代码的特征串> /app/app/<
 
 ⑤ 业务语义抽测一条（例：本次的 download-link 附件语义，用 X-User-Id dev 通道 + 库内真实 asset 实测响应头）。本地 build 指纹获取：`grep -o 'index-[^"]*\.js' api/app/static/web/index.html | head -1`。
 
-## 6. 回滚
+## 6. 正式环境（prod）专项注意
+
+prod 是真实用户环境，除 §1-§5 通用规则外，额外遵守：
+
+**通道（最容易踩的坑）**：prod 只能走 `ssh hh2-prod`（huanhua）。`hh2` 别名身份是
+msdev，对 `/home/huanhua/ms` 无写权限、无免密 sudo，rsync 会满屏
+`chgrp/Permission denied` 后以 code 23 失败（2026-09-10 实踩，当时 prod 未受影响
+是万幸——rsync 被拒的文件一个都没写进去）。`deploy_lan.sh` 的 prod 分支已改为
+`HOST=hh2-prod` 且重启去掉 sudo（huanhua 直管 docker，实测无需 sudo）。
+
+**上线前确认（比 dev 多三步）**：
+1. 过一遍增量 `git log <prod当前commit>..HEAD --oneline`，心里有数每个 commit
+   去哪了；后端契约变更必须向后兼容（additive 可选参数 / 默认行为不变）才可直接上。
+2. 无 migration / 无 `.env` 变更的假设要**逐条核实**而不是沿用 dev 的结论。
+3. 记录本次 SPA 指纹与回滚备份：SPA 原子替换保留 `web.bak-<日期>` 直到确认稳定。
+
+**部署窗口与告知**：hh2 prod **没有** MAINTENANCE_ISSUES 弹窗通道（那是 server2
+的 deploy_server2.sh 机制）；重启 ms-api 有秒级不可用，提前跟真实用户打好招呼。
+
+**验证（双入口都测）**：
+```bash
+# 内网与外网两个入口的 SPA 指纹必须一致且等于本地 build
+ssh hh2-prod 'curl -s http://127.0.0.1:80/ms-static/web/ | grep -o "index-[^\"]*\.js" | head -1'
+curl -s http://47.108.196.211:18080/ms-static/web/ | grep -o 'index-[^"]*\.js' | head -1
+```
+再加 auth/me 401、容器内新代码 grep（§5）。**业务级 API 实测在 prod 不能用
+X-User-Id**（仅 dev 生效）——用真实账号登录后抽查（如 download-link 的
+attachment 响应头），或引用同源代码在 dev 的实测结论并在汇报中注明。
+
+**回滚**：SPA 用保留的 `web.bak-<日期>` 换回；代码 = 工作区切回旧 commit 重新走
+分片通道 + restart。回滚后重过验证清单。
+
+## 7. 回滚（dev/prod 通用）
 
 工作区 `git checkout <目标commit>` → 重复 §4（或 `deploy_lan.sh`，能通就通）→ restart。`.env` 与数据目录全程不动。回滚后同样过 §5 清单。
 
-## 7. 与 server2 的区别（别混用）
+## 8. 与 server2 的区别（别混用）
 
 - `deploy_server2.sh`（公网 8.156.34.238，tester 入口）才有 `MAINTENANCE_ISSUES` 弹窗机制；hh2 没有弹窗通道，tester 通知走 issue / 群里附回归清单。
 - server2 是 rsync 直连（无跳板断流问题）；hh2 必经跳板隧道，长流不可靠，**优先考虑分片通道**。

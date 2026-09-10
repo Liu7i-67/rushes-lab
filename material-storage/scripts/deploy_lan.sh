@@ -17,11 +17,14 @@ ENVNAME="${1:-}"
 RESTART="${2:-}"
 case "$ENVNAME" in
   dev)  SSH_USER=msdev;   REMOTE_DIR=/home/msdev/ms;   ENTRY="http://192.168.110.221:8090" ;;
-  prod) SSH_USER=huanhua; REMOTE_DIR=/home/huanhua/ms; ENTRY="http://192.168.110.221" ;;
+  # HOST 按环境分:跳板迁移(2026-09-10)后 hh2 别名身份是 msdev,对 huanhua 的
+  # prod 目录无写权限且无免密 sudo —— prod 必须走 hh2-prod(huanhua);
+  # huanhua 免 sudo 直管 docker,重启不需要 sudo(同日实测)。
+  dev)  SSH_USER=msdev;   REMOTE_DIR=/home/msdev/ms;   ENTRY="http://192.168.110.221:8090"; HOST=hh2 ;;
+  prod) SSH_USER=huanhua; REMOTE_DIR=/home/huanhua/ms; ENTRY="http://192.168.110.221"; HOST=hh2-prod ;;
   *) echo "用法: bash scripts/deploy_lan.sh <dev|prod> [--restart]" >&2; exit 2 ;;
 esac
 
-HOST=hh2
 [[ -d api && -d poc ]] || { echo "请在 material-storage/ 目录下执行" >&2; exit 2; }
 
 # 内网反向隧道(经跳板中转)会周期性抖动,单次连接常撞上 refused;
@@ -129,11 +132,9 @@ echo "✓ 代码已同步,版本记录已写入 $REMOTE_DIR/DEPLOYED.md"
 
 if [[ "$RESTART" == "--restart" ]]; then
   echo "═══ 重启 api / worker ═══"
-  if [[ "$ENVNAME" == "dev" ]]; then
-    ssh_r "cd $REMOTE_DIR/api && docker compose restart ms-api ms-worker"
-  else
-    ssh_r "cd $REMOTE_DIR/api && sudo docker compose restart ms-api ms-worker"
-  fi
+  # 两个环境都不用 sudo:huanhua 免 sudo 直管 docker(2026-09-10 实测),
+  # 且 sudo 在无 TTY 的 ssh 里撞密码会直接挂死
+  ssh_r "cd $REMOTE_DIR/api && docker compose restart ms-api ms-worker"
   echo "✓ 已重启"
 fi
 
