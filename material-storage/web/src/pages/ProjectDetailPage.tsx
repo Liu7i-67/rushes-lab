@@ -1,13 +1,15 @@
 /**
- * 三栏 workspace:左 FolderTree / 中 AssetTable / 右 AssetSummaryPanel,顶 ActionsBar。
+ * workspace:compact(<1024)单栏骨架(树 Drawer + AssetCardList + 详情 bottom Drawer +
+ * 批量操作栏)/ 桌面三栏(左 FolderTree / 中 AssetTable / 右 AssetSummaryPanel,顶 ActionsBar)。
  */
 import {
-  App, Button, Checkbox, Grid, Layout, Modal, Pagination, Popconfirm, Select, Skeleton,
+  App, Button, Checkbox, Drawer, Layout, Modal, Pagination, Popconfirm, Select, Skeleton,
   Space, Table, Tooltip,
 } from 'antd';
 import {
-  Archive, Download, FileText, Folder as FolderIcon, FolderPlus, Key,
-  Link2, Lock, RotateCw, Tags, Trash2, Upload, Users as UsersIcon,
+  Archive, ChevronDown, ChevronLeft, ChevronRight, Download, FileText,
+  Folder as FolderIcon, FolderPlus, Key, Link2, Lock, Menu, RotateCw, Settings, Tags,
+  Trash2, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -18,6 +20,7 @@ import {
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { FolderTree } from '../components/FolderTree';
 import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
+import { AssetCardList } from '../components/AssetCardList';
 import { AssetTagEditor } from '../components/AssetTagEditor';
 import { AssetThumbnail } from '../components/AssetThumbnail';
 import { FolderTrashModal } from '../components/FolderTrashModal';
@@ -25,6 +28,8 @@ import { ProjectMembersDrawer } from '../components/ProjectMembersDrawer';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
 import { NewFolderModal } from '../components/NewFolderModal';
+import { useCompactViewport } from '../lib/use-viewports';
+import { useKeyboardVisible, useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { useUpload } from '../lib/upload-store';
 import { useDownloads } from '../lib/download-store';
 import { errorMessage } from '../api/client';
@@ -40,8 +45,11 @@ function fmtBytes(n: number): string {
 export default function ProjectDetailPage() {
   const { projectId, folderId: paramFolderId } = useParams<{ projectId: string; folderId?: string }>();
   const navigate = useNavigate();
-  const screens = Grid.useBreakpoint();
-  const isMobile = !screens.md;
+  // hooks 置顶(compact 判定唯一源,见 use-viewports 模块注释:首过返回 mobile,
+  // 分支只切 JSX,不挂不同数量的 hook)
+  const compact = useCompactViewport();
+  const kbVisible = useKeyboardVisible();
+  const kbViewportHeight = useKeyboardViewportHeight();
 
   const { data: project } = useProject(projectId);
   // 项目级上传权限(uploader/admin):建根目录、FolderTree 新建入口用;
@@ -77,6 +85,12 @@ export default function ProjectDetailPage() {
   const assetTotal = assets?.total ?? 0;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // compact 专属 UI 状态(桌面分支不消费;hooks/状态置顶约定 → 无条件声明):
+  // 树 Drawer / folder 管理 Drawer / 详情 Drawer(state 存 assetItems 的 index 而非 id,
+  // ‹ n/N › 切张只换内容,Drawer 常驻)
+  const [treeOpen, setTreeOpen] = useState(false);
+  const [manageOpen, setManageOpen] = useState(false);
+  const [detailIndex, setDetailIndex] = useState<number | null>(null);
   // 切 folder 回第一页并清空选择:分页选择只针对当前窗口,跨页保留会产生
   // 「选中但未加载 → 批量操作静默漏掉」的错位。render 期比较旧值重置
   // (React「adjust state on prop change」模式,不走 setState-in-effect)
@@ -85,6 +99,7 @@ export default function ProjectDetailPage() {
     setPrevFolder(activeFolderId);
     setPage(1);
     setSelectedIds([]);
+    setDetailIndex(null);
   }
   // 分页器钉在表格区下方(不随行滚动);翻页/切夹把表格滚回顶部
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
@@ -128,7 +143,8 @@ export default function ProjectDetailPage() {
   const handleDownload = async (a: Asset) => {
     try {
       const link = await dlLink.mutateAsync(a.id);
-      await downloads.start(link.url, a.filename);
+      // assetId 供无 FSA 环境的直连路径换 as_attachment 链接(Chromium FSA 路径忽略)
+      await downloads.start(link.url, a.filename, { assetId: a.id });
     } catch (e: unknown) {
       const err = e as { response?: { status?: number } };
       if (err.response?.status === 403) setApplyAsset(a);
@@ -307,7 +323,366 @@ export default function ProjectDetailPage() {
 
   const hasSelection = selectedIds.length > 0;
 
-  // mobile 退化:tree drawer + 单栏 file 列表
+  // ─── 共享 modal/抽屉群:PC / compact 两分支共用 ──────────────────────────
+  // (均 portal 渲染,挂在哪个 return 里与最终 DOM 位置无关;抽出来避免两分支重复)
+  const modals = (
+    <>
+      {applyAsset && (
+        <RequestAccessModal
+          open onClose={() => setApplyAsset(null)}
+          targetId={applyAsset.id} targetName={applyAsset.filename}
+          targetType="asset" defaultAction="download"
+        />
+      )}
+
+      {newFolderMode && projectId && (
+        <NewFolderModal
+          open
+          onClose={() => setNewFolderMode(null)}
+          projectId={projectId}
+          parentFolderId={newFolderMode === 'child' ? (activeFolderId ?? undefined) : undefined}
+          parentName={newFolderMode === 'child' ? folder?.minio_prefix : undefined}
+          parentIsSensitive={newFolderMode === 'child' ? folder?.is_sensitive : false}
+          onCreated={(fid) => {
+            setActiveFolderId(fid);
+            navigate(`/projects/${projectId}/folders/${fid}`, { replace: true });
+          }}
+        />
+      )}
+
+      {project && me && (
+        <ProjectMembersDrawer
+          open={membersOpen}
+          onClose={() => setMembersOpen(false)}
+          project={project}
+          me={me}
+        />
+      )}
+
+      {/* #129: folder admin 的"申请链接"modal — 生成 folder 级请求链接 */}
+      {folder && folder.my_can_admin && (
+        <RequestLinkCreateModal
+          open={linkOpen}
+          onClose={() => setLinkOpen(false)}
+          targetType={folder.is_sensitive ? 'sensitive_folder' : 'folder'}
+          targetId={folder.id}
+          targetName={folder.name}
+        />
+      )}
+
+      {/* #151: 批量打标 modal */}
+      <BulkTagModal
+        open={bulkTagOpen}
+        onClose={() => setBulkTagOpen(false)}
+        assets={selectedAssets}
+      />
+
+      {/* 回收站:本文件夹软删文件(恢复 / 彻底清除) */}
+      {folder && (
+        <FolderTrashModal
+          folderId={folder.id}
+          open={trashOpen}
+          onClose={() => setTrashOpen(false)}
+        />
+      )}
+    </>
+  );
+
+  // ─── compact(<1024):单栏工作区(方案 §3.1)─────────────────────────────
+  // 放弃 PC 的 height:calc(100vh-…) 内滚,自然文档流滚动;外层无固定高/圆角/阴影。
+  if (compact) {
+    const detailAsset = detailIndex != null ? assetItems[detailIndex] : null;
+    // 键盘弹起:Drawer 收缩为 visualViewport.height - 顶栏(56),打标输入框不被遮挡
+    const drawerHeight = kbViewportHeight != null ? kbViewportHeight - 56 : 'min(72vh, 72dvh)';
+    const toggleSelect = (id: string) =>
+      setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
+    return (
+      <div className="ms-enter">
+        {/* folder header — 最左 = 树 Drawer 触发(hamburger + 当前夹名 + chevron-down) */}
+        <div style={{ padding: '2px 0 10px', borderBottom: '1px solid var(--ms-hairline-soft)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Button type="text" onClick={() => setTreeOpen(true)} style={{
+              flex: 1, minWidth: 0, height: 44, maxWidth: '100%',
+              justifyContent: 'flex-start', padding: '0 8px', gap: 8,
+            }}>
+              <Menu size={18} strokeWidth={1.8} style={{ flexShrink: 0, color: 'var(--ms-ink-muted)' }} />
+              <span style={{
+                flex: 1, minWidth: 0, textAlign: 'left',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                fontFamily: 'var(--ms-font-display)', fontSize: 16, fontWeight: 500,
+                color: 'var(--ms-ink)', letterSpacing: '-0.01em',
+              }}>{folder?.name ?? '—'}</span>
+              <ChevronDown size={16} strokeWidth={1.8}
+                           style={{ flexShrink: 0, color: 'var(--ms-ink-subtle)' }} />
+            </Button>
+            {folder?.is_sensitive && (
+              <span title="敏感目录" style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '2px 8px', flexShrink: 0,
+                background: 'var(--ms-accent-soft)',
+                color: 'var(--ms-accent)',
+                borderRadius: 3,
+                fontSize: 10.5, fontWeight: 500, letterSpacing: '0.02em',
+              }}>
+                <Lock size={10} strokeWidth={2.2} />
+                SENSITIVE
+              </span>
+            )}
+            {folder && folder.my_can_admin && (
+              <Button size="small" icon={<Settings size={13} strokeWidth={1.8} />}
+                      onClick={() => setManageOpen(true)}>
+                管理
+              </Button>
+            )}
+          </div>
+          {/* 第二行(wrap):权限 chips + folder 级操作(成员/申请链接/删除文件夹) */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 6 }}>
+            {folder && <MyFolderPerms folder={folder} />}
+            {project && me && (
+              <Button size="small" icon={<UsersIcon size={13} strokeWidth={1.8} />}
+                      onClick={() => setMembersOpen(true)}>
+                成员
+              </Button>
+            )}
+            {folder && folder.my_can_admin && (
+              <Tooltip title="生成申请链接,发给别人让他申请这个文件夹的临时下载权限">
+                <Button size="small" icon={<Link2 size={13} strokeWidth={1.8} />}
+                        onClick={() => setLinkOpen(true)}>
+                  申请链接
+                </Button>
+              </Tooltip>
+            )}
+            {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
+              <Popconfirm
+                title={`删除文件夹「${folder.name}」?`}
+                description={trashCount > 0
+                  ? `回收站内还有 ${trashCount} 个已删除文件,请先清空回收站`
+                  : '删除后不可恢复'}
+                okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={handleDeleteFolder}
+              >
+                <Tooltip title={folderDeletable
+                  ? '删除当前文件夹(不可恢复)'
+                  : trashCount > 0
+                    ? `请先清空回收站(还有 ${trashCount} 个已删除文件)`
+                    : '先删除文件夹内所有文件'}>
+                  <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
+                          disabled={!folderDeletable} loading={delFolder.isPending}>
+                    删除文件夹
+                  </Button>
+                </Tooltip>
+              </Popconfirm>
+            )}
+          </div>
+          {folder?.minio_prefix && (
+            <div style={{
+              marginTop: 4,
+              fontFamily: 'var(--ms-font-mono)',
+              fontSize: 11,
+              color: 'var(--ms-ink-subtle)',
+            }}>{folder.minio_prefix}</div>
+          )}
+        </div>
+
+        {/* actions bar — 允许 wrap;批量打标/删除收进底部批量操作栏,批量下载不做(§3.1) */}
+        <div style={{
+          padding: '10px 0',
+          borderBottom: '1px solid var(--ms-hairline-soft)',
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        }}>
+          {/* 全选只作用于当前页(服务端分页只加载本页);语义与 PC 一致,共用 selectedIds */}
+          <Checkbox
+            indeterminate={hasSelection && selectedIds.length < assetItems.length}
+            checked={hasSelection && assetItems.length > 0 && selectedIds.length === assetItems.length}
+            onChange={(e) => setSelectedIds(e.target.checked ? assetItems.map(a => a.id) : [])}
+          />
+          <span style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
+            {hasSelection ? (
+              <>已选 <span className="ms-mono" style={{ color: 'var(--ms-accent)', fontWeight: 500 }}>
+                {selectedIds.length}</span> / 本页 {assetItems.length}</>
+            ) : (
+              <>共 <span className="ms-mono">{assetTotal}</span> 个文件</>
+            )}
+          </span>
+          <Space size={6} wrap>
+            <Tooltip title={folder?.my_can_upload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
+              <Button size="small" type="primary"
+                      icon={<Upload size={13} strokeWidth={2} />}
+                      disabled={!folder?.my_can_upload}
+                      onClick={() => activeFolderId && upload.open(activeFolderId)}>上传</Button>
+            </Tooltip>
+            {/* 回收站:普通夹 folder admin;sensitive 夹仅系统 admin */}
+            {canSeeTrash && (
+              <Button size="small" icon={<Archive size={13} strokeWidth={2} />}
+                      onClick={() => setTrashOpen(true)}>
+                回收站{trashCount > 0 ? ` ${trashCount}` : ''}
+              </Button>
+            )}
+            <Button size="small" icon={<RotateCw size={13} strokeWidth={2} />}
+                    onClick={() => refetch()}>刷新</Button>
+          </Space>
+        </div>
+
+        {/* 卡片列表 + 分页器(文档流普通块);勾选态追加批量栏高度 padding-bottom,
+            防末端内容被「批量栏 + TabBar」双层盖住 */}
+        <div style={{ padding: '12px 0 0', paddingBottom: hasSelection ? 76 : 12 }}>
+          <AssetCardList
+            assets={assetItems}
+            loading={assetsLoading || isFetching}
+            emptyText={
+              <div style={{ padding: '60px 16px', textAlign: 'center' }}>
+                <FileText size={32} strokeWidth={1.3}
+                          style={{ color: 'var(--ms-hairline)' }} />
+                <div style={{
+                  marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
+                }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
+              </div>
+            }
+            selectable
+            selectedIds={selectedIds}
+            onToggle={toggleSelect}
+            onOpen={setDetailIndex}
+          />
+          {assetTotal > ASSETS_PAGE_SIZE && (
+            <div style={{
+              padding: '4px 0 8px',
+              display: 'flex', justifyContent: 'flex-end',
+            }}>
+              <Pagination
+                size="small"
+                current={page}
+                pageSize={ASSETS_PAGE_SIZE}
+                total={assetTotal}
+                showSizeChanger={false}
+                showTotal={(t) => `共 ${t} 个文件`}
+                onChange={(p) => {
+                  setPage(p);
+                  setSelectedIds([]);
+                  setDetailIndex(null);
+                  window.scrollTo({ top: 0 });
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* 批量操作栏(§3.1):sticky 钉在 TabBar 上方;键盘弹起隐藏。
+            不放「下载」— 移动端浏览器拦截连续多下载,下载走每卡行内按钮 */}
+        {hasSelection && (
+          <div style={{
+            position: 'sticky',
+            bottom: 'calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))',
+            zIndex: 'var(--ms-z-batchbar)',
+            marginTop: 12,
+            display: kbVisible ? 'none' : 'flex',
+            alignItems: 'center', gap: 8,
+            padding: '6px 8px 6px 14px',
+            background: 'var(--ms-surface)',
+            border: '1px solid var(--ms-hairline)',
+            borderRadius: 'var(--ms-radius-lg)',
+            boxShadow: 'var(--ms-shadow-md)',
+          }}>
+            <span style={{ fontSize: 13, color: 'var(--ms-ink-muted)', flexShrink: 0 }}>
+              已选 <span className="ms-mono" style={{ color: 'var(--ms-accent)', fontWeight: 500 }}>
+                {selectedIds.length}</span>
+            </span>
+            <div style={{ flex: 1 }} />
+            <Button style={{ height: 44 }} icon={<Tags size={14} strokeWidth={2} />}
+                    disabled={!folder?.my_can_upload} onClick={() => setBulkTagOpen(true)}>
+              打标
+            </Button>
+            <Popconfirm
+              title={`删除 ${selectedIds.length} 个文件?`}
+              description="软删除;管理员可在回收站恢复或彻底清除"
+              okText="删除" okButtonProps={{ danger: true }}
+              disabled={!folder?.my_can_admin}
+              onConfirm={handleBulkDelete}
+            >
+              <Button danger style={{ height: 44 }} icon={<Trash2 size={14} strokeWidth={2} />}
+                      disabled={!folder?.my_can_admin} loading={del.isPending}>
+                删除
+              </Button>
+            </Popconfirm>
+            <Button style={{ height: 44 }} onClick={() => setSelectedIds([])}>
+              清空选择
+            </Button>
+          </div>
+        )}
+
+        {/* 左:FolderTree Drawer(替代 PC 左栏) */}
+        <Drawer
+          placement="left"
+          open={treeOpen}
+          onClose={() => setTreeOpen(false)}
+          width="min(320px, 84vw)"
+          title={project?.name}
+          styles={{ body: { padding: 0, overflowY: 'auto' } }}
+        >
+          <FolderTree
+            folders={folders}
+            projectName={project?.name}
+            activeFolderId={activeFolderId}
+            onSelect={(fid) => { onFolderSelect(fid); setTreeOpen(false); }}
+            onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
+            onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
+            canUpload={canUploadProject}
+          />
+        </Drawer>
+
+        {/* 单文件详情 bottom Drawer:内容 = AssetSummaryPanel 单选态原样复用;
+            头部 ‹ n/N › 行内切换(批量过图选片)。预览 Modal 在 Drawer 内叠层:
+            两者同 z 1000,靠 DOM 挂载序后者在上 — 不改 getContainer */}
+        <Drawer
+          placement="bottom"
+          open={detailAsset != null}
+          onClose={() => setDetailIndex(null)}
+          height={drawerHeight}
+          styles={{ body: { padding: 0, overflowY: 'auto' } }}
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <Button type="text" size="small" aria-label="上一个"
+                      icon={<ChevronLeft size={16} strokeWidth={1.8} />}
+                      disabled={(detailIndex ?? 0) <= 0}
+                      onClick={() => setDetailIndex(i => (i == null ? null : i - 1))} />
+              <span className="ms-mono" style={{
+                fontSize: 12.5, color: 'var(--ms-ink-muted)', flexShrink: 0,
+              }}>{(detailIndex ?? 0) + 1} / {assetItems.length}</span>
+              <Button type="text" size="small" aria-label="下一个"
+                      icon={<ChevronRight size={16} strokeWidth={1.8} />}
+                      disabled={(detailIndex ?? 0) >= assetItems.length - 1}
+                      onClick={() => setDetailIndex(i => (i == null ? null : i + 1))} />
+              <span style={{
+                flex: 1, minWidth: 0, marginLeft: 6, fontSize: 13,
+                color: 'var(--ms-ink-muted)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{detailAsset?.filename}</span>
+            </div>
+          }
+        >
+          {detailAsset && (
+            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder} />
+          )}
+        </Drawer>
+
+        {/* folder 级管理面板:AssetSummaryPanel 空选态原样复用
+            (内部自动渲染 FolderInvitePanel / FolderGrantsPanel) */}
+        <Drawer
+          placement="bottom"
+          open={manageOpen}
+          onClose={() => setManageOpen(false)}
+          height={drawerHeight}
+          title="文件夹管理"
+          styles={{ body: { padding: 0, overflowY: 'auto' } }}
+        >
+          {folder && me && <AssetSummaryPanel selected={[]} me={me} folder={folder} />}
+        </Drawer>
+
+        {modals}
+      </div>
+    );
+  }
+
   // 桌面:三栏 layout
   return (
     <Layout className="ms-enter" style={{
@@ -319,24 +694,22 @@ export default function ProjectDetailPage() {
       overflow: 'hidden',
       boxShadow: 'var(--ms-shadow-sm)',
     }}>
-      {/* 左:folder tree */}
-      {!isMobile && (
-        <Layout.Sider width={260} theme="light" style={{
-          background: 'var(--ms-surface)',
-          borderRight: '1px solid var(--ms-hairline)',
-          overflow: 'auto',
-        }}>
-          <FolderTree
-            folders={folders}
-            projectName={project?.name}
-            activeFolderId={activeFolderId}
-            onSelect={onFolderSelect}
-            onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
-            onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
-            canUpload={canUploadProject}
-          />
-        </Layout.Sider>
-      )}
+      {/* 左:folder tree(compact 分支为左滑 Drawer) */}
+      <Layout.Sider width={260} theme="light" style={{
+        background: 'var(--ms-surface)',
+        borderRight: '1px solid var(--ms-hairline)',
+        overflow: 'auto',
+      }}>
+        <FolderTree
+          folders={folders}
+          projectName={project?.name}
+          activeFolderId={activeFolderId}
+          onSelect={onFolderSelect}
+          onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
+          onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
+          canUpload={canUploadProject}
+        />
+      </Layout.Sider>
 
       {/* 中:folder header + actions bar + asset table */}
       <Layout.Content style={{
@@ -548,88 +921,16 @@ export default function ProjectDetailPage() {
         )}
       </Layout.Content>
 
-      {/* 右:summary */}
-      {!isMobile && (
-        <Layout.Sider width={320} theme="light" style={{
-          background: 'var(--ms-surface)',
-          borderLeft: '1px solid var(--ms-hairline)',
-          overflow: 'auto',
-        }}>
-          <AssetSummaryPanel selected={selectedAssets} me={me} folder={folder} />
-        </Layout.Sider>
-      )}
+      {/* 右:summary(compact 分支 = 卡片 tap 打开的详情 Drawer) */}
+      <Layout.Sider width={320} theme="light" style={{
+        background: 'var(--ms-surface)',
+        borderLeft: '1px solid var(--ms-hairline)',
+        overflow: 'auto',
+      }}>
+        <AssetSummaryPanel selected={selectedAssets} me={me} folder={folder} />
+      </Layout.Sider>
 
-      {/* mobile 下:tree 在顶部 collapsible(简化:用 Modal 选 folder)*/}
-      {isMobile && (
-        <Modal
-          title="选择文件夹"
-          open={false /* 留 hamburger 触发,iter2 */}
-          onCancel={() => undefined}
-          footer={null}
-        >
-          <FolderTree folders={folders} projectName={project?.name}
-                      activeFolderId={activeFolderId} onSelect={onFolderSelect} />
-        </Modal>
-      )}
-
-      {applyAsset && (
-        <RequestAccessModal
-          open onClose={() => setApplyAsset(null)}
-          targetId={applyAsset.id} targetName={applyAsset.filename}
-          targetType="asset" defaultAction="download"
-        />
-      )}
-
-      {newFolderMode && projectId && (
-        <NewFolderModal
-          open
-          onClose={() => setNewFolderMode(null)}
-          projectId={projectId}
-          parentFolderId={newFolderMode === 'child' ? (activeFolderId ?? undefined) : undefined}
-          parentName={newFolderMode === 'child' ? folder?.minio_prefix : undefined}
-          parentIsSensitive={newFolderMode === 'child' ? folder?.is_sensitive : false}
-          onCreated={(fid) => {
-            setActiveFolderId(fid);
-            navigate(`/projects/${projectId}/folders/${fid}`, { replace: true });
-          }}
-        />
-      )}
-
-      {project && me && (
-        <ProjectMembersDrawer
-          open={membersOpen}
-          onClose={() => setMembersOpen(false)}
-          project={project}
-          me={me}
-        />
-      )}
-
-      {/* #129: folder admin 的"申请链接"modal — 生成 folder 级请求链接 */}
-      {folder && folder.my_can_admin && (
-        <RequestLinkCreateModal
-          open={linkOpen}
-          onClose={() => setLinkOpen(false)}
-          targetType={folder.is_sensitive ? 'sensitive_folder' : 'folder'}
-          targetId={folder.id}
-          targetName={folder.name}
-        />
-      )}
-
-      {/* #151: 批量打标 modal */}
-      <BulkTagModal
-        open={bulkTagOpen}
-        onClose={() => setBulkTagOpen(false)}
-        assets={selectedAssets}
-      />
-
-      {/* 回收站:本文件夹软删文件(恢复 / 彻底清除) */}
-      {folder && (
-        <FolderTrashModal
-          folderId={folder.id}
-          open={trashOpen}
-          onClose={() => setTrashOpen(false)}
-        />
-      )}
+      {modals}
     </Layout>
   );
 }

@@ -13,6 +13,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { MaintenanceBanner } from './components/MaintenanceBanner';
 import { UploadProvider } from './lib/upload-store';
 import { DownloadProvider } from './lib/download-store';
+import { useCompactViewport } from './lib/use-viewports';
+import { MobileTabBar } from './components/MobileTabBar';
 
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
 const ProjectDetailPage = lazy(() => import('./pages/ProjectDetailPage'));
@@ -79,6 +81,8 @@ const RouterRoutes = () => (
 function AppShell() {
   const { data: me, isLoading, isError } = useMe();
   const location = useLocation();
+  // hooks 置顶(compact 判定唯一源,见 use-viewports 模块注释)
+  const compact = useCompactViewport();
 
   // #149: 本地登录 / 改密是独立页(无 AppShell),未登录时也放行(useLocation 为 basename 相对路径)
   const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password';
@@ -127,7 +131,10 @@ function AppShell() {
       <AppHeader me={me} />
       <main style={{
         flex: 1,
-        padding: '32px 24px 80px',
+        // compact 下底部预留 TabBar 高 + 安全区(末端 2-4px 不被盖),32px 是与 TabBar 的呼吸位
+        padding: compact
+          ? '16px 12px calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom) + 32px)'
+          : '32px 24px 80px',
         maxWidth: 1480,
         margin: '0 auto',
         width: '100%',
@@ -136,6 +143,8 @@ function AppShell() {
       </main>
       <PersistentUploadDrawer />
       <UploadFloatingIndicator />
+      {/* 内部自判 compact,PC 渲染 null */}
+      <MobileTabBar />
     </div>
   );
 }

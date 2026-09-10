@@ -141,6 +141,7 @@ export function FolderTree({
           <button
             onClick={onCreateRoot}
             aria-label="新建一级文件夹"
+            className="ms-ghost-btn"
             style={ghostIconBtn}
             onMouseEnter={e => Object.assign(e.currentTarget.style, ghostIconBtnHover)}
             onMouseLeave={e => Object.assign(e.currentTarget.style, ghostIconBtnRest)}
@@ -154,6 +155,7 @@ export function FolderTree({
           <button
             onClick={onCreateChild}
             aria-label="新建子文件夹"
+            className="ms-ghost-btn"
             style={{ ...ghostIconBtn, color: 'var(--ms-accent)' }}
             onMouseEnter={e => Object.assign(e.currentTarget.style, ghostIconBtnHover)}
             onMouseLeave={e => Object.assign(e.currentTarget.style, {

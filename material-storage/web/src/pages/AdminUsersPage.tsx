@@ -12,6 +12,7 @@ import dayjs from 'dayjs';
 import { useMe, useCreateUser, useDisableUser, useEnableUser,
          useDirectoryUsers, useResetUserPassword } from '../api/hooks';
 import { errorMessage } from '../api/client';
+import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryUser, DirectoryUserCreateOut } from '../api/types';
 
 export default function AdminUsersPage() {
@@ -91,6 +92,7 @@ function FilterBar({ q, setQ, isActive, setIsActive }: {
   q: string; setQ: (v: string) => void;
   isActive: boolean | undefined; setIsActive: (v: boolean | undefined) => void;
 }) {
+  const compact = useCompactViewport();
   return (
     <div style={{ display: 'flex', gap: 12, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
       <Input.Search
@@ -98,11 +100,11 @@ function FilterBar({ q, setQ, isActive, setIsActive }: {
         onChange={e => setQ(e.target.value)}
         onSearch={v => setQ(v.trim())}
         allowClear placeholder="搜用户名 / 姓名 / 邮箱…"
-        style={{ width: 260 }} />
+        style={compact ? { flex: 1, minWidth: 0 } : { width: 260 }} />
       <Select
         value={isActive === undefined ? '' : isActive}
         onChange={(v) => setIsActive(v === '' ? undefined : v as boolean)}
-        style={{ width: 120 }}
+        style={compact ? { flex: 1, minWidth: 0 } : { width: 120 }}
         options={[
           { value: '', label: '全部状态' },
           { value: true, label: '启用' },
@@ -119,6 +121,7 @@ function UserRow({ user }: { user: DirectoryUser }) {
   const reset = useResetUserPassword();
   const [pw, setPw] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const compact = useCompactViewport();
 
   const doDisable = async () => {
     setBusy(true);
@@ -150,7 +153,7 @@ function UserRow({ user }: { user: DirectoryUser }) {
 
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 12,
+      display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
       padding: '12px 16px', background: 'var(--ms-surface)',
       border: '1px solid var(--ms-hairline)', borderRadius: 'var(--ms-radius-md)',
     }}>
@@ -172,7 +175,11 @@ function UserRow({ user }: { user: DirectoryUser }) {
           {user.username || '—'}{user.email ? ` · ${user.email}` : ''}
         </div>
       </div>
-      <span style={{ fontSize: 11.5, color: 'var(--ms-ink-subtle)', whiteSpace: 'nowrap' }}>
+      {/* compact: 日期占满一整行,操作按钮换行到下一行 */}
+      <span style={{
+        fontSize: 11.5, color: 'var(--ms-ink-subtle)', whiteSpace: 'nowrap',
+        flexBasis: compact ? '100%' : undefined,
+      }}>
         创建于 {dayjs(user.created_at).format('YYYY-MM-DD')}
       </span>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>

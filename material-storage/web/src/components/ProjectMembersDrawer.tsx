@@ -141,7 +141,7 @@ export function ProjectMembersDrawer({ open, onClose, project, me }: Props) {
       }
       open={open}
       onClose={onClose}
-      width={480}
+      width="min(480px, 100vw)"
       styles={{ body: { padding: 0 } }}
       extra={
         <Button type="primary" icon={<Plus size={14} strokeWidth={2.2} />}

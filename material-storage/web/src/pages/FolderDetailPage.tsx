@@ -1,25 +1,25 @@
-import { App, Button, Empty, List, Pagination, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
-import { CloudDownloadOutlined, KeyOutlined, UploadOutlined } from '@ant-design/icons';
+/**
+ * /folders/:id — 盲搜落点(方案 §3.2):AssetCardList(不带 checkbox)+
+ * tap=open 单文件详情 bottom Drawer(‹ n/N › 切张,两端尺寸通用,不分分支)。
+ */
+import { Button, Drawer, Empty, Pagination, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
+import { KeyOutlined, UploadOutlined } from '@ant-design/icons';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { useState } from 'react';
-import { ASSETS_PAGE_SIZE, useAssets, useDownloadLink, useFolder } from '../api/hooks';
+import { ASSETS_PAGE_SIZE, useAssets, useFolder, useMe } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
-import { RequestAccessModal } from '../components/RequestAccessModal';
+import { AssetCardList } from '../components/AssetCardList';
+import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
+import { useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
+import { useCompactViewport } from '../lib/use-viewports';
 import { useUpload } from '../lib/upload-store';
-import { useDownloads } from '../lib/download-store';
-import { errorMessage } from '../api/client';
-import type { Asset } from '../api/types';
-
-function fmtBytes(n: number) {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  return `${(n / 1024 ** 3).toFixed(2)} GB`;
-}
 
 export default function FolderDetailPage() {
   const { folderId } = useParams<{ folderId: string }>();
   const { data: folder } = useFolder(folderId);
+  const { data: me } = useMe();
+  const compact = useCompactViewport();
   // 服务端分页:此前列表被后端默认 limit=100 静默截断,超出的旧文件看不见。
   // 切夹回第一页用 render 期比较旧值重置(不走 setState-in-effect)
   const [page, setPage] = useState(1);
@@ -31,30 +31,16 @@ export default function FolderDetailPage() {
   const { data, isLoading, isFetching } = useAssets(folderId, page, ASSETS_PAGE_SIZE);
   const items = data?.items ?? [];
   const total = data?.total ?? 0;
-  const dlLink = useDownloadLink();
-  const { message } = App.useApp();
+  // 详情 Drawer state 存 index 不存 id(‹ n/N › 切张只换内容,Drawer 常驻)
+  const [detailIndex, setDetailIndex] = useState<number | null>(null);
+  const kbViewportHeight = useKeyboardViewportHeight();
   const upload = useUpload();
-  const downloads = useDownloads();
-  const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
   // 后端 /assets/uploads 对每个上传都强制 can_upload;这里按 folder 权限禁用按钮,
   // 避免无权限用户(select 完文件才被 403)白走流程
   const canUpload = folder?.my_can_upload === true;
-
-  const handleDownload = async (a: Asset) => {
-    try {
-      const link = await dlLink.mutateAsync(a.id);
-      // 走任务中心(fetch + progress + 可取消),右下浮按显示
-      await downloads.start(link.url, a.filename);
-    } catch (e: unknown) {
-      const err = e as { response?: { status?: number } };
-      if (err.response?.status === 403) {
-        message.warning('无下载权限,自动打开申请...');
-        setApplyAsset(a);
-      } else {
-        message.error(errorMessage(e, '下载失败'));
-      }
-    }
-  };
+  // 键盘弹起:Drawer 收缩为 visualViewport.height - 顶栏(56)
+  const drawerHeight = kbViewportHeight != null ? kbViewportHeight - 56 : 'min(72vh, 72dvh)';
+  const detailAsset = detailIndex != null ? items[detailIndex] : null;
 
   return (
     <div>
@@ -87,36 +73,16 @@ export default function FolderDetailPage() {
         <Empty description={canUpload ? '空文件夹 — 点上传文件添加内容' : '空文件夹(无上传权限,如需上传请联系项目管理员)'} />
       ) : (
         <>
-          <List
-            bordered
+          <AssetCardList
+            assets={items}
             loading={isFetching}
-            dataSource={items}
-            renderItem={(a) => (
-              <List.Item
-                actions={[
-                  <Tooltip title="拿 presigned URL 直下" key="dl">
-                    <Button type="link" icon={<CloudDownloadOutlined />}
-                            loading={dlLink.isPending && dlLink.variables === a.id}
-                            onClick={() => handleDownload(a)}>下载</Button>
-                  </Tooltip>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={a.filename}
-                  description={
-                    <Space size="middle" style={{ fontSize: 12, color: '#999' }}>
-                      <span>{fmtBytes(a.size_bytes)}</span>
-                      <span>{a.content_type ?? '—'}</span>
-                      <span>{new Date(a.created_at).toLocaleString()}</span>
-                    </Space>
-                  }
-                />
-              </List.Item>
-            )}
+            onOpen={setDetailIndex}
           />
-          {/* 分页器吸附视口底部:翻页后自动回顶,不用滚到底找页码 */}
+          {/* 分页器吸附视口底部:翻页后自动回顶,不用滚到底找页码;
+              compact 下垫高到 TabBar 上方(PC 无 TabBar,保持 0) */}
           <div style={{
-            position: 'sticky', bottom: 0,
+            position: 'sticky',
+            bottom: compact ? 'calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))' : 0,
             marginTop: 16, padding: '8px 4px',
             display: 'flex', justifyContent: 'flex-end',
             background: 'var(--ms-canvas)',
@@ -128,6 +94,7 @@ export default function FolderDetailPage() {
               total={total}
               onChange={(p) => {
                 setPage(p);
+                setDetailIndex(null);
                 window.scrollTo({ top: 0 });
               }}
               showSizeChanger={false}
@@ -137,16 +104,40 @@ export default function FolderDetailPage() {
         </>
       )}
 
-      {applyAsset && (
-        <RequestAccessModal
-          open
-          onClose={() => setApplyAsset(null)}
-          targetId={applyAsset.id}
-          targetName={applyAsset.filename}
-          targetType="asset"
-          defaultAction="download"
-        />
-      )}
-    </div>
+      {/* 单文件详情 bottom Drawer:内容 = AssetSummaryPanel 单选态原样复用;
+          预览 Modal 在 Drawer 内叠层(同 z 1000,靠 DOM 挂载序,不改 getContainer) */}
+      <Drawer
+          placement="bottom"
+          open={detailAsset != null}
+          onClose={() => setDetailIndex(null)}
+          height={drawerHeight}
+          styles={{ body: { padding: 0, overflowY: 'auto' } }}
+          title={
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+              <Button type="text" size="small" aria-label="上一个"
+                      icon={<ChevronLeft size={16} strokeWidth={1.8} />}
+                      disabled={(detailIndex ?? 0) <= 0}
+                      onClick={() => setDetailIndex(i => (i == null ? null : i - 1))} />
+              <span className="ms-mono" style={{
+                fontSize: 12.5, color: 'var(--ms-ink-muted)', flexShrink: 0,
+              }}>{(detailIndex ?? 0) + 1} / {items.length}</span>
+              <Button type="text" size="small" aria-label="下一个"
+                      icon={<ChevronRight size={16} strokeWidth={1.8} />}
+                      disabled={(detailIndex ?? 0) >= items.length - 1}
+                      onClick={() => setDetailIndex(i => (i == null ? null : i + 1))} />
+              <span style={{
+                flex: 1, minWidth: 0, marginLeft: 6, fontSize: 13,
+                color: 'var(--ms-ink-muted)',
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{detailAsset?.filename}</span>
+            </div>
+          }
+        >
+          {detailAsset && (
+            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder} />
+          )}
+        </Drawer>
+
+      </div>
   );
 }

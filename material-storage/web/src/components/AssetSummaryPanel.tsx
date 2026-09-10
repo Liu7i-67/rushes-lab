@@ -79,7 +79,8 @@ export function AssetSummaryPanel({ selected, me, folder }: Props) {
     const handleDownload = async () => {
       try {
         const link = await dlLink.mutateAsync(a.id);
-        await downloads.start(link.url, a.filename);
+        // assetId 供无 FSA 环境(移动端/桌面 Firefox)直连路径换 as_attachment 链接
+        await downloads.start(link.url, a.filename, { assetId: a.id });
       } catch (e) {
         const err = e as { response?: { status?: number } };
         if (err.response?.status === 403) {

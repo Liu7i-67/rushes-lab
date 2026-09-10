@@ -8,6 +8,7 @@ import { CloseOutlined, DeleteOutlined, FileOutlined, FolderOutlined } from '@an
 import { useRef, useState } from 'react';
 import { computeUploadStats, useUpload } from '../lib/upload-store';
 import { useDownloads, type DownloadTask } from '../lib/download-store';
+import { useCompactViewport } from '../lib/use-viewports';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -68,6 +69,7 @@ function UploadList() {
   const [filter, setFilter] = useState<UploadFilter>('all');
   const [page, setPage] = useState(1);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const compact = useCompactViewport();
 
   // 把所有 uppy 实例的所有 files 平铺出来
   const items: { folderId: string; file: { id: string; name: string; size?: number; progress?: { uploadComplete?: boolean; bytesUploaded?: number; bytesTotal?: number; percentage?: number }; error?: unknown } }[] = [];
@@ -113,6 +115,21 @@ function UploadList() {
     scrollRef.current?.scrollTo({ top: 0 });
   };
 
+  // compact: 筛选 Segmented 包 .ms-hscroll 横滚(类本身仅 <768 生效,PC 渲染不变)
+  const filterSeg = (
+    <Segmented
+      style={{ marginBottom: 12 }}
+      value={filter}
+      onChange={(v) => changeFilter(v as UploadFilter)}
+      options={[
+        { label: `全部 (${stats.total})`, value: 'all' },
+        { label: `进行中 (${stats.inflight})`, value: 'inflight' },
+        { label: `已完成 (${stats.success})`, value: 'done' },
+        { label: `失败 (${stats.failed})`, value: 'failed' },
+      ]}
+    />
+  );
+
   if (items.length === 0) return <Empty description="无上传任务" style={{ marginTop: 60 }} />;
 
   return (
@@ -123,17 +140,7 @@ function UploadList() {
           <Button size="small" onClick={retryAllFailed}>重试全部失败项 ({stats.failed})</Button>
         )}
       </div>
-      <Segmented
-        style={{ marginBottom: 12 }}
-        value={filter}
-        onChange={(v) => changeFilter(v as UploadFilter)}
-        options={[
-          { label: `全部 (${stats.total})`, value: 'all' },
-          { label: `进行中 (${stats.inflight})`, value: 'inflight' },
-          { label: `已完成 (${stats.success})`, value: 'done' },
-          { label: `失败 (${stats.failed})`, value: 'failed' },
-        ]}
-      />
+      {compact ? <div className="ms-hscroll">{filterSeg}</div> : filterSeg}
       <div ref={scrollRef} style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {filtered.length === 0 ? (
           <Empty description={FILTER_EMPTY[filter]} style={{ marginTop: 60 }} />
@@ -167,7 +174,7 @@ function UploadList() {
                     avatar={<FolderOutlined />}
                     title={
                       <Space>
-                        <Typography.Text ellipsis={{ tooltip: file.name }} style={{ maxWidth: 280 }}>{file.name}</Typography.Text>
+                        <Typography.Text ellipsis={{ tooltip: file.name }} style={{ maxWidth: compact ? '60%' : 280 }}>{file.name}</Typography.Text>
                         <Tag color={tag.color}>{tag.text}</Tag>
                       </Space>
                     }
@@ -203,6 +210,7 @@ function UploadList() {
 
 function DownloadList() {
   const { tasks, cancel, remove } = useDownloads();
+  const compact = useCompactViewport();
   const [page, setPage] = useState(1);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
@@ -245,7 +253,7 @@ function DownloadList() {
                   avatar={<FileOutlined />}
                   title={
                     <Space>
-                      <Typography.Text ellipsis={{ tooltip: t.filename }} style={{ maxWidth: 280 }}>{t.filename}</Typography.Text>
+                      <Typography.Text ellipsis={{ tooltip: t.filename }} style={{ maxWidth: compact ? '60%' : 280 }}>{t.filename}</Typography.Text>
                       <Tag color={tag.color}>{tag.text}</Tag>
                     </Space>
                   }
@@ -257,6 +265,12 @@ function DownloadList() {
                         {t.status === 'running' && t.speedBps != null && <span>{fmtSpeed(t.speedBps)}</span>}
                         {t.error && <span style={{ color: '#ff4d4f' }}>{t.error}</span>}
                       </Space>
+                      {/* 直连系统下载等路径的补充说明(note,download-store 写入):PC/compact 都渲染 */}
+                      {t.note && (
+                        <div style={{ fontSize: 11, color: 'var(--ms-ink-subtle)', wordBreak: 'break-all' }}>
+                          {t.note}
+                        </div>
+                      )}
                     </div>
                   }
                 />

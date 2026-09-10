@@ -4,12 +4,16 @@
  * livp(iOS Live Photo):静态图走缩略图,实况短片走 live-preview-url(可播放)。
  */
 import { App, Button, Modal, Spin } from 'antd';
-import { Image as ImageIcon, Play } from 'lucide-react';
+import { Download, FileText, Image as ImageIcon, Play } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Asset } from '../api/types';
+import { useDownloadLink } from '../api/hooks';
 import { http, errorMessage } from '../api/client';
+import { useDownloads } from '../lib/download-store';
+import { useCompactViewport } from '../lib/use-viewports';
+import { isIOS } from '../lib/ua';
 
 interface Props {
   asset: Asset;
@@ -49,12 +53,28 @@ export function isPreviewable(a: Asset): boolean {
 
 export function AssetPreviewModal({ asset, open, onClose }: Props) {
   const { message } = App.useApp();
+  // hooks 置顶(见 use-viewports 模块注释)
+  const compact = useCompactViewport();
+  const dlLink = useDownloadLink();
+  const downloads = useDownloads();
   const [content, setContent] = useState<string | null>(null);
   // livp 实况短片 URL(null = 无/未生成/无权限 — 只显示静态图)
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [playingLive, setPlayingLive] = useState(false);
   const [loading, setLoading] = useState(false);
   const kind = detectKind(asset);
+
+  // iOS PDF 降级卡(§3.6)的下载按钮 — 走既有下载链路(as_attachment 直连系统预览)
+  const handleDownload = async () => {
+    try {
+      const link = await dlLink.mutateAsync(asset.id);
+      await downloads.start(link.url, asset.filename, { assetId: asset.id });
+    } catch (e) {
+      const err = e as { response?: { status?: number } };
+      if (err.response?.status === 403) message.warning('无下载权限,请联系项目管理员');
+      else message.error(errorMessage(e, '下载失败'));
+    }
+  };
 
   useEffect(() => {
     if (!open) { setContent(null); setLiveUrl(null); setPlayingLive(false); return; }
@@ -104,7 +124,7 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
       footer={null}
       title={asset.filename}
       width="min(960px, 92vw)"
-      styles={{ body: { maxHeight: '72vh', overflow: 'auto', padding: 24 } }}
+      styles={{ body: { maxHeight: 'min(72vh, 72dvh)', overflow: 'auto', padding: 24 } }}
       destroyOnClose
     >
       {loading && (
@@ -147,17 +167,41 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
           minHeight: 200,
         }}>
           <img src={content} alt={asset.filename} style={{
-            maxWidth: '100%', maxHeight: '65vh',
+            maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
             objectFit: 'contain', display: 'block',
           }} />
         </div>
       )}
-      {!loading && kind === 'pdf' && content !== null && (
+      {!loading && kind === 'pdf' && content !== null && isIOS() && (
+        // iOS 内嵌 PDF 受限(Safari 不支持 iframe 内嵌 PDF 交互),降级为提示卡(§3.6)
+        <div style={{
+          padding: 32, textAlign: 'center',
+          border: '1px dashed var(--ms-hairline)',
+          borderRadius: 'var(--ms-radius-sm)',
+          background: 'var(--ms-hairline-soft)',
+        }}>
+          <FileText size={28} strokeWidth={1.5}
+                    style={{ color: 'var(--ms-ink-subtle)', marginBottom: 12 }} />
+          <div style={{
+            fontSize: 13, color: 'var(--ms-ink-muted)', lineHeight: 1.7,
+            marginBottom: 16,
+          }}>
+            iOS 内嵌预览受限,<br />点击下载后用系统预览打开。
+          </div>
+          <Button type="primary" size={compact ? 'large' : 'middle'}
+                  icon={<Download size={15} strokeWidth={1.8} />}
+                  loading={dlLink.isPending}
+                  onClick={() => void handleDownload()}>
+            下载 PDF
+          </Button>
+        </div>
+      )}
+      {!loading && kind === 'pdf' && content !== null && !isIOS() && (
         <iframe
           src={content}
           title={asset.filename}
           style={{
-            width: '100%', height: '68vh',
+            width: '100%', height: 'min(68vh, 68dvh)',
             border: '1px solid var(--ms-hairline)',
             borderRadius: 'var(--ms-radius-sm)',
             background: 'var(--ms-hairline-soft)',
@@ -174,7 +218,7 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
             controls
             src={content}
             style={{
-              width: '100%', maxHeight: '68vh',
+              width: '100%', maxHeight: 'min(68vh, 68dvh)',
               display: 'block', borderRadius: 'var(--ms-radius-sm)',
             }}
           />
@@ -202,13 +246,13 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
                 autoPlay loop muted playsInline
                 src={liveUrl}
                 style={{
-                  width: '100%', maxHeight: '65vh',
+                  width: '100%', maxHeight: 'min(65vh, 65dvh)',
                   display: 'block', borderRadius: 'var(--ms-radius-sm)',
                 }}
               />
             ) : (
               <img src={content} alt={asset.filename} style={{
-                maxWidth: '100%', maxHeight: '65vh',
+                maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
                 objectFit: 'contain', display: 'block',
               }} />
             )}
@@ -216,7 +260,7 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
           {liveUrl && (
             <div style={{ textAlign: 'center', marginTop: 12 }}>
               <Button
-                size="small"
+                size={compact ? 'middle' : 'small'}
                 icon={playingLive ? <ImageIcon size={13} strokeWidth={1.8} /> : <Play size={13} strokeWidth={1.8} />}
                 onClick={() => setPlayingLive(v => !v)}
               >

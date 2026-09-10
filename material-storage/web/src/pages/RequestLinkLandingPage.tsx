@@ -14,6 +14,7 @@ import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { useResolveRequestLink } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 
 dayjs.extend(relativeTime);
@@ -38,10 +39,11 @@ export default function RequestLinkLandingPage() {
   const navigate = useNavigate();
   const { data, isLoading, isError, error } = useResolveRequestLink(token);
   const [modalOpen, setModalOpen] = useState(false);
+  const compact = useCompactViewport();
 
   if (isLoading) {
     return (
-      <div style={{ padding: 120, textAlign: 'center', color: 'var(--ms-ink-muted)' }}>
+      <div style={{ padding: compact ? 64 : 120, textAlign: 'center', color: 'var(--ms-ink-muted)' }}>
         <Spin />
         <div style={{ marginTop: 12, fontSize: 13 }}>正在解析申请链接</div>
       </div>

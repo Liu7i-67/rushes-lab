@@ -13,6 +13,7 @@ import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { useResolveShare } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
@@ -43,9 +44,11 @@ export default function ShareLandingPage() {
     }
   }, [data]);
 
+  const compact = useCompactViewport();
+
   if (isLoading) {
     return (
-      <div style={{ padding: 120, textAlign: 'center', color: 'var(--ms-ink-muted)' }}>
+      <div style={{ padding: compact ? 64 : 120, textAlign: 'center', color: 'var(--ms-ink-muted)' }}>
         <Spin />
         <div style={{ marginTop: 12, fontSize: 13 }}>正在解析分享链接</div>
       </div>
@@ -99,9 +102,9 @@ export default function ShareLandingPage() {
         overflow: 'hidden',
         boxShadow: 'var(--ms-shadow-md)',
       }}>
-        {/* Hero — 大封面区:几何插画 */}
+        {/* Hero — 大封面区:几何插画(compact 下 padding 收敛) */}
         <div style={{
-          padding: '40px 32px 32px',
+          padding: compact ? '28px 20px' : '40px 32px 32px',
           background: data.kind === 'asset'
             ? 'linear-gradient(135deg, #FEF3E8 0%, #FAFAF7 60%)'
             : 'linear-gradient(135deg, #FEE4D0 0%, #FAFAF7 60%)',

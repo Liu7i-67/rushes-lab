@@ -12,6 +12,7 @@ import dayjs from 'dayjs';
 import { useMe, useDirectoryGroups, useCreateGroup, useUpdateGroup,
          useDeleteGroup, useGroupMembers, useAddGroupMember, useRemoveGroupMember } from '../api/hooks';
 import { errorMessage } from '../api/client';
+import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryGroup } from '../api/types';
 import { UserPicker } from '../components/UserPicker';
 
@@ -19,6 +20,7 @@ export default function AdminGroupsPage() {
   const { data: me } = useMe();
   const [q, setQ] = useState('');
   const { data, isLoading } = useDirectoryGroups(q);
+  const compact = useCompactViewport();
 
   if (me && !me.is_system_admin) {
     return (
@@ -35,13 +37,13 @@ export default function AdminGroupsPage() {
   return (
     <div className="ms-enter">
       <GroupsHeader />
-      <div style={{ marginBottom: 16 }}>
+      <div style={{ marginBottom: 16, display: 'flex' }}>
         <Input.Search
           value={q}
           onChange={e => setQ(e.target.value)}
           onSearch={v => setQ(v.trim())}
           allowClear placeholder="搜用户组名…"
-          style={{ width: 260 }} />
+          style={compact ? { flex: 1, minWidth: 0 } : { width: 260 }} />
       </div>
       {isLoading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -100,6 +102,7 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
   const [editOpen, setEditOpen] = useState(false);
   const del = useDeleteGroup();
   const [deleting, setDeleting] = useState(false);
+  const compact = useCompactViewport();
 
   const doDelete = async () => {
     setDeleting(true);
@@ -113,7 +116,7 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
 
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 12,
+      display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
       padding: '12px 16px', background: 'var(--ms-surface)',
       border: '1px solid var(--ms-hairline)', borderRadius: 'var(--ms-radius-md)',
     }}>
@@ -141,7 +144,11 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
           }}>{group.description}</div>
         )}
       </div>
-      <span style={{ fontSize: 11.5, color: 'var(--ms-ink-subtle)', whiteSpace: 'nowrap' }}>
+      {/* compact: 日期占满一整行,操作按钮换行到下一行 */}
+      <span style={{
+        fontSize: 11.5, color: 'var(--ms-ink-subtle)', whiteSpace: 'nowrap',
+        flexBasis: compact ? '100%' : undefined,
+      }}>
         创建于 {dayjs(group.created_at).format('YYYY-MM-DD')}
       </span>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
@@ -255,7 +262,8 @@ function GroupMembersDrawer({ group, open, onClose }: {
 
   return (
     <Modal title={`成员 — ${group.name}(${members?.length ?? group.member_count} 人)`}
-           open={open} onCancel={onClose} footer={null} width={560}>
+           open={open} onCancel={onClose} footer={null}
+           width="min(560px, calc(100vw - 16px))">
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <div style={{ flex: 1 }}>
           <UserPicker

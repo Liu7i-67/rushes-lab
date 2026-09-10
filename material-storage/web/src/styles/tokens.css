@@ -187,3 +187,45 @@ html, body {
 .ant-segmented .ant-segmented-item:hover:not(.ant-segmented-item-selected) {
   color: var(--ms-ink);
 }
+
+/* ═══ 移动端层（集中管理，禁止散落）═════════════════════════════════════ */
+
+:root {
+  /* 固定层几何:单一常量来源(TabBar 总高,含内 padding;
+     bottom 偏移一律 calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))) */
+  --ms-tabbar-h: 56px;
+  /* z 阶梯(antd Drawer/Modal 自带 z 1000+,浮于全部常驻层之上,不冲突) */
+  --ms-z-header: 50;     /* 现有 sticky header */
+  --ms-z-batchbar: 60;   /* 批量操作栏 */
+  --ms-z-tabbar: 70;     /* 底部 TabBar(最上的常驻层) */
+  --ms-z-float: 80;      /* UploadFloatingIndicator */
+}
+
+/* ── 手机构图精修层:唯一断点 = max-width 767.98px(低于 antd md)──────── */
+@media (max-width: 767.98px) {
+  /* iOS 聚焦自动放大防护:输入字号 ≥16px(含 DatePicker/AutoComplete 内 input) */
+  .ant-input, .ant-select-selection-search-input,
+  .ant-picker-input > input, .ant-input-number-input { font-size: 16px !important; }
+  /* 长路径面包屑:横向滚动而非撑破布局 */
+  .ms-breadcrumb { overflow-x: auto; scrollbar-width: none; flex-wrap: nowrap; }
+  /* Segmented 溢出场景:横向滚动 + 右缘渐隐提示"还有更多"
+     (已知小瑕疵:无溢出时末项右缘也虚化,先接受;tester 反馈再改溢出检测挂 mask) */
+  .ms-hscroll { overflow-x: auto; scrollbar-width: none;
+                -webkit-mask-image: linear-gradient(to right, #000 92%, transparent); }
+  .ms-hscroll .ant-segmented { white-space: nowrap; }
+}
+
+/* ── 触控目标:primary pointer 为触屏且无 hover 才生效
+      (不误伤触屏 Windows 笔记本,主 pointer 是鼠标时 pointer:fine)────────── */
+@media (pointer: coarse) and (hover: none) {
+  /* 旧 small 控件地板:antd 系 */
+  .ant-btn-sm { min-height: 34px; }
+  .ant-btn-icon-only { min-width: 38px; min-height: 38px; }
+  /* 旧自定义 ghost 小按钮(24px/22px 系)统一套此 class 抬到 38 */
+  .ms-ghost-btn { min-width: 38px; min-height: 38px; }
+  /* hover 反馈在触屏无意义,去掉位移留边框变化 */
+  .ms-card-hover:hover { transform: none; }
+}
+
+/* ── 安全区 ─────────────────────────────────────────────────────────── */
+.ms-safe-bottom { padding-bottom: max(12px, env(safe-area-inset-bottom)); }

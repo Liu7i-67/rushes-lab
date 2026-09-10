@@ -65,6 +65,7 @@ export function AssetTagEditor({ asset, stopPropagation = true }: {
           <button
             onClick={(e) => { e.stopPropagation(); void save(); }}
             title="保存标签"
+            className="ms-ghost-btn"
             style={{
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
               width: 22, height: 22, border: 0, borderRadius: 4,

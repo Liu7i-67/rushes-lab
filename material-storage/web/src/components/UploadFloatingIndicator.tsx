@@ -6,12 +6,14 @@ import { CloudSyncOutlined } from '@ant-design/icons';
 import { useMemo, useState } from 'react';
 import { useUpload } from '../lib/upload-store';
 import { useDownloads } from '../lib/download-store';
+import { useCompactViewport } from '../lib/use-viewports';
 import { TaskCenterDrawer } from './TaskCenterDrawer';
 
 export function UploadFloatingIndicator() {
   const { getAllUppies, version, activeFolderId } = useUpload();
   const { tasks } = useDownloads();
   const [centerOpen, setCenterOpen] = useState(false);
+  const compact = useCompactViewport();
 
   const stats = useMemo(() => {
     const all = getAllUppies();
@@ -41,7 +43,13 @@ export function UploadFloatingIndicator() {
           icon={<CloudSyncOutlined />}
           badge={{ count: stats.total, color: stats.upFailed > 0 ? '#ff4d4f' : '#1677ff' }}
           onClick={() => setCenterOpen(true)}
-          style={{ right: 24, bottom: 80 }}
+          style={{
+            right: 24,
+            // compact: 让开底部 TabBar + 安全区(--ms-tabbar-h 由 tokens.css 移动层定义);PC 维持 80
+            bottom: compact
+              ? 'calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))'
+              : 80,
+          }}
         />
       </Tooltip>
       <TaskCenterDrawer open={centerOpen} onClose={() => setCenterOpen(false)} />

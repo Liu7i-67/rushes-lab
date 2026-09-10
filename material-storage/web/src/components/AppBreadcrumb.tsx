@@ -29,5 +29,6 @@ export function AppBreadcrumb() {
   }
 
   if (items.length <= 1) return null;
-  return <Breadcrumb items={items} style={{ marginBottom: 16 }} />;
+  // ms-breadcrumb: 手机端横滚不换行(tokens.css <768 生效),避免长路径撑破布局
+  return <Breadcrumb items={items} className="ms-breadcrumb" style={{ marginBottom: 16 }} />;
 }

@@ -196,10 +196,15 @@ export const useAssets = (
     placeholderData: keepPreviousData,
   });
 
+// §3.5:可选 as_attachment —— 移动端直连系统下载器时签 attachment 头(后端可选 body,
+// 响应结构不变)。传 assetId 字符串(既有调用)或不传 as_attachment,语义均为内联,零影响。
 export const useDownloadLink = () =>
   useMutation({
-    mutationFn: async (assetId: string) =>
-      (await http.post<DownloadLink>(`/api/v1/assets/${assetId}/download-link`, {})).data,
+    mutationFn: async (vars: string | { assetId: string; as_attachment?: boolean }) => {
+      const assetId = typeof vars === 'string' ? vars : vars.assetId;
+      const body = typeof vars === 'object' && vars.as_attachment ? { as_attachment: true } : {};
+      return (await http.post<DownloadLink>(`/api/v1/assets/${assetId}/download-link`, body)).data;
+    },
   });
 
 export const useDeleteAsset = () => {

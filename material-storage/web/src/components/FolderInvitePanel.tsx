@@ -282,7 +282,8 @@ function InviteModal({
           <FieldLabel>邀请主体(用户 / 用户组;#154:部门轴下线)</FieldLabel>
           <SubjectPicker value={subjects} onChange={setSubjects} me={me} />
         </div>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+        {/* minmax(0,1fr): Modal 钳制变窄时两列收缩不溢出(方案 §3.4,无需 JS) */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
           <div>
             <FieldLabel>权限等级</FieldLabel>
             <Select

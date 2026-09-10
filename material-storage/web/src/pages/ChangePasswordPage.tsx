@@ -11,6 +11,7 @@ import { App, Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { Navigate, useNavigate } from 'react-router-dom';
 import { errorMessage } from '../api/client';
 import { useChangePassword, useMe } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 
 /** 镜像后端密码策略:≥8 位,且同时含字母和数字(AUTH_PASSWORD_MIN_LENGTH=8) */
 const PW_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
@@ -21,6 +22,7 @@ export default function ChangePasswordPage() {
   const { data: me, isLoading, isError } = useMe();
   const change = useChangePassword();
   const [form] = Form.useForm();
+  const compact = useCompactViewport();
 
   if (isLoading) return null; // AppShell 已展示加载态
   if (isError || !me) return <Navigate to="/login?next=/change-password" replace />;
@@ -38,7 +40,7 @@ export default function ChangePasswordPage() {
   };
 
   return (
-    <div style={{ maxWidth: 520, margin: '64px auto', padding: 16 }}>
+    <div style={{ maxWidth: 520, margin: compact ? '24px auto' : '64px auto', padding: 16 }}>
       <Card>
         <Typography.Title level={4} style={{ marginTop: 0, marginBottom: 4 }}>
           {forced ? '首次登录,请设置新密码' : '修改密码'}

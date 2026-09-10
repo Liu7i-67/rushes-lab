@@ -65,6 +65,7 @@ export function UserMenu({ me }: { me: Me }) {
                       type="button"
                       onClick={copyOpenId}
                       title={copied ? '已复制' : '复制 open_id'}
+                      className="ms-ghost-btn"
                       style={{
                         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
                         width: 22, height: 22, flexShrink: 0,

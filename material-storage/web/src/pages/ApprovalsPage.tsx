@@ -16,6 +16,7 @@ import {
 import type { Approval, ApprovalStatus } from '../api/types';
 import { GrantCountdown } from '../components/GrantCountdown';
 import { errorMessage } from '../api/client';
+import { useCompactViewport } from '../lib/use-viewports';
 import { TARGET_TYPE_LABEL, ACTION_LABEL, tlabel } from '../lib/labels';
 
 dayjs.extend(relativeTime);
@@ -71,14 +72,16 @@ function ApprovalRow({
   const TargetIcon = TARGET_ICON[a.target_type] || HelpCircle;
   const StatusIcon = meta.Icon;
   const canDecide = a.status === 'pending' && scope === 'all';
+  const compact = useCompactViewport();
 
   return (
     <div style={{
       position: 'relative',
       display: 'grid',
-      gridTemplateColumns: '1fr auto',
-      gap: 20,
-      padding: '18px 24px 18px 28px',
+      // compact: 单列,操作按钮组换行到卡片底部
+      gridTemplateColumns: compact ? '1fr' : '1fr auto',
+      gap: compact ? '10px 20px' : 20,
+      padding: compact ? '14px 16px' : '18px 24px 18px 28px',
       background: 'var(--ms-surface)',
       border: '1px solid var(--ms-hairline)',
       borderRadius: 'var(--ms-radius-lg)',
@@ -185,13 +188,16 @@ function ApprovalRow({
         </div>
       </div>
 
-      {/* 右:操作 */}
+      {/* 右:操作(compact 下换行到卡片底部,按钮抬到常规尺寸) */}
       {canDecide && (
-        <div style={{ display: 'flex', gap: 6, alignSelf: 'center', flexShrink: 0 }}>
-          <Button size="small" type="primary"
+        <div style={{
+          display: 'flex', gap: 6,
+          alignSelf: compact ? 'start' : 'center', flexShrink: 0,
+        }}>
+          <Button size={compact ? 'middle' : 'small'} type="primary"
                   icon={<Check size={13} strokeWidth={2.4} />}
                   loading={approveLoading} onClick={onApprove}>批准</Button>
-          <Button size="small" danger
+          <Button size={compact ? 'middle' : 'small'} danger
                   icon={<X size={13} strokeWidth={2.4} />}
                   loading={rejectLoading} onClick={onReject}>拒绝</Button>
         </div>

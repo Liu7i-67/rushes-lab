@@ -10,6 +10,7 @@ import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { useApprovals, useMe, useProjects } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 import { GrantCountdown } from '../components/GrantCountdown';
 import type { Approval } from '../api/types';
 import { TARGET_TYPE_LABEL, tlabel } from '../lib/labels';
@@ -65,6 +66,7 @@ export default function MyPermissionsPage() {
   const { data: approvals } = useApprovals('self', 'approved');
 
   const [filter, setFilter] = useState<RoleFilter>('all');
+  const compact = useCompactViewport();
 
   // 仅显示有效授权:my_roles 非空 OR 临时授权 approved
   const ownedAll: Project[] = (projects ?? []).filter(p => (p.my_roles ?? []).length > 0);
@@ -165,7 +167,8 @@ export default function MyPermissionsPage() {
                desc="通过个人、用户组或部门继承而来的角色">
         {/* #115 角色 filter — admin 蕴含全部;upload/download 按 model v4 §5 并列 */}
         {ownedAll.length > 0 && (
-          <div style={{ marginBottom: 12 }}>
+          /* compact: .ms-hscroll 横滚 + 右缘渐隐(类本身仅 <768 生效,PC 不受影响) */
+          <div style={{ marginBottom: 12 }} className={compact ? 'ms-hscroll' : undefined}>
             <Segmented
               size="small"
               value={filter}

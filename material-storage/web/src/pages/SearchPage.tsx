@@ -8,6 +8,7 @@ import { FolderOpen, Search as SearchIcon, Tag as TagIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useSearchAssets } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import type { SearchResult } from '../api/types';
 
@@ -41,6 +42,7 @@ export default function SearchPage() {
   const [sp, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const { message } = App.useApp();
+  const compact = useCompactViewport();
   // q 直接以 URL 为准 — ⌘K 跳 /search?q=… 也能驱动输入框,无需 effect 同步
   const q = sp.get('q') ?? '';
   const [debounced, setDebounced] = useState(q);
@@ -86,11 +88,14 @@ export default function SearchPage() {
           onPressEnter={() => setDebounced(q)}
           style={{ fontSize: 15, padding: '10px 0' }}
         />
-        <kbd style={{
-          fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
-          color: 'var(--ms-ink-subtle)', background: 'var(--ms-canvas)',
-          border: '1px solid var(--ms-hairline)', borderRadius: 3, padding: '1px 5px',
-        }}>Enter</kbd>
+        {/* Enter kbd 是键盘优先的 PC 提示,compact 不渲染 */}
+        {!compact && (
+          <kbd style={{
+            fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
+            color: 'var(--ms-ink-subtle)', background: 'var(--ms-canvas)',
+            border: '1px solid var(--ms-hairline)', borderRadius: 3, padding: '1px 5px',
+          }}>Enter</kbd>
+        )}
       </div>
 
       <div style={{ margin: '14px 2px', fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
@@ -143,9 +148,15 @@ export default function SearchPage() {
                   e.currentTarget.style.boxShadow = 'none';
                 }}
               >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                {/* compact: folder/project meta 换行到文件名下方第二行 */}
+                <div style={{
+                  display: 'flex', alignItems: 'center',
+                  gap: compact ? '4px 10px' : 10,
+                  flexWrap: compact ? 'wrap' : undefined,
+                }}>
                   <span style={{
                     flex: 1, minWidth: 0,
+                    flexBasis: compact ? '100%' : undefined,
                     fontSize: 14.5, fontWeight: 500, color: 'var(--ms-ink)',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }}>

@@ -1,6 +1,9 @@
 /**
  * AppHeader — 品牌印记 + ⌘K 命令栏 + 用户头像。
  * 不用 antd Layout.Header / Menu,自由 flex layout 控制视觉密度。
+ * compact(<1024)切移动壳层:只留 logo 方块 + 任务收件箱 + UserMenu;
+ * nav chips / ⌘K 触发器 / 通知 Bell 不渲染(搜索走 TabBar,通知走 TabBar badge)。
+ * hooks 全部置顶,分支只切 JSX(见 use-viewports 模块注释)。
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -9,6 +12,7 @@ import { Bell, FileText, Search as SearchIcon, Inbox } from 'lucide-react';
 import { TaskCenterDrawer } from './TaskCenterDrawer';
 import { useMe, useNotificationsUnread, useProjects, useSearchAssets } from '../api/hooks';
 import { UserMenu } from './UserMenu';
+import { useCompactViewport } from '../lib/use-viewports';
 import type { Me } from '../api/types';
 
 interface Props { me: Me; }
@@ -23,6 +27,7 @@ export function AppHeader({ me }: Props) {
     () => typeof navigator !== 'undefined' && /Mac/.test(navigator.platform),
     [],
   );
+  const compact = useCompactViewport();
 
   // ⌘K / Ctrl+K 全局
   useEffect(() => {
@@ -36,6 +41,40 @@ export function AppHeader({ me }: Props) {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  // ── compact 移动壳层:CommandPalette(PC ⌘K 专属)与 TaskCenterDrawer 挂载保持 ──
+  if (compact) {
+    return (
+      <>
+        <header
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 'var(--ms-z-header)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--ms-sp-sm)',
+            padding: '10px 12px',
+            background: 'rgba(255, 255, 255, 0.85)',
+            backdropFilter: 'saturate(180%) blur(20px)',
+            WebkitBackdropFilter: 'saturate(180%) blur(20px)',
+            borderBottom: '1px solid var(--ms-hairline)',
+            height: 56,
+          }}
+        >
+          <Brand onClick={() => navigate('/')} hideWordmark />
+          <div style={{ flex: 1 }} />
+          <IconButton title="任务收件箱" onClick={() => setTaskOpen(true)}>
+            <Inbox size={16} strokeWidth={1.8} />
+          </IconButton>
+          <UserMenu me={me} />
+        </header>
+
+        <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} />
+        <TaskCenterDrawer open={taskOpen} onClose={() => setTaskOpen(false)} />
+      </>
+    );
+  }
 
   return (
     <>
@@ -127,7 +166,7 @@ export function AppHeader({ me }: Props) {
 }
 
 // ─── 品牌印记 ───────────────────────────────────────────────────────────────
-function Brand({ onClick }: { onClick: () => void }) {
+function Brand({ onClick, hideWordmark = false }: { onClick: () => void; hideWordmark?: boolean }) {
   return (
     <button
       onClick={onClick}
@@ -153,16 +192,18 @@ function Brand({ onClick }: { onClick: () => void }) {
         <span style={layerStyle('var(--ms-accent)', 14, 14, 4, 4, 0.85)} />
         <span style={layerStyle('var(--ms-emerald)', 14, 14, 8, 8, 0.7)} />
       </span>
-      <span
-        style={{
-          fontFamily: 'var(--ms-font-display)',
-          fontWeight: 500,
-          fontSize: 16,
-          letterSpacing: '-0.01em',
-        }}
-      >
-        material<span style={{ color: 'var(--ms-accent)' }}>·</span>storage
-      </span>
+      {!hideWordmark && (
+        <span
+          style={{
+            fontFamily: 'var(--ms-font-display)',
+            fontWeight: 500,
+            fontSize: 16,
+            letterSpacing: '-0.01em',
+          }}
+        >
+          material<span style={{ color: 'var(--ms-accent)' }}>·</span>storage
+        </span>
+      )}
     </button>
   );
 }

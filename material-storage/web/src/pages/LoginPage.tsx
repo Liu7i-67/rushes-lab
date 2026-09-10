@@ -9,6 +9,7 @@ import { KeyRound, User as UserIcon } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../api/client';
 import { useLocalLogin } from '../api/hooks';
+import { useCompactViewport } from '../lib/use-viewports';
 
 const BASENAME = '/ms-static/web';
 
@@ -26,6 +27,7 @@ export default function LoginPage() {
   const [params] = useSearchParams();
   const login = useLocalLogin();
   const [form] = Form.useForm();
+  const compact = useCompactViewport();
   const next = parseNext(params.get('next'));
 
   const onFinish = async (values: { username: string; password: string }) => {
@@ -43,7 +45,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div style={{ maxWidth: 520, margin: '64px auto', padding: 16 }}>
+    <div style={{ maxWidth: 520, margin: compact ? '24px auto' : '64px auto', padding: 16 }}>
       <Card>
         {/* 品牌印记(与 AppHeader 一致的几何方块) */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>

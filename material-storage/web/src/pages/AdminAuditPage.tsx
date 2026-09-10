@@ -13,6 +13,7 @@ import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
 import { http, apiBase } from '../api/client';
 import { UserPicker } from '../components/UserPicker';
+import { useCompactViewport } from '../lib/use-viewports';
 import { EVENT_TYPE_LABEL, tlabel } from '../lib/labels';
 
 dayjs.extend(relativeTime);
@@ -45,6 +46,7 @@ const EVENT_TYPES = [
 const PAGE_SIZE = 30;
 
 export default function AdminAuditPage() {
+  const compact = useCompactViewport();
   const [filters, setFilters] = useState<{
     event_type: string;
     actor_user_id: string;   // users.id UUID(#148 起)
@@ -131,7 +133,7 @@ export default function AdminAuditPage() {
         />
         {/* #116 修:actor 过滤从手填 open_id Input 改 UserPicker 选人;
             #148 起 value = users.id UUID,传给 backend actor_user_id */}
-        <div style={{ width: 280 }}>
+        <div style={compact ? { flex: 1, minWidth: 0 } : { width: 280 }}>
           <UserPicker
             multiple={false}
             value={filters.actor_user_id}
@@ -142,11 +144,28 @@ export default function AdminAuditPage() {
             placeholder="按操作者筛选"
           />
         </div>
-        <DatePicker.RangePicker
-          value={filters.range}
-          onChange={(v) => { setFilters({ ...filters, range: v as [Dayjs, Dayjs] | null }); setPage(1); }}
-          showTime
-        />
+        {/* compact: 双月 RangePicker + showTime 手机不可用,换单个 DatePicker(按整天过滤);
+            仍写回同一个 filters.range([startOf('day'), endOf('day')]),params/CSV 导出逻辑零变化 */}
+        {compact ? (
+          <DatePicker
+            value={filters.range ? filters.range[0] : null}
+            onChange={(d) => {
+              setFilters({
+                ...filters,
+                range: d ? [d.startOf('day'), d.endOf('day')] : null,
+              });
+              setPage(1);
+            }}
+            placeholder="按日期筛选"
+            style={{ flex: 1, minWidth: 0 }}
+          />
+        ) : (
+          <DatePicker.RangePicker
+            value={filters.range}
+            onChange={(v) => { setFilters({ ...filters, range: v as [Dayjs, Dayjs] | null }); setPage(1); }}
+            showTime
+          />
+        )}
       </div>
 
       {/* 列表 */}
@@ -177,7 +196,8 @@ export default function AdminAuditPage() {
                 expanded={expanded.has(e.id)}
                 onToggle={() => {
                   const next = new Set(expanded);
-                  next.has(e.id) ? next.delete(e.id) : next.add(e.id);
+                  if (next.has(e.id)) next.delete(e.id);
+                  else next.add(e.id);
                   setExpanded(next);
                 }}
               />
@@ -222,7 +242,7 @@ function EventRow({
         width: 2, background: color,
         borderRadius: '0 2px 2px 0',
       }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <ChevronRight size={14} strokeWidth={1.8}
                       style={{
                         color: 'var(--ms-ink-subtle)',
