@@ -139,14 +139,26 @@ export function useCompactViewport(): boolean {
 ```css
 :root {
   /* 固定层几何:单一常量来源(TabBar 总高,含内 padding;
-     bottom 偏移一律 calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))) */
+     fixed 浮层(上传浮标等)的 bottom 仍以 calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom)) 为基准) */
   --ms-tabbar-h: 56px;
-  /* z 阶梯(antd Drawer/Modal 自带 z 1000+,浮于全部常驻层之上,不冲突) */
+  /* z 阶梯(TabBar 文档流化后 --ms-z-tabbar 暂无消费者,保留;antd Drawer/Modal 自带 z 1000+) */
   --ms-z-header: 50;     /* 现有 sticky header */
   --ms-z-batchbar: 60;   /* 批量操作栏 */
-  --ms-z-tabbar: 70;     /* 底部 TabBar(最上的常驻层) */
+  --ms-z-tabbar: 70;     /* 底部 TabBar(保留) */
   --ms-z-float: 80;      /* UploadFloatingIndicator */
 }
+
+/* compact 壳层:固定动态视口高(旧浏览器回退 vh) */
+.ms-app-shell { height: 100vh; height: 100dvh; }
+
+/* compact 态经 AppShell 往 body 挂 ms-compact 类 —— portal 出去的 Drawer/Modal
+   同样被覆盖;PC(无类)完全不受影响 */
+body.ms-compact, body.ms-compact *, body.ms-compact *::before, body.ms-compact *::after {
+  box-sizing: border-box;
+}
+/* UA 默认 body{margin:8px} 会把 100dvh 壳层顶下 8px → TabBar 出视口(375×812 实测
+   bottom 820>812);只 reset body 自身,不能并进上面的分组选择器(会把后代 margin 全清) */
+body.ms-compact { margin: 0; }
 
 /* ── 手机构图精修层:唯一断点 = max-width 767.98px(低于 antd md)──────── */
 @media (max-width: 767.98px) {
@@ -191,9 +203,15 @@ export function useCompactViewport(): boolean {
 ### 2.4 AppShell（`App.tsx`）
 
 - `main` 的 padding 由 `useCompactViewport()` 切换：PC `32px 24px 80px` →
-  compact `16px 12px calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom) + 32px)`
-  （TabBar 实际占位 = 56px + 安全区 inset，预留必须含 inset，否则末端 2-4px
-  被盖；32px 是内容与 TabBar 的呼吸位）。
+  compact `16px 12px 24px`。
+- **壳层滚动模型（真机反馈后修订）**：compact 根容器挂 `.ms-app-shell`
+  （`height: 100vh; height: 100dvh`），`main` 改 `flex:1 + overflowY:auto +
+  overflowX:hidden` 的**滚动容器**（`data-ms-main`），TabBar 文档流化（§2.5）——
+  解决移动浏览器 100vh 大视口导致 TabBar 默认不可见、以及 UA 默认
+  `body{margin:8px}` 把壳层顶出视口两个问题；AppShell 往 body 挂 `ms-compact`
+  类承载 border-box 与 margin reset（§2.2）。
+- 翻页回顶：compact 用 `scrollMainToTop()`（`lib/main-scroll.ts`，滚动
+  `[data-ms-main]`），PC 保持 `window.scrollTo`。
 - `PersistentUploadDrawer` / `TaskCenterDrawer` 不动（已响应式）。
 
 ### 2.5 AppHeader + MobileTabBar
@@ -206,9 +224,9 @@ CommandPalette 保留 PC 专属，`⌘K` 快捷键不变）、**通知 Bell（v3
 通知 tab 是唯一正门，30s 未读轮询的 badge 挂在 TabBar"通知"上，避免双入口
 双 badge 让 tester 困惑）**。
 
-**新增 `components/MobileTabBar.tsx`**（fixed bottom，`z: var(--ms-z-tabbar)`，
+**新增 `components/MobileTabBar.tsx`**（**文档流 flex 项**，`flexShrink: 0`，
 仅 compact 渲染，`padding-bottom: env(safe-area-inset-bottom)`，总高
-`var(--ms-tabbar-h)`）：
+`var(--ms-tabbar-h)`；键盘弹起时 `display:none`）：
 
 | tab | 去向 | 说明 |
 | --- | --- | --- |
@@ -251,9 +269,9 @@ CommandPalette 保留 PC 专属，`⌘K` 快捷键不变）、**通知 Bell（v3
   而非 id；切张只换内容，Drawer 常驻——"批量过图选片"是素材管理真实工作方式，
   不做原生滑动 pager，留下轮）。预览 Modal 在 Drawer 内叠层：两者同为 antd
   z 1000，靠 DOM 挂载顺序后者在上——**实现时不要改 `getContainer`**。
-- 批量操作：checkbox 勾选 ≥1 时底部浮出**批量操作栏**（sticky，
-  `bottom = calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))`，
-  `z: var(--ms-z-batchbar)`）：已选 N · 打标 / 删除 / 清空选择。
+- 批量操作：checkbox 勾选 ≥1 时底部浮出**批量操作栏**（sticky，滚动容器为
+  main，`bottom: 0`（TabBar 文档流化后天然钉在 TabBar 上沿），
+  `z: var(--ms-z-batchbar)`，键盘期隐藏）：已选 N · 打标 / 删除 / 清空选择。
   **移动端批量栏不放"下载"**：iOS/Android 只放行首个自动下载、后续静默拦截，
   批量下载在移动端不可靠——勾选仅服务打标/删除，下载走每卡行内按钮
   （§6 清单注明，防 tester 误报）。PC 批量下载不变。
@@ -266,8 +284,10 @@ CommandPalette 保留 PC 专属，`⌘K` 快捷键不变）、**通知 Bell（v3
   folder header 在 `my_can_admin` 时显示"管理"按钮 → bottom Drawer 内渲染
   AssetSummaryPanel 空选态（其内部本来就按 `selected===0` 条件渲染这两个面板，
   原样复用，不新写 UI）。
-- **滚动模型**：compact 分支**放弃** `height: calc(100vh-…)` 内滚 +
-  `overflow:hidden`（H8），改**自然文档流滚动**；外层 Layout 固定高、
+- **滚动模型（真机反馈后修订为"固定壳层 + 内滚"）**：compact 分支**放弃**
+  `height: calc(100vh-…)` 内滚 + `overflow:hidden`（H8），也**不采用页面级文档流
+  滚动**（100vh 大视口 + UA body margin 会把 fixed TabBar 顶出可视区）——改为
+  **`.ms-app-shell` 固定 100dvh + main 内滚**（§2.4）；外层 Layout 固定高、
   `borderRadius`、`boxShadow` 仅 PC 分支保留；分页器为文档流普通块。
 - **全选语义**：actions bar 的全选 Checkbox 保留（作用于当前页，语义与 PC 一致）；
   它与卡片 checkbox 共用同一 `selectedIds` state。
