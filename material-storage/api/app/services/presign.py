@@ -71,10 +71,25 @@ class PresignService:
             config=Config(signature_version="s3v4"),
         )
 
-    def sign_get_url(self, bucket: str, key: str, expires_seconds: int) -> str:
+    def sign_get_url(
+        self,
+        bucket: str,
+        key: str,
+        expires_seconds: int,
+        response_content_disposition: str | None = None,
+    ) -> str:
+        """签 GET presigned URL。
+
+        response_content_disposition 非 None 时并入 Params(移动端下载直连的
+        attachment 语义,方案 §3.5);None 时 Params 与旧版完全一致(预览路径
+        inline 语义零变化)。
+        """
+        params: dict[str, Any] = {"Bucket": bucket, "Key": key}
+        if response_content_disposition is not None:
+            params["ResponseContentDisposition"] = response_content_disposition
         return self._s3_signer.generate_presigned_url(
             "get_object",
-            Params={"Bucket": bucket, "Key": key},
+            Params=params,
             ExpiresIn=expires_seconds,
         )
 

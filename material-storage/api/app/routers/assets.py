@@ -9,8 +9,10 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel
 from sqlalchemy import ColumnElement, func, or_, select, true
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -576,9 +578,56 @@ async def update_asset_meta(
 
 
 # ─── download link ────────────────────────────────────────────────────────────
+class DownloadLinkIn(BaseModel):
+    """download-link 可选请求体(移动端下载直连,方案 §3.5)。
+
+    向后兼容:不传 body / `{}` 均可,as_attachment 默认 False → 行为与旧版
+    完全一致(inline 语义,桌面 PDF iframe 预览不受影响)。
+    """
+
+    as_attachment: bool = False
+
+
+def rfc5987_encode(filename: str) -> str:
+    """RFC 5987 ext-value 的 pct-encoded 部分:UTF-8 百分号编码(safe="" 全量转义)。"""
+    return quote(filename, safe="", encoding="utf-8")
+
+
+def _quoted_string(value: str) -> str:
+    """RFC 6266 quoted-string:转义反斜杠与双引号。"""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _ascii_fallback(filename: str) -> str:
+    """quoted-string 里的 ASCII 兜底:非 ASCII / 控制字符替换为 `_`(保扩展名)。
+
+    全部被替换导致空串时回落 "download"(中文名对不识别 RFC 5987 的老客户端
+    至少给个合法值)。
+    """
+    out = "".join(ch if ch.isascii() and ch.isprintable() else "_" for ch in filename)
+    return out.strip() or "download"
+
+
+def attachment_content_disposition(filename: str) -> str:
+    """构造 attachment 语义的 Content-Disposition 值(RFC 6266 + RFC 5987)。
+
+    - 纯 ASCII 文件名:`attachment; filename="<引号转义后的原名>"`。
+    - 含非 ASCII:quoted-string 放 ASCII 兜底,原文名走
+      `filename*=UTF-8''<RFC 5987 百分号编码>`(移动端中文素材落盘文件名正确)。
+    """
+    if filename.isascii():
+        return f'attachment; filename="{_quoted_string(filename)}"'
+    fallback = _quoted_string(_ascii_fallback(filename))
+    return (
+        f'attachment; filename="{fallback}"; '
+        f"filename*=UTF-8''{rfc5987_encode(filename)}"
+    )
+
+
 @router.post("/{asset_id}/download-link", response_model=DownloadLinkOut)
 async def get_download_link(
     asset_id: uuid.UUID,
+    data: DownloadLinkIn | None = None,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     presign: PresignService = Depends(get_presign),
@@ -614,7 +663,17 @@ async def get_download_link(
 
     settings = get_settings()
     ttl = settings.presigned_normal_ttl_seconds
-    url = presign.sign_get_url(asset.minio_bucket, asset.minio_key, ttl)
+    # as_attachment=true → attachment 语义(移动端系统下载器直连,方案 §3.5);
+    # 默认 None 不带 ResponseContentDisposition,预览路径(inline)零变化
+    disposition = (
+        attachment_content_disposition(asset.filename)
+        if data is not None and data.as_attachment
+        else None
+    )
+    url = presign.sign_get_url(
+        asset.minio_bucket, asset.minio_key, ttl,
+        response_content_disposition=disposition,
+    )
 
     await audit.signed_url_issued(
         actor_user_id=user_id,

@@ -29,6 +29,7 @@ from app.deps import (
     get_presign,
     get_request_context,
 )
+from app.routers.assets import attachment_content_disposition
 from app.services.audit import AuditService
 from app.services.permissions import PermissionsService
 from app.services.presign import PresignService
@@ -195,7 +196,12 @@ async def resolve(
             **ctx,
         )
         ttl = settings.presigned_normal_ttl_seconds
-        url = presign.sign_get_url(asset.minio_bucket, asset.minio_key, ttl)
+        # 分享下载签发同走 attachment 语义(方案 §3.5「分享下载签发同改」):
+        # 该 download_url 在前端只用于「下载」按钮,无内联预览复用,无条件 attachment
+        url = presign.sign_get_url(
+            asset.minio_bucket, asset.minio_key, ttl,
+            response_content_disposition=attachment_content_disposition(asset.filename),
+        )
         return ShareResolveOut(
             kind="asset", target_id=target_id,
             sharer_name=info["sharer_name"],
