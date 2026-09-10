@@ -1,5 +1,6 @@
 /**
  * MobileTabBar — compact(<1024)专属底部导航,PC 渲染 null、PC 顶栏零接触。
+ * 文档流 flex 项(非 fixed):壳层固定 100dvh + main 内滚,TabBar 常驻可视底。
  * 视觉语言对齐 AppHeader 的 NavChip:inline style + tokens 变量。
  * hooks 置顶(见 use-viewports 模块注释):分支只切 JSX,不挂不同数量的 hook。
  */
@@ -53,9 +54,8 @@ export function MobileTabBar() {
     <>
       <nav
         style={{
-          position: 'fixed',
-          left: 0, right: 0, bottom: 0,
-          zIndex: 'var(--ms-z-tabbar)',
+          // 文档流 flex 项(壳层根是 flex 列,main 内滚):常驻可视底,不再叠压内容
+          flexShrink: 0,
           height: 'var(--ms-tabbar-h)',
           boxSizing: 'border-box',
           display: kbVisible ? 'none' : 'flex',

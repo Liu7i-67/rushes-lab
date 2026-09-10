@@ -191,13 +191,13 @@ html, body {
 /* ═══ 移动端层（集中管理，禁止散落）═════════════════════════════════════ */
 
 :root {
-  /* 固定层几何:单一常量来源(TabBar 总高,含内 padding;
-     bottom 偏移一律 calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))) */
+  /* TabBar 总高(含内 padding;TabBar 现为文档流 flex 项,不再 fixed 叠压内容)。
+     fixed 浮层仍以其为基准:bottom = calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom)) */
   --ms-tabbar-h: 56px;
   /* z 阶梯(antd Drawer/Modal 自带 z 1000+,浮于全部常驻层之上,不冲突) */
   --ms-z-header: 50;     /* 现有 sticky header */
   --ms-z-batchbar: 60;   /* 批量操作栏 */
-  --ms-z-tabbar: 70;     /* 底部 TabBar(最上的常驻层) */
+  --ms-z-tabbar: 70;     /* (保留)TabBar 已改文档流,无 fixed 层暂不消费 */
   --ms-z-float: 80;      /* UploadFloatingIndicator */
 }
 
@@ -229,3 +229,19 @@ html, body {
 
 /* ── 安全区 ─────────────────────────────────────────────────────────── */
 .ms-safe-bottom { padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+
+/* ── compact 壳层固定视口高:移动浏览器 100vh 是大视口(含地址栏下沿),
+      真实可视区更矮 → 旧浏览器回退 100vh,支持 dvh 的用 100dvh 锁可视区 ── */
+.ms-app-shell { height: 100vh; height: 100dvh; }
+
+/* ── compact 下全局 border-box(body 级选择器借 AppShell 的 body class 生效,
+      连带覆盖 portal 到 body 的 Drawer/Modal/message;
+      修 width + padding/border 组合在窄屏 x 轴溢出)────────────────────── */
+body.ms-compact, body.ms-compact *, body.ms-compact *::before, body.ms-compact *::after {
+  box-sizing: border-box;
+}
+
+/* ── 清掉 UA 默认 body margin(8px):否则壳层整体被顶下 8px,
+      底部文档流 TabBar 超出视口(375×812 实测 bottom 820 > 812)。
+      只 reset body 自身 — 不能并入上面分组选择器,否则全部后代 margin 归零 ── */
+body.ms-compact { margin: 0; }

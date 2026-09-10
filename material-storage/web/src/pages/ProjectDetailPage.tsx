@@ -29,6 +29,7 @@ import { RequestAccessModal } from '../components/RequestAccessModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
 import { NewFolderModal } from '../components/NewFolderModal';
 import { useCompactViewport } from '../lib/use-viewports';
+import { scrollMainToTop } from '../lib/main-scroll';
 import { useKeyboardVisible, useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { useUpload } from '../lib/upload-store';
 import { useDownloads } from '../lib/download-store';
@@ -481,6 +482,8 @@ export default function ProjectDetailPage() {
               fontFamily: 'var(--ms-font-mono)',
               fontSize: 11,
               color: 'var(--ms-ink-subtle)',
+              // 长路径窄屏不撑破 x 轴(单行省略);PC 分支保持换行原样
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>{folder.minio_prefix}</div>
           )}
         </div>
@@ -525,7 +528,7 @@ export default function ProjectDetailPage() {
         </div>
 
         {/* 卡片列表 + 分页器(文档流普通块);勾选态追加批量栏高度 padding-bottom,
-            防末端内容被「批量栏 + TabBar」双层盖住 */}
+            防末端内容被 sticky 批量栏盖住 */}
         <div style={{ padding: '12px 0 0', paddingBottom: hasSelection ? 76 : 12 }}>
           <AssetCardList
             assets={assetItems}
@@ -560,19 +563,20 @@ export default function ProjectDetailPage() {
                   setPage(p);
                   setSelectedIds([]);
                   setDetailIndex(null);
-                  window.scrollTo({ top: 0 });
+                  // compact 下 main 是滚动容器(window 不滚),回顶滚 main
+                  scrollMainToTop();
                 }}
               />
             </div>
           )}
         </div>
 
-        {/* 批量操作栏(§3.1):sticky 钉在 TabBar 上方;键盘弹起隐藏。
-            不放「下载」— 移动端浏览器拦截连续多下载,下载走每卡行内按钮 */}
+        {/* 批量操作栏(§3.1):sticky 钉在 main 滚动容器可视底(= TabBar 上沿);
+            键盘弹起隐藏。不放「下载」— 移动端浏览器拦截连续多下载,下载走每卡行内按钮 */}
         {hasSelection && (
           <div style={{
             position: 'sticky',
-            bottom: 'calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))',
+            bottom: 0,
             zIndex: 'var(--ms-z-batchbar)',
             marginTop: 12,
             display: kbVisible ? 'none' : 'flex',

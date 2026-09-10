@@ -13,6 +13,7 @@ import { AssetCardList } from '../components/AssetCardList';
 import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 import { useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { useCompactViewport } from '../lib/use-viewports';
+import { scrollMainToTop } from '../lib/main-scroll';
 import { useUpload } from '../lib/upload-store';
 
 export default function FolderDetailPage() {
@@ -51,7 +52,11 @@ export default function FolderDetailPage() {
           {folder?.is_sensitive && <Tag color="volcano" icon={<KeyOutlined />}>sensitive</Tag>}
         </Space>
       </Typography.Title>
-      <Typography.Paragraph type="secondary" code style={{ fontSize: 12 }}>{folder?.minio_prefix}</Typography.Paragraph>
+      {/* 长路径单行省略只在 compact 加(PC 保持换行原样,红线不动) */}
+      <Typography.Paragraph type="secondary" code style={{
+        fontSize: 12,
+        ...(compact ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : {}),
+      }}>{folder?.minio_prefix}</Typography.Paragraph>
 
       <Space style={{ marginBottom: 12 }}>
         <Tooltip title={canUpload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
@@ -78,11 +83,11 @@ export default function FolderDetailPage() {
             loading={isFetching}
             onOpen={setDetailIndex}
           />
-          {/* 分页器吸附视口底部:翻页后自动回顶,不用滚到底找页码;
-              compact 下垫高到 TabBar 上方(PC 无 TabBar,保持 0) */}
+          {/* 分页器吸附滚动容器底:翻页后自动回顶,不用滚到底找页码;
+              compact 下滚动容器是 main(钉底 = TabBar 上沿),PC 是 window,语义一致 */}
           <div style={{
             position: 'sticky',
-            bottom: compact ? 'calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom))' : 0,
+            bottom: 0,
             marginTop: 16, padding: '8px 4px',
             display: 'flex', justifyContent: 'flex-end',
             background: 'var(--ms-canvas)',
@@ -95,7 +100,9 @@ export default function FolderDetailPage() {
               onChange={(p) => {
                 setPage(p);
                 setDetailIndex(null);
-                window.scrollTo({ top: 0 });
+                // compact 下 main 是滚动容器(window 不滚);PC 维持 window 回顶
+                if (compact) scrollMainToTop();
+                else window.scrollTo({ top: 0 });
               }}
               showSizeChanger={false}
               showTotal={(t) => `共 ${t} 个文件`}

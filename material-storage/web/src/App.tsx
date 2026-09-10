@@ -3,7 +3,7 @@ import { App as AntApp, ConfigProvider, Spin, message as antMessage, theme } fro
 import zhCN from 'antd/locale/zh_CN';
 import { MutationCache, QueryCache, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, useEffect } from 'react';
 import { useMe } from './api/hooks';
 import { errorMessage } from './api/client';
 import { AppHeader } from './components/AppHeader';
@@ -84,6 +84,14 @@ function AppShell() {
   // hooks 置顶(compact 判定唯一源,见 use-viewports 模块注释)
   const compact = useCompactViewport();
 
+  // compact 态挂 body class:tokens.css 的 body.ms-compact 选择器(box-sizing
+  // border-box 等)借此覆盖 portal 到 body 的 Drawer/Modal/message。
+  // effect 只做 DOM classList 操作,不 setState
+  useEffect(() => {
+    document.body.classList.toggle('ms-compact', compact);
+    return () => document.body.classList.remove('ms-compact');
+  }, [compact]);
+
   // #149: 本地登录 / 改密是独立页(无 AppShell),未登录时也放行(useLocation 为 basename 相对路径)
   const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password';
 
@@ -121,24 +129,38 @@ function AppShell() {
   }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: 'var(--ms-canvas)',
-      color: 'var(--ms-ink)',
-      display: 'flex',
-      flexDirection: 'column',
-    }}>
-      <AppHeader me={me} />
-      <main style={{
-        flex: 1,
-        // compact 下底部预留 TabBar 高 + 安全区(末端 2-4px 不被盖),32px 是与 TabBar 的呼吸位
-        padding: compact
-          ? '16px 12px calc(var(--ms-tabbar-h) + env(safe-area-inset-bottom) + 32px)'
-          : '32px 24px 80px',
-        maxWidth: 1480,
-        margin: '0 auto',
-        width: '100%',
+    <div
+      className={compact ? 'ms-app-shell' : undefined}
+      style={{
+        // PC 分支不变(minHeight 100vh + window 滚动);compact 固定视口高
+        // 由 tokens.css 的 .ms-app-shell(100dvh,旧浏览器回退 100vh)承担
+        minHeight: compact ? undefined : '100vh',
+        background: 'var(--ms-canvas)',
+        color: 'var(--ms-ink)',
+        display: 'flex',
+        flexDirection: 'column',
       }}>
+      <AppHeader me={me} />
+      <main
+        data-ms-main={compact || undefined}
+        style={{
+          flex: 1,
+          ...(compact
+            ? {
+                // compact:壳层固定 100dvh,main 即滚动容器(滚动定位用 [data-ms-main]);
+                // TabBar 是文档流 flex 项,不再叠压内容,无需预留底 padding
+                overflowY: 'auto',
+                overflowX: 'hidden',
+                WebkitOverflowScrolling: 'touch',
+                padding: '16px 12px 24px',
+              }
+            : {
+                padding: '32px 24px 80px',
+              }),
+          maxWidth: 1480,
+          margin: '0 auto',
+          width: '100%',
+        }}>
         <RouterRoutes />
       </main>
       <PersistentUploadDrawer />
