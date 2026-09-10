@@ -9,17 +9,19 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 
 ## 1. 环境事实（先对号入座）
 
-| | dev（测试环境） | prod |
+| | dev（测试环境） | prod（正式环境） |
 | --- | --- | --- |
-| SSH | `hh2`（msdev） | `hh2`（huanhua） |
+| SSH 别名 | `hh2`（登录身份 **msdev**） | **`hh2-prod`（登录身份 huanhua）——prod 必须走这个别名** |
 | 远端目录 | `/home/msdev/ms` | `/home/huanhua/ms` |
 | 入口 | `http://192.168.110.221:8090`（外网 `http://47.108.196.211:8080`） | `http://192.168.110.221`（外网 `:18080`） |
 | 容器 | `ms-api-dev` / `ms-worker-dev` / `ms-db-dev` | `ms-api` / `ms-worker` / `ms-db` |
 
+- ⚠ **prod 别用 `hh2` 别名**：该身份（msdev）对 `/home/huanhua/ms` 无写权限、也无免密 sudo，rsync 会满屏 chgrp/Permission denied（2026-09-10 实踩）。prod 一律 `ssh hh2-prod`（huanhua 身份可直接 `docker compose restart`，无需 sudo）。
 - ssh 走跳板反向隧道，**会抖动也会中途断流**（§3 是重点）。
 - 同机双环境并存，靠三层隔离（COMPOSE_PROJECT_NAME / container_name 后缀 / ports `!override`）互不干扰——**别动这套隔离，exec/重启前先看清容器名后缀**。
 - `.env` 与 `docker-compose.override.yml` 在目标机上从不随部署覆盖。
 - dev 的 nginx 把 `/healthz` 路由到 MinIO（既有配置），**API 存活用 `/api/v1/auth/me`（未登录 401）判断**。
+- prod 是 `ENV=production`：`X-User-Id` dev 通道**失效**，业务级实测（如 download-link 语义）需要真实账号登录；代码级核验用容器内 grep。
 
 ## 2. 部署前预检（每次都做）
 
@@ -101,7 +103,10 @@ bash .agents/skills/deploy-hh2/scripts/chunked-push.sh <本地文件> <远端绝
    ```
 
 4. `--inplace` 别去掉：nginx conf 等是 bind mount，换 inode 会让容器内看到 stale 文件。
-5. 小坑：scp 报 `No such file or directory` 多半是**远端目标目录没建**，先 `ssh hh2 'mkdir -p <dir>'`。
+5. 小坑三条（都实踩过）：
+   - scp 报 `No such file or directory` = **远端目标目录没建**，先 `ssh hh2 'mkdir -p <dir>'`；
+   - **/tmp 粘滞位跨身份残留**：`chunked-push.sh` 默认推到 hh2（msdev），msdev 传的 /tmp 文件 huanhua 删不掉（rm Operation not permitted 会中断远端脚本）——推 prod 用时，上传方(msdev)在处理完成后自己清 `ssh hh2 'rm -f /tmp/xxx.tgz'`，或远端工作目录/文件名按身份区分；
+   - 远端批量脚本里 tar/cp **一律绝对路径**：heredoc 的 cwd 是登录家目录，`tar xzf ms-spa.tgz` 这种相对路径会静默打不开文件。
 
 **SPA 原子替换**（先备份再换名，防半包状态）：
 
