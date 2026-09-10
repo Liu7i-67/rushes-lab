@@ -1,5 +1,15 @@
 # 生产环境外网映射操作流程(runbook)
 
+> **2026-09-10 跳板机迁移(最新状态)**:隧道跳板已从旧 ECS(47.108.119.221)迁至**轻量应用服务器
+> 47.108.196.211**(2核0.5G,200Mbps 峰值,无固定流量套餐;root 密钥 `scripts/env/fileali.pem`)。
+> 轻量机已配 `GatewayPorts clientspecified`(备份 `/etc/ssh/sshd_config.bak-swas-20260910`)+ `tunnel`
+> 用户(复用 tunnel-to-aliyun 同一钥对与 restrict 限制)+ 2G swap;jump-tunnel 三条转发
+> (12222/8080/18080)目标 IP 已切换;dev/prod `.env` ENDPOINT_PUBLIC 已切新 IP(备份 `.env.bak-swas-20260910`)。
+> **本文下文所有 `47.108.119.221` 应读作 `47.108.196.211`,「安全组」对应轻量机控制台的防火墙**
+> (已开 22/8080/18080/20009,其中 20009 暂未使用)。本地 ssh 别名已全部改经 `aliyun-swas`,
+> `aliyun-jump`(旧 ECS)保留作回退;hh2 回滚预案 `/home/msdev/jump-tunnel.service.bak.swas-20260910`
+> (还原并重启 jump-tunnel 即回旧 ECS,旧 ECS 释放前有效)。
+>
 > 状态:**已于 2026-09-07 实施并验收通过**(入口 `http://47.108.119.221:18080`;外网登录/搜索/缩略图 200/
 > 原片 206,内网 prod/dev 回归 200,12222 运维与 8080 dev 通道无恙)。同日随部署将 prod 代码推进到
 > `662754f`(liuqi,含 fbe5822 分页),SPA `index-nixcEnFQ.js`,`.env` 备份 `/home/huanhua/.env.bak-prod-20260904`。
