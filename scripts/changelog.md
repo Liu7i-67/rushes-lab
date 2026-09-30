@@ -2,6 +2,10 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
+## 2026-09-30
+
+- 成员权限三项改动方案定稿(rushes-spec/material-storage/project-grant-templates-plan.md,方案文档、未动代码):①放开「用户组授项目管理」——查实系 #162 飞书下线重构把原本只拦部门的 guard 压平误伤用户组,FGA 模型 `admin: [user, group#member]` 本就支持、撤销成员的 admin 不变量注释也按 group-admin 设计,放开仅需删 API guard + 前端警示,零模型变更;②用户组名称显示修复——「用户组ef94e20c-be0…」根因是 4 处列表接口(项目成员/授权总览/夹成员/夹授权)只 join users 不 join groups,方案统一收敛到 `resolve_subject_names` helper;③新建项目自动授权两步走——先 `POST /projects` 加 `initial_grants` 直通(前置校验 400 原子、OpenFGA 写入幂等、audit 带 via 标记)+ NewProjectModal 初始权限区(抽 RoleChipGroup 公共组件),再做权限模板模块(两张表 + admin CRUD + 前端预填式应用,不做服务端 template_id);拆 3 个独立批次,仅批次三含 alembic migration。已与用户确认三项决策(放开/修复/按建议展开),待实施
+
 ## 2026-09-10
 
 - **deploy-hh2 技能补"正式环境专项"+ 修 deploy_lan.sh prod 通道 bug**:技能新增 §6"正式环境专项注意"(prod 必须走 hh2-prod 别名/上线前三步确认/无弹窗通道要提前打招呼/双入口指纹验证/业务实测需真实账号/回滚流程);**根因修复**——deploy_lan.sh 的 prod 分支原硬编码 `HOST=hh2`,跳板迁移(2026-09-10)后该别名身份是 msdev,对 huanhua 的 prod 目录无写权限且无免密 sudo,脚本 prod 路径实际已坏;改为 prod 走 `hh2-prod`(huanhua)且重启去 sudo(huanhua 免 sudo 直管 docker,同日实测),bash -n 过。dev/prod 部署技能化完成,后续内网部署直接引用该技能
