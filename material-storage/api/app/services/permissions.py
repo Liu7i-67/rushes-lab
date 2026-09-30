@@ -89,6 +89,17 @@ def is_already_exists_error(e: BaseException) -> bool:
     return isinstance(e, ValidationException) and "already exist" in str(e).lower()
 
 
+def is_not_exists_error(e: BaseException) -> bool:
+    """判定 OpenFGA 写异常是否为「被删 tuple 不存在」(stale 重复撤销)。
+
+    与 is_already_exists_error 对称:SDK 400 ValidationException + 稳定公共子串
+    "does not exist";非 400 类(网络 / 5xx)不视作不存在,继续上抛。
+    """
+    from openfga_sdk.exceptions import ValidationException
+
+    return isinstance(e, ValidationException) and "does not exist" in str(e).lower()
+
+
 class PermissionsService:
     def __init__(self, settings: Settings):
         self._settings = settings

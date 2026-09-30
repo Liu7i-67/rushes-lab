@@ -108,6 +108,8 @@ export function AppHeader({ me }: Props) {
             <>
               <NavChip to="/admin/users" label="用户" navigate={navigate} />
               <NavChip to="/admin/groups" label="用户组" navigate={navigate} />
+              {/* 权限模板(方案 §4.4)— 仅系统管理员可见 */}
+              <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />
             </>
           )}
         </nav>

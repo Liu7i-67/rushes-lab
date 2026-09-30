@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+# ProjectRole Literal 定义处(permissions.py 只 import settings/openfga_sdk,无循环依赖)
+from app.services.permissions import ProjectRole
 
 
 class ORMModel(BaseModel):
@@ -12,6 +16,19 @@ class ORMModel(BaseModel):
 
 
 # ─── projects ─────────────────────────────────────────────────────────────────
+class InitialGrantIn(BaseModel):
+    """新建项目初始授权条目(方案 §3.1)。
+
+    user 需存在且 active / group 需存在(存在性校验在 create_project 前置,
+    400 指明第几条);roles 非空在 Pydantic 层拦(422),去重 + 固定顺序落在
+    create_project 路由内(PROJECT_ROLES 常量在 routers,models 层不 import)。
+    """
+
+    kind: Literal["user", "group"]
+    id: uuid.UUID                      # user: users.id(需 active);group: groups.id(需存在)
+    roles: list[ProjectRole] = Field(..., min_length=1)
+
+
 class ProjectCreateIn(BaseModel):
     code: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z0-9][a-z0-9\-]*$")
     name: str = Field(..., min_length=1, max_length=255)
@@ -22,6 +39,8 @@ class ProjectCreateIn(BaseModel):
     # 必填:指派的项目 admin(系统 admin 创建,需要明确指派 sub-admin;
     # 可以是自己 = me.id;UI 默认填创建者)
     admin_user_id: uuid.UUID = Field(..., description="项目管理员的 users.id UUID")
+    # 新建项目初始授权(可选;方案 §3.1):不传 / 空 = 现行为完全不变
+    initial_grants: list[InitialGrantIn] | None = None
 
 
 class AdminBrief(BaseModel):

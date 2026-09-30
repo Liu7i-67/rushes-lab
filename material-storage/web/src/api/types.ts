@@ -66,6 +66,30 @@ export interface Project {
   my_roles: ('admin' | 'uploader' | 'downloader' | 'viewer')[];
 }
 
+// ─── 项目角色 / initial_grants(方案 §3:创建时直通授权)─────────────────────
+export type ProjectRole = 'admin' | 'uploader' | 'downloader' | 'viewer';
+
+/** initial_grants / 权限模板 items 共用的授权条目(kind + id + roles)。*/
+export interface GrantEntry {
+  kind: 'user' | 'group';
+  id: string;            // user: users.id UUID(active) / group: groups.id UUID
+  roles: ProjectRole[];
+}
+
+// ─── 项目权限模板(方案 §4;require_system_admin)────────────────────────────
+export interface GrantTemplateItem extends GrantEntry {
+  name: string;          // 解析后的主体名(主体已删/未命中走短 id 兜底)
+  missing: boolean;      // true = 主体已删(预填后提交会被建项目存在性校验 400 拦下)
+}
+
+export interface GrantTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  is_default: boolean;
+  items: GrantTemplateItem[];
+}
+
 export interface Folder {
   id: string;
   project_id: string;

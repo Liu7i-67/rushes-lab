@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Project
+from app.db.tables import Group, Project
 from app.deps import (
     get_audit,
     CurrentUser,
@@ -31,9 +32,19 @@ from app.deps import (
 )
 from app.models import ProjectCreateIn, ProjectOut
 from app.services.audit import AuditService
-from app.services.permissions import PermissionsService, is_already_exists_error
+from app.services.permissions import (
+    PermissionsService,
+    fmt_subject,
+    is_already_exists_error,
+    is_not_exists_error,
+)
+from app.services.subject_names import resolve_subject_names
 
 router = APIRouter()
+log = logging.getLogger(__name__)
+
+# initial_grants 条数上限(方案 §3.1;批次三模板 items 上限与同一常量,见 admin.py)
+INITIAL_GRANTS_MAX = 50
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
@@ -84,6 +95,48 @@ async def create_project(
         raise HTTPException(400, f"organization {org_id} not found")
     tenant_key = org.feishu_tenant_key or str(org_id)
 
+    # ── initial_grants 前置校验(方案 §3.1:全部在建项目行之前,原子无半吊子)──
+    # 顺序:条数(422)→ payload 内 (kind,id) 重复(400)→ 存在性(400);
+    # roles 空数组 / 非法值已在 Pydantic 层 422(min_length=1 + Literal)。
+    initial_grants = payload.initial_grants or []
+    if len(initial_grants) > INITIAL_GRANTS_MAX:
+        raise HTTPException(
+            422,
+            f"initial_grants 条数超上限:最多 {INITIAL_GRANTS_MAX} 条,"
+            f"收到 {len(initial_grants)} 条",
+        )
+    seen_subjects: set[tuple[str, uuid.UUID]] = set()
+    for i, g in enumerate(initial_grants, start=1):
+        if (g.kind, g.id) in seen_subjects:
+            raise HTTPException(
+                400, f"initial_grants 第 {i} 条主体重复:{g.kind} {g.id}",
+            )
+        seen_subjects.add((g.kind, g.id))
+    if initial_grants:
+        grant_user_ids = {g.id for g in initial_grants if g.kind == "user"}
+        grant_group_ids = {g.id for g in initial_grants if g.kind == "group"}
+        active_user_ids: set[uuid.UUID] = set()
+        if grant_user_ids:
+            res_users = await db.execute(select(User).where(User.id.in_(grant_user_ids)))
+            active_user_ids = {
+                u.id for u in res_users.scalars().all() if u.is_active
+            }
+        existing_group_ids: set[uuid.UUID] = set()
+        if grant_group_ids:
+            res_groups = await db.execute(
+                select(Group.id).where(Group.id.in_(grant_group_ids))
+            )
+            existing_group_ids = {row[0] for row in res_groups.all()}
+        for i, g in enumerate(initial_grants, start=1):
+            if g.kind == "user" and g.id not in active_user_ids:
+                raise HTTPException(
+                    400, f"initial_grants 第 {i} 条主体不存在或未启用:user {g.id}",
+                )
+            if g.kind == "group" and g.id not in existing_group_ids:
+                raise HTTPException(
+                    400, f"initial_grants 第 {i} 条主体不存在:group {g.id}",
+                )
+
     project = Project(
         id=uuid.uuid4(),
         organization_id=org_id,
@@ -111,6 +164,36 @@ async def create_project(
         creator_user_id=str(admin_user.id),
     )
 
+    # initial_grants 直通(方案 §3.1):逐条逐角色写 OpenFGA。重复 tuple 幂等跳过
+    # (admin_user_id 与 initial_grants 重复授 admin 是合理输入);跳过分支不写 audit
+    # (与 add_project_member 的 continue-before-audit 现状一致)。OpenFGA 中途失败
+    # → 500,与 bootstrap 失败同类同治:项目行已提交但授权部分缺失,成员抽屉手动补授。
+    for g in initial_grants:
+        subject = fmt_subject(g.kind, str(g.id))
+        # 去重 + 固定顺序(用 PROJECT_ROLES;Literal 声明顺序与其不同,勿混用)
+        roles = [r for r in PROJECT_ROLES if r in set(g.roles)]
+        for role in roles:
+            try:
+                await permissions.add_project_subject(
+                    project_id=str(project.id), subject=subject, role=role,
+                )
+            except Exception as e:
+                if not is_already_exists_error(e):
+                    raise
+                continue
+            # 仅真正写入的记一条,单角色 detail 形状与 add_project_member 对齐,
+            # 下游按 event_type 过滤的查询不用改
+            await audit.write(
+                event_type="project_member_added",
+                actor_user_id=user_id,
+                target_project_id=project.id,
+                details={
+                    "subject": subject, "role": role, "kind": g.kind,
+                    "via": "initial_grants",
+                },
+                **ctx,
+            )
+
     await audit.write(
         event_type="project_created",
         actor_user_id=user_id,
@@ -120,6 +203,7 @@ async def create_project(
             "visibility": project.visibility,
             "admin_user_id": str(admin_user.id),
             "admin_name": admin_user.name,
+            "initial_grants_count": len(initial_grants),
         },
         **ctx,
     )
@@ -176,6 +260,15 @@ def _parse_uuids(ids: list[str] | set[str]) -> list[uuid.UUID]:
         except ValueError:
             continue
     return out
+
+
+def _is_uuid_str(s: str) -> bool:
+    """s 是否为合法 UUID 字符串(入口校验用)。"""
+    try:
+        uuid.UUID(s)
+    except ValueError:
+        return False
+    return True
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -363,13 +456,11 @@ async def list_project_members(
     )
 
     from openfga_sdk.models import ReadRequestTupleKey
-    from app.db.tables import User as _User
     resp = await permissions._client.read(  # type: ignore[attr-defined]
         ReadRequestTupleKey(object=f"project:{project_id}")
     )
 
     by_subject: dict[str, dict] = {}
-    user_subject_ids: list[str] = []
 
     for t in resp.tuples:
         rel = t.key.relation
@@ -384,22 +475,12 @@ async def list_project_members(
                 "subject": subject, "kind": kind, "subject_id": sid,
                 "name": None, "roles": [],
             }
-            if kind == "user":
-                user_subject_ids.append(sid)
         by_subject[key]["roles"].append(rel)
 
-    # user batch db lookup(subject_id 是 users.id UUID 字符串,容错非法值)
-    if user_subject_ids:
-        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
-        res = await db.execute(stmt)
-        name_by_user_id = {str(u.id): u.name for u in res.scalars().all()}
-        for m in by_subject.values():
-            if m["kind"] == "user":
-                m["name"] = name_by_user_id.get(m["subject_id"], m["subject_id"][:12] + "…")
+    # 批量解析主体名称(user → users.name,group → groups.name;未命中走 id 兜底)
+    names = await resolve_subject_names(db, list(by_subject.keys()))
     for m in by_subject.values():
-        if m["name"] is None:
-            label = "用户组" if m["kind"] == "group" else "部门" if m["kind"] == "department" else m["kind"]
-            m["name"] = f"{label} {m['subject_id'][:12]}…"
+        m["name"] = names[m["subject"]]["name"]
 
     members = list(by_subject.values())
     # 排序:admin 优先 → user 优先 → name
@@ -463,10 +544,12 @@ async def add_project_member(
     chosen = [(k, v) for k, v in provided if v]
     if len(chosen) != 1:
         raise HTTPException(400, "must specify exactly one of user_id / group_id")
-    if "admin" in roles and chosen[0][0] != "user":
-        # model v4 限 admin: [user, group#member]
-        raise HTTPException(400, "admin 不允许直接给 group;请改给 user")
     subject_kind, subject_id = chosen[0]
+    # 入口校验:user_id / group_id 必须是 UUID —— 封掉「任意字符串当 group 主体」
+    # 的历史入口(存量 grp_editors 等);admin 允许 group(model v4: admin:
+    # [user, group#member],fmt_subject('group', id) 天然合法),仅 department 不可达
+    if not _is_uuid_str(str(subject_id)):
+        raise HTTPException(400, f"{subject_kind}_id 必须是 UUID: got {subject_id!r}")
 
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
@@ -514,28 +597,74 @@ async def remove_project_member(
         is_system_admin=is_system_admin,
     )
 
-    # admin 不变量(#106 修复):防止 admin 自我锁死 + 项目归零无 admin
-    # (b) 不允许 admin 撤销自己的 admin 角色 — 必须先邀请其他 admin 再让别人撤销自己
-    # (a) 不允许撤销后项目 admin 归零(兜底:group-admin 间接 user 也计入,接受 OpenFGA
-    #     list_users 透传 leaf users 的语义 — 不完美但能拦住典型死循环路径)
+    # 入口形态校验:subject 必须形如 user:<uuid> 或 group:<uuid>#member。
+    # 放行任意串的话,客户端漏 #member 后缀时下面投影匹配不到该 tuple
+    # → 204 假成功 + audit 记了 removed 但真实 tuple 残留(§1.2 配套入口校验)
+    s_kind, _, s_rest = subject.partition(":")
+    if s_kind == "user":
+        subject_ok = _is_uuid_str(s_rest)
+    elif s_kind == "group":
+        subject_ok = s_rest.endswith("#member") and _is_uuid_str(
+            s_rest.removesuffix("#member")
+        )
+    else:
+        subject_ok = False
+    if not subject_ok:
+        raise HTTPException(400, "subject 必须形如 user:<uuid> 或 group:<uuid>#member")
+
+    # admin 不变量(#106):不允许 admin 撤自己的 admin;且撤销后项目必须仍有
+    # 幸存 admin —— 按幸存 tuple 的 leaf 投影计数:read 一次项目 admin tuples →
+    # 剔除本次要撤的 subject → 幸存 user: tuple 的 id 加上幸存 group:<gid>#member
+    # tuple 经组 member tuple 展开的 user 成员 id,幸存集为空才 409。
+    # 不用「当前 leaf 集合 - 被撤主体贡献集」减法:组成员同时持有直授 admin(或
+    # 另一 admin 组)时,减法会把差集错算成空,把本应 204 的撤销错杀成 409。
+    # leaf 数据源一律 FGA tuple,不用 DB group_memberships:用户停用会撤全部
+    # FGA tuple 但 DB 组成员行保留,按 DB 展开会计入幽灵 admin。
     if role == "admin":
         if subject == user.subject:
             raise HTTPException(
                 409,
                 "不允许撤销自己的项目管理员角色;请先邀请其他管理员,再让对方撤销你",
             )
-        current_admins = await permissions.list_users_with_relation(
-            object_type="project", object_id=str(project_id), relation="admin",
+        from openfga_sdk.models import ReadRequestTupleKey
+        resp = await permissions._client.read(
+            ReadRequestTupleKey(object=f"project:{project_id}")  # type: ignore[no-untyped-call]
         )
-        if len(current_admins) <= 1:
+        survivor_leafs: set[str] = set()
+        for t in resp.tuples:
+            if t.key.relation != "admin" or t.key.user == subject:
+                continue  # 非 admin relation / 本次要撤的那条 tuple
+            s = t.key.user
+            if s.startswith("user:"):
+                survivor_leafs.add(s.split(":", 1)[1])
+            elif s.startswith("group:"):
+                gid = s.split(":", 1)[1].rsplit("#", 1)[0]
+                # 只展开一层 user: 型 member(嵌套组/department#member 全库无写入路径)
+                for member_user, _rel, _obj in await permissions.list_group_member_tuples(gid):
+                    survivor_leafs.add(member_user.split(":", 1)[1])
+            else:
+                # 未知 kind 幸存 tuple(v3 时代/脚本直写残留):不计入幸存集,记 log 排查
+                log.warning(
+                    "remove_project_member: survivor admin tuple of unknown kind,"
+                    " project=%s subject=%s", project_id, s,
+                )
+        if not survivor_leafs:
             raise HTTPException(
                 409,
                 "项目至少需要保留 1 个管理员;请先邀请其他管理员,再撤销当前管理员",
             )
 
-    await permissions.remove_project_subject(
-        project_id=str(project_id), subject=subject, role=role,  # type: ignore[arg-type]
-    )
+    try:
+        await permissions.remove_project_subject(
+            project_id=str(project_id), subject=subject, role=role,  # type: ignore[arg-type]
+        )
+    except Exception as e:
+        # stale 重复撤销(§1.2):被撤 subject 本就无该角色 tuple → 幂等 no-op,
+        # 直接 204,不写 audit(没真删不该记 removed,与 add 侧「仅真正写入的
+        # 记 audit」对称);其他异常(网络 / 5xx)照旧上抛 → 500
+        if not is_not_exists_error(e):
+            raise
+        return
 
     await audit.write(
         event_type="project_member_removed",

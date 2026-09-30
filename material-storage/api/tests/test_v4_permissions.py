@@ -587,3 +587,389 @@ async def test_folder_delete_concurrent_double_delete(client: AsyncClient) -> No
 
 
 # #154:admin feishu health / test-card 测试随飞书下线删除(ADR-0007)
+
+
+# ─── 批次一:组授管理放开(§1.2 改动 1)+ admin 不变量加固(§1.2 改动 2)
+# ─── + 主体名称解析(§2.2 helper)。建组照 tests/test_directory.py:127-135
+# ─── (seed 脚本不建 groups 表数据,不存在现成 fixture 组)。
+def _uniq(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+async def _create_group(client: AsyncClient, name: str, member_ids: list[str]) -> str:
+    """建目录组 + 挂成员,返回组 id。"""
+    r = await client.post(
+        "/api/v1/admin/directory/groups", json={"name": name}, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 201, r.text
+    gid = r.json()["id"]
+    for uid in member_ids:
+        rm = await client.post(
+            f"/api/v1/admin/directory/groups/{gid}/members",
+            json={"user_id": uid}, headers=_h(EVAN_ID),
+        )
+        assert rm.status_code == 201, rm.text
+    return gid
+
+
+@pytest.mark.asyncio
+async def test_project_member_group_admin_cycle(client: AsyncClient) -> None:
+    """§1.4:建组(Evan+outsider)→ 组 admin 204 → 组内非创建者(outsider)
+    list/add 成员成功(can_admin 生效)→ GET /members 该组带 admin 徽章 →
+    DELETE 撤回 → outsider can_admin 消失。"""
+    gid = await _create_group(client, _uniq("grp_cycle"), [EVAN_ID, OUTSIDER_ID])
+    try:
+        # 组 admin 放行(#162 重构回归的 guard 已删,§1.2 改动 1)
+        add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"group_id": gid, "roles": ["admin"]},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+
+        # 组内非创建者用户已具 can_admin:list 成员 / 加成员成功
+        r1 = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(OUTSIDER_ID),
+        )
+        assert r1.status_code == 200, r1.text
+        add2 = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"user_id": OUTSIDER_ID, "role": "viewer"},
+            headers=_h(OUTSIDER_ID),
+        )
+        assert add2.status_code == 204, add2.text
+
+        # GET /members:该组带 admin 角色(前端「管理」徽章 + 🛡 数据源)
+        r2 = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID),
+        )
+        assert r2.status_code == 200
+        grp = next(m for m in r2.json() if m["subject"] == f"group:{gid}#member")
+        assert "admin" in grp["roles"], r2.json()
+
+        # DELETE 撤回组 admin(Evan 直授 admin 幸存 → 投影非空 → 204)
+        rev = await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"group:{gid}#member", "role": "admin"},
+            headers=_h(EVAN_ID),
+        )
+        assert rev.status_code == 204, rev.text
+
+        # can_admin 消失:outsider 再列成员 → 403;组不再出现在成员列表
+        r3 = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(OUTSIDER_ID),
+        )
+        assert r3.status_code == 403
+        r4 = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID),
+        )
+        assert not any(m["subject"] == f"group:{gid}#member" for m in r4.json())
+    finally:
+        # 清场:撤 outsider 直授 viewer(若有)+ 删组(组 member tuple 由删组清理)
+        await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"user:{OUTSIDER_ID}", "role": "viewer"},
+            headers=_h(EVAN_ID),
+        )
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_group_admin_lockout_guard(client: AsyncClient) -> None:
+    """§1.4(§1.2 改动 2):组成为唯一 admin 来源后撤组 admin → 409 不放行;
+    重新授一个 user admin 后再撤组 → 204 —— 直授 tuple 独立于组 tuple 幸存,
+    这正是幸存 tuple 投影替代「leaf - 贡献集」减法的原因。"""
+    gid = await _create_group(client, _uniq("grp_lockout"), [EVAN_ID, OUTSIDER_ID])
+    try:
+        # ① PROJECT_EVENT 天生有 Evan 的 bootstrap admin;② 授 2 人组 admin
+        add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"group_id": gid, "roles": ["admin"]},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+        # ③ outsider(组成员,已具 can_admin)撤掉 Evan 的 user admin → 204
+        #    (幸存组 tuple 展开非空;此后组是唯一 admin 来源)
+        rev_evan = await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"user:{EVAN_ID}", "role": "admin"},
+            headers=_h(OUTSIDER_ID),
+        )
+        assert rev_evan.status_code == 204, rev_evan.text
+        # ④ 撤该组 admin → 409(幸存 leaf 投影为空,项目不失去管理入口)
+        rev_grp = await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"group:{gid}#member", "role": "admin"},
+            headers=_h(OUTSIDER_ID),
+        )
+        assert rev_grp.status_code == 409, rev_grp.text
+        # ⑤ 重新授 user admin(outsider 经组 can_admin 可操作)后再撤组 → 204
+        re_add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"user_id": EVAN_ID, "roles": ["admin"]},
+            headers=_h(OUTSIDER_ID),
+        )
+        assert re_add.status_code == 204, re_add.text
+        rev_grp2 = await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"group:{gid}#member", "role": "admin"},
+            headers=_h(OUTSIDER_ID),
+        )
+        assert rev_grp2.status_code == 204, rev_grp2.text
+    finally:
+        # 兜底恢复 seed 基线(Evan admin;Evan 是 org admin 可直通)+ 删组
+        await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"user_id": EVAN_ID, "roles": ["admin"]},
+            headers=_h(EVAN_ID),
+        )
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_group_admin_overlap_direct_grant_survives(client: AsyncClient) -> None:
+    """§1.4 重叠回归:Evan 直授 admin + 给含 Evan 的组授 admin → 撤组的 admin
+    → 204 且 Evan 仍 can_admin(直授 tuple 幸存;减法算法会把差集错算成空、
+    把本应 204 的撤销误杀成 409,该场景必须直拍)。"""
+    gid = await _create_group(client, _uniq("grp_overlap"), [EVAN_ID, OUTSIDER_ID])
+    try:
+        # Evan 直授 admin(与 bootstrap 同 tuple,幂等)+ 组授 admin → 重叠授权
+        direct = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"user_id": EVAN_ID, "roles": ["admin"]},
+            headers=_h(EVAN_ID),
+        )
+        assert direct.status_code == 204, direct.text
+        add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"group_id": gid, "roles": ["admin"]},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+
+        # 撤组的 admin → 204(Evan 直授 tuple 幸存,幸存投影非空)
+        rev = await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"group:{gid}#member", "role": "admin"},
+            headers=_h(EVAN_ID),
+        )
+        assert rev.status_code == 204, rev.text
+
+        # Evan 仍 can_admin
+        r = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID),
+        )
+        assert r.status_code == 200, r.text
+        assert any(m["subject"] == f"user:{EVAN_ID}" and "admin" in m["roles"]
+                   for m in r.json())
+    finally:
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_project_member_uuid_entry_validation(client: AsyncClient) -> None:
+    """§1.2 配套入口校验:user_id / group_id 非 UUID → 400;DELETE subject 非
+    user:<uuid> / group:<uuid>#member 形态 → 400(否则投影匹配不到该 tuple,
+    204 假成功 + audit 记了 removed 但真实 tuple 残留)。"""
+    base = f"/api/v1/projects/{PROJECT_EVENT}/members"
+
+    # 存量非 UUID 组名(如 seed 的 grp_editors)当 group_id → 400
+    r1 = await client.post(
+        base, json={"group_id": "grp_editors", "roles": ["viewer"]}, headers=_h(EVAN_ID),
+    )
+    assert r1.status_code == 400, r1.text
+    # user_id 非 UUID → 400
+    r2 = await client.post(
+        base, json={"user_id": "not-a-uuid", "roles": ["viewer"]}, headers=_h(EVAN_ID),
+    )
+    assert r2.status_code == 400, r2.text
+
+    # DELETE:user: 后非 UUID → 400
+    r3 = await client.delete(
+        base, params={"subject": "user:not-a-uuid", "role": "viewer"}, headers=_h(EVAN_ID),
+    )
+    assert r3.status_code == 400, r3.text
+    # DELETE:group 漏 #member 后缀 → 400
+    r4 = await client.delete(
+        base,
+        params={"subject": f"group:{uuid.uuid4()}", "role": "viewer"},
+        headers=_h(EVAN_ID),
+    )
+    assert r4.status_code == 400, r4.text
+    # DELETE:无 kind 前缀的裸串 → 400
+    r5 = await client.delete(
+        base, params={"subject": "grp_editors", "role": "viewer"}, headers=_h(EVAN_ID),
+    )
+    assert r5.status_code == 400, r5.text
+
+
+@pytest.mark.asyncio
+async def test_project_members_group_name_resolved(client: AsyncClient) -> None:
+    """§2.3:groups 表命中的组主体显示组名(不再是「用户组 xxx」)。"""
+    gname = _uniq("命名组")
+    gid = await _create_group(client, gname, [OUTSIDER_ID])
+    try:
+        add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"group_id": gid, "roles": ["viewer"]},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+        r = await client.get(
+            f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID),
+        )
+        assert r.status_code == 200
+        grp = next(m for m in r.json() if m["subject"] == f"group:{gid}#member")
+        assert grp["name"] == gname
+    finally:
+        await client.delete(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            params={"subject": f"group:{gid}#member", "role": "viewer"},
+            headers=_h(EVAN_ID),
+        )
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_grants_overview_and_folder_grants_group_name(client: AsyncClient) -> None:
+    """§2.3:给一级普通 folder 授组 viewer 后,folder grants 列表与项目授权总览
+    的组主体都显示组名。"""
+    gname = _uniq("grp_gov")
+    gid = await _create_group(client, gname, [OUTSIDER_ID])
+    r = await client.get(
+        "/api/v1/folders", params={"project_id": PROJECT_WEDDING}, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 200
+    fid = next(
+        f["id"] for f in r.json()
+        if not f["is_sensitive"] and f.get("parent_folder_id") is None
+    )
+    try:
+        add = await client.post(
+            f"/api/v1/folders/{fid}/grants",
+            json={"group_id": gid, "level": "viewer"},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+
+        # folder grants 列表:组名
+        r1 = await client.get(f"/api/v1/folders/{fid}/grants", headers=_h(EVAN_ID))
+        assert r1.status_code == 200
+        g = next(x for x in r1.json() if x["subject"] == f"group:{gid}#member")
+        assert g["name"] == gname
+
+        # 项目授权总览(folder explicit_viewer 聚合进来):组名
+        r2 = await client.get(
+            f"/api/v1/projects/{PROJECT_WEDDING}/grants", headers=_h(EVAN_ID),
+        )
+        assert r2.status_code == 200
+        rec = next(x for x in r2.json() if x["subject"] == f"group:{gid}#member")
+        assert rec["name"] == gname
+    finally:
+        await client.delete(
+            f"/api/v1/folders/{fid}/grants",
+            params={"subject": f"group:{gid}#member", "level": "viewer"},
+            headers=_h(EVAN_ID),
+        )
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_folder_members_group_name(client: AsyncClient) -> None:
+    """§2.3:sensitive folder 成员列表(/members)的组主体显示组名。"""
+    gname = _uniq("grp_sens")
+    gid = await _create_group(client, gname, [OUTSIDER_ID])
+    r = await client.get(
+        "/api/v1/folders", params={"project_id": PROJECT_WEDDING}, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 200
+    sens = next(f for f in r.json() if f["is_sensitive"])
+    try:
+        inv = await client.post(
+            f"/api/v1/folders/{sens['id']}/invite",
+            json={"group_id": gid, "level": "viewer"},
+            headers=_h(EVAN_ID),
+        )
+        assert inv.status_code == 204, inv.text
+        r2 = await client.get(f"/api/v1/folders/{sens['id']}/members", headers=_h(EVAN_ID))
+        assert r2.status_code == 200
+        m = next(x for x in r2.json() if x["subject"] == f"group:{gid}#member")
+        assert m["name"] == gname
+    finally:
+        await client.delete(
+            f"/api/v1/folders/{sens['id']}/invite",
+            params={"subject": f"group:{gid}#member", "level": "viewer",
+                    "permanent": "true"},
+            headers=_h(EVAN_ID),
+        )
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_members_legacy_non_uuid_group_fallback(client: AsyncClient) -> None:
+    """§2.3 边界①:seed 写入的存量非 UUID 组主体 group:grp_editors#member 本就
+    在 PROJECT_EVENT 成员列表里 → name 为 id 兜底值 "grp_editors…"(新格式,
+    无「用户组」前缀),_parse_uuids 容错路径直拍,接口不 500。"""
+    r = await client.get(f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID))
+    assert r.status_code == 200, r.text
+    grp = next(m for m in r.json() if m["subject"] == "group:grp_editors#member")
+    assert grp["name"] == "grp_editors…"
+
+
+@pytest.mark.asyncio
+async def test_members_deleted_group_tuple_fallback(client: AsyncClient) -> None:
+    """§2.3 边界②:组删除后 project 上的 group:<gid>#member tuple 残留
+    (ADR-0007 惯例不回收)→ name 回退 gid[:12]+…,接口不 500。"""
+    gid = await _create_group(client, _uniq("grp_dead"), [OUTSIDER_ID])
+    add = await client.post(
+        f"/api/v1/projects/{PROJECT_EVENT}/members",
+        json={"group_id": gid, "roles": ["viewer"]},
+        headers=_h(EVAN_ID),
+    )
+    assert add.status_code == 204, add.text
+    # 删组:组 member tuple 被清理,project 上的 subject 引用按惯例不回收
+    dg = await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+    assert dg.status_code == 200, dg.text
+
+    r = await client.get(f"/api/v1/projects/{PROJECT_EVENT}/members", headers=_h(EVAN_ID))
+    assert r.status_code == 200, r.text
+    dead = next(m for m in r.json() if m["subject"] == f"group:{gid}#member")
+    assert dead["name"] == gid[:12] + "…"
+
+    # 清场:撤掉残留 tuple
+    rev = await client.delete(
+        f"/api/v1/projects/{PROJECT_EVENT}/members",
+        params={"subject": f"group:{gid}#member", "role": "viewer"},
+        headers=_h(EVAN_ID),
+    )
+    assert rev.status_code == 204, rev.text
+
+
+@pytest.mark.asyncio
+async def test_remove_member_stale_revoke_idempotent_204(client: AsyncClient) -> None:
+    """§1.2 幂等撤销:同一 subject 同一 role 撤两次,第二次(stale 客户端重复
+    撤销,被撤 tuple 本已不存在)也 204 no-op,不再裸 500;admin / viewer
+    两角色各验一遍(语义对所有角色统一)。"""
+    gid = await _create_group(client, _uniq("grp_stale"), [EVAN_ID])
+    try:
+        add = await client.post(
+            f"/api/v1/projects/{PROJECT_EVENT}/members",
+            json={"group_id": gid, "roles": ["viewer", "admin"]},
+            headers=_h(EVAN_ID),
+        )
+        assert add.status_code == 204, add.text
+
+        for role in ("viewer", "admin"):
+            params = {"subject": f"group:{gid}#member", "role": role}
+            rev1 = await client.delete(
+                f"/api/v1/projects/{PROJECT_EVENT}/members",
+                params=params, headers=_h(EVAN_ID),
+            )
+            assert rev1.status_code == 204, rev1.text
+            rev2 = await client.delete(
+                f"/api/v1/projects/{PROJECT_EVENT}/members",
+                params=params, headers=_h(EVAN_ID),
+            )
+            assert rev2.status_code == 204, rev2.text
+    finally:
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))

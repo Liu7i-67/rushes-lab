@@ -28,6 +28,7 @@ const RequestLinkLandingPage = lazy(() => import('./pages/RequestLinkLandingPage
 const AdminAuditPage = lazy(() => import('./pages/AdminAuditPage'));
 const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage'));
 const AdminGroupsPage = lazy(() => import('./pages/AdminGroupsPage'));
+const AdminGrantTemplatesPage = lazy(() => import('./pages/AdminGrantTemplatesPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
@@ -67,6 +68,7 @@ const RouterRoutes = () => (
       <Route path="/admin/audit" element={<AdminAuditPage />} />
       <Route path="/admin/users" element={<AdminUsersPage />} />
       <Route path="/admin/groups" element={<AdminGroupsPage />} />
+      <Route path="/admin/grant-templates" element={<AdminGrantTemplatesPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/s/:token" element={<ShareLandingPage />} />
       <Route path="/r/:token" element={<RequestLinkLandingPage />} />
