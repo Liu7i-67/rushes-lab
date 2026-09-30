@@ -4,6 +4,8 @@
 
 ## 2026-09-30
 
+- 成员权限三项改动**实施完成**(feat/project-grant-templates 分支,qdev 四角色流程:PM 需求存档 → 前端/后端×2/测试用例 4 包并行+串行派发 → PM 验收(亲手复跑 diff/ruff/mypy/build/lint/隔离栈容器 pytest)→ 专职测试 2 P1+4 P2 → 修复 → 全新测试子智能体复验**通过**;方案依据 project-grant-templates-plan.md qplan 定稿版):①批次一——删组 admin guard;admin 撤销不变量重写为**幸存 tuple 精确投影**(read admin tuples→剔除被撤→展开 FGA member tuple→空集才 409,防多成员组唯一来源锁死+重叠授权误杀,stale 重复撤销 204 幂等);add/remove members 补 UUID/形态校验;新建 `services/subject_names.py` 收敛 4 处组名兜底(用户组显示 groups.name);②批次二——`POST /projects` 可选 `initial_grants`(前置校验 400/422 原子、OpenFGA 幂等写入、audit 带 via);NewProjectModal 初始权限区=**主体行×每行独立角色**(抽 RoleChipGroup 公共组件);③批次三——权限模板两张表+`2026_09_30_0012` migration(partial unique index 全库首例)+admin CRUD 4 端点(重名 409/超限 422/missing 标记/PATCH null 清空描述)+AdminGrantTemplatesPage+NewProjectModal 模板预填+labels.ts 映射。验证:隔离容器栈 pytest **182 过/3 失败均为 stash 基线对照证明的环境遗留**(notifications_e2e×2+trash 401);ruff 331/mypy 135/pnpm lint 16 全部与基线持平零新增;新增 25 条用例全绿。遗留(P2 不强修):members 接口对不存在 UUID 仍 204 幽灵 tuple(历史行为)、模板 items 允许 0 条、前端 lint 基线 13 errors 存量
+
 - 成员权限三项改动方案定稿(rushes-spec/material-storage/project-grant-templates-plan.md,方案文档、未动代码):①放开「用户组授项目管理」——查实系 #162 飞书下线重构把原本只拦部门的 guard 压平误伤用户组,FGA 模型 `admin: [user, group#member]` 本就支持、撤销成员的 admin 不变量注释也按 group-admin 设计,放开仅需删 API guard + 前端警示,零模型变更;②用户组名称显示修复——「用户组ef94e20c-be0…」根因是 4 处列表接口(项目成员/授权总览/夹成员/夹授权)只 join users 不 join groups,方案统一收敛到 `resolve_subject_names` helper;③新建项目自动授权两步走——先 `POST /projects` 加 `initial_grants` 直通(前置校验 400 原子、OpenFGA 写入幂等、audit 带 via 标记)+ NewProjectModal 初始权限区(抽 RoleChipGroup 公共组件),再做权限模板模块(两张表 + admin CRUD + 前端预填式应用,不做服务端 template_id);拆 3 个独立批次,仅批次三含 alembic migration。已与用户确认三项决策(放开/修复/按建议展开),待实施
 
 ## 2026-09-10
