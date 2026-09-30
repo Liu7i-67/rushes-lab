@@ -4,6 +4,7 @@
 
 ## 2026-09-30
 
+- 三需求新方案定稿(rushes-spec/material-storage/netdisk-import-batch-rename-roles-plan.md,方案文档、未动代码,qplan 16 轮独立盲审收敛至 P0/P1 清零):①百度网盘导入——因内网 egress 待定+隧道断流,走「本地中转 + Web 目录导入」(百度客户端下载到办公电脑→整目录拖入/点选上传),后端 create_upload 加 relative_path 目录链 get-or-create(prefix 尾斜杠对齐/NFC 归一/敏感夹分类处置/INSERT→tuple→一次 commit);②批量文件名前缀——新 POST /assets/batch-prefix(加/去前缀、NFC 两侧归一、already_prefixed 防叠层、逐 id UPDATE+对账、labels_mode=merge 顺手补打标合并语义),前端跨页保留选中+既有批量操作切全量口径;③组织级三角色——FGA model 加 organization#operator(运营)/#leader(组长)并派生进 project can_*(存量未来项目零回填全覆盖、敏感夹隔离保持),建项目守门放开给 leader(require_project_creator+/me 字段/前端闸门改造),管理后台新增「组织角色」页;拆 3 个独立批次(无 migration;PR-3 需 push FGA model),部署含两段式发布消除新旧前后端窗口;与 project-grant-templates-plan(他人跟进)的 5 个交点已写协调节
 - 成员权限三项改动方案定稿(rushes-spec/material-storage/project-grant-templates-plan.md,方案文档、未动代码):①放开「用户组授项目管理」——查实系 #162 飞书下线重构把原本只拦部门的 guard 压平误伤用户组,FGA 模型 `admin: [user, group#member]` 本就支持、撤销成员的 admin 不变量注释也按 group-admin 设计,放开仅需删 API guard + 前端警示,零模型变更;②用户组名称显示修复——「用户组ef94e20c-be0…」根因是 4 处列表接口(项目成员/授权总览/夹成员/夹授权)只 join users 不 join groups,方案统一收敛到 `resolve_subject_names` helper;③新建项目自动授权两步走——先 `POST /projects` 加 `initial_grants` 直通(前置校验 400 原子、OpenFGA 写入幂等、audit 带 via 标记)+ NewProjectModal 初始权限区(抽 RoleChipGroup 公共组件),再做权限模板模块(两张表 + admin CRUD + 前端预填式应用,不做服务端 template_id);拆 3 个独立批次,仅批次三含 alembic migration。已与用户确认三项决策(放开/修复/按建议展开),待实施
 
 ## 2026-09-10
