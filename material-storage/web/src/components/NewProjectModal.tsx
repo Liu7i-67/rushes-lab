@@ -75,6 +75,8 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
     ? templateRows(defaultTemplate)
     : rows;
 
+  // 打开即重置表单到默认态:有意的「open 翻转重置」,改 render 期重置/key 重挂载会改动态,豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       form.resetFields();
@@ -83,6 +85,7 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       setTemplateId(undefined);
     }
   }, [open, form, me.id]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const rowName = (r: GrantRow) => r.name ?? nameById.get(r.id) ?? shortId(r.id);
 

@@ -45,7 +45,7 @@ export function UserPicker({
   useEffect(() => {
     if (preset) preset.forEach(u => briefById.current.set(keyOf(u), u));
     options.forEach(u => briefById.current.set(keyOf(u), u));
-  }, [options, preset]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [options, preset]);
 
   const search = (q: string) => {
     setQuery(q);
@@ -85,7 +85,7 @@ export function UserPicker({
       value: keyOf(u),
       label: <UserRow user={u} />,
     }));
-  }, [options, preset, query]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [options, preset, query]);
 
   return (
     <Select

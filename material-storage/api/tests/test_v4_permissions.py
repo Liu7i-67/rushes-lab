@@ -973,3 +973,24 @@ async def test_remove_member_stale_revoke_idempotent_204(client: AsyncClient) ->
             assert rev2.status_code == 204, rev2.text
     finally:
         await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+
+
+@pytest.mark.asyncio
+async def test_project_member_unknown_subject_400(client: AsyncClient) -> None:
+    """存在性校验(与 create_project 的 initial_grants 前置校验同款语义):
+    形状合法的随机 UUID 也必须 400,否则 OpenFGA 里留下幽灵 tuple ——
+    user 须存在且 is_active、group 须存在,detail 指明 user/group + id。"""
+    base = f"/api/v1/projects/{PROJECT_EVENT}/members"
+    ghost = str(uuid.uuid4())
+
+    r1 = await client.post(
+        base, json={"user_id": ghost, "roles": ["viewer"]}, headers=_h(EVAN_ID),
+    )
+    assert r1.status_code == 400, r1.text
+    assert "user" in r1.json()["detail"] and ghost in r1.json()["detail"], r1.text
+
+    r2 = await client.post(
+        base, json={"group_id": ghost, "roles": ["viewer"]}, headers=_h(EVAN_ID),
+    )
+    assert r2.status_code == 400, r2.text
+    assert "group" in r2.json()["detail"] and ghost in r2.json()["detail"], r2.text

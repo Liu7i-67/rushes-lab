@@ -116,7 +116,8 @@ function AppShell() {
     if (onAuthPage) return <RouterRoutes />;
     // #149: 未登录 → 本地登录页,带完整路径(next)登录后回跳原页
     const next = encodeURIComponent(window.location.pathname + window.location.search + window.location.hash);
-    window.location.href = `/ms-static/web/login?next=${next}`;
+    // assign() 与 `href =` 完全等价(整页跳转 + 新历史条目),只是方法调用形式以满足 react-hooks/immutability
+    window.location.assign(`/ms-static/web/login?next=${next}`);
     return null;
   }
 

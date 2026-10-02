@@ -47,6 +47,8 @@ function detectKind(a: Asset): Kind {
   return 'unsupported';
 }
 
+// 被 AssetSummaryPanel 等跨组件复用 — 拆独立文件属结构重构且本规则只影响 dev HMR 粒度,豁免
+// eslint-disable-next-line react-refresh/only-export-components
 export function isPreviewable(a: Asset): boolean {
   return detectKind(a) !== 'unsupported';
 }
@@ -76,6 +78,8 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
     }
   };
 
+  // 关闭即清预览态:有意的 modal 生命周期重置;重排为 render 期重置会改动态,豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (!open) { setContent(null); setLiveUrl(null); setPlayingLive(false); return; }
     if (kind === 'unsupported') return;
@@ -116,6 +120,7 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
     })();
     return () => { cancelled = true; };
   }, [open, asset.id, kind, message]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return (
     <Modal

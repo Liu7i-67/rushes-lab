@@ -191,7 +191,7 @@ class GrantTemplateCreateIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(None, max_length=1024)
     is_default: bool = False
-    items: list[GrantTemplateItemIn]
+    items: list[GrantTemplateItemIn] = Field(..., min_length=1)  # 空模板无意义,UI 已拦,API 层兜底
 
 
 class GrantTemplateUpdateIn(BaseModel):
@@ -201,7 +201,7 @@ class GrantTemplateUpdateIn(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=128)
     description: str | None = Field(None, max_length=1024)
     is_default: bool | None = None
-    items: list[GrantTemplateItemIn] | None = None
+    items: list[GrantTemplateItemIn] | None = Field(None, min_length=1)  # 空模板无意义,UI 已拦,API 层兜底
 
 
 class GrantTemplateItemOut(BaseModel):

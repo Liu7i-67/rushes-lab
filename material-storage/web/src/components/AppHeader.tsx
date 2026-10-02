@@ -308,6 +308,8 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
   const [debounced, setDebounced] = useState('');
 
   useEffect(() => {
+    // 打开时清空搜索词:有意的「open 翻转重置」;改 render 期重置/key 重挂载会改组件动态,豁免 cascading 警告
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (open) setQ('');
   }, [open]);
 

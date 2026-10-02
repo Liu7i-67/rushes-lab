@@ -551,6 +551,19 @@ async def add_project_member(
     if not _is_uuid_str(str(subject_id)):
         raise HTTPException(400, f"{subject_kind}_id 必须是 UUID: got {subject_id!r}")
 
+    # 存在性校验(与 create_project 的 initial_grants 前置校验同款语义):
+    # 形状合法的随机 UUID 也会写出幽灵 tuple —— user 须存在且 is_active,
+    # group 须存在,否则 400。
+    subject_uuid = uuid.UUID(str(subject_id))
+    if subject_kind == "user":
+        from app.db.tables import User
+        u = await db.get(User, subject_uuid)
+        if u is None or not u.is_active:
+            raise HTTPException(400, f"user_id 不存在或未启用:user {subject_id}")
+    else:
+        if await db.get(Group, subject_uuid) is None:
+            raise HTTPException(400, f"group_id 不存在:group {subject_id}")
+
     from app.services.permissions import fmt_subject
     subject = fmt_subject(subject_kind, subject_id)  # type: ignore[arg-type]
     # 部分成功语义:重复(已存在)按幂等跳过;真错误中止 —— 此前角色已生效并留有

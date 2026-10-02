@@ -64,6 +64,8 @@ export default function ProjectDetailPage() {
   // 选中 folder 默认为 path 参数;无则 = 首个可见 folder;
   // activeFolderId 指向的文件夹已不在可见列表(被删/失权)时纠正到首个可见,
   // 避免幽灵选中(header 挂着已删夹且 staleTime 内无自愈)
+  // URL 参数 + 异步 folders 数据联动纠正,依赖服务端取数结果,无法在 render 期纯派生 — 豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (paramFolderId) {
       setActiveFolderId(paramFolderId);
@@ -76,13 +78,15 @@ export default function ProjectDetailPage() {
       setActiveFolderId(folders[0].id);
     }
   }, [paramFolderId, folders, activeFolderId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const { data: folder } = useFolder(activeFolderId ?? undefined);
   // 服务端分页:超一页的 folder 走后端 limit/offset,旧文件不再被 100 条截断吞掉
   const [page, setPage] = useState(1);
   const { data: assets, isLoading: assetsLoading, isFetching, refetch } =
     useAssets(activeFolderId ?? undefined, page, ASSETS_PAGE_SIZE);
-  const assetItems = assets?.items ?? [];
+  // useMemo 包稳 `?? []` 兜底数组的引用(兜底时每 render 新建导致下游 useMemo 失效,规则建议的等价变换)
+  const assetItems = useMemo(() => assets?.items ?? [], [assets]);
   const assetTotal = assets?.total ?? 0;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);

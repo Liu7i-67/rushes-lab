@@ -450,3 +450,34 @@ async def test_template_item_missing_after_group_delete(client: AsyncClient) -> 
     assert item["name"] == f"{gid[:12]}…", (
         f"已删主体 name 应回退 sid[:12]+'…'(方案 §2.2): {item['name']}"
     )
+
+
+# ─── 11. items 空数组 → 422(空模板无意义,UI 已拦,API 层兜底)─────────────────
+@pytest.mark.asyncio
+async def test_template_empty_items_422(client: AsyncClient) -> None:
+    """POST items: [] → 422(min_length=1);PATCH items: [] → 422
+    (UpdateIn 可选不传,但传了就必须 ≥1)。"""
+    # POST 空数组 → 422
+    r = await client.post(
+        "/api/v1/admin/grant-templates",
+        json={"name": _uniq("tpl_empty_items"), "items": []},
+        headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 422, r.text
+
+    # PATCH 空数组 → 422(先建一个正常模板)
+    name = _uniq("tpl_patch_empty")
+    tpl = await _post_template(
+        client, name=name, items=[_item_user(EVAN_ID, ["viewer"])],
+    )
+    r2 = await client.patch(
+        f"/api/v1/admin/grant-templates/{tpl['id']}",
+        json={"items": []},
+        headers=_h(EVAN_ID),
+    )
+    assert r2.status_code == 422, r2.text
+    # 原 items 不应被空数组替换
+    kept = await _get_template_by_name(client, name)
+    assert kept is not None and len(kept["items"]) == 1, (
+        "PATCH items: [] 422 后原模板 items 不应被改动"
+    )
