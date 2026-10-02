@@ -2,7 +2,10 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
-## 2026-09-30
+## 2026-10-02
+
+- **P2 收口 + 本地/内网 dev 双环境部署验证**(feat/project-grant-templates `bbc9885`):①P2 三项修复(members 补主体存在性校验拦幽灵 tuple、模板 items 补 min_length=1、前端 lint 存量 16 条清零——6 处行为等价真修+10 处带理由单 effect 块级豁免,pnpm lint 0 problems),容器 pytest **184 过**+3 基线遗留,ruff 331/mypy 135 持平;②本地 docker 部署测试——隔离栈(feat-ms-*)冷启动 healthz/SPA 指纹与 build 一致(index-CzNHD5U5.js)/业务 e2e 16 项 PASS(组管理授权-徽章-撤销-幂等/组名解析/幽灵主体 400/initial_grants 建项目生效/模板 CRUD+空 items 422);③**内网 hh2 dev 部署**(b7ced37→bbc9885,分片通道 3.8MB 代码包+1.3MB SPA 包各 8/3 片 md5 全校验):rsync+SPA 原子替换+重启 ms-api-dev/ms-worker-dev+**migration 20260930_0012 权限模板两表已执行到 head**;验证清单全过——DEPLOYED.md 版本正确、内外网(192.168.110.221:8090 / 47.108.196.211:8080)SPA 指纹一致、auth/me 401、容器内新代码 grep 就位(is_not_exists_error/grant-templates);业务抽测 10/10(模板端点空列表/临时组建-授管理-组名+徽章-撤销-stale 幂等 204-幽灵 400-删组清场零残留);SPA web.bak 备份确认指纹后已清
+
 
 - 成员权限三项改动**实施完成**(feat/project-grant-templates 分支,qdev 四角色流程:PM 需求存档 → 前端/后端×2/测试用例 4 包并行+串行派发 → PM 验收(亲手复跑 diff/ruff/mypy/build/lint/隔离栈容器 pytest)→ 专职测试 2 P1+4 P2 → 修复 → 全新测试子智能体复验**通过**;方案依据 project-grant-templates-plan.md qplan 定稿版):①批次一——删组 admin guard;admin 撤销不变量重写为**幸存 tuple 精确投影**(read admin tuples→剔除被撤→展开 FGA member tuple→空集才 409,防多成员组唯一来源锁死+重叠授权误杀,stale 重复撤销 204 幂等);add/remove members 补 UUID/形态校验;新建 `services/subject_names.py` 收敛 4 处组名兜底(用户组显示 groups.name);②批次二——`POST /projects` 可选 `initial_grants`(前置校验 400/422 原子、OpenFGA 幂等写入、audit 带 via);NewProjectModal 初始权限区=**主体行×每行独立角色**(抽 RoleChipGroup 公共组件);③批次三——权限模板两张表+`2026_09_30_0012` migration(partial unique index 全库首例)+admin CRUD 4 端点(重名 409/超限 422/missing 标记/PATCH null 清空描述)+AdminGrantTemplatesPage+NewProjectModal 模板预填+labels.ts 映射。验证:隔离容器栈 pytest **182 过/3 失败均为 stash 基线对照证明的环境遗留**(notifications_e2e×2+trash 401);ruff 331/mypy 135/pnpm lint 16 全部与基线持平零新增;新增 25 条用例全绿。遗留(P2 不强修):members 接口对不存在 UUID 仍 204 幽灵 tuple(历史行为)、模板 items 允许 0 条、前端 lint 基线 13 errors 存量
 
