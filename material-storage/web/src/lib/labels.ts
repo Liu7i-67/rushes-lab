@@ -18,7 +18,11 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   asset_deleted: '文件删除',
   asset_restored: '文件恢复',
   asset_purged: '文件彻底删除',
-  asset_tag_updated: '文件标签更新',  // #151
+  // 后端 event_type 实际为点号键(assets.py:asset.tag_updated / asset.batch_renamed);
+  // 历史行一直按点号落库,这里补点号键修正展示(后端不动,避免历史行跨值)
+  'asset.tag_updated': '文件标签更新',  // #151
+  'asset.batch_renamed': '文件批量改名',  // PR-1 批量文件名前缀
+  asset_tag_updated: '文件标签更新',  // 旧键与后端点号键错位,保留兼容(后端不产此值)
   download: '下载',
   download_denied: '下载被拒',
   folder_created: '文件夹创建',

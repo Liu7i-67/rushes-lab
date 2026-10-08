@@ -144,6 +144,23 @@ export interface TrashAssets {
   total: number;
 }
 
+// ─── 批量文件名前缀(PR-1:POST /api/v1/assets/batch-prefix)────────────────
+export type BatchPrefixAction = 'add' | 'remove';
+
+/** 批量改名结果(尽力而为 + 对账:renamed + skipped 恒等于提交的 asset_ids 数)。*/
+export interface AssetBatchPrefixResult {
+  renamed: number;
+  skipped: number;
+  // 键固定 ASCII,前端做中文映射(见 BatchPrefixModal)
+  skipped_reasons: {
+    too_long: number;         // add:加前缀后超长
+    no_match: number;         // remove:不以该前缀开头
+    already_prefixed: number; // add:已带该前缀
+    empty_result: number;     // remove:剥离后为空串
+    deleted: number;          // 已删除/不存在
+  };
+}
+
 /** 文件夹文件列表 = items 分页窗口(服务端分页)+ total 全量计数(分页器用)。*/
 export interface AssetList {
   items: Asset[];

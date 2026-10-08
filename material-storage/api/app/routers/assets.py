@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import unicodedata
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, func, or_, select, true
+from sqlalchemy import ColumnElement, func, literal_column, or_, select, true, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
@@ -30,6 +32,7 @@ from app.deps import (
     get_request_context,
 )
 from app.models import (
+    AssetBatchPrefixIn,
     AssetListOut,
     AssetMetaUpdateIn,
     AssetOut,
@@ -553,7 +556,16 @@ async def update_asset_meta(
         raise HTTPException(403, "no permission to edit this asset")
 
     if payload.user_labels is not None:
-        asset.user_labels = _normalize_labels(payload.user_labels)
+        if payload.labels_mode == "merge":
+            # merge(方案 §1.1):与 DB 现值取并集,顺序写死 —— DB 现值在前、
+            # 新标签追加在后;并集仍统一走 _normalize_labels(去重 + 50 条上限,
+            # DB 已占满 50 时新标签被静默截断,已知行为)。批量跨页打标依赖
+            # merge,未加载行的旧标签不被整条替换清掉。
+            merged = list(asset.user_labels) + payload.user_labels
+            asset.user_labels = _normalize_labels(merged)
+        else:
+            # replace(默认):现行为完全不变
+            asset.user_labels = _normalize_labels(payload.user_labels)
     if payload.notes is not None:
         asset.notes = payload.notes[:2000] if payload.notes else ""
     try:
@@ -575,6 +587,220 @@ async def update_asset_meta(
         **ctx,
     )
     return AssetOut.model_validate(asset)
+
+
+# ─── 批量文件名前缀(方案 §1.1)───────────────────────────────────────────────
+class BatchPrefixReasonsOut(BaseModel):
+    """五类跳过原因计数(键固定 ASCII,前端中文映射;deleted = 已删/不存在,不细分)。"""
+
+    too_long: int = 0
+    no_match: int = 0
+    already_prefixed: int = 0
+    empty_result: int = 0
+    deleted: int = 0
+
+
+class AssetBatchPrefixOut(BaseModel):
+    """尽力而为 + 结果报告:renamed + skipped 与提交 id 数严格对账。"""
+
+    renamed: int
+    skipped: int
+    skipped_reasons: BatchPrefixReasonsOut
+
+
+@router.post("/batch-prefix", response_model=AssetBatchPrefixOut)
+async def batch_prefix(
+    payload: AssetBatchPrefixIn,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+    ctx: dict[str, Any] = Depends(get_request_context),
+) -> AssetBatchPrefixOut:
+    """批量加 / 去文件名前缀(纯 DB 改名,MinIO key 不动 —— 下载文件名由
+    filename 动态生成 Content-Disposition)。
+
+    语义:add = prefix + filename,已带该前缀跳过(already_prefixed),结果
+    >512 跳过(too_long);remove = 恰好以 prefix 开头(大小写敏感)剥离一次,
+    否则 no_match,剥离后空串 empty_result。
+
+    **前缀比较两侧 NFC 归一**:存量 filename 多为 macOS 拖入的 NFD 原样落库,
+    只归一输入侧会不命中;比较用 NFC(filename).startswith(prefix_nfc);
+    remove 余量 = NFC(filename)[len(prefix_nfc):] 落库(NFC 串码点数与原串
+    不同,不能按原串长度切);add 结果按 NFC 落库(库内 filename 逐步收敛 NFC)。
+
+    权限:按 folder_id 分组逐组 can_upload check(对齐 update_asset_meta;
+    敏感夹按 sensitive_folder 类型 —— 受邀 downloader 亦可改名,与打标同语义),
+    系统 admin 直通;任一组无权限 → 403 整批不执行,文案笼统不带 folder 名
+    (反探测约定,与 GET /assets 403 同口径)。
+
+    实现四步(单事务):① asset_ids 去重 + SELECT 快照(软删行查不到 → 计
+    deleted);② Python 端按语义算新名分桶;③ Core 语句逐 id UPDATE —— 不用
+    ORM flush(并发 hard purge 抛 StaleDataError,restore 先例),不用单条
+    IN...RETURNING(add 各 id 新名不同,executemany 不累积 RETURNING);add
+    谓词 NOT starts_with(normalize(filename, NFC), :prefix) 是二次防线,防
+    SELECT 与 UPDATE 之间并发提交的 add 叠出双前缀(remove 侧不加内容谓词,
+    字节级谓词与 NFC 口径不对称,对 NFD 存量名会静默不命中);④ rowcount=0
+    补查归因,保证 renamed + skipped 与提交数严格对账。
+    """
+    user_id = user.id
+    # prefix 已在 AssetBatchPrefixIn 校验器里 NFC 归一;此处再归一一次是幂等的,
+    # 让「两侧 NFC」口径在使用点显式可见
+    prefix_nfc = unicodedata.normalize("NFC", payload.prefix)
+    reasons = BatchPrefixReasonsOut()
+
+    # ① 去重(dict.fromkeys 保序,防重复 id 被计入 deleted/统计两次)+ 快照
+    unique_ids = list(dict.fromkeys(payload.asset_ids))
+    rows = (
+        await db.execute(
+            select(
+                Asset.id, Asset.filename, Asset.folder_id,
+                Folder.project_id, Folder.is_sensitive,
+            )
+            .join(Folder, Asset.folder_id == Folder.id)
+            .where(Asset.id.in_(unique_ids), Asset.deleted_at.is_(None))
+        )
+    ).all()
+    snap: dict[uuid.UUID, tuple[str, uuid.UUID, bool]] = {}
+    folder_groups: dict[uuid.UUID, bool] = {}  # folder_id -> is_sensitive
+    project_ids: set[uuid.UUID] = set()
+    for asset_id, filename, folder_id, project_id, is_sensitive in rows:
+        snap[asset_id] = (filename, folder_id, is_sensitive)
+        folder_groups.setdefault(folder_id, is_sensitive)
+        project_ids.add(project_id)
+    # 全批恰属一个项目时 audit 带 target_project_id(对齐单资产端点写法),跨项目留空
+    target_project_id = next(iter(project_ids)) if len(project_ids) == 1 else None
+
+    # 权限:逐 folder 组 can_upload check(对齐 update_asset_meta 的 check 模式);
+    # 任一组无权限 → 403 整批不执行
+    denied_folders: list[uuid.UUID] = []
+    for folder_id, is_sensitive in folder_groups.items():
+        if is_system_admin:
+            continue  # 系统 admin 直通
+        allowed = await permissions.check(
+            user_subject=user.subject,
+            relation="can_upload",
+            object_type="sensitive_folder" if is_sensitive else "folder",
+            object_id=str(folder_id),
+        )
+        if not allowed:
+            denied_folders.append(folder_id)
+    if denied_folders:
+        # HTTP 文案笼统不带 folder 名(反探测);audit 略详(folder_id)供溯源
+        await audit.write(
+            event_type="access_denied",
+            actor_user_id=user_id,
+            target_project_id=target_project_id,
+            details={
+                "action": "batch_prefix",
+                "reason": "openfga can_upload false",
+                "denied_folder_ids": [str(f) for f in denied_folders],
+            },
+            **ctx,
+        )
+        raise HTTPException(403, "所选部分或全部文件无操作权限")
+
+    # ② Python 端按语义算新名(两侧 NFC),分「应改 / 各原因跳过」
+    new_names: dict[uuid.UUID, str] = {}
+    for asset_id in unique_ids:
+        row = snap.get(asset_id)
+        if row is None:
+            # SELECT 查不到 = 已软删(回收站)或不存在,天然跳过
+            reasons.deleted += 1
+            continue
+        old_nfc = unicodedata.normalize("NFC", row[0])
+        if payload.action == "add":
+            if old_nfc.startswith(prefix_nfc):
+                reasons.already_prefixed += 1
+                continue
+            new_nfc = unicodedata.normalize("NFC", prefix_nfc + old_nfc)
+            if len(new_nfc) > 512:  # 与 tables.assets.filename String(512) 对齐
+                reasons.too_long += 1
+                continue
+            new_names[asset_id] = new_nfc
+        else:
+            if not old_nfc.startswith(prefix_nfc):
+                reasons.no_match += 1
+                continue
+            rest = old_nfc[len(prefix_nfc):]  # 按码点切,NFC 串长度 ≠ 原串长度
+            if not rest:
+                reasons.empty_result += 1
+                continue
+            new_names[asset_id] = rest
+
+    # ③ Core 语句单事务逐 id UPDATE。add 谓词里的 normalize form 参数是不带
+    # 引号的 SQL 关键字 NFC(literal_column —— 写成 'NFC' 字符串是 PG 语法
+    # 错误);用 starts_with 不用 LIKE(_ / % 通配符会被误拦,免转义先例
+    # _escape_like)。rowcount 由逐条 UPDATE 直接拿,不依赖 ORM flush 校验。
+    renamed_ids: list[uuid.UUID] = []
+    raced_ids: list[uuid.UUID] = []
+    for asset_id, new_name in new_names.items():
+        stmt = update(Asset).where(Asset.id == asset_id, Asset.deleted_at.is_(None))
+        if payload.action == "add":
+            stmt = stmt.where(
+                ~func.starts_with(
+                    func.normalize(Asset.filename, literal_column("NFC")), prefix_nfc
+                )
+            )
+        result = await db.execute(stmt.values(filename=new_name))
+        # asyncpg DML 实际返回 CursorResult(带 rowcount);基类 Result 的类型
+        # 标注未声明该属性,cast 仅为过 mypy strict,运行时行为不变
+        if cast("CursorResult[Any]", result).rowcount == 1:
+            renamed_ids.append(asset_id)
+        else:
+            raced_ids.append(asset_id)
+
+    # ④ 对账:rowcount=0 = SELECT 与 UPDATE 之间有并发变更,补查归因,
+    # 保证 renamed + skipped 与提交数严格对账(每 id 恰落一桶)
+    for asset_id in raced_ids:
+        cur = (
+            await db.execute(
+                select(Asset.deleted_at, Asset.filename).where(Asset.id == asset_id)
+            )
+        ).first()
+        if cur is None or cur[0] is not None:
+            reasons.deleted += 1  # 并发软删 / hard purge
+        elif unicodedata.normalize("NFC", cur[1]).startswith(prefix_nfc):
+            reasons.already_prefixed += 1  # 并发 add 已叠上前缀(NFC 口径)
+        elif cur[1].startswith(payload.prefix):
+            # 兜底原始字节命中:PG 与 Python 的 Unicode 版本差会让两者 NFC 结果
+            # 不一致,谓词与归因口径可能错位 —— 按已带前缀归因
+            reasons.already_prefixed += 1
+        else:
+            # 理论不可达(谓词与归因口径一致);留桶兜底保证对账闭合,不 500
+            log.warning(
+                "batch_prefix reconcile fallback asset=%s action=%s prefix=%r",
+                asset_id, payload.action, prefix_nfc,
+            )
+            reasons.deleted += 1
+
+    await db.commit()
+
+    # 聚合 audit:采样前 50 条 {id, old, new},超出只以 renamed/skipped 计数
+    skipped_total = sum(reasons.model_dump().values())
+    sample: list[dict[str, str]] = [
+        {"id": str(asset_id), "old": snap[asset_id][0], "new": new_names[asset_id]}
+        for asset_id in renamed_ids[:50]
+    ]
+    await audit.write(
+        event_type="asset.batch_renamed",
+        actor_user_id=user_id,
+        target_project_id=target_project_id,
+        details={
+            "action": payload.action,
+            "prefix": prefix_nfc,
+            "renamed": len(renamed_ids),
+            "skipped": skipped_total,
+            "sample": sample,
+        },
+        **ctx,
+    )
+    return AssetBatchPrefixOut(
+        renamed=len(renamed_ids),
+        skipped=skipped_total,
+        skipped_reasons=reasons,
+    )
 
 
 # ─── download link ────────────────────────────────────────────────────────────

@@ -6,7 +6,9 @@ import type {
   ApprovalAction,
   ApprovalTargetType,
   Asset,
+  AssetBatchPrefixResult,
   AssetList,
+  BatchPrefixAction,
   DirectoryGroup,
   DirectoryGroupMember,
   DirectoryUser,
@@ -275,16 +277,42 @@ export const useSearchAssets = (q: string | null) =>
   });
 
 // #151: 写 user_labels / notes(user_labels 显式传空数组 = 清空)
+// labels_mode(PR-1):'merge' = 与 DB 现值取并集(旧值在前);缺省 'replace' 行为不变。
+// 批量打标跨页提交未加载 id 时必须 merge,否则后端整条替换会清掉旧标签。
 export const useUpdateAssetMeta = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (args: { asset_id: string; user_labels?: string[]; notes?: string }) =>
+    mutationFn: async (args: {
+      asset_id: string;
+      user_labels?: string[];
+      notes?: string;
+      labels_mode?: 'merge' | 'replace';
+    }) =>
       (await http.patch<Asset>(`/api/v1/assets/${args.asset_id}/meta`, {
         user_labels: args.user_labels,
         notes: args.notes,
+        labels_mode: args.labels_mode,
       })).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['asset-search'] });
+    },
+  });
+};
+
+// PR-1: 批量文件名前缀(加/去前缀)。后端单事务逐 id UPDATE、NFC 两侧归一,
+// 尽力而为 + skipped_reasons 对账;单批上限 1000,超出由前端分批顺序调用
+export const useBatchPrefix = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      asset_ids: string[];          // 1..1000
+      action: BatchPrefixAction;
+      prefix: string;               // 1..128,禁 "/" 与控制字符(服务端 NFC 归一后复检)
+    }) => (await http.post<AssetBatchPrefixResult>('/api/v1/assets/batch-prefix', body)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets'] });
+      // 文件名可被盲搜命中,改名后同步失效搜索缓存
       qc.invalidateQueries({ queryKey: ['asset-search'] });
     },
   });

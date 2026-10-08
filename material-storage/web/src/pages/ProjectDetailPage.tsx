@@ -9,7 +9,7 @@ import {
 import {
   Archive, ChevronDown, ChevronLeft, ChevronRight, Download, FileText,
   Folder as FolderIcon, FolderPlus, Key, Link2, Lock, Menu, RotateCw, Settings, Tags,
-  Trash2, Upload, Users as UsersIcon,
+  Trash2, Type, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -23,6 +23,7 @@ import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 import { AssetCardList } from '../components/AssetCardList';
 import { AssetTagEditor } from '../components/AssetTagEditor';
 import { AssetThumbnail } from '../components/AssetThumbnail';
+import { BatchPrefixModal } from '../components/BatchPrefixModal';
 import { FolderTrashModal } from '../components/FolderTrashModal';
 import { ProjectMembersDrawer } from '../components/ProjectMembersDrawer';
 import { RequestAccessModal } from '../components/RequestAccessModal';
@@ -90,6 +91,8 @@ export default function ProjectDetailPage() {
   const assetTotal = assets?.total ?? 0;
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  // PR-1: 批量文件名前缀 — 选中多个文件时统一加/去前缀
+  const [batchPrefixOpen, setBatchPrefixOpen] = useState(false);
   // compact 专属 UI 状态(桌面分支不消费;hooks/状态置顶约定 → 无条件声明):
   // 树 Drawer / folder 管理 Drawer / 详情 Drawer(state 存 assetItems 的 index 而非 id,
   // ‹ n/N › 切张只换内容,Drawer 常驻)
@@ -116,13 +119,23 @@ export default function ProjectDetailPage() {
     () => assetItems.filter(a => selectedIds.includes(a.id)),
     [assetItems, selectedIds],
   );
+  // PR-1 跨页保留选中:selectedIds 可能含未加载页的 id。id → Asset 索引供批量
+  // 操作区分「已加载(有 filename)/未加载(用 id 占位)」;当前页 id 集合供
+  // 自绘全选做并/差集与 checked/indeterminate 派生
+  const assetById = useMemo(() => new Map(assetItems.map(a => [a.id, a])), [assetItems]);
+  const pageIdSet = useMemo(() => new Set(assetItems.map(a => a.id)), [assetItems]);
+  // 自绘全选的派生态:按「当前页 id 与 selectedIds 的交集数」对比当前页行数
+  // (不再用 selectedIds.length 对比全量行数 — 跨页保留后语义坏)。selectedAssets
+  // 即交集(按当前页过滤),长度可直接用
+  const allPageSelected = assetItems.length > 0 && selectedAssets.length === assetItems.length;
+  const somePageSelected = selectedAssets.length > 0 && !allPageSelected;
 
   const upload = useUpload();
   const downloads = useDownloads();
   const dlLink = useDownloadLink();
   const del = useDeleteAsset();
   const delFolder = useDeleteFolder();
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
 
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
   const [applySensitive, setApplySensitive] = useState(false);
@@ -157,21 +170,86 @@ export default function ProjectDetailPage() {
     }
   };
 
+  // 批量下载:切 selectedIds 全量口径(跨页保留后含未加载页的 id)—
+  // 已加载项沿用原 filename;未加载 id 无 Asset 对象,用占位名 asset_<id 前 8 位>.bin。
+  // 403 分流:已加载项弹申请弹窗(既有行为);未加载项缺完整 Asset,只计入「需申请」聚合计数。
+  // 其余失败:已加载项逐条报错,未加载项按 id 聚合计数,避免长列表刷屏
   const handleBulkDownload = async () => {
-    for (const a of selectedAssets) await handleDownload(a);
+    let needApply = 0, unloadedFail = 0;
+    for (const id of selectedIds) {
+      const a = assetById.get(id);
+      const filename = a?.filename ?? `asset_${id.slice(0, 8)}.bin`;
+      try {
+        const link = await dlLink.mutateAsync(id);
+        // assetId 供无 FSA 环境的直连路径换 as_attachment 链接(Chromium FSA 路径忽略)
+        await downloads.start(link.url, filename, { assetId: id });
+      } catch (e: unknown) {
+        const err = e as { response?: { status?: number } };
+        if (err.response?.status === 403) {
+          if (a) setApplyAsset(a);
+          else needApply++;
+        } else if (a) {
+          message.error(`${a.filename}: ${errorMessage(e, '下载失败')}`);
+        } else {
+          unloadedFail++;
+        }
+      }
+    }
+    if (needApply > 0) message.warning(`${needApply} 个未加载文件无下载权限,请翻页后逐个申请`);
+    if (unloadedFail > 0) message.error(`${unloadedFail} 个未加载文件下载失败`);
+  };
+
+  // 批量下载 >20 加确认:逐条 presigned 循环,连续多下载易被浏览器拦截
+  const confirmBulkDownload = () => {
+    if (selectedIds.length > 20) {
+      modal.confirm({
+        title: `下载 ${selectedIds.length} 个文件?`,
+        content: '数量较多,将逐个发起下载;浏览器可能拦截连续下载,建议分批(每批 ≤20)操作。',
+        okText: '继续下载',
+        onOk: handleBulkDownload,
+      });
+    } else {
+      void handleBulkDownload();
+    }
   };
 
   const handleBulkDelete = async () => {
-    let ok = 0, fail = 0;
-    for (const a of selectedAssets) {
-      try { await del.mutateAsync(a.id); ok++; }
-      catch (e) { fail++; message.error(`${a.filename}: ${errorMessage(e)}`); }
+    let ok = 0, fail = 0, unloadedFail = 0, okOnPage = 0;
+    for (const id of selectedIds) {
+      const a = assetById.get(id);
+      try {
+        await del.mutateAsync(id);
+        ok++;
+        if (pageIdSet.has(id)) okOnPage++;
+      } catch (e) {
+        fail++;
+        // 已加载项逐条报错;未加载项按 id 聚合计数
+        if (a) message.error(`${a.filename}: ${errorMessage(e)}`);
+        else unloadedFail++;
+      }
     }
+    if (unloadedFail > 0) message.error(`${unloadedFail} 个未加载文件删除失败`);
     if (ok > 0) message.success(`删除 ${ok} 个文件${fail > 0 ? ` · 失败 ${fail}` : ''}`);
     setSelectedIds([]);
-    // 删光当前页时回退一页,避免停在空尾页(page 变化触发重取,无需再 refetch)
-    if (page > 1 && ok >= assetItems.length) setPage(page - 1);
+    // 删光当前页时回退一页,避免停在空尾页(page 变化触发重取,无需再 refetch);
+    // 跨页删除后选中行从当前页消失,按「当前页剩余未删行数」判定(不再用 ok 对比全页行数)
+    if (page > 1 && assetItems.length - okOnPage === 0) setPage(page - 1);
     else refetch();
+  };
+
+  // 删除 >100 加耗时提示(逐条 DELETE 循环,量大时明显变慢)
+  const confirmBulkDelete = () => {
+    if (selectedIds.length > 100) {
+      modal.confirm({
+        title: `删除 ${selectedIds.length} 个文件?`,
+        content: '数量较多,逐个提交需要一些时间,期间请保持页面打开。',
+        okText: '继续删除',
+        okButtonProps: { danger: true },
+        onOk: handleBulkDelete,
+      });
+    } else {
+      void handleBulkDelete();
+    }
   };
 
   // 删除文件夹:须 文件夹空(无子夹 + 无活跃文件)**且 回收站空**。
@@ -375,11 +453,26 @@ export default function ProjectDetailPage() {
         />
       )}
 
-      {/* #151: 批量打标 modal */}
+      {/* #151: 批量打标 modal(assets 仅当前页已加载选中项,明细展示用;
+          提交按 selectedIds 全量逐 id PATCH + labels_mode=merge) */}
       <BulkTagModal
         open={bulkTagOpen}
         onClose={() => setBulkTagOpen(false)}
         assets={selectedAssets}
+        selectedIds={selectedIds}
+      />
+
+      {/* PR-1: 批量前缀 modal(桌面 + compact 共用;全部成功清空选中,
+          中途失败保留未提交的剩余选中供重试) */}
+      <BatchPrefixModal
+        open={batchPrefixOpen}
+        onClose={() => setBatchPrefixOpen(false)}
+        assets={selectedAssets}
+        selectedIds={selectedIds}
+        onSettle={(remaining) => {
+          setBatchPrefixOpen(false);
+          setSelectedIds(remaining);
+        }}
       />
 
       {/* 回收站:本文件夹软删文件(恢复 / 彻底清除) */}
@@ -498,11 +591,15 @@ export default function ProjectDetailPage() {
           borderBottom: '1px solid var(--ms-hairline-soft)',
           display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
         }}>
-          {/* 全选只作用于当前页(服务端分页只加载本页);语义与 PC 一致,共用 selectedIds */}
+          {/* 全选只作用于当前页(服务端分页只加载本页):勾选 = 当前页 id 并入选中,
+              取消 = 从选中剔除当前页 id(跨页保留的其它页 id 不受影响);
+              checked/indeterminate 按「当前页 id 与 selectedIds 的交集数」派生 */}
           <Checkbox
-            indeterminate={hasSelection && selectedIds.length < assetItems.length}
-            checked={hasSelection && assetItems.length > 0 && selectedIds.length === assetItems.length}
-            onChange={(e) => setSelectedIds(e.target.checked ? assetItems.map(a => a.id) : [])}
+            indeterminate={somePageSelected}
+            checked={allPageSelected}
+            onChange={(e) => setSelectedIds(prev => e.target.checked
+              ? [...new Set([...prev, ...assetItems.map(a => a.id)])]
+              : prev.filter(id => !pageIdSet.has(id)))}
           />
           <span style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
             {hasSelection ? (
@@ -565,7 +662,7 @@ export default function ProjectDetailPage() {
                 showTotal={(t) => `共 ${t} 个文件`}
                 onChange={(p) => {
                   setPage(p);
-                  setSelectedIds([]);
+                  // PR-1:跨页保留选中,翻页不再清空(切 folder 仍清空,见上方 prevFolder 逻辑)
                   setDetailIndex(null);
                   // compact 下 main 是滚动容器(window 不滚),回顶滚 main
                   scrollMainToTop();
@@ -600,12 +697,17 @@ export default function ProjectDetailPage() {
                     disabled={!folder?.my_can_upload} onClick={() => setBulkTagOpen(true)}>
               打标
             </Button>
+            {/* PR-1: 批量前缀 — 门控随打标 = folder.my_can_upload */}
+            <Button style={{ height: 44 }} icon={<Type size={14} strokeWidth={2} />}
+                    disabled={!folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
+              前缀
+            </Button>
             <Popconfirm
               title={`删除 ${selectedIds.length} 个文件?`}
               description="软删除;管理员可在回收站恢复或彻底清除"
               okText="删除" okButtonProps={{ danger: true }}
               disabled={!folder?.my_can_admin}
-              onConfirm={handleBulkDelete}
+              onConfirm={confirmBulkDelete}
             >
               <Button danger style={{ height: 44 }} icon={<Trash2 size={14} strokeWidth={2} />}
                       disabled={!folder?.my_can_admin} loading={del.isPending}>
@@ -807,11 +909,15 @@ export default function ProjectDetailPage() {
           display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
           background: 'var(--ms-canvas)',
         }}>
-          {/* 全选只作用于当前页(服务端分页只加载本页);跨页批量请逐页操作 */}
+          {/* 全选只作用于当前页(服务端分页只加载本页):勾选 = 当前页 id 并入选中,
+              取消 = 从选中剔除当前页 id(跨页保留的其它页 id 不受影响);
+              checked/indeterminate 按「当前页 id 与 selectedIds 的交集数」派生 */}
           <Checkbox
-            indeterminate={hasSelection && selectedIds.length < assetItems.length}
-            checked={hasSelection && assetItems.length > 0 && selectedIds.length === assetItems.length}
-            onChange={(e) => setSelectedIds(e.target.checked ? assetItems.map(a => a.id) : [])}
+            indeterminate={somePageSelected}
+            checked={allPageSelected}
+            onChange={(e) => setSelectedIds(prev => e.target.checked
+              ? [...new Set([...prev, ...assetItems.map(a => a.id)])]
+              : prev.filter(id => !pageIdSet.has(id)))}
           />
           <span style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
             {hasSelection ? (
@@ -838,10 +944,17 @@ export default function ProjectDetailPage() {
                 打标{hasSelection ? ` ${selectedIds.length}` : ''}
               </Button>
             </Tooltip>
+            {/* PR-1: 批量前缀 — 门控随打标 = folder.my_can_upload */}
+            <Tooltip title={!hasSelection ? '' : folder?.my_can_upload ? '' : '无编辑权限(需 uploader 角色)'}>
+              <Button size="small" icon={<Type size={13} strokeWidth={2} />}
+                      disabled={!hasSelection || !folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
+                前缀{hasSelection ? ` ${selectedIds.length}` : ''}
+              </Button>
+            </Tooltip>
             <Button size="small" icon={<RotateCw size={13} strokeWidth={2} />}
                     onClick={() => refetch()}>刷新</Button>
             <Button size="small" icon={<Download size={13} strokeWidth={2} />}
-                    disabled={!hasSelection} onClick={handleBulkDownload}>
+                    disabled={!hasSelection} onClick={confirmBulkDownload}>
               下载{hasSelection ? ` ${selectedIds.length}` : ''}
             </Button>
             {/* 回收站:普通夹 folder admin;sensitive 夹仅系统 admin(后端同规则 enforce) */}
@@ -856,7 +969,7 @@ export default function ProjectDetailPage() {
               description="软删除;管理员可在回收站恢复或彻底清除"
               okText="删除" okButtonProps={{ danger: true }}
               disabled={!hasSelection || !folder?.my_can_admin}
-              onConfirm={handleBulkDelete}
+              onConfirm={confirmBulkDelete}
             >
               <Tooltip title={!hasSelection ? '' : folder?.my_can_admin ? '' : '无删除权限(需管理员角色)'}>
                 <Button size="small" danger icon={<Trash2 size={13} strokeWidth={2} />}
@@ -881,6 +994,9 @@ export default function ProjectDetailPage() {
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys as string[]),
+              // PR-1:跨页保留选中 — 翻页后其它页的选中行 key 不丢(行不在当前页也不渲染);
+              // 内置表头全选在 preserve 下天然只动当前页,勿改
+              preserveSelectedRowKeys: true,
             }}
             onRow={(record) => ({
               onClick: () => {
@@ -921,7 +1037,7 @@ export default function ProjectDetailPage() {
               showTotal={(t) => `共 ${t} 个文件`}
               onChange={(p) => {
                 setPage(p);
-                setSelectedIds([]);
+                // PR-1:跨页保留选中,翻页不再清空(切 folder 仍清空,见上方 prevFolder 逻辑)
                 tableScrollRef.current?.scrollTo({ top: 0 });
               }}
             />
@@ -935,6 +1051,13 @@ export default function ProjectDetailPage() {
         borderLeft: '1px solid var(--ms-hairline)',
         overflow: 'auto',
       }}>
+        {/* PR-1:仅桌面多选批量态加注统计口径 — 批量统计只覆盖当前页已加载项
+            (AssetSummaryPanel 三处复用,不能在组件内无条件加注,由页面侧注入) */}
+        {selectedIds.length >= 2 && (
+          <div style={{ padding: '12px 20px 0', fontSize: 12, color: 'var(--ms-ink-muted)' }}>
+            统计为当前页已加载的 {selectedAssets.length} 项(共已选 {selectedIds.length} 个)
+          </div>
+        )}
         <AssetSummaryPanel selected={selectedAssets} me={me} folder={folder} />
       </Layout.Sider>
 
@@ -943,45 +1066,74 @@ export default function ProjectDetailPage() {
   );
 }
 
-// ─── 批量打标(#151)─────────────────────────────────────────────────────────
-function BulkTagModal({ open, onClose, assets }: {
-  open: boolean; onClose: () => void; assets: Asset[];
+// ─── 批量打标(#151;PR-1 merge 化 + selectedIds 全量口径)────────────────────
+function BulkTagModal({ open, onClose, assets, selectedIds }: {
+  open: boolean; onClose: () => void;
+  /** 当前页已加载的选中项(明细展示用;跨页保留选中后仅为全量选中的子集)。*/
+  assets: Asset[];
+  /** 全量选中 id(提交数据源;逐 id PATCH,无需加载行对象)。*/
+  selectedIds: string[];
 }) {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
   const meta = useUpdateAssetMeta();
   // Modal destroyOnClose → 每次打开重新挂载,labels 天然归零
   const [labels, setLabels] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+
+  const totalCount = selectedIds.length;
+  // 明细仅为当前页子集时明示口径,避免「列表 N 个、明细 M 个」的错位困惑
+  const scopeNote = totalCount > assets.length ? '(明细为当前页已加载项)' : '';
 
   const apply = async () => {
     const next = [...new Set(labels.map(s => s.trim()).filter(Boolean))];
     if (next.length === 0) { message.warning('先输入至少一个标签'); return; }
-    let ok = 0, fail = 0;
-    for (const a of assets) {
-      // 合并:新标签 + 已有标签(不覆盖已打的)
-      try {
-        await meta.mutateAsync({
-          asset_id: a.id,
-          user_labels: [...new Set([...(a.user_labels ?? []), ...next])],
-        });
-        ok++;
-      } catch (e) { fail++; message.error(`${a.filename}: ${errorMessage(e)}`); }
+    const run = async () => {
+      setSubmitting(true);
+      let ok = 0, fail = 0, unloadedFail = 0;
+      for (const id of selectedIds) {
+        const a = assets.find(x => x.id === id);
+        try {
+          // merge 后端化:与 DB 现值取并集,未加载 id 的旧标签不会被整条替换清掉
+          await meta.mutateAsync({ asset_id: id, user_labels: next, labels_mode: 'merge' });
+          ok++;
+        } catch (e) {
+          fail++;
+          // 已加载项逐条报错;未加载项按 id 聚合计数
+          if (a) message.error(`${a.filename}: ${errorMessage(e)}`);
+          else unloadedFail++;
+        }
+      }
+      setSubmitting(false);
+      if (unloadedFail > 0) message.error(`${unloadedFail} 个未加载文件打标失败`);
+      if (ok > 0) message.success(`已为 ${ok} 个文件打标${fail > 0 ? ` · 失败 ${fail}` : ''}`);
+      onClose();
+    };
+    // 跨页放大后 >100 提示耗时,确认后再提交
+    if (totalCount > 100) {
+      modal.confirm({
+        title: `即将为 ${totalCount} 个文件打标`,
+        content: '数量较多,逐个提交需要一些时间,期间请保持页面打开。',
+        okText: '继续打标',
+        onOk: run,
+      });
+    } else {
+      void run();
     }
-    if (ok > 0) message.success(`已为 ${ok} 个文件打标${fail > 0 ? ` · 失败 ${fail}` : ''}`);
-    onClose();
   };
 
   return (
     <Modal
-      title={`批量打标 — ${assets.length} 个文件`}
+      title={`批量打标 — ${totalCount} 个文件`}
       open={open}
       onCancel={onClose}
       okText="打标"
-      okButtonProps={{ disabled: labels.length === 0, loading: meta.isPending }}
+      okButtonProps={{ disabled: labels.length === 0, loading: meta.isPending || submitting }}
       onOk={apply}
       destroyOnClose
     >
       <div style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)', marginBottom: 10 }}>
-        给选中的文件统一加标签(与已有标签合并)。输入后回车确认,支持多个。
+        给选中的 {totalCount} 个文件统一加标签{scopeNote}。与已有标签合并(不清除旧标签)。
+        输入后回车确认,支持多个。
       </div>
       <Select
         mode="tags"
