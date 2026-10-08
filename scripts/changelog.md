@@ -91,3 +91,5 @@
 - 修 vite dev 的 `/ms-static` 代理劫持 SPA 路由,导致 dev-login 页面打不开的问题(f5acec0)
 - Dockerfile 的 apt / pip 镜像源抽成 build arg(默认清华源不变;对清华源包文件 403 的网络可切阿里云)(f5acec0)
 - Windows + Docker Desktop 全栈部署验证通过,容器集成测试全绿
+
+- **qdev 实施收尾**(`494361f`):专职测试(全新子智能体,不带开发上下文)全方位+回归——无 P0,1 P1(测试卫生:新用例每轮净留 17 个活跃项目,5 轮全量后 GET /projects 第一页把 seed 项目挤出致 evan_sees_all 假红;已修:两文件补 finally 归档,复验连续两轮全量结果一致 3F 基线/221P/1S,活跃项目 11<100);3 P2 记遗留(URL 直切项目瞬态选中残留——folders 返回后必自愈、/projects 排序无 id tiebreaker(仅 Transfer 数据源受影响)、BatchPrefixModal 预览未 NFC 归一(注释已明示以服务端为准));补充探针 8/8 过(add 谓词并发防线/FGA 写失败尽力而为/already_exists 降级逐条/128 边界 NFC 膨胀 422 等);前端 lint/build 零告警;回归基线除已知 3 例全绿
