@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { Badge, Drawer } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Bell, ClipboardCheck, Folder, Menu, Search,
+  Bell, ClipboardCheck, Folder, LayoutTemplate, Menu, Search,
   ScrollText, ShieldCheck, Users as UsersIcon, UsersRound,
 } from 'lucide-react';
 import { useMe, useNotificationsUnread } from '../api/hooks';
@@ -47,6 +47,7 @@ export function MobileTabBar() {
       { to: '/admin/audit', label: '审计', icon: <ScrollText size={16} strokeWidth={1.8} /> },
       { to: '/admin/users', label: '用户管理', icon: <UsersIcon size={16} strokeWidth={1.8} /> },
       { to: '/admin/groups', label: '用户组管理', icon: <UsersRound size={16} strokeWidth={1.8} /> },
+      { to: '/admin/grant-templates', label: '权限模板', icon: <LayoutTemplate size={16} strokeWidth={1.8} /> },
     ] : []),
   ];
 

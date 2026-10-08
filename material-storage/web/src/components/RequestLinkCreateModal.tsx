@@ -32,6 +32,8 @@ export function RequestLinkCreateModal({ open, onClose, targetType, targetId, ta
   const [result, setResult] = useState<RequestLinkCreateOut | null>(null);
   const [copied, setCopied] = useState(false);
 
+  // 打开即重置结果态(step2 → step1):有意的「open 翻转重置」,豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       setResult(null);
@@ -39,6 +41,7 @@ export function RequestLinkCreateModal({ open, onClose, targetType, targetId, ta
       form.resetFields();
     }
   }, [open, form]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // sensitive_folder 才能 access,其他只能 download
   const canAccess = targetType === 'sensitive_folder';

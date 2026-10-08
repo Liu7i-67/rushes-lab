@@ -108,6 +108,8 @@ export function AppHeader({ me }: Props) {
             <>
               <NavChip to="/admin/users" label="用户" navigate={navigate} />
               <NavChip to="/admin/groups" label="用户组" navigate={navigate} />
+              {/* 权限模板(方案 §4.4)— 仅系统管理员可见 */}
+              <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />
             </>
           )}
         </nav>
@@ -306,6 +308,8 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
   const [debounced, setDebounced] = useState('');
 
   useEffect(() => {
+    // 打开时清空搜索词:有意的「open 翻转重置」;改 render 期重置/key 重挂载会改组件动态,豁免 cascading 警告
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (open) setQ('');
   }, [open]);
 

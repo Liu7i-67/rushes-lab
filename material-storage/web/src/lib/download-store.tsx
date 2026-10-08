@@ -36,6 +36,8 @@ interface DownloadCtx {
 
 const Ctx = createContext<DownloadCtx | null>(null);
 
+// 与 DownloadProvider 同文件是 context 惯用形态,拆文件波及 6+ 个使用方;本规则只影响 dev HMR 粒度,豁免
+// eslint-disable-next-line react-refresh/only-export-components
 export function useDownloads() {
   const v = useContext(Ctx);
   if (!v) throw new Error('useDownloads 必须在 DownloadProvider 内');

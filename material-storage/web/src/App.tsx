@@ -28,6 +28,7 @@ const RequestLinkLandingPage = lazy(() => import('./pages/RequestLinkLandingPage
 const AdminAuditPage = lazy(() => import('./pages/AdminAuditPage'));
 const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage'));
 const AdminGroupsPage = lazy(() => import('./pages/AdminGroupsPage'));
+const AdminGrantTemplatesPage = lazy(() => import('./pages/AdminGrantTemplatesPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
@@ -67,6 +68,7 @@ const RouterRoutes = () => (
       <Route path="/admin/audit" element={<AdminAuditPage />} />
       <Route path="/admin/users" element={<AdminUsersPage />} />
       <Route path="/admin/groups" element={<AdminGroupsPage />} />
+      <Route path="/admin/grant-templates" element={<AdminGrantTemplatesPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/s/:token" element={<ShareLandingPage />} />
       <Route path="/r/:token" element={<RequestLinkLandingPage />} />
@@ -114,7 +116,8 @@ function AppShell() {
     if (onAuthPage) return <RouterRoutes />;
     // #149: 未登录 → 本地登录页,带完整路径(next)登录后回跳原页
     const next = encodeURIComponent(window.location.pathname + window.location.search + window.location.hash);
-    window.location.href = `/ms-static/web/login?next=${next}`;
+    // assign() 与 `href =` 完全等价(整页跳转 + 新历史条目),只是方法调用形式以满足 react-hooks/immutability
+    window.location.assign(`/ms-static/web/login?next=${next}`);
     return null;
   }
 

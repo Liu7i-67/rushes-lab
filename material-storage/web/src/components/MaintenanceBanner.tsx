@@ -35,7 +35,8 @@ export function MaintenanceBanner() {
   const lastKnownActiveRef = useRef(false);
   const [phase, setPhase] = useState<'idle' | 'maintaining' | 'just-finished'>('idle');
   const finishedTimerRef = useRef<number | null>(null);
-  const [nowTick, setNowTick] = useState(Date.now());
+  // 懒初始化 = 挂载时刻的时间快照(倒计时起点),非 render 期重复求值
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   // 1 秒 tick 给倒计时
   useEffect(() => {
@@ -44,7 +45,9 @@ export function MaintenanceBanner() {
     return () => window.clearInterval(t);
   }, [phase]);
 
-  // 状态机:监听 banner 变化
+  // 状态机:监听 banner 变化 — 由服务端 banner 驱动(含 wasActive 跳变 + 定时器),
+  // 无法在 render 期纯派生,同步 setState 是有意行为,豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     // 网络错误 + 不知道之前状态 → 静默
     if (isError && !lastKnownActiveRef.current) return;
@@ -75,6 +78,7 @@ export function MaintenanceBanner() {
       setPhase('idle');
     }
   }, [data, isError, isFetching]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   useEffect(() => () => {
     if (finishedTimerRef.current) window.clearTimeout(finishedTimerRef.current);

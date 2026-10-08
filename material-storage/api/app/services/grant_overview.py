@@ -24,8 +24,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.tables import Folder, User
+from app.db.tables import Folder
 from app.services.permissions import PermissionsService
+from app.services.subject_names import resolve_subject_names
 
 # 各 object type 的 grant relation 白名单 → (level, 是否 relation 本身就代表永久)
 # relation 本身代表永久的(sensitive 的 invited_*)无 condition;其余靠 condition 判定。
@@ -161,27 +162,10 @@ async def list_project_grants(
             object_name=fname, relations=rels, now=now,
         ))
 
-    # 批量查 user name(subject_id = users.id UUID 字符串;group/department 显 id 占位,
-    # 与 folders.list_members 一致)
-    user_sids = [r["subject_id"] for r in records if r["kind"] == "user"]
-    user_uuids: list[uuid.UUID] = []
-    for s in user_sids:
-        try:
-            user_uuids.append(uuid.UUID(s))
-        except ValueError:
-            continue  # 老 open_id 存量数据,跳过(显示 id 占位)
-    if user_uuids:
-        ures = await db.execute(
-            select(User.id, User.name).where(User.id.in_(user_uuids))
-        )
-        name_by_uid = {str(uid): name for uid, name in ures.all()}
-        for r in records:
-            if r["kind"] == "user":
-                r["name"] = name_by_uid.get(r["subject_id"], r["subject_id"][:12] + "…")
+    # 批量解析主体名称(user → users.name,group → groups.name;未命中走 id 兜底)
+    names = await resolve_subject_names(db, [str(r["subject"]) for r in records])
     for r in records:
-        if r["kind"] != "user" and r["name"] is None:
-            label = "用户组" if r["kind"] == "group" else "部门"
-            r["name"] = f"{label} {r['subject_id'][:12]}…"
+        r["name"] = names[r["subject"]]["name"]
 
     # 排序:临时在前(admin 更关心)、到期近的在前、user 优先
     def _rank(r: dict) -> tuple:
