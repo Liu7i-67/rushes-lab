@@ -41,7 +41,8 @@ interface Props {
 export function BatchPrefixModal({ open, onClose, assets, selectedIds, onSettle }: Props) {
   const { message } = App.useApp();
   const batchPrefix = useBatchPrefix();
-  // Modal destroyOnClose → 每次打开重新挂载,表单态天然归零
+  // 表单态存在本组件(Modal 的父级),destroyOnHidden 只销毁 Modal 内部子树、
+  // 重置不到这里 — 关闭动画结束后 afterOpenChange 显式归零
   const [action, setAction] = useState<BatchPrefixAction>('add');
   const [prefix, setPrefix] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -121,7 +122,10 @@ export function BatchPrefixModal({ open, onClose, assets, selectedIds, onSettle 
       okText="执行改名"
       okButtonProps={{ disabled: !!prefixError || totalCount === 0, loading: submitting }}
       onOk={submit}
-      destroyOnClose
+      destroyOnHidden
+      afterOpenChange={(o) => {
+        if (!o) { setAction('add'); setPrefix(''); }
+      }}
     >
       <div style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)', marginBottom: 12 }}>
         对选中的文件统一{action === 'add' ? '加' : '去'}文件名前缀。无批量撤销:

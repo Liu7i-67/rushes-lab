@@ -1076,7 +1076,8 @@ function BulkTagModal({ open, onClose, assets, selectedIds }: {
 }) {
   const { message, modal } = App.useApp();
   const meta = useUpdateAssetMeta();
-  // Modal destroyOnClose → 每次打开重新挂载,labels 天然归零
+  // 表单态存在本组件(Modal 的父级),destroyOnHidden 重置不到这里 —
+  // 关闭动画结束后 afterOpenChange 显式归零(与 BatchPrefixModal 同款)
   const [labels, setLabels] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
@@ -1129,7 +1130,10 @@ function BulkTagModal({ open, onClose, assets, selectedIds }: {
       okText="打标"
       okButtonProps={{ disabled: labels.length === 0, loading: meta.isPending || submitting }}
       onOk={apply}
-      destroyOnClose
+      destroyOnHidden
+      afterOpenChange={(o) => {
+        if (!o) setLabels([]);
+      }}
     >
       <div style={{ fontSize: 12.5, color: 'var(--ms-ink-muted)', marginBottom: 10 }}>
         给选中的 {totalCount} 个文件统一加标签{scopeNote}。与已有标签合并(不清除旧标签)。
