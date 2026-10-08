@@ -5,8 +5,11 @@ import type {
   Approval,
   ApprovalAction,
   ApprovalTargetType,
+  ApplyDefaultResult,
   Asset,
+  AssetBatchPrefixResult,
   AssetList,
+  BatchPrefixAction,
   DirectoryGroup,
   DirectoryGroupMember,
   DirectoryUser,
@@ -22,6 +25,7 @@ import type {
   ShareCreateOut,
   ShareResolve,
   TrashAssets,
+  UserBrief,
 } from './types';
 
 // ─── auth ──────────────────────────────────────────────────────────────────
@@ -62,6 +66,43 @@ export const useProjects = () =>
   useQuery({
     queryKey: ['projects'],
     queryFn: async () => (await http.get<Project[]>('/api/v1/projects')).data,
+  });
+
+// 分页拉全通用页大小:GET /projects 默认 limit=100、GET /users 硬上限 100
+const ALL_PAGE_LIMIT = 100;
+
+/** 循环 offset 翻页直至取完(末页不足一页即止;依赖后端稳定排序防翻页窗口漂移)。*/
+async function fetchAllPages<T>(url: string, params: Record<string, unknown> = {}): Promise<T[]> {
+  const out: T[] = [];
+  let offset = 0;
+  for (;;) {
+    const { data } = await http.get<T[]>(url, { params: { ...params, limit: ALL_PAGE_LIMIT, offset } });
+    out.push(...data);
+    if (data.length < ALL_PAGE_LIMIT) break;
+    offset += ALL_PAGE_LIMIT;
+  }
+  return out;
+}
+
+// PR-3: 项目全量拉取(「刷新默认权限」Transfer 数据源)。默认请求 limit=100 会静默
+// 截断,这里循环 offset 拉全;系统 admin 分支按 created_at desc 排序,翻页窗口稳定
+export const useAllProjects = (enabled = true) =>
+  useQuery({
+    queryKey: ['projects-all'],
+    queryFn: () => fetchAllPages<Project>('/api/v1/projects'),
+    enabled,
+    staleTime: 30_000,
+  });
+
+// PR-2/PR-3: 用户全量拉取(NewProjectModal 权限行 nameById 数据源)。打已放宽的
+// GET /api/v1/users(原 directory 端点 require_system_admin 未放宽,组长 403);
+// 只回 active 用户,停用主体行显名走短 id 兜底(方案 §3.3,可接受)
+export const useAllUsers = (enabled: boolean) =>
+  useQuery({
+    queryKey: ['users-all'],
+    queryFn: () => fetchAllPages<UserBrief>('/api/v1/users'),
+    enabled,
+    staleTime: 30_000,
   });
 
 export const useProject = (id: string | undefined) =>
@@ -275,16 +316,42 @@ export const useSearchAssets = (q: string | null) =>
   });
 
 // #151: 写 user_labels / notes(user_labels 显式传空数组 = 清空)
+// labels_mode(PR-1):'merge' = 与 DB 现值取并集(旧值在前);缺省 'replace' 行为不变。
+// 批量打标跨页提交未加载 id 时必须 merge,否则后端整条替换会清掉旧标签。
 export const useUpdateAssetMeta = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (args: { asset_id: string; user_labels?: string[]; notes?: string }) =>
+    mutationFn: async (args: {
+      asset_id: string;
+      user_labels?: string[];
+      notes?: string;
+      labels_mode?: 'merge' | 'replace';
+    }) =>
       (await http.patch<Asset>(`/api/v1/assets/${args.asset_id}/meta`, {
         user_labels: args.user_labels,
         notes: args.notes,
+        labels_mode: args.labels_mode,
       })).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['asset-search'] });
+    },
+  });
+};
+
+// PR-1: 批量文件名前缀(加/去前缀)。后端单事务逐 id UPDATE、NFC 两侧归一,
+// 尽力而为 + skipped_reasons 对账;单批上限 1000,超出由前端分批顺序调用
+export const useBatchPrefix = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      asset_ids: string[];          // 1..1000
+      action: BatchPrefixAction;
+      prefix: string;               // 1..128,禁 "/" 与控制字符(服务端 NFC 归一后复检)
+    }) => (await http.post<AssetBatchPrefixResult>('/api/v1/assets/batch-prefix', body)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets'] });
+      // 文件名可被盲搜命中,改名后同步失效搜索缓存
       qc.invalidateQueries({ queryKey: ['asset-search'] });
     },
   });
@@ -472,10 +539,15 @@ export const useDirectoryGroups = (q = '') =>
       (await http.get<DirectoryGroup[]>('/api/v1/admin/directory/groups', { params: { q } })).data,
   });
 
+// PR-2: can_create_project = 组级「新建项目」权限(Create bool,缺省 False 服务端兜底)
 export const useCreateGroup = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { name: string; description?: string }) =>
+    mutationFn: async (body: {
+      name: string;
+      description?: string;
+      can_create_project?: boolean;
+    }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
   });
@@ -484,7 +556,14 @@ export const useCreateGroup = () => {
 export const useUpdateGroup = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (args: { groupId: string; name?: string; description?: string }) => {
+    mutationFn: async (args: {
+      groupId: string;
+      name?: string;
+      description?: string | null;
+      // PR-2 tri-state:仅在调用方显式传入时才携带(undefined 经 JSON 序列化自动省略
+      // = None 不动;非 Optional 布尔会让仅改名的不带字段 PATCH 静默撤权,方案 §2.2)
+      can_create_project?: boolean;
+    }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;
     },
@@ -593,6 +672,17 @@ export const useDeleteGrantTemplate = () => {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['grant-templates'] }),
   });
 };
+
+// PR-3: 刷新默认权限(存量项目按需补)。叠加不删 —— 只补缺失授权,不移除任何现有授权;
+// 单批上限 100,部分成功语义(单项目失败继续其余,失败项 results[].error)
+// 项目列表 / 组等授权数据不受影响,无需 invalidate
+export const useApplyDefaultTemplate = () =>
+  useMutation({
+    mutationFn: async (body: { project_ids: string[] }) =>
+      (await http.post<ApplyDefaultResult>(
+        '/api/v1/admin/grant-templates/apply-default', body,
+      )).data,
+  });
 
 // ─── notifications(#153)— 轮询即可,不做 WebSocket ─────────────────────────
 /** 未读计数 — Bell badge 轮询用(30s;页面聚焦时由 refetchOnWindowFocus 兜底)。 */

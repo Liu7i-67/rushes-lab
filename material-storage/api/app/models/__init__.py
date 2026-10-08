@@ -1,11 +1,12 @@
 """Pydantic API I/O models — Phase B-2 first batch。"""
 from __future__ import annotations
 
+import unicodedata
 import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ProjectRole Literal 定义处(permissions.py 只 import settings/openfga_sdk,无循环依赖)
 from app.services.permissions import ProjectRole
@@ -97,10 +98,43 @@ class AssetMetaUpdateIn(BaseModel):
     """打标 / 改标(#151)。
 
     user_labels / notes 缺省 = 不改该项;显式传空数组 / 空串 = 清空。
+    labels_mode(方案 §1.1):replace(默认)= 整条替换,现行为完全不变;
+    merge = 与 DB 现值取并集(DB 现值在前、新标签追加在后,顺序写死),
+    并集仍过 50 条上限 —— 批量跨页打标用,未加载行的旧标签不被清掉。
     """
 
     user_labels: list[str] | None = None
     notes: str | None = None
+    labels_mode: Literal["merge", "replace"] = "replace"
+
+
+class AssetBatchPrefixIn(BaseModel):
+    """批量文件名前缀(方案 §1.1)。
+
+    prefix 校验:禁 "/"(前缀拼进 filename,路径分隔符会越出 folder 语义)、
+    禁控制字符(Cc 类)、strip 后非空;服务端 NFC 归一,归一后复检 ≤128
+    (归一可能合并码点,只查归一前长度会漏)。路由拿到的 prefix 已是
+    归一后的值(「前缀比较两侧 NFC」的输入侧)。
+    """
+
+    asset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=1000)
+    action: Literal["add", "remove"]
+    prefix: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("prefix")
+    @classmethod
+    def _nfc_and_charset(cls, v: str) -> str:
+        stripped = v.strip()
+        if not stripped:
+            raise ValueError("prefix 不能为空白")
+        if "/" in stripped:
+            raise ValueError("prefix 不能包含路径分隔符 /")
+        if any(unicodedata.category(ch) == "Cc" for ch in stripped):
+            raise ValueError("prefix 不能包含控制字符")
+        normalized = unicodedata.normalize("NFC", stripped)
+        if len(normalized) > 128:
+            raise ValueError("prefix NFC 归一后超长(>128)")
+        return normalized
 
 
 class TrashOut(BaseModel):

@@ -28,10 +28,11 @@ from app.deps import (
     get_is_system_admin,
     get_permissions,
     get_request_context,
-    require_system_admin,
+    require_project_creator,
 )
 from app.models import ProjectCreateIn, ProjectOut
 from app.services.audit import AuditService
+from app.services.default_grants import apply_default_template_grants
 from app.services.permissions import (
     PermissionsService,
     fmt_subject,
@@ -46,6 +47,11 @@ log = logging.getLogger(__name__)
 # initial_grants 条数上限(方案 §3.1;批次三模板 items 上限与同一常量,见 admin.py)
 INITIAL_GRANTS_MAX = 50
 
+# 非 admin 创建者的强制 bucket(方案 §2.3):前端 NewProjectModal 固定默认值;
+# ProjectCreateIn 对 bucket 无约束,不收口则 project creator 可 API 直调把项目
+# 指到任意 bucket,后续 presign 全走它
+DEFAULT_MINIO_BUCKET = "ms-dev"
+
 
 @router.post("", response_model=ProjectOut, status_code=201)
 async def create_project(
@@ -53,16 +59,29 @@ async def create_project(
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
-    user: CurrentUser = Depends(require_system_admin),   # 仅系统 admin 可建
+    user: CurrentUser = Depends(require_project_creator),   # 系统 admin 或 组级 project_creator
+    is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> ProjectOut:
-    """创建 project — **仅系统 admin 可调**;必须 payload 明确指派项目 admin
-    (可以指自己,UI 默认填创建者)。
+    """创建 project — 系统 admin 或 组级 project_creator(方案 §2.3);必须 payload
+    明确指派项目 admin(可以指自己,UI 默认填创建者)。
 
-    organization_id 解析顺序:payload > user.organization_id > settings.default_organization_id。
+    organization_id 解析顺序:payload > user.organization_id > settings.default_organization_id;
+    **非系统 admin 的创建者强制忽略 payload.organization_id 与 minio_bucket**
+    (提权口收口,见下方注释)。
     """
     user_id = user.id
     from app.db.tables import Organization, User
+
+    # 提权口收口(方案 §2.3):organization_id 可选且前端从不传,不收口则
+    # creator 可 API 直调在任意 org 下建项目并 bootstrap 该 org 关系;bucket 对
+    # creator 无约束,可把项目指到任意 bucket 使后续 presign 全走它。
+    # 系统 admin 保留两个自由度不动。
+    req_org_id = payload.organization_id
+    req_bucket = payload.minio_bucket
+    if not is_system_admin:
+        req_org_id = None
+        req_bucket = DEFAULT_MINIO_BUCKET
 
     # 校验 admin 是真 user(存在 db + active)
     from sqlalchemy import select as _select
@@ -77,7 +96,7 @@ async def create_project(
         )
 
     # 解析 org_id
-    org_id = payload.organization_id
+    org_id = req_org_id
     if org_id is None:
         db_user = await db.get(User, user_id)
         if db_user and db_user.organization_id:
@@ -143,7 +162,7 @@ async def create_project(
         code=payload.code,
         name=payload.name,
         description=payload.description,
-        minio_bucket=payload.minio_bucket,
+        minio_bucket=req_bucket,
     )
     db.add(project)
     try:
@@ -193,6 +212,17 @@ async def create_project(
                 },
                 **ctx,
             )
+
+    # 默认模板直通(方案 §3.1):payload 校验与上面的直通写只认 initial_grants,
+    # 默认模板授权由共享 helper 在直通写完成后合并(read 差集天然排除 payload
+    # 已写条目,幂等;无默认模板 / items 空 = 现行为不变)。helper 异常与
+    # initial_grants 直通写同治:500,项目行已提交、授权缺失,正是 §3.2
+    # 「刷新默认权限」的补法。
+    await apply_default_template_grants(
+        db, permissions, audit,
+        org_id=org_id, project_id=project.id,
+        actor_user_id=user_id, ctx=ctx,
+    )
 
     await audit.write(
         event_type="project_created",
@@ -455,18 +485,20 @@ async def list_project_members(
         is_system_admin=is_system_admin,
     )
 
-    from openfga_sdk.models import ReadRequestTupleKey
-    resp = await permissions._client.read(  # type: ignore[attr-defined]
-        ReadRequestTupleKey(object=f"project:{project_id}")
+    # 翻页聚合 read(read_all_tuples,方案 §3.1 封装):OpenFGA read 单页有上限,
+    # initial_grants 满额 + 默认模板直通后 50+ tuple 是现实场景,单页 read 会
+    # 静默截断(成员列表丢人 / 丢补写角色)
+    tuples = await permissions.read_all_tuples(
+        object_type="project", object_id=str(project_id),
     )
 
     by_subject: dict[str, dict] = {}
 
-    for t in resp.tuples:
-        rel = t.key.relation
+    for t_user, t_rel, _t_obj in tuples:
+        rel = t_rel
         if rel not in PROJECT_ROLES:
             continue
-        subject = t.key.user
+        subject = t_user
         kind, rest = subject.split(":", 1)
         sid = rest.rsplit("#", 1)[0]
         key = subject

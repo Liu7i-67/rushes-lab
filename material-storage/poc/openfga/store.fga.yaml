@@ -44,6 +44,10 @@ model: |
       define admin: [user, group#member]
       # 整个企业的"基础"成员资格(可包含 department#member,飞书事件同步时灌入)
       define member: [user, group#member, department#member]
+      # 组级「新建项目」权限(方案 §2.1):UI 只写组主体,user 留口(直接授单个
+      # user 的入口本期不做,见方案 §6)。组员判定由 check 自动展开 group#member,
+      # 应用层守门口径 = is_org_admin ∨ check(project_creator)(系统 admin 恒可建)
+      define project_creator: [user, group#member]
 
   type project
     relations
@@ -142,6 +146,17 @@ tuples:
   - user: user:ou_mia
     relation: member
     object: group:grp_editors
+
+  # 组级「新建项目」权限(方案 §2.1):剪辑师组可建项目
+  - user: group:grp_editors#member
+    relation: project_creator
+    object: organization:tenant_demo
+  # 移出组用例的静态编码:dave 仅具部门身份、无任何组成员 tuple → project_creator
+  # 为 false(证明 project_creator 不随 department#member 扩散;真实移出组 =
+  # 删 group#member tuple,check 同理 false)
+  - user: user:ou_dave
+    relation: member
+    object: department:dep_editing
 
   # 项目 demo
   - user: organization:tenant_demo
@@ -303,3 +318,36 @@ tests:
         assertions:
           can_view: false
           can_download: false
+
+      # ─── 组级「新建项目」权限(方案 §2.1/§2.6)───────────────────────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          project_creator: true
+
+      # 组员 ✓:mia 同组(子部门 member + 组成员双身份)
+      - user: user:ou_mia
+        object: organization:tenant_demo
+        assertions:
+          project_creator: true
+
+      # 非组员 ✗
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          project_creator: false
+
+      # 移出组 ✗(静态编码):dave 在 editing 部门但不在剪辑师组 → false;
+      # 真实移出组 = 删 group#member tuple 后 check 同理 false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          project_creator: false
+
+      # org admin 不自动蕴含 project_creator(FGA 层是独立 relation;
+      # 系统 admin 恒可建由应用层守门 is_org_admin ∨ check 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          project_creator: false

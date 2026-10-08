@@ -3,7 +3,7 @@
 #150 起数据源从飞书通讯录(contact/group/simplelist)改为本地 groups 表,
 成员数来自 group_memberships join。管理端 CRUD 见 routers/directory.py。
 
-需 admin。
+需 admin 或 project creator(方案 §2.3 弱门放宽:零项目组员也要能拉建项目表单候选)。
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.db.tables import Group, GroupMembership
-from app.deps import CurrentUser, require_admin
+from app.deps import CurrentUser, require_admin_or_project_creator
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -34,7 +34,7 @@ async def search_groups(
     q: str = Query("", description="name 模糊关键字(留空 = 返前 N)"),
     limit: int = Query(30, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_admin),
+    user: CurrentUser = Depends(require_admin_or_project_creator),
 ) -> list[GroupBrief]:
     """本地组列表 → name 模糊 filter。无组 → 空数组(不是 404)。"""
     _ = user.id

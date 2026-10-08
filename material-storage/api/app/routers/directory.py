@@ -9,9 +9,9 @@ endpoints:
   POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit
   POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
   POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码)
-  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset)
-  POST   /api/v1/admin/directory/groups                     — 创建组
-  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述
+  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;含 project_creator flag 读回)
+  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project)
+  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project(tri-state)
   DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清)
   GET    /api/v1/admin/directory/groups/{id}/members        — 组内成员列表
   POST   /api/v1/admin/directory/groups/{id}/members        — 加成员(写 group_memberships + group#member tuple)
@@ -35,7 +35,11 @@ from app.deps import CurrentUser, get_audit, get_permissions, require_system_adm
 from app.services.audit import AuditService
 from app.services.org import get_default_organization
 from app.services.passwords import generate_temp_password, hash_password
-from app.services.permissions import PermissionsService
+from app.services.permissions import (
+    PermissionsService,
+    fmt_subject,
+    is_already_exists_error,
+)
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -307,16 +311,25 @@ class DirectoryGroupOut(BaseModel):
     description: str | None
     member_count: int
     created_at: datetime
+    # 组级「新建项目」权限(方案 §2.2):读接口按 FGA tuple 真实态回显;
+    # create/update 响应按入参 flag 回填(真实态以列表刷新为准)
+    can_create_project: bool = False
 
 
 class GroupCreateIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=128)
     description: str | None = Field(None, max_length=1024)
+    # 置位 = 写 organization#project_creator 的 group:<gid>#member tuple
+    can_create_project: bool = False
 
 
 class GroupUpdateIn(BaseModel):
+    # tri-state(方案 §2.2):None(缺省)= 不动 —— PATCH 惯例是省略即不动,
+    # 非 Optional 布尔会让仅改名的不带字段 PATCH 解析成 False **静默撤权**;
+    # true = 写 tuple / false = 删 tuple
     name: str | None = Field(None, min_length=1, max_length=128)
     description: str | None = Field(None, max_length=1024)
+    can_create_project: bool | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -331,6 +344,86 @@ class GroupMemberAddIn(BaseModel):
     user_id: uuid.UUID
 
 
+# ─── 组级「新建项目」flag ↔ FGA tuple(方案 §2.2)──────────────────────────────
+async def _read_creator_group_ids(
+    permissions: PermissionsService,
+    db: AsyncSession,
+) -> set[uuid.UUID]:
+    """定向 read default org 的 project_creator 置位组 id 集合(flag 读回)。
+
+    **必须带 relation 过滤**:不带 relation 的全量 read 撞 OpenFGA read 单页上限
+    (organization 上每个启用用户一条 #member tuple,百人级单页必漏);
+    置位组量小单页即回。FGA 异常尽力而为 → 空集 + log,组列表照常返回
+    (管理员见「开着却显示关」重试 PATCH 即补写)。
+    """
+    org = await get_default_organization(db)
+    if org is None:
+        log.warning("read project_creator tuples skipped:no default org")
+        return set()
+    _, tenant_key = org
+    try:
+        tuples = await permissions.read_all_tuples(
+            object_type="organization", object_id=tenant_key,
+            relation="project_creator",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("read project_creator tuples fail err=%s", e)
+        return set()
+    out: set[uuid.UUID] = set()
+    for t_user, _t_rel, _t_obj in tuples:
+        # UI 只写组主体;user 直授留口(方案 §6)本期无写入路径,防御性跳过
+        if not t_user.startswith("group:"):
+            continue
+        gid = t_user.split(":", 1)[1].rsplit("#", 1)[0]
+        try:
+            out.add(uuid.UUID(gid))
+        except ValueError:
+            continue
+    return out
+
+
+async def _sync_group_project_creator(
+    permissions: PermissionsService,
+    db: AsyncSession,
+    group_id: uuid.UUID,
+    *,
+    enable: bool,
+) -> None:
+    """组 flag → organization#project_creator 的 group:<gid>#member tuple 写/删。
+
+    尽力而为,不 500(先例 create_directory_user 的 org member tuple):
+    flag 读回展示的是真实 tuple 状态,写失败仅 log.warning,管理员重试 PATCH
+    即补写。tuple 读写一律走 PermissionsService 小方法,路由不摸 _client。
+    """
+    org = await get_default_organization(db)
+    if org is None:
+        log.warning("group project_creator sync skipped:no default org group=%s", group_id)
+        return
+    _, tenant_key = org
+    subject = fmt_subject("group", str(group_id))
+    try:
+        if enable:
+            await permissions.add_org_relation(
+                organization_tenant_key=tenant_key,
+                subject=subject,
+                relation="project_creator",
+            )
+        else:
+            # remove_org_relation 内部吞 is_not_exists_error:重复清除幂等
+            await permissions.remove_org_relation(
+                organization_tenant_key=tenant_key,
+                subject=subject,
+                relation="project_creator",
+            )
+    except Exception as e:  # noqa: BLE001
+        if enable and is_already_exists_error(e):
+            return  # 重复置位(如 true→true 的 PATCH),幂等成功
+        log.warning(
+            "group project_creator tuple sync fail group=%s enable=%s err=%s",
+            group_id, enable, e,
+        )
+
+
 @router.get("/groups", response_model=list[DirectoryGroupOut])
 async def list_directory_groups(
     q: str = Query("", description="name / description 模糊"),
@@ -338,8 +431,13 @@ async def list_directory_groups(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
+    permissions: PermissionsService = Depends(get_permissions),
 ) -> list[DirectoryGroupOut]:
-    """组列表(带成员数)。"""
+    """组列表(带成员数)+ project_creator flag 读回(定向 read,方案 §2.2)。
+
+    编辑弹窗数据来自列表行(无组详情路由),flag 按 FGA tuple 真实态回显;
+    read 异常时尽力而为回 False,不阻塞列表。
+    """
     _ = user.id
     term = q.strip()
     where = None
@@ -358,12 +456,15 @@ async def list_directory_groups(
     if where is not None:
         stmt = stmt.where(where)
     res = await db.execute(stmt)
+    rows = list(res.all())
+    creator_group_ids = await _read_creator_group_ids(permissions, db)
     return [
         DirectoryGroupOut(
             id=g.id, name=g.name, description=g.description,
             member_count=cnt, created_at=g.created_at,
+            can_create_project=g.id in creator_group_ids,
         )
-        for g, cnt in res.all()
+        for g, cnt in rows
     ]
 
 
@@ -373,9 +474,10 @@ async def create_directory_group(
     request: Request,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
+    permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """创建本地组(name unique)。"""
+    """创建本地组(name unique);置位 flag 时写 project_creator tuple(尽力而为)。"""
     dup = await db.execute(select(Group).where(Group.name == payload.name))
     if dup.scalar_one_or_none() is not None:
         raise HTTPException(409, f"组名已存在:{payload.name}")
@@ -383,17 +485,26 @@ async def create_directory_group(
     db.add(g)
     await db.commit()
     await db.refresh(g)
+    # tuple 写在 DB 提交后,尽力而为不 500(方案 §2.2;响应按入参 flag 回填,
+    # 真实态以列表刷新为准)
+    if payload.can_create_project:
+        await _sync_group_project_creator(
+            permissions, db, g.id, enable=payload.can_create_project,
+        )
     await audit.write(
         event_type="group_created",
         actor_user_id=user.id,
-        details={"group_id": str(g.id), "name": g.name},
+        details={"group_id": str(g.id), "name": g.name,
+                 "can_create_project": payload.can_create_project},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("group created id=%s name=%s by admin=%s", g.id, g.name, user.id)
+    log.info("group created id=%s name=%s by admin=%s creator=%s",
+             g.id, g.name, user.id, payload.can_create_project)
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=0, created_at=g.created_at,
+        can_create_project=payload.can_create_project,
     )
 
 
@@ -404,9 +515,10 @@ async def update_directory_group(
     request: Request,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
+    permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """改组名 / 描述。"""
+    """改组名 / 描述;can_create_project tri-state(None=不动 / true=写 / false=删)。"""
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
@@ -419,13 +531,27 @@ async def update_directory_group(
         g.description = payload.description or None
     await db.commit()
     await db.refresh(g)
+    # tri-state:仅改名的不带字段 PATCH(None)→ tuple 不动,防静默撤权(§2.2)
+    if payload.can_create_project is not None:
+        await _sync_group_project_creator(
+            permissions, db, group_id, enable=payload.can_create_project,
+        )
+    details: dict[str, object] = {"group_id": str(group_id), "name": g.name}
+    if payload.can_create_project is not None:
+        details["can_create_project"] = payload.can_create_project
     await audit.write(
         event_type="group_updated",
         actor_user_id=user.id,
-        details={"group_id": str(group_id), "name": g.name},
+        details=details,
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
+    # 响应 flag:入参带了按入参回填;没带(None = 不动)定向 read 真实态,
+    # 免得仅改名 PATCH 的响应把已置位 flag 谎报成 False
+    if payload.can_create_project is not None:
+        out_flag = payload.can_create_project
+    else:
+        out_flag = group_id in await _read_creator_group_ids(permissions, db)
     cnt = (await db.execute(
         select(func.count()).select_from(GroupMembership)
         .where(GroupMembership.group_id == group_id)
@@ -433,6 +559,7 @@ async def update_directory_group(
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=cnt, created_at=g.created_at,
+        can_create_project=out_flag,
     )
 
 
@@ -454,6 +581,20 @@ async def delete_directory_group(
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
     name = g.name
+
+    # 顺手删 organization#project_creator 的组 tuple(方案 §2.2;尽力而为,
+    # remove_org_relation 幂等吞 not_exists,组本就未置位时静默 no-op)
+    try:
+        org = await get_default_organization(db)
+        if org:
+            _, tenant_key = org
+            await permissions.remove_org_relation(
+                organization_tenant_key=tenant_key,
+                subject=fmt_subject("group", str(group_id)),
+                relation="project_creator",
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("delete group project_creator tuple fail group=%s err=%s", group_id, e)
 
     # OpenFGA member tuples(尽力而为,不阻塞 DB 删除)
     try:

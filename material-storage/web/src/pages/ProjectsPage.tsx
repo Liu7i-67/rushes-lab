@@ -31,6 +31,9 @@ export default function ProjectsPage() {
   const { data: me } = useMe();
   const [createOpen, setCreateOpen] = useState(false);
   const navigate = useNavigate();
+  // PR-2: 新建闸门口径回落式替换 —— 新后端 is_project_creator 已含系统 admin,
+  // `??` 仅在旧后端(字段 undefined)时回落 is_system_admin
+  const canCreate = me ? (me.is_project_creator ?? me.is_system_admin) : false;
 
   return (
     <div className="ms-enter">
@@ -59,12 +62,12 @@ export default function ProjectsPage() {
           </p>
         </div>
         {me && (
-          <Tooltip title={me.is_system_admin ? '' : '仅系统管理员可创建项目'} placement="left">
+          <Tooltip title={canCreate ? '' : '需要组织管理员,或加入已开启「允许新建项目」的用户组'} placement="left">
             <Button
               type="primary"
               icon={<Plus size={15} strokeWidth={2.2} />}
               onClick={() => setCreateOpen(true)}
-              disabled={!me.is_system_admin}
+              disabled={!canCreate}
               style={{ height: 36, fontWeight: 500 }}
             >新建项目</Button>
           </Tooltip>
@@ -76,7 +79,7 @@ export default function ProjectsPage() {
           {Array.from({ length: 6 }).map((_, i) => <SkeletonCard key={i} />)}
         </Grid>
       ) : (!data || data.length === 0) ? (
-        <EmptyState onCreate={me?.is_system_admin ? () => setCreateOpen(true) : undefined} />
+        <EmptyState onCreate={canCreate ? () => setCreateOpen(true) : undefined} />
       ) : (
         <div className="ms-enter-stagger">
           <Grid>

@@ -1,16 +1,17 @@
 /**
- * 新建项目 — 仅系统 admin 可用;创建时必须指派项目 admin(默认 = 自己,可改)。
- * 「初始权限(可选)」(方案 §3.2):主体行列表 × 每行独立角色,提交组装 initial_grants
- * 直通;不选任何主体 = 完全兼容现行为。
- * 「权限模板」Select(方案 §4.4):顶部选项 = 不使用模板 + 模板列表;默认选中 org 的
- * is_default 模板,onChange 把模板 items 逐条预填成主体行(每行各自角色,可再增删改);
- * 模板接口 403 / 失败时静默降级为只有「不使用模板」。
+ * 新建项目 — 闸门 = is_project_creator ?? is_system_admin 回落(PR-2:组织管理员或
+ * 被授予「允许新建项目」组权限的成员;旧后端字段缺失回落系统 admin)。
+ * 创建时必须指派项目 admin(默认 = 自己,可改)。
+ * 「权限(可选)」组(PR-3 重排):PC 双栏(左基础字段 / 右权限组),移动端单栏权限在尾;
+ * 组内顶部模板 Select 仅显式选中时预填初始权限(可再增删改)—— 默认模板不再前端预选,
+ * 改由后端创建时直通合并(有默认模板时提交区明示)。
  */
 import { Alert, App, Button, Form, Input, Modal, Select, Tooltip } from 'antd';
 import { ShieldCheck, Trash2, Users as UsersIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useCreateProject, useDirectoryUsers, useGrantTemplates } from '../api/hooks';
+import { useAllUsers, useCreateProject, useGrantTemplates } from '../api/hooks';
 import { errorMessage } from '../api/client';
+import { useCompactViewport } from '../lib/use-viewports';
 import type { GrantEntry, GrantTemplate, Me, ProjectRole } from '../api/types';
 import { UserPicker } from './UserPicker';
 import { SubjectPicker, type Subject } from './SubjectPicker';
@@ -50,30 +51,26 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
   const create = useCreateProject();
   const [form] = Form.useForm();
   const { message } = App.useApp();
+  const compact = useCompactViewport();
   const [adminUserId, setAdminUserId] = useState<string>(me.id);
   const [rows, setRows] = useState<GrantRow[]>([]);
-  // undefined = 自动跟随默认模板(有则预填,方案 §4.4);'' = 显式「不使用模板」;
-  // 其余 = 显式选中的模板 id。用户任何行内改动都会把当前值固化,不再自动跟随
-  const [templateId, setTemplateId] = useState<string | undefined>(undefined);
+  // '' = 不使用模板(默认);其余 = 显式选中的模板 id。
+  // PR-3 起「自动跟随默认模板」已删:默认模板由后端创建时直通合并,前端不再预选/预填
+  const [templateId, setTemplateId] = useState<string>('');
 
   // 模板列表;手选用户名典(SubjectPicker 的 user 分支只回传 id,行显名用)。
+  // nameById 走已放宽的 GET /api/v1/users(offset 分页拉全;原 directory 端点
+  // require_system_admin 未放宽,零项目组长会 403)。
   // 弹窗对全员挂载,关闭态不取数(403/失败 → 静默降级为只有「不使用模板」)
   const { data: templates } = useGrantTemplates(open);
-  const { data: dirUsers } = useDirectoryUsers(open ? { limit: 200 } : null);
+  const { data: allUsers } = useAllUsers(open);
   const nameById = useMemo(
-    () => new Map((dirUsers ?? []).map(u => [u.id, u.name])),
-    [dirUsers],
+    () => new Map((allUsers ?? []).map(u => [u.id, u.name])),
+    [allUsers],
   );
 
   const templateList = templates ?? [];
   const defaultTemplate = templateList.find(t => t.is_default);
-  const effectiveTemplateId = templateId !== undefined
-    ? templateId
-    : (defaultTemplate?.id ?? '');
-  // 自动跟随期(未固化)的预填行:默认模板 items 逐条一行 + 各自角色
-  const effectiveRows = rows.length === 0 && templateId === undefined && defaultTemplate
-    ? templateRows(defaultTemplate)
-    : rows;
 
   // 打开即重置表单到默认态:有意的「open 翻转重置」,改 render 期重置/key 重挂载会改动态,豁免 cascading 警告
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -82,22 +79,16 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       form.resetFields();
       setAdminUserId(me.id);  // 默认 admin = 自己(users.id UUID)
       setRows([]);
-      setTemplateId(undefined);
+      setTemplateId('');
     }
   }, [open, form, me.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const rowName = (r: GrantRow) => r.name ?? nameById.get(r.id) ?? shortId(r.id);
 
-  // 行内任何改动都基于 effectiveRows 并固化模板选择
-  const commitRows = (next: GrantRow[]) => {
-    setRows(next);
-    setTemplateId(effectiveTemplateId);
-  };
-
   // SubjectPicker 增删 → 同步行:已有行保留其角色,新行默认「查看」,移除的行丢弃
   const applySubjects = (subjects: Subject[]) => {
-    const prevByKey = new Map(effectiveRows.map(r => [r.key, r]));
+    const prevByKey = new Map(rows.map(r => [r.key, r]));
     const next: GrantRow[] = [];
     for (const s of subjects) {
       const key = rowKeyOf(s);
@@ -105,10 +96,11 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         key, kind: s.kind, id: s.id, name: s.name, roles: ['viewer'],
       });
     }
-    commitRows(next);
+    setRows(next);
   };
 
-  // 模板切换:逐条预填(items 每 item 一行 + 各自角色);「不使用模板」清空重来
+  // 模板切换:逐条预填(items 每 item 一行 + 各自角色);「不使用模板」清空重来。
+  // 仅显式选中的模板预填;默认模板不预选(创建后由后端合并,见提交区提示)
   const applyTemplate = (tid: string) => {
     setTemplateId(tid);
     if (!tid) {
@@ -126,12 +118,12 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         message.warning('请指派项目管理员');
         return;
       }
-      if (effectiveRows.some(r => r.roles.length === 0)) {
+      if (rows.some(r => r.roles.length === 0)) {
         message.warning('请至少勾选一个角色');
         return;
       }
       const initial_grants: GrantEntry[] =
-        effectiveRows.map(r => ({ kind: r.kind, id: r.id, roles: r.roles }));
+        rows.map(r => ({ kind: r.kind, id: r.id, roles: r.roles }));
       const p = await create.mutateAsync({
         code: v.code.trim(),
         name: v.name.trim(),
@@ -147,25 +139,61 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       onCreated?.(p.id);
       onClose();
     } catch (e) {
-      if ((e as { errorFields?: unknown }).errorFields) return;
+      const err = e as { errorFields?: { name: (string | number)[] }[] };
+      if (err.errorFields) {
+        // body 是滚动容器,显式滚到第一个出错字段(方案 §3.3:scrollToFirstError 可用)
+        form.scrollToField(err.errorFields[0].name);
+        return;
+      }
       message.error(errorMessage(e, '创建失败'));
     }
   };
 
-  // 非系统 admin → 禁用并提示
-  if (!me.is_system_admin) {
+  // 无新建权限 → 禁用并提示(口径 = is_org_admin ∨ 用户组 project_creator;
+  // 旧后端无 is_project_creator 字段时回落 is_system_admin)
+  if (!(me.is_project_creator ?? me.is_system_admin)) {
     return (
       <Modal title="新建项目" open={open} onCancel={onClose} footer={null}>
         <Alert
           type="warning"
           showIcon
-          message="只有系统管理员可以创建项目"
-          description="如需新建项目,请联系系统管理员;管理员通过后台命令 grant_org_admin 指定。"
+          message="当前账号暂无新建项目权限"
+          description="需要组织管理员,或加入已开启「允许组成员新建项目」的用户组;请联系组织管理员开通。"
           style={{ marginTop: 4 }}
         />
       </Modal>
     );
   }
+
+  // 权限模板下拉项(默认模板带「默认」徽标;仅显式选中才预填)
+  const templateOptions = [
+    { value: '', labelText: '不使用模板', label: '不使用模板' },
+    ...(templateList.map(t => ({
+      value: t.id,
+      labelText: t.name + (t.is_default ? '(默认)' : ''),
+      label: (
+        <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13, color: 'var(--ms-ink)' }}>{t.name}</span>
+            {t.is_default && (
+              <span style={{
+                padding: '0 5px', fontSize: 9.5, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
+                borderRadius: 2, lineHeight: '14px',
+              }}>默认</span>
+            )}
+          </span>
+          {t.description && (
+            <span style={{
+              fontSize: 11, color: 'var(--ms-ink-subtle)', lineHeight: 1.5,
+              display: 'flex', flexDirection: 'column',
+            }}>{t.description}</span>
+          )}
+        </div>
+      ),
+    }))),
+  ];
 
   return (
     <Modal
@@ -176,115 +204,111 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       confirmLoading={create.isPending}
       onOk={submit}
       okText="创建"
+      // PR-3 重排:PC 双栏拉宽到 ≈1040;body 限高滚动(权限行多时不撑爆弹窗)
+      width={compact ? 'min(640px, calc(100vw - 16px))' : 'min(1040px, calc(100vw - 32px))'}
+      styles={{ body: { maxHeight: '70vh', overflowY: 'auto' } }}
     >
       <Form form={form} layout="vertical"
             initialValues={{ minio_bucket: 'ms-dev' }}>
-        {/* 权限模板(方案 §4.4)— 顶部:默认模板自动选中,onChange 预填下方初始权限 */}
-        <Form.Item label="权限模板"
-                   extra="按模板预填初始权限,预填后可自由增删行 / 改角色;仅预填,不锁定">
-          <Select
-            value={effectiveTemplateId}
-            onChange={applyTemplate}
-            optionLabelProp="labelText"
-            options={[
-              { value: '', labelText: '不使用模板', label: '不使用模板' },
-              ...(templateList.map(t => ({
-                value: t.id,
-                labelText: t.name + (t.is_default ? '(默认)' : ''),
-                label: (
-                  <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0' }}>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontSize: 13, color: 'var(--ms-ink)' }}>{t.name}</span>
-                      {t.is_default && (
-                        <span style={{
-                          padding: '0 5px', fontSize: 9.5, letterSpacing: '0.04em',
-                          fontFamily: 'var(--ms-font-mono)',
-                          color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
-                          borderRadius: 2, lineHeight: '14px',
-                        }}>默认</span>
-                      )}
-                    </span>
-                    {t.description && (
-                      <span style={{
-                        fontSize: 11, color: 'var(--ms-ink-subtle)', lineHeight: 1.5,
-                        display: 'flex', flexDirection: 'column',
-                      }}>{t.description}</span>
-                    )}
-                  </div>
-                ),
-              }))),
-            ]}
-          />
-        </Form.Item>
+        <div style={compact
+          ? { display: 'flex', flexDirection: 'column' }
+          : { display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', columnGap: 32 }}>
+          {/* 左栏:基础字段(移动端 = 表单主体,权限组自然落到尾部) */}
+          <div>
+            <Form.Item name="name" label="项目名称"
+                       rules={[{ required: true, max: 255 }]}>
+              <Input placeholder="2026 春季婚礼策划" autoFocus />
+            </Form.Item>
+            <Form.Item name="code" label="项目编码(URL slug,小写字母/数字/-)"
+                       rules={[{
+                         required: true, min: 2, max: 64,
+                         pattern: /^[a-z0-9][a-z0-9-]*$/,
+                         message: '小写字母/数字/-,以字母数字开头',
+                       }]}
+                       extra="提交后不可改;影响 MinIO 路径前缀">
+              <Input placeholder="wedding-2026-spring" />
+            </Form.Item>
+            <Form.Item name="description" label="描述(可选)">
+              <Input.TextArea rows={3} maxLength={500} showCount />
+            </Form.Item>
 
-        <Form.Item name="name" label="项目名称"
-                   rules={[{ required: true, max: 255 }]}>
-          <Input placeholder="2026 春季婚礼策划" autoFocus />
-        </Form.Item>
-        <Form.Item name="code" label="项目编码(URL slug,小写字母/数字/-)"
-                   rules={[{
-                     required: true, min: 2, max: 64,
-                     pattern: /^[a-z0-9][a-z0-9-]*$/,
-                     message: '小写字母/数字/-,以字母数字开头',
-                   }]}
-                   extra="提交后不可改;影响 MinIO 路径前缀">
-          <Input placeholder="wedding-2026-spring" />
-        </Form.Item>
-        <Form.Item name="description" label="描述(可选)">
-          <Input.TextArea rows={3} maxLength={500} showCount />
-        </Form.Item>
+            {/* 指派 admin — 必填,默认自己 */}
+            <Form.Item label="项目管理员"
+                       extra="可以是自己;创建后会自动获得项目内全部权限,并可进一步邀请成员">
+              <UserPicker
+                multiple={false}
+                value={adminUserId}
+                onChange={(v) => setAdminUserId((v as string) || '')}
+                preset={[{ id: me.id, username: null, open_id: me.open_id, union_id: me.union_id,
+                           name: me.name + '(自己)', email: me.email }]}
+                placeholder="选一个项目管理员"
+              />
+              {adminUserId === me.id && (
+                <div style={{
+                  marginTop: 6, fontSize: 11, color: 'var(--ms-ink-subtle)',
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}>
+                  <ShieldCheck size={11} strokeWidth={1.8} />
+                  你本人将作为项目管理员
+                </div>
+              )}
+            </Form.Item>
 
-        {/* 指派 admin — 系统 admin 必填,默认自己 */}
-        <Form.Item label="项目管理员"
-                   extra="可以是自己;创建后会自动获得项目内全部权限,并可进一步邀请成员">
-          <UserPicker
-            multiple={false}
-            value={adminUserId}
-            onChange={(v) => setAdminUserId((v as string) || '')}
-            preset={[{ id: me.id, username: null, open_id: me.open_id, union_id: me.union_id,
-                       name: me.name + '(自己)', email: me.email }]}
-            placeholder="选一个项目管理员"
-          />
-          {adminUserId === me.id && (
-            <div style={{
-              marginTop: 6, fontSize: 11, color: 'var(--ms-ink-subtle)',
-              display: 'inline-flex', alignItems: 'center', gap: 4,
-            }}>
-              <ShieldCheck size={11} strokeWidth={1.8} />
-              你本人将作为项目管理员
-            </div>
-          )}
-        </Form.Item>
+            <Form.Item name="minio_bucket" label="MinIO bucket"
+                       rules={[{ required: true, max: 63 }]}
+                       extra="PoC 统一 ms-dev">
+              <Select options={[
+                { label: 'ms-dev(开发环境)', value: 'ms-dev' },
+              ]} />
+            </Form.Item>
+          </div>
 
-        {/* 初始权限(可选)(方案 §3.2)— 主体行列表 × 每行独立角色 */}
-        <Form.Item label="初始权限(可选)"
-                   extra="创建时同时授权给用户 / 用户组;每行主体各自勾选角色,不选则不额外授权">
-          <SubjectPicker
-            value={effectiveRows.map(r => ({ kind: r.kind, id: r.id, name: rowName(r) }))}
-            onChange={applySubjects}
-            me={me}
-          />
-          {effectiveRows.length > 0 && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
-              {effectiveRows.map(r => (
-                <GrantRowCard
-                  key={r.key} row={r} name={rowName(r)}
-                  onRolesChange={(roles) => commitRows(
-                    effectiveRows.map(x => (x.key === r.key ? { ...x, roles } : x)))}
-                  onRemove={() => commitRows(effectiveRows.filter(x => x.key !== r.key))}
+          {/* 右栏:「权限(可选)」组 — 模板 Select 从顶部移入,初始权限区在其下 */}
+          <div>
+            <Form.Item label="权限(可选)"
+                       extra="选模板可预填初始权限(预填后可自由增删行 / 改角色),或直接手选主体;每行主体各自勾选角色">
+              <Select
+                value={templateId}
+                onChange={applyTemplate}
+                optionLabelProp="labelText"
+                options={templateOptions}
+              />
+              <div style={{ marginTop: 12 }}>
+                <SubjectPicker
+                  value={rows.map(r => ({ kind: r.kind, id: r.id, name: rowName(r) }))}
+                  onChange={applySubjects}
+                  me={me}
                 />
-              ))}
-            </div>
-          )}
-        </Form.Item>
+              </div>
+              {rows.length > 0 && (
+                <div style={{
+                  display: 'flex', flexDirection: 'column', gap: 8,
+                  marginTop: 10, maxHeight: 320, overflowY: 'auto', paddingRight: 2,
+                }}>
+                  {rows.map(r => (
+                    <GrantRowCard
+                      key={r.key} row={r} name={rowName(r)}
+                      onRolesChange={(roles) => setRows(
+                        rows.map(x => (x.key === r.key ? { ...x, roles } : x)))}
+                      onRemove={() => setRows(rows.filter(x => x.key !== r.key))}
+                    />
+                  ))}
+                </div>
+              )}
+            </Form.Item>
+          </div>
+        </div>
 
-        <Form.Item name="minio_bucket" label="MinIO bucket"
-                   rules={[{ required: true, max: 63 }]}
-                   extra="PoC 统一 ms-dev">
-          <Select options={[
-            { label: 'ms-dev(开发环境)', value: 'ms-dev' },
-          ]} />
-        </Form.Item>
+        {/* 默认模板直通(PR-3)提交区明示:防「行内显式删掉的角色被默认模板 union 顶回」无感知 */}
+        {defaultTemplate && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginTop: 4 }}
+            message={`已设默认模板「${defaultTemplate.name}」— 创建后将自动合并其授权`}
+            description="与上方权限取并集、不重复;行内显式删除的角色也可能被默认模板合并回来。"
+          />
+        )}
       </Form>
     </Modal>
   );

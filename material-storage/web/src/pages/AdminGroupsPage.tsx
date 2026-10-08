@@ -2,9 +2,11 @@
  * /admin/groups — 本地用户组管理(#150 数据源本地化)。
  * 组 CRUD + 成员管理;成员变更后端同步 OpenFGA group:<uuid>#member tuple,
  * 加成员即时获得组权限、移出即时失去。
+ * PR-2: 组级「新建项目」开关(can_create_project,tri-state PATCH — 仅在用户
+ * 改动过 Switch 时才携带该字段,省略 = 不动)+ 列表「可建项目」徽标。
  */
 import {
-  Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Tooltip,
+  Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
 } from 'antd';
 import { Pencil, Plus, Trash2, Users as UsersIcon } from 'lucide-react';
 import { useState } from 'react';
@@ -128,7 +130,7 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
         <UsersIcon size={16} strokeWidth={1.8} />
       </div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ms-ink)' }}>{group.name}</span>
           <span style={{
             fontFamily: 'var(--ms-font-mono)', fontSize: 10.5, color: 'var(--ms-ink-subtle)',
@@ -136,6 +138,17 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
           }}>
             {group.member_count} 人
           </span>
+          {/* PR-2: 组级「新建项目」权限徽标(真实态以列表接口的 tuple 定向 read 为准) */}
+          {group.can_create_project && (
+            <Tooltip title="组内成员可自行新建项目,并自动成为所建项目的管理员">
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
+                borderRadius: 3,
+              }}>可建项目</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -182,6 +195,9 @@ function GroupFormModal({ open, onClose, group }: {
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const isEdit = !!group;
+  // PR-2 tri-state:仅当用户改动过开关,PATCH 才携带 can_create_project
+  // (否则省略 = None 不动 —— 防「仅改名保存」也触发 tuple 重写/静默撤权,方案 §2.2)
+  const [flagTouched, setFlagTouched] = useState(false);
 
   const submit = async () => {
     try {
@@ -191,10 +207,15 @@ function GroupFormModal({ open, onClose, group }: {
           groupId: group.id,
           name: v.name?.trim(),
           description: v.description?.trim() || null,
+          ...(flagTouched ? { can_create_project: v.can_create_project === true } : {}),
         });
         message.success('已保存');
       } else {
-        await create.mutateAsync({ name: v.name.trim(), description: v.description?.trim() });
+        await create.mutateAsync({
+          name: v.name.trim(),
+          description: v.description?.trim(),
+          can_create_project: v.can_create_project === true,
+        });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
       onClose();
@@ -207,17 +228,24 @@ function GroupFormModal({ open, onClose, group }: {
   return (
     <Modal title={isEdit ? `编辑用户组 — ${group.name}` : '新建用户组'}
            open={open} onCancel={onClose} destroyOnClose
+           afterOpenChange={(o) => { if (!o) setFlagTouched(false); }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
            onOk={submit} okText={isEdit ? '保存' : '创建'}>
       <Form key={isEdit ? group.id : 'new'} form={form} layout="vertical" preserve={false}
             initialValues={group ? {
               name: group.name, description: group.description || undefined,
-            } : undefined}>
+              can_create_project: group.can_create_project ?? false,
+            } : { can_create_project: false }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
         </Form.Item>
         <Form.Item name="description" label="描述(可选)" rules={[{ max: 1024 }]}>
           <Input.TextArea rows={2} maxLength={1024} showCount />
+        </Form.Item>
+        <Form.Item name="can_create_project" label="允许组成员新建项目" valuePropName="checked"
+                   extra="开启后组内成员可自行新建项目,并自动成为所建项目的管理员;系统管理员不受此开关影响">
+          <Switch checkedChildren="开" unCheckedChildren="关"
+                  onChange={() => setFlagTouched(true)} />
         </Form.Item>
       </Form>
     </Modal>

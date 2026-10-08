@@ -2,7 +2,9 @@
 
   GET  /api/v1/admin/audit?...              — audit 查询(分页 + filter)
   GET  /api/v1/admin/audit/export.csv?...   — audit 流式 CSV 导出
-  CRUD /api/v1/admin/grant-templates        — 项目权限模板(前端预填用预设)
+  CRUD /api/v1/admin/grant-templates        — 项目权限模板(前端预填用预设;
+                                              读放宽 system admin 或 project creator,§2.3)
+  POST /api/v1/admin/grant-templates/apply-default — 存量项目补默认模板授权(§3.2)
 
 #154:飞书诊断 endpoint(/feishu/health、/feishu/test-card)随飞书下线删除(ADR-0007)。
 """
@@ -26,15 +28,24 @@ from app.db.session import get_db
 from app.db.tables import (
     AuditEvent,
     Group,
+    Project,
     ProjectGrantTemplate,
     ProjectGrantTemplateItem,
     User,
 )
-from app.deps import CurrentUser, get_audit, get_request_context, require_system_admin
+from app.deps import (
+    CurrentUser,
+    get_audit,
+    get_permissions,
+    get_request_context,
+    require_admin_or_project_creator,
+    require_system_admin,
+)
 from app.routers.projects import INITIAL_GRANTS_MAX
 from app.services.audit import AuditService
+from app.services.default_grants import apply_default_template_grants
 from app.services.org import get_default_organization
-from app.services.permissions import ProjectRole, fmt_subject
+from app.services.permissions import PermissionsService, ProjectRole, fmt_subject
 from app.services.subject_names import resolve_subject_names
 
 log = logging.getLogger(__name__)
@@ -177,8 +188,10 @@ async def export_audit_csv(
 
 # ─── 项目权限模板(批次三,方案 §4.2)─────────────────────────────────────────
 # 落位取舍见方案 §4.2:模板属项目授权域,不进 directory(组织目录域);复用本文件
-# 的 require_system_admin 惯例。应用方式 = 前端预填(§4.3):后端只存取模板,
-# 不感知建项目链路(POST /projects 只认 initial_grants)。
+# 的 require_system_admin 惯例。应用方式:非默认模板 = 前端预填(§4.3);默认模板
+# 例外由后端直通(§3.1,POST /projects 完成后调 default_grants 共享 helper)+
+# 存量项目按需「刷新默认权限」(§3.2 apply-default)—— 「后端不感知模板」原则仅对
+# 默认模板打破,非默认模板仍纯前端预填。
 
 
 class GrantTemplateItemIn(BaseModel):
@@ -317,9 +330,13 @@ def _integrity_conflict_response(e: IntegrityError, name: str | None) -> HTTPExc
 @router.get("/grant-templates", response_model=list[GrantTemplateOut])
 async def list_grant_templates(
     db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
-    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+    user: CurrentUser = Depends(require_admin_or_project_creator),  # noqa: B008
 ) -> list[GrantTemplateOut]:
-    """模板列表(含 items + 解析后的主体名称;主体已删的 item 标 missing=true)。"""
+    """模板列表(含 items + 解析后的主体名称;主体已删的 item 标 missing=true)。
+
+    读守门放宽为 system admin 或 project creator(方案 §2.3 弱门:零项目组长建
+    项目表单要拉模板列表);写端点 POST/PATCH/DELETE 保持 require_system_admin。
+    """
     _ = user.id
     res = await db.execute(
         select(ProjectGrantTemplate).order_by(
@@ -511,4 +528,113 @@ async def delete_grant_template(
         details={"action": "delete", "template_id": str(template_id), "name": name},
         request_ip=ctx["request_ip"],
         user_agent=ctx["user_agent"],
+    )
+
+
+# ─── 「刷新默认权限」:存量项目补默认模板授权(方案 §3.2)──────────────────────
+class ApplyDefaultIn(BaseModel):
+    project_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+
+
+class ApplyDefaultResultItem(BaseModel):
+    """单项目结果:成功项 = {project_id, applied, skipped_stale};失败项 =
+    {project_id, error} —— 两种条目形状勿混用(方案 §3.2),故三字段显式可空。"""
+
+    project_id: uuid.UUID
+    applied: int | None = None
+    skipped_stale: int | None = None
+    error: str | None = None
+
+
+class ApplyDefaultOut(BaseModel):
+    results: list[ApplyDefaultResultItem]
+    total_applied: int
+    total_skipped: int
+
+
+@router.post("/grant-templates/apply-default", response_model=ApplyDefaultOut)
+async def apply_default_grant_template(
+    payload: ApplyDefaultIn,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> ApplyDefaultOut:
+    """存量项目按需补默认模板授权(管理页「刷新默认权限」按钮)。
+
+    语义写死**叠加不删**(§3.2):只补缺失 (subject, role),已存在天然跳过,
+    不移除任何授权。project_ids 去重;执行前单条 SELECT 预检全部(不存在 /
+    跨 org / is_archived → 400 指明第几个;无默认模板 → 400 —— UI 已 disabled,
+    这里是 API 直调兜底);执行期单项目 FGA/DB 失败**继续其余项目**,失败项计入
+    results 的 error(部分成功)。满批串行 FGA/DB 往返为分钟级,建议 20-30 项/批
+    分次提交。audit 逐条 project_member_added(via: "default_template")在 helper 内。
+    """
+    # 去重(保持原顺序;前端 Transfer 天然无重复,API 直调兜底)
+    seen: set[uuid.UUID] = set()
+    project_ids: list[uuid.UUID] = []
+    for pid in payload.project_ids:
+        if pid not in seen:
+            seen.add(pid)
+            project_ids.append(pid)
+
+    # 预检:单条 SELECT 拉全部目标项目,逐条校验并指明第几个
+    rows = await db.execute(select(Project).where(Project.id.in_(project_ids)))
+    projects_by_id = {p.id: p for p in rows.scalars().all()}
+    for i, pid in enumerate(project_ids, start=1):
+        p = projects_by_id.get(pid)
+        if p is None:
+            raise HTTPException(400, f"第 {i} 个项目不存在:{pid}")
+        if p.is_archived:
+            raise HTTPException(400, f"第 {i} 个项目已归档:{pid}")
+
+    org = await get_default_organization(db)
+    if org is None:
+        raise HTTPException(400, "默认组织不存在,无法刷新默认权限")
+    org_id, _tenant_key = org
+    for i, pid in enumerate(project_ids, start=1):
+        if projects_by_id[pid].organization_id != org_id:
+            raise HTTPException(400, f"第 {i} 个项目不属于当前组织:{pid}")
+
+    # 无默认模板 → 400(UI disabled 的 API 兜底;helper 对无默认也回 0/0,
+    # 但预检前置才能把「刷了个寂寞」拦在执行前)
+    tpl_res = await db.execute(
+        select(ProjectGrantTemplate).where(
+            ProjectGrantTemplate.organization_id == org_id,
+            ProjectGrantTemplate.is_default.is_(True),
+        )
+    )
+    if tpl_res.scalar_one_or_none() is None:
+        raise HTTPException(400, "当前组织没有默认模板,无可刷新的默认权限")
+
+    results: list[ApplyDefaultResultItem] = []
+    total_applied = 0
+    total_skipped = 0
+    failed = 0
+    for pid in project_ids:
+        try:
+            out = await apply_default_template_grants(
+                db, permissions, audit,
+                org_id=org_id, project_id=pid,
+                actor_user_id=user.id, ctx=ctx,
+            )
+        except Exception as e:  # noqa: BLE001
+            # 执行期单项目失败继续其余(部分成功);失败项计入 results 的 error。
+            # helper 内不会抛 HTTPException —— 形状/预检类错误都已在上方拦下
+            failed += 1
+            results.append(ApplyDefaultResultItem(
+                project_id=pid, error=str(e) or e.__class__.__name__,
+            ))
+            continue
+        total_applied += out["applied"]
+        total_skipped += out["skipped_stale"]
+        results.append(ApplyDefaultResultItem(
+            project_id=pid, applied=out["applied"], skipped_stale=out["skipped_stale"],
+        ))
+    log.info(
+        "apply default template grants by admin=%s projects=%d applied=%d skipped=%d failed=%d",
+        user.id, len(project_ids), total_applied, total_skipped, failed,
+    )
+    return ApplyDefaultOut(
+        results=results, total_applied=total_applied, total_skipped=total_skipped,
     )
