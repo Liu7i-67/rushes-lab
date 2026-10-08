@@ -25,6 +25,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
     literal_column,
+    text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -353,4 +354,56 @@ class Notification(Base):
     read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class ProjectGrantTemplate(Base, TimestampMixin):
+    """项目权限模板(方案 §4.1,批次三)— 保存的授权组合预设 {主体, 角色}。
+
+    应用方式 = 前端预填(§4.3):新建项目时选模板把 items 预填进 initial_grants,
+    后端不感知模板、模板事后修改不影响任何已建项目。同 org 内 name 唯一;
+    partial unique index 保证每 org 至多 1 个 is_default。
+    """
+    __tablename__ = "project_grant_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024))
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_pgt_org_name"),
+        # 每 org 至多 1 个 default(全库首例 partial unique index)
+        Index(
+            "uq_pgt_default_per_org", "organization_id", unique=True,
+            postgresql_where=text("is_default"),
+        ),
+    )
+
+
+class ProjectGrantTemplateItem(Base):
+    """模板条目:单主体(user | group)的一组角色;template 删除级联。
+
+    roles 为 list[ProjectRole](全库 ORM 惯例 JSONB,不用 JSON)。
+    """
+    __tablename__ = "project_grant_template_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_grant_templates.id", ondelete="CASCADE"), nullable=False
+    )
+    subject_kind: Mapped[str] = mapped_column(String(8), nullable=False)  # 'user' | 'group'
+    subject_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    roles: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "template_id", "subject_kind", "subject_id", name="uq_pgt_item_subject",
+        ),
     )

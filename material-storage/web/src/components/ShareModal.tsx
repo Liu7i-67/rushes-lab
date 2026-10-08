@@ -62,12 +62,15 @@ export function ShareModal({ open, onClose, target }: Props) {
   const loading = shareAsset.isPending || shareFolder.isPending;
   const canNativeShare = typeof navigator.share === 'function';
 
+  // 打开即重置结果态:有意的「open 翻转重置」,豁免 cascading 警告
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       form.resetFields();
       setResult(null);
     }
   }, [open, form]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const submit = async () => {
     try {

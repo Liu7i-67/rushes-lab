@@ -148,6 +148,8 @@ function GroupPicker({
     }, 250);
   };
 
+  // 挂载 prefetch 一次;search 同步 setFetching 触发 cascading 警告 — prefetch 是有意行为,豁免
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { search(''); }, []); // prefetch
 
   const ids = value.map(s => s.id);

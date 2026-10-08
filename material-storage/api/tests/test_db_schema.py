@@ -20,6 +20,8 @@ def test_all_tables_in_metadata() -> None:
         "groups",
         "group_memberships",
         "notifications",
+        "project_grant_templates",
+        "project_grant_template_items",
     }
 
 

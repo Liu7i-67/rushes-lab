@@ -11,7 +11,8 @@ export const getDevUserId = (): string | null => {
   try { return localStorage.getItem(DEV_USER_KEY); } catch { return null; }
 };
 export const setDevUserId = (id: string | null) => {
-  try { id ? localStorage.setItem(DEV_USER_KEY, id) : localStorage.removeItem(DEV_USER_KEY); } catch { /* ignore */ }
+  // 三元改 if/else:消除 no-unused-expressions,行为不变
+  try { if (id) localStorage.setItem(DEV_USER_KEY, id); else localStorage.removeItem(DEV_USER_KEY); } catch { /* ignore */ }
 };
 
 export const http = axios.create({

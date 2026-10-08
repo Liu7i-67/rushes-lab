@@ -39,20 +39,10 @@ from app.models import FolderCreateIn, FolderInviteIn, FolderOut
 from app.services.audit import AuditService
 from app.services.notifications import run_notify_folder_invite_bg
 from app.services.permissions import PermissionsService, is_already_exists_error
+from app.services.subject_names import resolve_subject_names
 
 log = logging.getLogger(__name__)
 router = APIRouter()
-
-
-def _parse_uuids(ids: list[str]) -> list[uuid.UUID]:
-    """subject_id 字符串 → UUID,容错非法值(老 open_id 存量数据)直接跳过。"""
-    out: list[uuid.UUID] = []
-    for s in ids:
-        try:
-            out.append(uuid.UUID(s))
-        except ValueError:
-            continue
-    return out
 
 
 @router.post("", response_model=FolderOut, status_code=201)
@@ -529,14 +519,11 @@ async def list_members(
     # OpenFGA read 所有 tuples for sensitive_folder:<id>
     from openfga_sdk.models import ReadRequestTupleKey
 
-    from app.db.tables import User as _User
     resp = await permissions._client.read(  # type: ignore[attr-defined]
         ReadRequestTupleKey(object=f"sensitive_folder:{folder_id}")
     )
 
     members: list[dict] = []
-    user_subject_ids: list[str] = []
-    user_records: list[dict] = []   # 后面合并 db 名
 
     INVITE_RELATIONS = {
         "invited_viewer":            ("viewer", True),
@@ -574,27 +561,17 @@ async def list_members(
             "subject": subject,
             "kind": kind,            # user / group / department
             "subject_id": sid,
-            "name": None,            # 后面 db 查
+            "name": None,            # 后面批量解析
             "level": level,
             "permanent": permanent,
             "expires_at": expires_at,
         }
-        if kind == "user":
-            user_subject_ids.append(sid)
-            user_records.append(record)
-        else:
-            # group / department:目前没拉 db,显示 id
-            record["name"] = f"{('用户组' if kind == 'group' else '部门')} {sid[:12]}…"
-            members.append(record)
+        members.append(record)
 
-    # user 批量查 db 拿 name(subject_id = users.id UUID 字符串,容错非法值)
-    if user_subject_ids:
-        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
-        res = await db.execute(stmt)
-        name_by_user_id = {str(u.id): u.name for u in res.scalars().all()}
-        for r in user_records:
-            r["name"] = name_by_user_id.get(r["subject_id"], r["subject_id"][:12] + "…")
-        members.extend(user_records)
+    # 批量解析主体名称(user → users.name,group → groups.name;未命中走 id 兜底)
+    names = await resolve_subject_names(db, [str(m["subject"]) for m in members])
+    for m in members:
+        m["name"] = names[m["subject"]]["name"]
 
     # 排序:user 在前,group/department 在后;name 字典序
     members.sort(key=lambda m: (0 if m["kind"] == "user" else 1, m["name"] or ""))
@@ -691,14 +668,11 @@ async def list_folder_grants(
 
     from openfga_sdk.models import ReadRequestTupleKey
 
-    from app.db.tables import User as _User
     resp = await permissions._client.read(  # type: ignore[attr-defined]
         ReadRequestTupleKey(object=f"folder:{folder_id}")
     )
 
     grants: list[dict] = []
-    user_subject_ids: list[str] = []
-    user_rows: list[dict] = []
     GRANT_RELATIONS = {f"explicit_{k}" for k in FOLDER_GRANT_KINDS}
     for t in resp.tuples:
         rel = t.key.relation
@@ -708,25 +682,15 @@ async def list_folder_grants(
         subject = t.key.user
         sk, rest = subject.split(":", 1)
         sid = rest.rsplit("#", 1)[0]
-        rec = {
+        grants.append({
             "subject": subject, "kind": sk, "subject_id": sid,
             "name": None, "level": kind,
-        }
-        if sk == "user":
-            user_subject_ids.append(sid)
-            user_rows.append(rec)
-        else:
-            label = "用户组" if sk == "group" else "部门"
-            rec["name"] = f"{label} {sid[:12]}…"
-            grants.append(rec)
+        })
 
-    if user_subject_ids:
-        stmt = select(_User).where(_User.id.in_(_parse_uuids(user_subject_ids)))
-        res = await db.execute(stmt)
-        name_by = {str(u.id): u.name for u in res.scalars().all()}
-        for r in user_rows:
-            r["name"] = name_by.get(r["subject_id"], r["subject_id"][:12] + "…")
-        grants.extend(user_rows)
+    # 批量解析主体名称(user → users.name,group → groups.name;未命中走 id 兜底)
+    names = await resolve_subject_names(db, [str(g["subject"]) for g in grants])
+    for g in grants:
+        g["name"] = names[g["subject"]]["name"]
 
     grants.sort(key=lambda g: (0 if g["kind"] == "user" else 1, g["name"] or ""))
     return grants

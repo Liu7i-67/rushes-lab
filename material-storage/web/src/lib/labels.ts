@@ -26,6 +26,7 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   folder_grant_added: '文件夹权限授予',
   folder_grant_removed: '文件夹权限撤销',
   grant_revoked: '授权撤回',
+  grant_template_changed: '权限模板变更',  // 批次三:项目权限模板增删改
   invite_notified: '邀请通知已发送',
   local_login_failed: '本地账号登录失败',
   local_login_success: '本地账号登录',

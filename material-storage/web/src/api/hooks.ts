@@ -13,6 +13,8 @@ import type {
   DirectoryUserCreateOut,
   DownloadLink,
   Folder,
+  GrantEntry,
+  GrantTemplate,
   Me,
   NotificationsList,
   Project,
@@ -79,9 +81,14 @@ export const useCreateProject = () => {
       organization_id?: string;
       minio_bucket: string;
       admin_user_id: string;   // 必填:指派项目 admin(可以是自己;users.id UUID)
+      initial_grants?: GrantEntry[];   // 可选:创建时同时授权(方案 §3;不传/空 = 现行为)
     }) => {
-      const { organization_id, ...rest } = body;
-      const payload = organization_id ? { ...rest, organization_id } : rest;
+      const { organization_id, initial_grants, ...rest } = body;
+      const payload = {
+        ...rest,
+        ...(organization_id ? { organization_id } : {}),
+        ...(initial_grants && initial_grants.length > 0 ? { initial_grants } : {}),
+      };
       return (await http.post<Project>('/api/v1/projects', payload)).data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
@@ -408,11 +415,16 @@ export const useResolveShare = (token: string | undefined) =>
   });
 
 // ─── directory(#150 本地用户/组管理,admin only)────────────────────────────
-export const useDirectoryUsers = (params: { q?: string; is_active?: boolean } = {}) =>
+// params 传 null = 不启用(挂载但不取数;新建项目弹窗关闭期间不白打请求)
+export const useDirectoryUsers = (
+  params: { q?: string; is_active?: boolean; limit?: number } | null = {},
+) =>
   useQuery({
     queryKey: ['directory-users', params],
     queryFn: async () =>
-      (await http.get<DirectoryUser[]>('/api/v1/admin/directory/users', { params })).data,
+      (await http.get<DirectoryUser[]>('/api/v1/admin/directory/users', { params: params ?? {} }))
+        .data,
+    enabled: params !== null,
   });
 
 export const useCreateUser = () => {
@@ -525,6 +537,60 @@ export const useRemoveGroupMember = () => {
       qc.invalidateQueries({ queryKey: ['directory-group-members', vars.groupId] });
       qc.invalidateQueries({ queryKey: ['directory-groups'] });
     },
+  });
+};
+
+// ─── 项目权限模板(方案 §4;require_system_admin)────────────────────────────
+// 列表(含 items + 解析后的主体名)。非系统 admin 403 由全局 queryCache 静默跳过;
+// 调用方(权限模板 Select)对 undefined 数据自行降级为只有「不使用模板」。
+// enabled:NewProjectModal 对全员挂载,关闭态不取数。
+export const useGrantTemplates = (enabled = true) =>
+  useQuery({
+    queryKey: ['grant-templates'],
+    queryFn: async () => (await http.get<GrantTemplate[]>('/api/v1/admin/grant-templates')).data,
+    enabled,
+  });
+
+export const useCreateGrantTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      name: string;
+      description?: string;
+      is_default?: boolean;
+      items: GrantEntry[];
+    }) => (await http.post<GrantTemplate>('/api/v1/admin/grant-templates', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['grant-templates'] }),
+  });
+};
+
+// PATCH:均可选;items 传即全量替换
+export const useUpdateGrantTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: {
+      templateId: string;
+      name?: string;
+      description?: string | null;
+      is_default?: boolean;
+      items?: GrantEntry[];
+    }) => {
+      const { templateId, ...body } = args;
+      return (await http.patch<GrantTemplate>(
+        `/api/v1/admin/grant-templates/${templateId}`, body,
+      )).data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['grant-templates'] }),
+  });
+};
+
+export const useDeleteGrantTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (templateId: string) => {
+      await http.delete(`/api/v1/admin/grant-templates/${templateId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['grant-templates'] }),
   });
 };
 
