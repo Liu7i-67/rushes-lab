@@ -119,6 +119,30 @@ async def _delete_group(client: AsyncClient, gid: str) -> None:
     assert r.status_code == 200, r.text
 
 
+async def _archive_project(pid: str) -> None:
+    """归档自建项目(收尾专用):项目无删除 API,is_archived=True 后不再进
+    GET /projects 列表(列表过滤 is_archived),防多轮全量累积把 seed 项目挤出
+    第一页(专职测试 P1 测试卫生)。DB 直写照 test_default_template._set_archived
+    惯例;在 finally 里调用:失败吞掉 + warning,不掩盖原断言。"""
+    import warnings
+
+    from sqlalchemy import update
+
+    from app.db.session import get_sessionmaker
+    from app.db.tables import Project
+
+    try:
+        async with get_sessionmaker()() as db:
+            await db.execute(
+                update(Project)
+                .where(Project.id == uuid.UUID(pid))
+                .values(is_archived=True)
+            )
+            await db.commit()
+    except Exception as e:  # noqa: BLE001
+        warnings.warn(f"archive project {pid} failed: {e}; 残留活跃项目", stacklevel=2)
+
+
 async def _default_org() -> tuple[str, str]:
     """default org 的 (org_id, tenant_key) —— OpenFGA organization object 用 tenant_key。"""
     from app.db.session import get_sessionmaker
@@ -306,6 +330,7 @@ async def test_group_member_create_project_gate(client: AsyncClient) -> None:
     uid = await _create_user(client)
     await _add_group_member(client, gid, uid)
     helper_uid = await _create_user(client, "pc_helper")
+    pids: list[str] = []   # 本用例自建项目(组长 1 + 系统 admin 1),收尾归档
     try:
         body = {
             "code": _project_code(),
@@ -317,6 +342,7 @@ async def test_group_member_create_project_gate(client: AsyncClient) -> None:
         r = await client.post("/api/v1/projects", json=body, headers=_h(uid))
         assert r.status_code == 201, r.text
         pid = r.json()["id"]
+        pids.append(pid)
 
         # bootstrap 生效:创建者(admin_user_id=自己)是项目 admin
         r_me = await client.get(f"/api/v1/projects/{pid}", headers=_h(uid))
@@ -349,7 +375,11 @@ async def test_group_member_create_project_gate(client: AsyncClient) -> None:
         # 系统 admin(org admin)恒可建,不受组 flag 影响
         r5 = await client.post("/api/v1/projects", json=body3, headers=_h(EVAN_ID))
         assert r5.status_code == 201, r5.text
+        pids.append(r5.json()["id"])
     finally:
+        # 自建项目归档收尾(项目无删除 API;防挤占 GET /projects 第一页,P1)
+        for p in pids:
+            await _archive_project(p)
         await _delete_group(client, gid)
 
 
@@ -367,6 +397,7 @@ async def test_non_admin_create_ignores_organization_and_bucket(
     uid = await _create_user(client)
     await _add_group_member(client, gid, uid)
     org_id, _tenant_key = await _default_org()
+    pid = ""
     try:
         r = await client.post(
             "/api/v1/projects",
@@ -381,6 +412,7 @@ async def test_non_admin_create_ignores_organization_and_bucket(
         )
         assert r.status_code == 201, r.text
         body = r.json()
+        pid = body["id"]
         assert str(body["organization_id"]) == org_id, (
             f"非 admin 的 organization_id 必须被忽略,项目应落 default org: {body}"
         )
@@ -389,6 +421,8 @@ async def test_non_admin_create_ignores_organization_and_bucket(
             f"非 admin 的 minio_bucket 必须为服务端默认值 ms-dev(方案 §2.3): {body}"
         )
     finally:
+        if pid:
+            await _archive_project(pid)
         await _delete_group(client, gid)
 
 
@@ -533,6 +567,7 @@ async def test_disable_member_keeps_group_subject_tuple(
     uid_alive = await _create_user(client)
     await _add_group_member(client, gid, uid_disabled)
     await _add_group_member(client, gid, uid_alive)
+    pid_alive = ""   # 同组成员建的验证项目,收尾归档
     try:
         r = await client.post(
             f"/api/v1/admin/directory/users/{uid_disabled}/disable", headers=_h(EVAN_ID),
@@ -562,5 +597,8 @@ async def test_disable_member_keeps_group_subject_tuple(
         }
         r2 = await client.post("/api/v1/projects", json=body, headers=_h(uid_alive))
         assert r2.status_code == 201, r2.text
+        pid_alive = r2.json()["id"]
     finally:
+        if pid_alive:
+            await _archive_project(pid_alive)
         await _delete_group(client, gid)

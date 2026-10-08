@@ -248,6 +248,19 @@ async def _set_archived(pid: str, archived: bool) -> None:
         await db.commit()
 
 
+async def _archive_project(pid: str) -> None:
+    """归档自建项目(收尾专用):项目无删除 API,is_archived=True 后不再进
+    GET /projects 列表(列表过滤 is_archived),防多轮全量累积把 seed 项目挤出
+    第一页(专职测试 P1 测试卫生)。在 finally 里调用:失败吞掉 + warning,
+    不掩盖原断言。"""
+    import warnings
+
+    try:
+        await _set_archived(pid, True)
+    except Exception as e:  # noqa: BLE001
+        warnings.warn(f"archive project {pid} failed: {e}; 残留活跃项目", stacklevel=2)
+
+
 async def _create_org_row() -> str:
     """直插第二个 organization 行(跨 org 预检用例);org/project 行 FK RESTRICT
     且无删除 API,按每轮唯一 id 保留(不影响其他用例)。"""
@@ -291,6 +304,7 @@ async def test_create_merges_selected_template_and_default(client: AsyncClient) 
         assert roles.get(f"user:{ux}") == {"admin", "uploader", "downloader"}, roles
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"group:{ga}#member")
             await _revoke_subject(client, pid, f"user:{ux}")
         await _delete_template(client, tpl_a["id"])
@@ -322,6 +336,7 @@ async def test_create_default_template_selected_no_duplication(client: AsyncClie
         assert all(a.get("via") != "default_template" for a in audits), audits
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"user:{ux}")
         await _delete_template(client, tpl_c["id"])
 
@@ -349,6 +364,7 @@ async def test_create_role_union_same_subject(client: AsyncClient) -> None:
         assert roles.get(f"group:{ga}#member") == {"admin", "uploader", "downloader"}, roles
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"group:{ga}#member")
         await _delete_template(client, tpl_a["id"])
         await _delete_template(client, tpl_b["id"])
@@ -398,6 +414,7 @@ async def test_create_skips_stale_default_entries(client: AsyncClient) -> None:
         assert all(a.get("subject") not in stale_subjects for a in audits), audits
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"user:{ux}")
             await _revoke_subject(client, pid, f"user:{u_ok}")
         await _delete_template(client, tpl["id"])
@@ -435,6 +452,7 @@ async def test_audit_via_distinguishes_sources(client: AsyncClient) -> None:
         }, audits
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"user:{ux}")
             await _revoke_subject(client, pid, f"group:{gg}#member")
         await _delete_template(client, tpl["id"])
@@ -475,6 +493,7 @@ async def test_payload_50_entries_with_default_not_422(client: AsyncClient) -> N
         assert roles.get(f"user:{payload_users[-1]}") == {"viewer"}, roles
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"user:{payload_users[0]}")
         if tpl is not None:
             await _delete_template(client, tpl["id"])
@@ -487,16 +506,21 @@ async def test_no_default_template_regression(client: AsyncClient) -> None:
     授权,无任何组主体进入,零权限 outsider 对该项目仍 403。"""
     await _clear_default_templates(client)
     ux = await _create_user(client, "dt_regress")
-    proj = await _create_project(client, initial_grants=[_item_user(ux, ["viewer"])])
-    pid = proj["id"]
+    pid = ""
+    try:
+        proj = await _create_project(client, initial_grants=[_item_user(ux, ["viewer"])])
+        pid = proj["id"]
 
-    roles = _roles_map(await _members(client, pid))
-    assert "viewer" in roles.get(f"user:{ux}", set()), roles
-    assert not any(s.startswith("group:") for s in roles), (
-        f"无默认模板时不应有任何组主体进入: {roles}"
-    )
-    r = await client.get(f"/api/v1/projects/{pid}", headers=_h(OUTSIDER_ID))
-    assert r.status_code == 403, "无默认模板时不得给 outsider 带来任何授权"
+        roles = _roles_map(await _members(client, pid))
+        assert "viewer" in roles.get(f"user:{ux}", set()), roles
+        assert not any(s.startswith("group:") for s in roles), (
+            f"无默认模板时不应有任何组主体进入: {roles}"
+        )
+        r = await client.get(f"/api/v1/projects/{pid}", headers=_h(OUTSIDER_ID))
+        assert r.status_code == 403, "无默认模板时不得给 outsider 带来任何授权"
+    finally:
+        if pid:
+            await _archive_project(pid)
 
 
 # ─── 用例 13:apply-default 全 cycle / 幂等 / stale 计数 / 预检 / 形状 / 403 ──
@@ -544,6 +568,7 @@ async def test_apply_default_full_cycle_and_idempotent(client: AsyncClient) -> N
         assert body2["total_applied"] == 0, body2
     finally:
         for pid in (p1, p2):
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"group:{gg}#member")
             await _revoke_subject(client, pid, f"user:{ux}")
         await _delete_template(client, tpl["id"])
@@ -588,6 +613,7 @@ async def test_apply_default_counts_skipped_stale(client: AsyncClient) -> None:
         assert f"user:{u_dis}" not in roles, roles
     finally:
         if pid:
+            await _archive_project(pid)
             await _revoke_subject(client, pid, f"user:{u_ok}")
         await _delete_template(client, tpl["id"])
         try:
@@ -670,6 +696,7 @@ async def test_apply_default_precheck_cross_org_project_400(client: AsyncClient)
             f"400 应指明第几个/哪个项目: {r.text}"
         )
     finally:
+        await _archive_project(pid)
         await _delete_template(client, tpl["id"])
 
 
@@ -690,7 +717,9 @@ async def test_apply_default_precheck_archived_project_400(client: AsyncClient) 
             f"400 应指明第几个/哪个项目: {r.text}"
         )
     finally:
-        await _set_archived(pid, False)
+        # 不恢复 active:项目无删除 API,保持归档态防残留活跃项目挤占
+        # GET /projects 第一页(P1 测试卫生);幂等重置 True,失败吞掉 + warning
+        await _archive_project(pid)
         await _delete_template(client, tpl["id"])
 
 
@@ -698,9 +727,14 @@ async def test_apply_default_precheck_archived_project_400(client: AsyncClient) 
 async def test_apply_default_without_default_template_400(client: AsyncClient) -> None:
     """用例 13:org 无默认模板 → 400(UI 已 disabled,API 兜底)。"""
     await _clear_default_templates(client)
-    pid = (await _create_project(client))["id"]
-    r = await _apply_default(client, [pid])
-    assert r.status_code == 400, r.text
+    pid = ""
+    try:
+        pid = (await _create_project(client))["id"]
+        r = await _apply_default(client, [pid])
+        assert r.status_code == 400, r.text
+    finally:
+        if pid:
+            await _archive_project(pid)
 
 
 # ─── 用例 14:部分成功(占位,见 skip reason)─────────────────────────────────
