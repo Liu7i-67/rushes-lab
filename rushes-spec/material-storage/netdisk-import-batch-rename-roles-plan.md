@@ -92,12 +92,13 @@ type organization
 
 - `GroupCreateIn`(:312)/ `GroupUpdateIn`(:317)加 `can_create_project: bool = False`;create(:372)/update(:403)按 flag 写/删 `organization#project_creator` 的 `group:<gid>#member` tuple——**tuple 读写封装为 PermissionsService 小方法**(add/remove_org_relation),路由不摸 `_client`;删 stale 吞 `is_not_exists_error`(`permissions.py:92-102`);**组删除时顺手删该 tuple**;
 - `AdminGroupsPage` 的 `GroupFormModal`(:208-221)加 Switch「允许组成员新建项目」+ 说明文案(建后自动成为该项目管理员);列表加徽标;
+- **flag 读回**:组列表/详情接口追加一次 `read(object=organization:<tenant_key>)`、过滤 project_creator tuples,`DirectoryGroupOut` 加 `can_create_project` 字段回显(列表徽标与编辑回显的数据源;组管理页仅系统 admin 访问,一次 FGA read 开销可忽略);
 - audit:`group_created` / `group_updated` details 增 `can_create_project`,不新增 event_type;
 - 开关仅系统 admin 可操作(组 CRUD 本就 require_system_admin),提权面不扩大。
 
 ### 2.3 守门与弱门放宽
 
-- `deps.py` 新增 `require_project_creator` / `get_is_project_creator`(check 仿 `is_org_admin` `permissions.py:444-451`,relation = project_creator;default org 缺失行为对齐 `deps.py:205-206` / `:229-230`);
+- `deps.py` 新增 `require_project_creator` / `get_is_project_creator`——**语义统一为 `is_org_admin ∨ check(project_creator)`**(系统 admin 恒可建项目,不受组 flag 影响;check 写法仿 `is_org_admin` `permissions.py:444-451`;default org 缺失行为对齐 `deps.py:205-206` / `:229-230`);
 - `create_project`(`projects.py:56`)守门换 `require_project_creator`;`admin_user_id` 必填与 initial_grants 校验(:98-138)/直通写(:167-194)**不动**——组长自建默认 admin_user_id = me.id(NewProjectModal :53)、bucket 默认 ms-dev;
 - **弱门放宽(必改,否则零项目的新组长填不了表单)**:
   - `GET /users`(`users.py:40`)、`GET /groups`(`groups.py:37`)的 require_admin(系统 admin 或任一项目 can_admin)对零项目组长 403 → 并入 is_project_creator(SubjectPicker/UserPicker 候选来源);
@@ -105,8 +106,8 @@ type organization
 
 ### 2.4 /me 与前端闸门
 
-- `/me`(`auth.py:120-158`)加 `is_project_creator: bool`;`types.ts` 的 Me 同步;
-- 闸门**回落式** `me.is_project_creator ?? me.is_system_admin`(旧后端字段 undefined,不回落连系统管理员按钮一起消失):`ProjectsPage.tsx:62-79` 入口、`NewProjectModal.tsx:156` 守卫;`AppHeader.tsx:109-111` 管理菜单与 `MobileTabBar.tsx:47-51` 管理 tab **保持 is_system_admin 不动**;
+- `/me`(`auth.py:120-158`)加 `is_project_creator: bool`,**与守门同口径**(is_org_admin ∨ project_creator);查询按 `auth.py:130-141` 现状惯例 try/except 回 False(FGA 抖动 / model 未 push 不致 /me 500);`types.ts` 的 Me 同步;
+- 闸门 `me.is_project_creator ?? me.is_system_admin`——新后端字段已含系统 admin,`??` 实际只在旧后端(字段 undefined)时回落:`ProjectsPage.tsx:62-79` 入口、`NewProjectModal.tsx:156` 守卫;`AppHeader.tsx:109-111` 管理菜单与 `MobileTabBar.tsx:47-51` 管理 tab **保持 is_system_admin 不动**;
 - 组长视角无 org_role 概念:可见性/闸门全走现有 `my_roles`(自建项目自带 admin_user_id → admin),零额外前端改动。
 
 ### 2.5 边界
@@ -114,11 +115,11 @@ type organization
 - 「最后一个 admin」不变量(幸存 tuple 投影,`projects.py:632-667`)无交互:组长自建自带 admin_user_id;
 - 建项目入口无 visibility 字段(`ProjectCreateIn`),无 stealth 泄露面;
 - `USER_DIRECT_RELATIONS`(`permissions.py:43-61`)补 `("organization", "project_creator")`——防御性(UI 只写组主体;该函数对未部署 relation 有 continue 容错);
-- flag 撤销后成员即失建项目能力,其已建项目不受影响。
+- flag 撤销后组员即失建项目能力(系统 admin 不受影响——守门口径含 org admin),其已建项目不受影响。
 
 ### 2.6 测试
 
-model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple 写删(重复清除幂等)/ 组删除后不残留;守门:组员 POST /projects 201(admin_user_id=自己,bootstrap+initial_grants 正常)/ 非组员 403 / org admin 201;弱门:零项目组员 GET /users、/groups、grant-templates 读 200、写 403;/me 字段;disable 闭环。
+model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple 写删(重复清除幂等)/ 组删除后不残留;守门:组员 POST /projects 201(admin_user_id=自己,bootstrap+initial_grants 正常)/ 非组员 403 / org admin 201;弱门:零项目组员 GET /users、/groups、grant-templates 读 200、写 403;/me 字段同守门口径(组员 true、系统 admin true、非组员 false);disable 闭环。
 
 ---
 
@@ -129,22 +130,22 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 **语义**:最终授权 = payload 的 initial_grants(手选模板预填 + 手动行)∪ 当前默认模板 items,**按 (kind,id) 合并、角色取并集、幂等**——
 选中 A(组A 上传+下载)+ 默认 C(用户X 管理+上传+下载)→ 两者都在;选中默认模板自身 → 结果 = C 不重复;选中 A + 默认 B(组A 管理)→ 组A 管理+上传+下载。
 
-**实现**:payload 校验(重复 400 / 超 50 条 422 / stale 主体 400)与直通写**全部不动**;校验通过后、直通写之前,读当前 org 的 `is_default` 模板 items 合并统一写。无默认模板 / items 空 = 现行为不变。
+**实现**:payload 校验(重复 400 / 超 50 条 422 / stale 主体 400)与直通写**全部不动**;直通写完成后追加调用共享 helper 补默认模板授权(helper 自带 read 差集去重,见下)。无默认模板 / items 空 = 现行为不变。
 
 - 默认模板 stale 条目(user 已删/停用、group 已删)**跳过 + log.warning,不阻塞**——过期默认模板不能卡死建项目;
-- **50 上限只拦 payload**(合并后最多 50+50=100 不拦,防合法创建被 422);
+- **50 上限只拦 payload**(helper 补写不占上限,防合法创建被 422);
 - audit:默认模板来源记 `via: "default_template"`(手选仍 initial_grants),幂等跳过不写;
-- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`——本节与 §3.2 同一实现,勿写两份。
+- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`:读默认模板 → 主体存在性过滤(stale 跳过+log)→ `read` 项目现有 tuples **求差集** → **批量写**(OpenFGA 单次 write ≤100 tuple 分块;多 tuple 写先例 `ClientWriteRequest` `grant_org_admin.py:75`——刷新场景若逐条写会是万次级 HTTP 调用)→ 逐条 audit。create 侧:直通写完成后调用(read 差集天然排除 payload 已写条目);刷新侧:直接调用。重复调用差集为空、零写入,幂等。本节与 §3.2 同一实现,勿写两份。
 
-**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区。
+**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区;有默认模板时提交区明示「创建后将自动合并默认模板的授权」(现有「仅预填,不锁定」类文案同步核改)——防「行内显式删掉的角色被默认模板 union 顶回」无感知。
 
 **原则点名**:打破「后端不感知模板」原则,**仅默认模板例外**(须对 API/脚本直调生效、提交时取最新默认);非默认模板仍纯前端预填。
 
 ### 3.2 管理页「刷新默认权限」(存量项目按需补)
 
-- **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,dataSource = `useProjects()`,按项目名/编码搜);确认调 API,结果按项目报 `{applied, skipped_stale}`;
+- **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,数据源 = 项目列表**循环分页拉全量**——`GET /projects` 默认 limit=100 会静默截断,`projects.py:280`;按项目名/编码搜);确认调 API,结果按项目报 `{applied, skipped_stale}`;
 - **API**:`POST /api/v1/admin/grant-templates/apply-default`,body `{project_ids: list[uuid](1..100)}`,`require_system_admin` → 逐项目调 §3.1 helper → `{results: [{project_id, applied, skipped_stale}], total_applied, total_skipped}`;
-- **语义写死:叠加不删**——只补缺失 (subject, role) tuple,已存在幂等跳过;**不移除任何授权**(FGA tuple 无来源标记,对齐式收回必误伤手动授权,不做);模板改版删掉的角色需手动在成员抽屉撤;
+- **语义写死:叠加不删**——helper read 差集后批量写(见 §3.1),只补缺失 (subject, role),已存在天然跳过;**不移除任何授权**(FGA tuple 无来源标记,对齐式收回必误伤手动授权,不做);模板改版删掉的角色需手动在成员抽屉撤;
 - 边界:project_ids 去重;项目不存在/跨 org → 400 指明;无默认模板 → 400(UI 已 disabled,API 兜底);audit 逐条 `project_member_added`(via: "default_template");
 - 测试:全 cycle / 幂等二跑 applied=0 / stale 跳过计数 / 非 admin 403 / 空选 422 / >100 拒 / audit via 标记。
 
