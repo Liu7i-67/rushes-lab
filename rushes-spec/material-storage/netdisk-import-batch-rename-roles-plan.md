@@ -41,7 +41,7 @@ class AssetBatchPrefixIn(BaseModel):
 
 1. `asset_ids` 去重(`dict.fromkeys`,防重复 id 计入 deleted);`SELECT id, filename, folder_id, is_sensitive JOIN folders WHERE id IN (...) AND deleted_at IS NULL`;
 2. Python 端按语义算新名(两侧 NFC),分「应改 / 各原因跳过」;
-3. Core 语句**逐 id UPDATE**(`WHERE id = :id AND deleted_at IS NULL`):不用 ORM flush(并发 hard purge 抛 StaleDataError,`assets.py:561-565` 先例);不用单条 `IN ... RETURNING`(add 各 id 新名不同、executemany 不累积 RETURNING);add 谓词加 `NOT starts_with(normalize(filename,'NFC'), :prefix)` 二次防线(防并发双提交叠双前缀;PG normalize 与 Python 同口径;用 `starts_with` 不用 LIKE——`_`/`%` 通配符误拦,转义先例 `_escape_like` `assets.py:902-904`);remove 侧不加字节级谓词(与 NFC 口径不对称,存量 NFD 会静默不命中);
+3. Core 语句**逐 id UPDATE**(`WHERE id = :id AND deleted_at IS NULL`):不用 ORM flush(并发 hard purge 抛 StaleDataError,`assets.py:561-565` 先例);不用单条 `IN ... RETURNING`(add 各 id 新名不同、executemany 不累积 RETURNING);add 谓词加 `NOT starts_with(normalize(filename, NFC), :prefix)` 二次防线(防并发双提交叠双前缀;PG normalize 与 Python 同口径——**normalize 的 form 参数是不带引号的关键字 `NFC`,写成 `'NFC'` 字符串是语法错误**;`starts_with` 与 `normalize(…, NFC)` 已在 postgres:16-alpine 16.15 实测可用);用 `starts_with` 不用 LIKE——`_`/`%` 通配符误拦,转义先例 `_escape_like` `assets.py:902-904`);remove 侧不加字节级谓词(与 NFC 口径不对称,存量 NFD 会静默不命中);
 4. **对账**:rowcount=0 的 id 补查归因(软删 → deleted;NFC 前缀命中 → already_prefixed;兜底原始字节命中 → already_prefixed);SELECT 查不到的计入 deleted;保证 `renamed + skipped` 与提交数严格对账。
 
 403 写 `access_denied` audit(先例 `assets.py:79-87`)。**MinIO key 不动**(下载文件名由 filename 动态生成 Content-Disposition,纯 DB 改名)。
@@ -50,8 +50,8 @@ class AssetBatchPrefixIn(BaseModel):
 
 ### 1.2 前端(`ProjectDetailPage.tsx`;行号较旧版 +4,`canUploadProject` :58-60 例外)
 
-- **跨页保留选中**:删两处翻页清空(compact :568、桌面 :924);Table `rowSelection`(:881-884)加 `preserveSelectedRowKeys: true`,compact 卡片(:403、:505)同规则;**切 folder 仍清空**(:106);antd 内置表头全选在 preserve 下天然只动当前页,**勿改**;自绘全选(:814、:505)改为当前页 id 并/差集;
-- **三个既有批量操作切 `selectedIds` 全量口径**(现 `selectedAssets` 只含当前页 :115-118,跨页后「显示 N 实际只动当前页」):下载(:160)/删除(:164)遍历 id;未加载 id 无 Asset 对象——下载占位名 `asset_<id前8位>.<content_type 推断扩展名>`(回落 `.bin`),403 无对象计入「需申请」聚合计数,失败 toast 按 id 聚合;删除的空尾页回退判定(:172-174)同步改写;
+- **跨页保留选中**:删两处翻页清空(compact :568、桌面 :924);Table `rowSelection`(:881-884)加 `preserveSelectedRowKeys: true`,compact 卡片(:403、:505)同规则;**切 folder 仍清空**(:106);antd 内置表头全选在 preserve 下天然只动当前页,**勿改**;自绘全选(:814、:505)改为当前页 id 并/差集,**checked/indeterminate 派生式同步改**(:503-505/:812-814 现按 `selectedIds.length` 对比全量行数,跨页后语义坏——改为「当前页 id 与 selectedIds 的交集数」对比当前页行数);
+- **三个既有批量操作切 `selectedIds` 全量口径**(现 `selectedAssets` 只含当前页 :115-118,跨页后「显示 N 实际只动当前页」):下载(:160)/删除(:164)遍历 id;未加载 id 无 Asset 对象——下载占位名 `asset_<id前8位>.<扩展名>`(已加载项按其 content_type 推断,**未加载项无元数据一律 `.bin`**);403 无对象(缺完整 Asset)只计入「需申请」聚合计数,失败 toast 按 id 聚合;删除的空尾页回退判定(:172-174)同步改写;
 - **BulkTagModal 跨页合并后端化**:现状前端用已加载行合并(:955-967)而 `assets.py:555-556` 是整条替换,跨页未加载 id 的旧标签会被清掉。`AssetMetaUpdateIn` 加 `labels_mode: Literal["merge","replace"] = "replace"`(merge = DB 现值在前取并集,顺序写死);批量路径传 merge;`types.ts`/`hooks.ts` 同步;BulkTagModal 清单标注「已选 N 个(清单为当前页已加载项)」;`AssetSummaryPanel`(:938)仅**桌面批量态**加注「(当前页)」——该组件三处复用(compact 单资产详情 :672、compact 文件夹管理 :686),无条件加注会泄漏到另两态;
 - 批量栏加「批量前缀」按钮(桌面+compact,compact 栏在 :578-619):disabled 门控随打标 = `folder.my_can_upload`(:835-837 / :600);Modal = action 单选 + prefix 输入 + **预览**(当前页选中前 5 条改名前后对照,注明「预览仅当前页,共已选 N」)+ 确认;提交按 selectedIds 全量,>1000 前端按批顺序调用(任一批失败即中止,toast 报已完成批次的 renamed/skipped 计数并**保留剩余选中**供重试),完成后刷新并清空;批量下载跨页 >20 加确认。
 
@@ -93,7 +93,7 @@ type organization
 - `GroupCreateIn`(:312)/ `GroupUpdateIn`(:317)加 `can_create_project: bool = False`;create(:372)/update(:403)按 flag 写/删 `organization#project_creator` 的 `group:<gid>#member` tuple——**tuple 读写封装为 PermissionsService 小方法**(add/remove_org_relation),路由不摸 `_client`;删 stale 吞 `is_not_exists_error`(`permissions.py:92-102`);**组删除时顺手删该 tuple**;
 - `AdminGroupsPage` 的 `GroupFormModal`(:208-221)加 Switch「允许组成员新建项目」+ 说明文案(建后自动成为该项目管理员);列表加徽标;
 - **flag 读回**:组**列表**接口(directory.py 无组详情路由,编辑弹窗数据来自列表行 `AdminGroupsPage.tsx:171`)追加一次**定向 read**(`object=organization:<tenant_key>, relation=project_creator`)拿全部置位组,`DirectoryGroupOut` 加 `can_create_project` 字段回显——**必须带 relation 过滤**:不带 relation 的全量 read 会撞 OpenFGA read 单页上限(organization 上每个启用用户一条 `#member` tuple,`directory.py:146/:239`,百人级单页必漏);定向结果只有置位组、量小单页即回;
-- 组 create/update 的 tuple 写失败:**尽力而为 + log.warning**(先例 `directory.py:143-150`),不 500——flag 读回展示的是真实 tuple 状态,管理员见「开着却显示关」重试 PATCH 即补写;
+- 组 create/update 的 tuple 写失败:**尽力而为 + log.warning**(先例 `directory.py:143-150`),不 500——flag 读回展示的是真实 tuple 状态,管理员见「开着却显示关」重试 PATCH 即补写;create/update 响应同为 DirectoryGroupOut(:394-397/:433-436),按**入参 flag** 回填(真实态以列表刷新为准,前端保存后 invalidate 列表);
 - audit:`group_created` / `group_updated` details 增 `can_create_project`,不新增 event_type;
 - 开关仅系统 admin 可操作(组 CRUD 本就 require_system_admin),提权面不扩大。
 
@@ -136,16 +136,16 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 - 默认模板 stale 条目(user 已删/停用、group 已删)**跳过 + log.warning,不阻塞**——过期默认模板不能卡死建项目;
 - **50 上限只拦 payload**(helper 补写不占上限,防合法创建被 422);
 - audit:默认模板来源记 `via: "default_template"`(手选仍 initial_grants),幂等跳过不写;
-- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`:读默认模板 → 主体存在性过滤(stale 跳过+log)→ `read` 项目现有 tuples(**翻页聚合**:OpenFGA read 单页有上限、project tuples 可超一页(payload 直通写后最多 200 条 + 既有授权),须跟 continuation_token 拉全——全库现无翻页先例,封装小工具 `read_all_tuples` 复用)→ 求差集 → **批量写**(单次 write ≤100 tuple 分块,先例 `revoke_user_completely` `permissions.py:418-422`(BATCH=50)、`bootstrap_project` :189-204;批量 write 撞 already exists 会**整批失败**,**逐块捕获 `is_already_exists_error` 按幂等成功跳过**(同 `add_project_member` :579 口径)——刷新场景若逐条写会是万次级 HTTP 调用)→ 逐条 audit。create 侧:直通写完成后调用(read 差集天然排除 payload 已写条目);刷新侧:直接调用。重复调用差集为空、零写入,幂等。本节与 §3.2 同一实现,勿写两份。
+- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`:读默认模板 → 主体存在性过滤(stale 跳过+log)→ `read` 项目现有 tuples(**翻页聚合**:OpenFGA read 单页有上限、project tuples 可超一页(payload 直通写后最多 200 条 + 既有授权),须跟 continuation_token 拉全——全库现无翻页先例,封装小工具 `read_all_tuples` 复用)→ 求差集 → **批量写**(单次 write ≤100 tuple 分块,先例 `revoke_user_completely` `permissions.py:418-422`(BATCH=50)、`bootstrap_project` :189-204;批量 write 是原子的:块内任一 tuple 已存在则**整块失败**——**块级捕获 `is_already_exists_error` 后该块降级为逐条写**(逐条再撞 already_exists 才按幂等成功跳过,同 `add_project_member` :579 口径;直接整块跳过会丢块内其余合法 tuple、applied 虚报)——刷新场景若逐条写会是万次级 HTTP 调用)→ 逐条 audit。create 侧:直通写完成后调用(read 差集天然排除 payload 已写条目);刷新侧:直接调用。重复调用差集为空、零写入,幂等。本节与 §3.2 同一实现,勿写两份。
 
-**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区;有默认模板时提交区明示「创建后将自动合并默认模板的授权」(现有「仅预填,不锁定」类文案同步核改,含管理页副标题 `AdminGrantTemplatesPage.tsx:83`「仅预填,不进入授权链路」——默认模板直通后该描述不实)——防「行内显式删掉的角色被默认模板 union 顶回」无感知。
+**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区;有默认模板时提交区明示「创建后将自动合并默认模板的授权」(现有「仅预填,不锁定」类文案同步核改,含管理页副标题 `AdminGrantTemplatesPage.tsx:81`「仅预填,不进入授权链路」——默认模板直通后该描述不实)——防「行内显式删掉的角色被默认模板 union 顶回」无感知。
 
 **原则点名**:打破「后端不感知模板」原则,**仅默认模板例外**(须对 API/脚本直调生效、提交时取最新默认);非默认模板仍纯前端预填。
 
 ### 3.2 管理页「刷新默认权限」(存量项目按需补)
 
 - **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,数据源 = 项目列表**循环分页拉全量**——`GET /projects` 默认 limit=100 会静默截断(`projects.py:280`),且系统 admin 分支每项目一次 FGA 回路填 admins(`projects.py:231-236`),项目数百个时打开变慢,现网量级可接受(可选优化:list_projects 加跳过 admins 填充的查询参数);按项目名/编码搜);**勾选上限 100(= API 单批上限,超限禁止再勾并提示分批操作)**;确认调 API,结果按项目报 `{applied, skipped_stale}`;
-- **API**:`POST /api/v1/admin/grant-templates/apply-default`,body `{project_ids: list[uuid](1..100)}`,`require_system_admin` → 逐项目调 §3.1 helper → `{results: [{project_id, applied, skipped_stale}], total_applied, total_skipped}`;
+- **API**:`POST /api/v1/admin/grant-templates/apply-default`,body `{project_ids: list[uuid](1..100)}`,`require_system_admin` → 逐项目调 §3.1 helper → `{results: [{project_id, applied, skipped_stale}], total_applied, total_skipped}`——满批串行 FGA/DB 往返为分钟级:确认弹层提示耗时,**建议 20-30 项目/批分次提交**;audit 逐条改聚合事件为可选优化;
 - **语义写死:叠加不删**——helper read 差集后批量写(见 §3.1),只补缺失 (subject, role),已存在天然跳过;**不移除任何授权**(FGA tuple 无来源标记,对齐式收回必误伤手动授权,不做);模板改版删掉的角色需手动在成员抽屉撤;
 - 边界:project_ids 去重;项目不存在/跨 org → 400 指明;无默认模板 → 400(UI 已 disabled,API 兜底);audit 逐条 `project_member_added`(via: "default_template");
 - 测试:全 cycle / 幂等二跑 applied=0 / stale 跳过计数 / 非 admin 403 / 空选 422 / >100 拒 / audit via 标记。
@@ -155,7 +155,7 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 - **PC**(`Grid.useBreakpoint` lg+):`width≈1040`,双栏——左:名称/编码/描述/管理员/bucket;右:模板 Select + 初始权限(模板从顶部 :183 移到初始权限区 :260 上方,合成「权限(可选)」组);
 - **限高**:Modal body `maxHeight≈70vh + overflowY`;初始权限主体行列表内层 maxHeight 滚动(主要膨胀源);
 - 移动端单栏,权限块在表单尾部;`scrollToFirstError` 在滚动容器可用;
-- **名称解析数据源**:UserPicker/GroupPicker 本就走已放宽的 `GET /api/v1/users`、`/groups`(UserPicker.tsx:62),搜索不受影响;但初始权限行的 nameById 现用 `useDirectoryUsers`(NewProjectModal :62,打 `GET /admin/directory/users`,该端点 require_system_admin **未放宽**)——**改走已放宽的 `GET /api/v1/users`**(SubjectPicker 只回传 id,SubjectPicker.tsx:49-52,行名全靠 nameById;不改则组长侧手选用户行退化为短 id 兜底)。
+- **名称解析数据源**:UserPicker/GroupPicker 本就走已放宽的 `GET /api/v1/users`、`/groups`(UserPicker.tsx:57),搜索不受影响;但初始权限行的 nameById 现用 `useDirectoryUsers`(NewProjectModal :62,打 `GET /admin/directory/users`,该端点 require_system_admin **未放宽**)——**改走已放宽的 `GET /api/v1/users`**(SubjectPicker 只回传 id,SubjectPicker.tsx:49-52,行名全靠 nameById;不改则组长侧手选用户行退化为短 id 兜底)。
 
 ### 3.4 测试
 
@@ -168,9 +168,9 @@ create 合并:用户三例逐条断言 / stale 条目跳过且创建成功 / via
 
 | 批次 | 内容 | 部署注意 |
 |---|---|---|
-| PR-1 | §1 批量前缀 | 无 migration;rsync 后须重启 ms-api;新前端发 `labels_mode` 被旧后端静默吞 → 按 replace 清标签,**两段式发布**(server2 拆 rsync 或维护横幅;hh2 先后端 `--restart` 再前端通道) |
+| PR-1 | §1 批量前缀 | 无 migration;rsync 后须重启 ms-api;新前端发 `labels_mode` 被旧后端静默吞 → 按 replace 清标签,**两段式发布**(server2 拆 rsync 或维护横幅;hh2 先后端 `--restart` 再前端通道);**回滚先回前端再回后端**(反向 = 新前端 merge + 旧后端,再触发清标签) |
 | PR-2 | §2 组级建项目 | 无 alembic;**先 push FGA model 再放代码**;重启 ms-api/ms-worker |
-| PR-3 | §3 直通+刷新+弹窗 | 无 migration;**前后端同批**(否则默认模板短暂不生效,少给非越权) |
+| PR-3 | §3 直通+刷新+弹窗 | 无 migration;**前后端同批**;如必须拆分只允许**先前端后后端**(先放后端时旧前端仍默认预选默认模板,行内删掉的角色被 union 顶回且无透明度提示);回滚先回前端 |
 
 §2 与 §3 都动 NewProjectModal,建议同批实施或 §3 rebase 于 §2 后。每批:ruff + mypy(strict)+ 容器 pytest + `pnpm build/lint` + server2 dev 验证 + `scripts/changelog.md` 记账。
 
