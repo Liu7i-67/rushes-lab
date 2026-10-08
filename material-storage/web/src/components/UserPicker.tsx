@@ -1,7 +1,7 @@
 /**
  * UserPicker — antd Select with autocomplete /api/v1/users?q=
  * 支持 multiple 或 single;value = users.id UUID(#148/#150 起)。
- * 显示:头像首字 + name + 小字 username / open_id(open_id 仅历史对照,#154)。
+ * 显示:头像首字 + name + 小字 username > open_id 前 18 位 > 双空「本地账号」(open_id 仅历史对照,#154)。
  */
 import { Avatar, Select, Spin, type SelectProps } from 'antd';
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -10,7 +10,7 @@ import { http } from '../api/client';
 interface UserBrief {
   id: string;
   username: string | null;
-  open_id: string;
+  open_id: string | null;
   union_id: string | null;
   name: string;
   email: string | null;
@@ -145,7 +145,7 @@ function UserRow({ user }: { user: UserBrief }) {
           fontFamily: 'var(--ms-font-mono)',
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}>
-          {user.username || user.open_id.slice(0, 18)}{user.email ? ` · ${user.email}` : ''}
+          {user.username || user.open_id?.slice(0, 18) || '本地账号'}{user.email ? ` · ${user.email}` : ''}
         </div>
       </div>
     </div>

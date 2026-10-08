@@ -2,7 +2,7 @@
 
 export interface Me {
   id: string;
-  open_id: string;
+  open_id: string | null;
   union_id: string | null;
   name: string;
   email: string | null;
