@@ -51,7 +51,7 @@ class AssetBatchPrefixIn(BaseModel):
 ### 1.2 前端(`ProjectDetailPage.tsx`;行号较旧版 +4,`canUploadProject` :58-60 例外)
 
 - **跨页保留选中**:删两处翻页清空(compact :568、桌面 :924);Table `rowSelection`(:881-884)加 `preserveSelectedRowKeys: true`,compact 卡片(:403、:505)同规则;**切 folder 仍清空**(:106);antd 内置表头全选在 preserve 下天然只动当前页,**勿改**;自绘全选(:814、:505)改为当前页 id 并/差集,**checked/indeterminate 派生式同步改**(:503-505/:812-814 现按 `selectedIds.length` 对比全量行数,跨页后语义坏——改为「当前页 id 与 selectedIds 的交集数」对比当前页行数);
-- **三个既有批量操作切 `selectedIds` 全量口径**(现 `selectedAssets` 只含当前页 :115-118,跨页后「显示 N 实际只动当前页」):下载(:160)/删除(:164)遍历 id;未加载 id 无 Asset 对象——下载占位名 `asset_<id前8位>.<扩展名>`(已加载项按其 content_type 推断,**未加载项无元数据一律 `.bin`**);403 无对象(缺完整 Asset)只计入「需申请」聚合计数,失败 toast 按 id 聚合;删除的空尾页回退判定(:172-174 现按「当前页行数」比较,跨页删除后失效)改为「**当前页剩余未删行数为 0 且 page>1 → 回退一页**」;
+- **三个既有批量操作切 `selectedIds` 全量口径**(现 `selectedAssets` 只含当前页 :115-118,跨页后「显示 N 实际只动当前页」):下载(:160)/删除(:164)遍历 id;未加载 id 无 Asset 对象——**已加载项沿用原 filename 下载**(现状 :148-158),仅未加载 id 用占位名 `asset_<id前8位>.bin`;403 无对象(缺完整 Asset)只计入「需申请」聚合计数,失败 toast 按 id 聚合;删除的空尾页回退判定(:172-174 现按「当前页行数」比较,跨页删除后失效)改为「**当前页剩余未删行数为 0 且 page>1 → 回退一页**」;
 - **BulkTagModal 跨页合并后端化**:**批量打标同按 selectedIds 全量提交**(merge 模式逐 id PATCH,无需加载行对象)——现状前端只用已加载行做客户端合并(:955-967)而后端是整条替换(`assets.py:555-556`),切全量后未加载 id 的旧标签会被清掉,故 labels_mode 必须后端化。`AssetMetaUpdateIn` 加 `labels_mode: Literal["merge","replace"] = "replace"`(merge = DB 现值在前取并集,顺序写死;并集仍过 `_normalize_labels` 的 50 条上限,`assets.py:898`——DB 现值占满 50 时新标签被静默截断,已知行为);批量路径传 merge;`types.ts`/`hooks.ts` 同步;弹窗内文件明细仅列当前页已加载项,标注「已选 N 个(明细为当前页已加载项)」;`AssetSummaryPanel`(:938)仅**桌面批量态**加注「(当前页)」——该组件三处复用(compact 单资产详情 :672、compact 文件夹管理 :686),无条件加注会泄漏到另两态;
 - 批量栏加「批量前缀」按钮(桌面+compact,compact 栏在 :578-619):disabled 门控随打标 = `folder.my_can_upload`(:835-837 / :600);Modal = action 单选 + prefix 输入 + **预览**(当前页选中前 5 条改名前后对照,注明「预览仅当前页,共已选 N」)+ 确认;提交按 selectedIds 全量,>1000 前端按批顺序调用(任一批失败即中止,toast 报已完成批次的 renamed/skipped 计数并**保留剩余选中**供重试),完成后刷新并清空;批量下载跨页 >20 加确认。
 
@@ -101,7 +101,7 @@ type organization
 ### 2.3 守门与弱门放宽
 
 - `deps.py` 新增 `require_project_creator` / `get_is_project_creator`——**语义统一为 `is_org_admin ∨ check(project_creator)`**(系统 admin 恒可建项目,不受组 flag 影响;check 写法仿 `is_org_admin` `permissions.py:444-451`;default org 缺失行为对齐 `deps.py:205-206` / `:229-230`);
-- `create_project`(`projects.py:56`)守门换 `require_project_creator`,且**非系统 admin 的创建者强制忽略 `payload.organization_id`**(置 None 走 user org/default 解析,`projects.py:80-96`;该字段可选且前端从不传——不收口则 creator 可 API 直调在任意 org 下建项目并 bootstrap 该 org 关系,属本次新开的提权口);`admin_user_id` 必填与 initial_grants 校验(:98-138)/直通写(:167-194)**不动**——组长自建默认 admin_user_id = me.id(NewProjectModal :53)、bucket 默认 ms-dev;
+- `create_project`(`projects.py:56`)守门换 `require_project_creator`,且**非系统 admin 的创建者强制忽略 `payload.organization_id`**(置 None 走 user org/default 解析,`projects.py:80-96`;该字段可选且前端从不传——不收口则 creator 可 API 直调在任意 org 下建项目并 bootstrap 该 org 关系,属本次新开的提权口);同理**非系统 admin 的 `minio_bucket` 服务端强制为默认值**(`models/__init__.py:32-43` 对 bucket 无约束,前端固定 ms-dev;不收口则 creator 可 API 直调把项目指到任意 bucket,后续 presign 全走它);`admin_user_id` 必填与 initial_grants 校验(:98-138)/直通写(:167-194)**不动**——组长自建默认 admin_user_id = me.id(NewProjectModal :53)、bucket 默认 ms-dev;
 - **弱门放宽(必改,否则零项目的新组长填不了表单)**:
   - `GET /users`(`users.py:40`)、`GET /groups`(`groups.py:37`)的 require_admin(系统 admin 或任一项目 can_admin)对零项目组长 403 → 并入 is_project_creator(SubjectPicker/UserPicker 候选来源);
   - `GET /admin/grant-templates`(`admin.py:317`)读端点同样放宽;**写端点 POST/PATCH/DELETE 保持 require_system_admin**。
@@ -149,7 +149,7 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 - **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,数据源 = 项目列表**循环分页拉全量**——`GET /projects` 默认 limit=100 会静默截断(`projects.py:280`),且系统 admin 分支每项目一次 FGA 回路填 admins(`projects.py:231-236`),项目数百个时打开变慢,现网量级可接受(可选优化:list_projects 加跳过 admins 填充的查询参数);按项目名/编码搜);**勾选上限 100(= API 单批上限,超限禁止再勾并提示分批操作)**;确认调 API,结果按项目报 `{applied, skipped_stale}`;
 - **API**:`POST /api/v1/admin/grant-templates/apply-default`,body `{project_ids: list[uuid](1..100)}`,`require_system_admin` → 逐项目调 §3.1 helper → `{results: [{project_id, applied, skipped_stale}], total_applied, total_skipped}`——满批串行 FGA/DB 往返为分钟级:确认弹层提示耗时,**建议 20-30 项目/批分次提交**;audit 逐条改聚合事件为可选优化;
 - **语义写死:叠加不删**——helper read 差集后批量写(见 §3.1),只补缺失 (subject, role),已存在天然跳过;**不移除任何授权**(FGA tuple 无来源标记,对齐式收回必误伤手动授权,不做);模板改版删掉的角色需手动在成员抽屉撤;
-- 边界:project_ids 去重;项目不存在/跨 org/`is_archived` → 400 指明(Transfer 数据源天然过滤归档项目,API 直调兜底);无默认模板 → 400(UI 已 disabled,API 兜底);audit 逐条 `project_member_added`(via: "default_template");
+- 边界:project_ids 去重;**执行前单条 SELECT 预检全部 project_ids**(不存在/跨 org/`is_archived` → 400 指明第几个;Transfer 数据源天然过滤归档项目,预检是 API 直调兜底);无默认模板 → 400(UI 已 disabled,API 兜底);执行期单项目 FGA/DB 失败:**继续执行其余项目**,失败项计入 results 的 `{project_id, error}`(部分成功语义,与 §1.1 批量尽力而为同风格);audit 逐条 `project_member_added`(via: "default_template");
 - 测试:全 cycle / 幂等二跑 applied=0 / stale 跳过计数 / 非 admin 403 / 空选 422 / >100 拒 / 归档项目 400 / audit via 标记。
 
 ### 3.3 弹窗重排(NewProjectModal)
@@ -157,7 +157,7 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 - **PC**(`Grid.useBreakpoint` lg+):`width≈1040`,双栏——左:名称/编码/描述/管理员/bucket;右:模板 Select + 初始权限(模板从顶部 :183 移到初始权限区 :260 上方,合成「权限(可选)」组);
 - **限高**:Modal body `maxHeight≈70vh + overflowY`;初始权限主体行列表内层 maxHeight 滚动(主要膨胀源);
 - 移动端单栏,权限块在表单尾部;`scrollToFirstError` 在滚动容器可用;
-- **名称解析数据源**:UserPicker/GroupPicker 本就走已放宽的 `GET /api/v1/users`、`/groups`(UserPicker.tsx:57),搜索不受影响;但初始权限行的 nameById 现用 `useDirectoryUsers`(NewProjectModal :62,打 `GET /admin/directory/users`,该端点 require_system_admin **未放宽**)——**改走已放宽的 `GET /api/v1/users`**:其 limit 硬上限 100(`users.py:38`,现传 200 是 directory 端点的上限、照搬会 422),**按 offset 分页拉全**;且 /users 只回 active 用户,停用用户行名走短 id 兜底(可接受)。SubjectPicker 的 user 分支只回传 id(SubjectPicker.tsx:45-48;group 分支 :49-52 自带 name),行名全靠 nameById——不改则组长侧手选用户行退化为短 id 兜底。
+- **名称解析数据源**:UserPicker/GroupPicker 本就走已放宽的 `GET /api/v1/users`、`/groups`(UserPicker.tsx:57),搜索不受影响;但初始权限行的 nameById 现用 `useDirectoryUsers`(NewProjectModal :62,打 `GET /admin/directory/users`,该端点 require_system_admin **未放宽**)——**改走已放宽的 `GET /api/v1/users`**:其 limit 硬上限 100(`users.py:38`,现传 200 是 directory 端点的上限、照搬会 422)且**现状无 offset 参数**(`users.py:35-41`)——配套后端小改动:`GET /users` 加 `offset: int = Query(0, ge=0)`(排序已按 User.name 稳定,:56),前端按 offset 分页拉全;且 /users 只回 active 用户,停用用户行名走短 id 兜底(可接受)。SubjectPicker 的 user 分支只回传 id(SubjectPicker.tsx:45-48;group 分支 :49-52 自带 name),行名全靠 nameById——不改则组长侧手选用户行退化为短 id 兜底。
 
 ### 3.4 测试
 
@@ -193,7 +193,7 @@ create 合并:用户三例逐条断言 / stale 条目跳过且创建成功 / via
 |---|---|
 | 后端感知默认模板 | 仅默认模板例外(须对 API 直调生效、取提交时最新);模板事后修改仍不影响已建项目,刷新是显式管理员动作 |
 | 刷新只增不减 | tuple 无来源标记;收回走成员抽屉 |
-| 默认模板 stale 静默跳过 | 创建/刷新一致;模板编辑页已有 missing 标记引导清理 |
+| 默认模板 stale 静默跳过 | 创建/刷新一致;模板编辑页的 missing 标记**仅覆盖已删主体**(停用用户 found=True 不标,`admin.py:211-213`)——停用条目静默跳过且无 UI 提示,接受(留口:items 序列化对 is_active=false 标灰) |
 | 放弃 org 派生 | 见 §0;存量不自动覆盖,刷新按需补 |
 | 批量前缀无 undo | add 逆操作 = remove,预览缓解 |
 | model 回滚纪律 | **只回代码、不回 model**:回滚 model(append-only,须 push 去掉 relation 的新版本)后,新代码对 project_creator 的 check 会因 relation 未定义而报错(守门与 /me 都会触到),旧 tuple 失效也难追溯;只回代码时 relation 不再被 check,tuple 残留无害 |
