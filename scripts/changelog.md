@@ -2,6 +2,10 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
+## 2026-10-08
+
+- **合并 liuqi + push fork + prod 部署**(`5e3c58a`→**`681af12`**):feat/project-grant-templates 经 merge(no-ff,前置 `3db0d78` 仅 .zcodeignore 零冲突)并入 liuqi;push 发现上游 kevinfitzroy 对本机凭证(Liu7i-67)403——确认为预期(已记 memory:**push 默认走 fork** `Liu7i-67/rushes-lab`),改推 fork 成功;两个已合并 worktree(feat/qplan-project-grant-templates)与分支已清理(保留 qplan/import-rename-roles)。**hh2 prod 部署**(hh2-prod 通道,分片推送 3.7MB 代码 8 片+1.3MB SPA 3 片 md5 全校验):上线前三步确认过(增量 10 commit 仅 2 个运行时变更/无 .env 与 compose 变更仅需 restart/唯一新 migration);rsync+SPA 原子替换(**web.bak-20261008 备份按 prod 规则保留至稳定**)+重启 ms-api/ms-worker+**migration 20260930_0012 已到 head**;验证全过——DEPLOYED.md=681af12、内网 :80 与外网 :18080 指纹一致(index-CzNHD5U5.js=本地 build)、auth/me 401、容器新代码三特征 grep 就位、grant-templates 未登录 401(路由注册+鉴权正常);业务级实测按 prod 规则不使用 X-User-Id,引用 dev 同源(bbc9885 运行时等价)10/10 抽测结论。三环境(本地隔离栈/hh2 dev/hh2 prod)现运行同一版本族,feat 周期闭环
+
 ## 2026-10-02
 
 - **P2 收口 + 本地/内网 dev 双环境部署验证**(feat/project-grant-templates `bbc9885`):①P2 三项修复(members 补主体存在性校验拦幽灵 tuple、模板 items 补 min_length=1、前端 lint 存量 16 条清零——6 处行为等价真修+10 处带理由单 effect 块级豁免,pnpm lint 0 problems),容器 pytest **184 过**+3 基线遗留,ruff 331/mypy 135 持平;②本地 docker 部署测试——隔离栈(feat-ms-*)冷启动 healthz/SPA 指纹与 build 一致(index-CzNHD5U5.js)/业务 e2e 16 项 PASS(组管理授权-徽章-撤销-幂等/组名解析/幽灵主体 400/initial_grants 建项目生效/模板 CRUD+空 items 422);③**内网 hh2 dev 部署**(b7ced37→bbc9885,分片通道 3.8MB 代码包+1.3MB SPA 包各 8/3 片 md5 全校验):rsync+SPA 原子替换+重启 ms-api-dev/ms-worker-dev+**migration 20260930_0012 权限模板两表已执行到 head**;验证清单全过——DEPLOYED.md 版本正确、内外网(192.168.110.221:8090 / 47.108.196.211:8080)SPA 指纹一致、auth/me 401、容器内新代码 grep 就位(is_not_exists_error/grant-templates);业务抽测 10/10(模板端点空列表/临时组建-授管理-组名+徽章-撤销-stale 幂等 204-幽灵 400-删组清场零残留);SPA web.bak 备份确认指纹后已清
