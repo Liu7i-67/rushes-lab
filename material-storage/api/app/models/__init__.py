@@ -249,3 +249,132 @@ class ChangePasswordIn(BaseModel):
 
     old_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=1, max_length=128)
+
+
+# ─── 百度网盘备份(方案 §5.2,批次 1:binding + 网盘目录浏览)───────────────────
+class BaiduBindingOut(BaseModel):
+    """绑定状态;bound = status=='active'(expired/unbound 均提示重新绑定)。"""
+
+    bound: bool
+    status: str                       # active / expired / unbound
+    expires_at: datetime | None = None
+    # UI 显示绑定账号(§4:昵称缺失回退展示 uid);未绑定为 None
+    baidu_uid: str | None = None
+    nickname: str | None = None
+
+
+class BaiduAuthorizeUrlOut(BaseModel):
+    """oob 授权链接(用户在任意可上网设备浏览器打开,授权后复制授权码回填)。"""
+
+    url: str
+
+
+class BaiduBindIn(BaseModel):
+    """授权码回填(10 分钟内单次有效;只换 token 不存 code)。"""
+
+    code: str = Field(..., min_length=1, max_length=256, description="oob 授权码")
+
+
+class BaiduBindOut(BaseModel):
+    """绑定/重授权成功返回。"""
+
+    bound: bool = True
+    status: str = "active"
+    expires_at: datetime
+    baidu_uid: str
+    nickname: str | None = None
+
+
+class BaiduNetdiskFolderOut(BaseModel):
+    """网盘目录树节点(folder=1 时百度仅返回 path,name 由后端从 path 末段派生)。"""
+
+    path: str
+    name: str
+
+
+class BaiduNetdiskFoldersOut(BaseModel):
+    """网盘目录懒加载响应;truncated=True 时前端提示「目录过大,分批浏览」。"""
+
+    list: list[BaiduNetdiskFolderOut]
+    truncated: bool = False
+
+
+class BaiduTaskCreateIn(BaseModel):
+    """新建备份任务(§5.2):target_folder_id 不传 = 项目根(自动创建承接夹)。"""
+
+    source_dir: str = Field(..., min_length=1, max_length=1024, description="网盘目录绝对路径")
+    project_id: uuid.UUID
+    target_folder_id: uuid.UUID | None = None
+
+
+class BaiduTaskOut(BaseModel):
+    """任务对象(§3.1/§5.2;queued/eta_seconds 等为接口派生,前端契约对齐 WP2)。"""
+
+    id: uuid.UUID
+    source_dir: str
+    project_id: uuid.UUID
+    project_name: str | None = None
+    target_folder_id: uuid.UUID | None = None
+    target_folder_name: str | None = None      # NULL = 目标夹已删除(UI 显示「(已删除)」)
+    target_auto_created: bool = False
+    status: str                                 # enumerating/running/completed/cancelled/failed
+    queued: bool = False                        # 派生态派生:活动中但当前无 runner 实际推进
+    fail_reason: str | None = None
+    cancel_requested: bool = False
+    total_files: int | None = None
+    done_files: int | None = None
+    failed_files: int | None = None
+    skipped_files: int | None = None
+    cancelled_files: int | None = None
+    total_bytes: int | None = None
+    done_bytes: int = 0
+    speed_bps: int = 0
+    eta_seconds: int | None = None              # speed_bps<=0 → None(「估算中」)
+    retryable_failed_files: int | None = None   # failed 且 non_retryable=false 行数
+    created_at: datetime
+    updated_at: datetime
+
+
+class BaiduTasksPage(BaseModel):
+    """任务分页(ORDER BY created_at DESC, id DESC 稳定排序,§5.2)。"""
+
+    items: list[BaiduTaskOut]
+    total: int
+
+
+class BaiduTaskFileOut(BaseModel):
+    """manifest 行;target_path = 行级目录回退任务级目录 + rel_path 动态拼装(§5.2)。"""
+
+    id: uuid.UUID
+    fs_id: int
+    source_path: str
+    source_size: int
+    rel_path: str
+    target_path: str | None = None             # 皆 NULL = 目标已删除(UI 回退源路径+标注)
+    status: str
+    overwrite: bool = False
+    bytes_done: int = 0
+    attempts: int = 0
+    last_error: str | None = None
+    non_retryable: bool = False
+    asset_id: uuid.UUID | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BaiduTaskFilesPage(BaseModel):
+    items: list[BaiduTaskFileOut]
+    total: int
+
+
+class BaiduCancelOut(BaseModel):
+    """cancel 202 响应:finalized=true=API 已直接终态化,false=交 worker 消费(§5.2)。"""
+
+    finalized: bool
+
+
+class BaiduReviveOut(BaseModel):
+    """复活型操作(retry-failed/单文件 retry/overwrite)202 响应。"""
+
+    finalized: bool = True
+    status: str                                 # 复活后的目标状态(enumerating/running)

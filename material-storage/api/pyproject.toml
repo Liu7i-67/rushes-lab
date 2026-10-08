@@ -24,6 +24,8 @@ dependencies = [
     "openfga-sdk>=0.7",
     # auth / OIDC(#154:OIDC 为 hand-rolled httpx + provider 配置,无 authlib)
     "python-jose[cryptography]>=3.3",
+    # 百度网盘绑定 token 落库加密(方案 §5.1 Fernet;python-jose 间接带入,须显式声明)
+    "cryptography>=42",
     # 本地账号密码(#149 登录 / #150 管理后台临时密码 hash):argon2id(不用 passlib,停维护)
     "argon2-cffi>=23.1",
     # 工具

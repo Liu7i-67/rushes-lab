@@ -9,6 +9,11 @@ tasks:
   - generate_livp_thumbnail(asset_id):iOS Live Photo(.livp = zip)→ 静态图 thumbnail
     + 实况短片 H.264 转码(实况预览)
   - mark_expired_approvals:cron 扫已过期 approval,改 status
+  - baidu_backup_run(task_id, expected_seq):百度网盘备份导入(方案 §6;per-function
+    timeout=3600/max_tries=1 —— 不设 48h 级超时,in-progress TTL 按全部 function 的
+    最大超时计算;55min 接力模式续跑)
+  - sweep_stalled_baidu_tasks:cron 扫无租约/派发超时的百度任务(per-cron timeout=300),
+    急停 flag/cancel_requested/48h 感知 + 接管派发 + 30d 孤儿清理
 """
 from __future__ import annotations
 
@@ -641,9 +646,18 @@ def _build_redis_settings() -> RedisSettings:
 
 # cron schedule: 每 5min(/5 0..55)跑一次 mark_expired_approvals
 from arq.cron import cron  # noqa: E402
+from arq.worker import func  # noqa: E402
+
+from app.workers.baidu_backup import (  # noqa: E402
+    baidu_backup_run,
+    sweep_stalled_baidu_tasks,
+)
 
 _CRON_JOBS = [
     cron(mark_expired_approvals, minute=set(range(0, 60, 5))),
+    # 百度任务 sweeper(方案 §6):每 5min;per-cron timeout=300(低于百度任务
+    # 的 3610s,不影响全局 in-progress TTL)
+    cron(sweep_stalled_baidu_tasks, minute=set(range(0, 60, 5)), timeout=300),
 ]
 
 
@@ -653,6 +667,9 @@ class WorkerSettings:
         generate_video_thumbnail,
         generate_livp_thumbnail,
         mark_expired_approvals,
+        # 百度备份导入(方案 §6):timeout=3600/max_tries=1 per-function 覆盖;
+        # 55min 接力模式续跑,重试语义由自家状态机 + 租约接管实现
+        func(baidu_backup_run, timeout=3600, max_tries=1),
     ]
     cron_jobs = _CRON_JOBS
     redis_settings = _build_redis_settings()

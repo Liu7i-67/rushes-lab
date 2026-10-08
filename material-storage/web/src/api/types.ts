@@ -13,6 +13,8 @@ export interface Me {
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
   must_change_password: boolean;
+  // 百度网盘备份(方案 §5.2):功能开关,控制用户菜单入口显隐
+  baidu_backup_enabled: boolean;
 }
 
 export interface AdminBrief {
@@ -222,4 +224,86 @@ export interface NotificationsList {
   items: NotificationItem[];
   total: number;
   unread_count: number;
+}
+
+// ─── 百度网盘备份(方案 §5.2;/api/v1/baidu/backup/*)─────────────────────────
+export type BaiduBindingStatus = 'active' | 'expired' | 'unbound';
+
+/** GET /backup/binding → 绑定状态(§5.2 三字段;身份字段为方案 §5.1 uinfo 落库的展示扩展) */
+export interface BaiduBinding {
+  bound: boolean;
+  status: BaiduBindingStatus;
+  expires_at: string | null;
+  // bind 时 uinfo 落库的百度账号身份;nickname 缺失时 UI 回退 uid。可选:兼容仅含三字段的响应
+  nickname?: string | null;
+  baidu_uid?: string | null;
+}
+
+/** GET /backup/netdisk/folders → 网盘目录(仅目录,懒加载一层) */
+export interface BaiduNetdiskFolder {
+  path: string;   // 绝对路径(以 / 开头)
+  name: string;
+}
+
+export type BaiduTaskStatus = 'enumerating' | 'running' | 'completed' | 'cancelled' | 'failed';
+
+export interface BaiduBackupTask {
+  id: string;
+  source_dir: string;                    // 网盘所选目录绝对路径
+  project_id: string;
+  project_name?: string | null;          // 列表/明细展示用(后端 enrich)
+  target_folder_id: string | null;       // 被删后置 NULL(SET NULL),UI 显示「(已删除)」
+  target_folder_name?: string | null;    // 后端 enrich;NULL=目标夹已删除
+  target_auto_created?: boolean;         // true=自动创建的承接夹(项目根语义)
+  status: BaiduTaskStatus;
+  // 接口派生字段(§3.1):活动中但当前无 runner 实际推进(排队中)——true 时状态 Tag 显示「排队中」
+  queued?: boolean;
+  fail_reason: string | null;
+  total_files: number | null;
+  done_files: number | null;
+  failed_files: number | null;
+  skipped_files: number | null;
+  cancelled_files?: number | null;
+  total_bytes: number | null;
+  done_bytes: number;
+  speed_bps: number;
+  // 接口层按 speed_bps 计算;speed_bps<=0 → null,UI 显示「估算中」(§6)
+  eta_seconds: number | null;
+  // failed 任务中 non_retryable=false 的行数(「全部重试失败」按钮可用性;缺失时回退 failed_files>0)
+  retryable_failed_files?: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BaiduTasksPage {
+  items: BaiduBackupTask[];
+  total: number;
+}
+
+export type BaiduFileStatus =
+  | 'pending'
+  | 'skipped_exists'
+  | 'importing'
+  | 'success'
+  | 'failed'
+  | 'cancelled';
+
+export interface BaiduTaskFile {
+  id: string;
+  fs_id: number;
+  source_path: string;                   // 原网盘绝对路径
+  source_size: number;
+  rel_path: string;                      // 相对 source_dir
+  // 接口拼装的预计导入路径;NULL=目标夹已删除(UI 回退源路径并标注「(目标已删除)」)
+  target_path: string | null;
+  status: BaiduFileStatus;
+  last_error: string | null;
+  non_retryable: boolean;                // 结构性失败:重试置灰、retry-failed 排除
+  overwrite?: boolean;                   // 覆盖导入标记(清除-再导入)
+  attempts: number;
+}
+
+export interface BaiduTaskFilesPage {
+  items: BaiduTaskFile[];
+  total: number;
 }

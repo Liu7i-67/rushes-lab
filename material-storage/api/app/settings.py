@@ -118,6 +118,42 @@ class Settings(BaseSettings):
         """host + from_email 齐备才算启用;其余字段缺省不影响发送(匿名中继场景)。"""
         return bool(self.smtp_host and self.smtp_from_email)
 
+    # ─── 百度网盘备份导入(方案 rushes-spec/material-storage/baidu-netdisk-backup-plan.md)──
+    # 功能总开关(方案 §5.2):默认 false,未启用时 /api/v1/baidu/* 统一 404,
+    # 前端菜单显隐读 /auth/me 的 baidu_backup_enabled;回滚急停也走此开关
+    baidu_backup_enabled: bool = False
+    # 百度开放平台应用凭证(方案 §8:hh2 .env 注入,不入库不入仓)
+    baidu_app_key: str | None = Field(None, description="百度开放平台 AppKey")
+    baidu_app_secret: str | None = Field(None, description="百度开放平台 SecretKey")
+    # 绑定 token 的 Fernet 加密密钥材料(方案 §5.1);留空 = 由 sha256(session_jwt_secret)
+    # 派生(启动打 warning:跨用途复用 JWT 密钥应被运维感知,生产建议显式配置)
+    baidu_token_enc_key: str | None = Field(None, description="Fernet 密钥材料;留空回退派生")
+    # ── 时延常量(方案 §10 批次 3 收进 Settings;生产默认,集成测试注入秒级值)──
+    baidu_relay_after_s: int = 3300       # 55min 接力检查点(约束:RELAY+300 ≤ 3600 arq timeout)
+    baidu_round_timeout_s: int = 172800   # 48h 单轮活跃时间上限(轮起点判停)
+    baidu_lease_s: int = 60               # runner 租约(心跳)时长;≥ 2x 检查点周期
+    baidu_sweep_throttle_s: int = 600     # sweeper 接管节流(dispatched_at 超此时长才可派发)
+    baidu_part_size_bytes: int = 16 * 1024 * 1024  # multipart 分片(下限 5MiB,见校验)
+
+    def validate_baidu_settings(self) -> None:
+        """百度备份配置的启动断言(方案 §6)——配置关系错误宁可启动失败,不带病运行。
+
+        - RELAY_AFTER_S + 300 ≤ 3600:接力必须能在 arq job timeout(3600s)内触发;
+          违反则接力永不触发、任务每小时被硬断退化到 sweeper 接管,噪音无告警
+        - PART_SIZE_BYTES ≥ 5MiB:S3/MinIO complete 强制除末片外每片 ≥5MiB(EntityTooSmall)
+        """
+        assert self.baidu_relay_after_s + 300 <= 3600, (
+            f"BAIDU_RELAY_AFTER_S={self.baidu_relay_after_s} 必须满足 +300 ≤ 3600"
+            "(接力须在 arq job timeout 内触发,见方案 §6)"
+        )
+        assert self.baidu_part_size_bytes >= 5 * 1024 * 1024, (
+            f"BAIDU_PART_SIZE_BYTES={self.baidu_part_size_bytes} 必须 ≥ 5MiB"
+            "(S3/MinIO complete 除末片外每片 ≥5MiB,见方案 §6)"
+        )
+        assert min(
+            self.baidu_round_timeout_s, self.baidu_lease_s, self.baidu_sweep_throttle_s,
+        ) > 0, "百度备份时延常量(ROUND_TIMEOUT/LEASE/SWEEP_THROTTLE)必须为正数"
+
 
 # 单例(import 时 lazy 创建)
 _settings: Settings | None = None

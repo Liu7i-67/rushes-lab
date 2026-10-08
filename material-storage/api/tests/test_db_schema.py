@@ -3,7 +3,18 @@
 不连真实 DB,只 verify model 定义有效(metadata create / drop OK)。
 集成 test 需要起 PG + 跑 migration,留 Phase B-3 CI。
 """
-from app.db.tables import Asset, AuditEvent, Base, Folder, Organization, Project, User
+from app.db.tables import (
+    Asset,
+    AuditEvent,
+    BaiduBackupTask,
+    BaiduBackupTaskFile,
+    BaiduBinding,
+    Base,
+    Folder,
+    Organization,
+    Project,
+    User,
+)
 
 
 def test_all_tables_in_metadata() -> None:
@@ -22,6 +33,9 @@ def test_all_tables_in_metadata() -> None:
         "notifications",
         "project_grant_templates",
         "project_grant_template_items",
+        "baidu_bindings",
+        "baidu_backup_tasks",
+        "baidu_backup_task_files",
     }
 
 
@@ -64,6 +78,46 @@ def test_user_username_column() -> None:
     assert col.unique is True
     assert col.nullable is True
     assert {i.name for i in User.__table__.indexes} >= {"ix_users_username"}
+
+
+# ─── 百度网盘备份三表(方案 §4,migration 20261008_0013)────────────────────────
+
+def test_baidu_binding_unique_user() -> None:
+    """每 user 至多一条绑定(方案 §4:unique — one binding per user)。"""
+    constraints = {c.name for c in BaiduBinding.__table__.constraints}
+    assert "uq_baidu_binding_user" in constraints
+    col = BaiduBinding.__table__.c.baidu_uid
+    assert col.nullable is False  # NOT NULL 防线:uinfo 失败 → 绑定整体失败
+
+
+def test_baidu_task_active_partial_unique_index() -> None:
+    """同绑定同时至多一个活动中任务(partial unique index 硬兜底,方案 §4)。"""
+    indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
+    idx = indices.get("uq_baidu_task_active")
+    assert idx is not None
+    assert idx.unique is True
+    # partial 谓词:WHERE status IN ('enumerating','running')
+    where_sql = str(idx.dialect_options["postgresql"]["where"])
+    assert "enumerating" in where_sql and "running" in where_sql
+
+
+def test_baidu_task_file_relpath_unique() -> None:
+    """manifest 唯一键绑 (task_id, rel_path)(方案 §4:绑 rel_path 不绑 source_path)。"""
+    constraints = {c.name for c in BaiduBackupTaskFile.__table__.constraints}
+    assert "uq_baidu_task_file_relpath" in constraints
+
+
+def test_baidu_task_file_fk_ondelete() -> None:
+    """FK ondelete 照方案 §4:task_id→CASCADE;asset_id/target_folder_id→SET NULL。"""
+    fks = {fk.parent.name: fk for fk in BaiduBackupTaskFile.__table__.foreign_keys}
+    assert fks["task_id"].ondelete == "CASCADE"
+    assert fks["asset_id"].ondelete == "SET NULL"
+    assert fks["target_folder_id"].ondelete == "SET NULL"
+    task_fks = {fk.parent.name: fk for fk in BaiduBackupTask.__table__.foreign_keys}
+    assert task_fks["user_id"].ondelete == "RESTRICT"
+    assert task_fks["binding_id"].ondelete == "RESTRICT"
+    assert task_fks["project_id"].ondelete == "RESTRICT"
+    assert task_fks["target_folder_id"].ondelete == "SET NULL"
 
 
 # ─── 数据库层唯一约束(F3,容器测试)────────────────────────────────────────────

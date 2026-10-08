@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -114,8 +115,8 @@ class Folder(Base, TimestampMixin):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     minio_prefix: Mapped[str] = mapped_column(String(1024), nullable=False)
-    # Deprecated(Phase B-2 next iter):OpenFGA model 不再区分 sensitive/普通 folder type;
-    # 字段保留为 future flexibility(可作业务标签),但不驱动权限。可下个 migration drop。
+    # 权限语义判定字段:仍被 routers(folders/assets 等)用于 OpenFGA object_type 选择,
+    # 是敏感目录权限语义的判定地基。禁止 drop(百度网盘备份导入功能依赖)。
     is_sensitive: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="folders")
@@ -406,4 +407,183 @@ class ProjectGrantTemplateItem(Base):
         UniqueConstraint(
             "template_id", "subject_kind", "subject_id", name="uq_pgt_item_subject",
         ),
+    )
+
+
+class BaiduBinding(Base, TimestampMixin):
+    """百度网盘绑定(方案 §4)— 每 user 一条;token 双列 Fernet 密文。
+
+    - status:active / expired(refresh 确认失效或密钥轮换解密失败)/ unbound
+      (软解绑:密文已清空,行保留供任务历史 FK 引用)
+    - baidu_uid NOT NULL:uinfo 失败/缺 uid → 本次绑定整体失败(502)——否则
+      NULL==NULL 会让真换绑被误判"同账号",绕过断点作废防线产出跨账号静默损坏
+    - last_authorized_at:仅 bind/重授权(调 uinfo)时刷新 —— 换绑甄别锚点之一
+    - token_rotated_at:任何 token 覆盖写入(绑定/重授权/refresh)都刷新 ——
+      403 dlink 甄别锚点(防仅 refresh 过的同账号任务被误判换绑)
+    """
+    __tablename__ = "baidu_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    access_token_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    refresh_token_enc: Mapped[str] = mapped_column(Text, nullable=False)
+    baidu_uid: Mapped[str] = mapped_column(String(32), nullable=False)
+    nickname: Mapped[str | None] = mapped_column(String(128))
+    access_token_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="active", server_default="active", nullable=False
+    )
+    last_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    token_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # one binding per user(方案 §4);显式命名供 test_db_schema 断言
+        UniqueConstraint("user_id", name="uq_baidu_binding_user"),
+    )
+
+
+class BaiduBackupTask(Base, TimestampMixin):
+    """百度网盘备份任务(方案 §4)— 单绑定同时至多一个活动中任务。
+
+    状态:enumerating(清单准备中)→ running → completed / cancelled / failed。
+    时间戳谓词必须显式含 NULL 分支(SQL 中 NULL 参与比较恒为假):任务在
+    「创建后未派发」「派发后未认领」两窗口 dispatched_at / runner_id / lease_until
+    均为 NULL(方案 §4 状态谓词)。
+    """
+    __tablename__ = "baidu_backup_tasks"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    binding_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("baidu_bindings.id", ondelete="RESTRICT"), nullable=False
+    )
+    # 创建时从 binding 快照:换绑甄别(409 前置与 not_found 文案)统一比较此快照
+    # 与当前 binding.baidu_uid(§4)
+    bound_baidu_uid: Mapped[str | None] = mapped_column(String(32))
+    source_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False
+    )
+    # 目标夹被删后置 NULL,明细展示「(已删除)」(方案 §4)
+    target_folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL")
+    )
+    target_auto_created: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default="enumerating", server_default="enumerating", nullable=False,
+        index=True,
+    )
+    cancel_requested: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    # user_cancel / binding_replaced(急停走 fail_reason=feature_disabled,不经此列)
+    cancel_reason: Mapped[str | None] = mapped_column(String(64))
+    retry_count: Mapped[int] = mapped_column(
+        default=0, server_default="0", nullable=False
+    )  # 复活次数(audit dedup_key 轮次维度)
+    # 枚举完成标记:runner 枚举完成置 running 时同事务置位;复活时 false→重枚举
+    enum_done: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    # 聚合口径一律由 manifest 行状态 GROUP BY 重算,不做增量维护(方案 §6)
+    total_files: Mapped[int | None]
+    done_files: Mapped[int | None]
+    failed_files: Mapped[int | None]
+    skipped_files: Mapped[int | None]
+    cancelled_files: Mapped[int | None]
+    total_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    done_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
+    # 滚动吞吐(锚点差分),ETA=剩余字节/此值;≤0 时接口 ETA 返 null 显示「估算中」
+    speed_bps: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
+    speed_anchor_bytes: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )
+    speed_anchor_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    runner_id: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 即心跳
+    # 派发版本号:每次派发自增,job 按 expected_seq 认领(互斥唯一凭证之一)
+    lease_seq: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    # 最近派发时刻:sweeper 节流(NULL=从未派发,必须被接管)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 轮起点(两次复活之间):认领 COALESCE 保留、仅复活派发与并发门控退出复位
+    # NULL —— 48h 判停依据(从未认领=NULL 不参与判停)
+    round_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # binding_expired / timeout / file_failed / enum_rate_limited / enum_failed /
+    # manifest_too_large / feature_disabled(方案 §4 取值域)
+    fail_reason: Mapped[str | None] = mapped_column(String(512))
+
+    __table_args__ = (
+        # 同绑定同时最多一个活动中任务(应用层检查之外的硬兜底,撞唯一约束统一转 409)
+        Index(
+            "uq_baidu_task_active", "binding_id", unique=True,
+            postgresql_where=text("status IN ('enumerating','running')"),
+        ),
+    )
+
+
+class BaiduBackupTaskFile(Base, TimestampMixin):
+    """任务 manifest 行(方案 §4)— 不落 MinIO 前先建 DB 行。
+
+    断点续传三元组 (minio_upload_id, minio_bucket, minio_key) 在 create_multipart
+    时同事务落定(abort 按三元组直读,防目标夹被删后 key 无法重建);dlink 仅存
+    原始值不拼 access_token,8h 缓存由 dlink_fetched_at/dlink_expires_at 记账。
+    """
+    __tablename__ = "baidu_backup_task_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("baidu_backup_tasks.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    fs_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_path: Mapped[str] = mapped_column(Text, nullable=False)  # 仅展示用,不进索引
+    source_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # 相对 source_dir;唯一键绑 (task_id, rel_path) —— source_dir 创建时定长,
+    # rel_path ≤600 足以唯一定位行(绑 source_path 会因 source_dir 变长误伤浅目录长文件)
+    rel_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # 导入时按需建出的目录链(展示"预计导入路径"用)
+    target_folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("folders.id", ondelete="SET NULL")
+    )
+    asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL")
+    )
+    # pending / skipped_exists / importing / success / failed / cancelled
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", nullable=False,
+        index=True,
+    )
+    overwrite: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )  # 覆盖导入标记(清除-再导入,导入时复查 can_admin)
+    bytes_done: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default="0", nullable=False
+    )  # 已完成 multipart parts 的累计字节(断点偏移)
+    # MinIO multipart 会话(断点续传载体);VARCHAR 不定长 → Text(PG 语义等价)
+    minio_upload_id: Mapped[str | None] = mapped_column(Text)
+    minio_bucket: Mapped[str | None] = mapped_column(String(63))   # 列宽对齐 assets.minio_bucket
+    minio_key: Mapped[str | None] = mapped_column(String(1024))
+    attempts: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    last_error: Mapped[str | None] = mapped_column(String(512))
+    # not_found 类终态:retry-failed 排除、单文件 retry 409、UI 置灰
+    non_retryable: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    dlink: Mapped[str | None] = mapped_column(Text)
+    dlink_fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    dlink_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "rel_path", name="uq_baidu_task_file_relpath"),
     )

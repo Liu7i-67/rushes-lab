@@ -155,6 +155,8 @@ async def me(
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)
         "password_set": user.password_hash is not None,
         "must_change_password": bool(user.must_change_password and user.password_hash is not None),
+        # 百度网盘备份(方案 §5.2):菜单显隐开关(批次 4 前端依赖;读 settings,与用户无关)
+        "baidu_backup_enabled": get_settings().baidu_backup_enabled,
     }
 
 

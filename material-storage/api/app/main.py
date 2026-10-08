@@ -20,6 +20,7 @@ from app.routers import (
     approvals,
     assets,
     auth,
+    baidu_backup,
     directory,
     folders,
     groups,
@@ -59,6 +60,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.services.local_auth import LocalAuthService
     app.state.local_auth = LocalAuthService(settings, app.state.redis)
 
+    # 百度网盘备份(方案批次 1):启动断言 + token Fernet 加密 + 网盘 API 客户端(httpx 单例)
+    settings.validate_baidu_settings()
+    from app.services.baidu_client import BaiduNetdiskClient
+    from app.services.token_crypto import TokenCryptoService
+    app.state.token_crypto = TokenCryptoService(settings)
+    app.state.baidu_client = BaiduNetdiskClient(settings)
+
     log.info("startup complete — permissions + presign + auth + arq + redis ready")
 
     yield
@@ -68,6 +76,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.auth.close()
     await app.state.arq_pool.aclose()
     await app.state.redis.aclose()
+    await app.state.baidu_client.close()
 
 
 class _SpaStaticFiles(StaticFiles):
@@ -128,6 +137,8 @@ def create_app() -> FastAPI:
     app.include_router(maintenance.router, prefix="/api/v1/maintenance", tags=["maintenance"])
     app.include_router(request_links.router, prefix="/api/v1/request-links", tags=["request-links"])
     app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
+    # 百度网盘备份(方案 §5.2;受 BAIDU_BACKUP_ENABLED 门控,未启用统一 404)
+    app.include_router(baidu_backup.router, prefix="/api/v1/baidu", tags=["baidu-backup"])
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict[str, str]:
