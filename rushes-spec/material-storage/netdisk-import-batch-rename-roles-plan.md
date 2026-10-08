@@ -53,7 +53,7 @@ class AssetBatchPrefixIn(BaseModel):
 - **跨页保留选中**:删两处翻页清空(compact :568、桌面 :924);Table `rowSelection`(:881-884)加 `preserveSelectedRowKeys: true`,compact 卡片(:403、:505)同规则;**切 folder 仍清空**(:106);antd 内置表头全选在 preserve 下天然只动当前页,**勿改**;自绘全选(:814、:505)改为当前页 id 并/差集;
 - **三个既有批量操作切 `selectedIds` 全量口径**(现 `selectedAssets` 只含当前页 :115-118,跨页后「显示 N 实际只动当前页」):下载(:160)/删除(:164)遍历 id;未加载 id 无 Asset 对象——下载占位名 `asset_<id前8位>.<content_type 推断扩展名>`(回落 `.bin`),403 无对象计入「需申请」聚合计数,失败 toast 按 id 聚合;删除的空尾页回退判定(:172-174)同步改写;
 - **BulkTagModal 跨页合并后端化**:现状前端用已加载行合并(:955-967)而 `assets.py:555-556` 是整条替换,跨页未加载 id 的旧标签会被清掉。`AssetMetaUpdateIn` 加 `labels_mode: Literal["merge","replace"] = "replace"`(merge = DB 现值在前取并集,顺序写死);批量路径传 merge;`types.ts`/`hooks.ts` 同步;BulkTagModal 清单标注「已选 N 个(清单为当前页已加载项)」;`AssetSummaryPanel`(:938)仅**桌面批量态**加注「(当前页)」——该组件三处复用(compact 单资产详情 :672、compact 文件夹管理 :686),无条件加注会泄漏到另两态;
-- 批量栏加「批量前缀」按钮(桌面+compact,compact 栏在 :578-619):disabled 门控随打标 = `folder.my_can_upload`(:835-837 / :600);Modal = action 单选 + prefix 输入 + **预览**(当前页选中前 5 条改名前后对照,注明「预览仅当前页,共已选 N」)+ 确认;提交按 selectedIds 全量,>1000 前端按批顺序调用(任一批失败即中止),完成后刷新并清空;批量下载跨页 >20 加确认。
+- 批量栏加「批量前缀」按钮(桌面+compact,compact 栏在 :578-619):disabled 门控随打标 = `folder.my_can_upload`(:835-837 / :600);Modal = action 单选 + prefix 输入 + **预览**(当前页选中前 5 条改名前后对照,注明「预览仅当前页,共已选 N」)+ 确认;提交按 selectedIds 全量,>1000 前端按批顺序调用(任一批失败即中止,toast 报已完成批次的 renamed/skipped 计数并**保留剩余选中**供重试),完成后刷新并清空;批量下载跨页 >20 加确认。
 
 ### 1.3 边界与取舍
 
@@ -92,14 +92,15 @@ type organization
 
 - `GroupCreateIn`(:312)/ `GroupUpdateIn`(:317)加 `can_create_project: bool = False`;create(:372)/update(:403)按 flag 写/删 `organization#project_creator` 的 `group:<gid>#member` tuple——**tuple 读写封装为 PermissionsService 小方法**(add/remove_org_relation),路由不摸 `_client`;删 stale 吞 `is_not_exists_error`(`permissions.py:92-102`);**组删除时顺手删该 tuple**;
 - `AdminGroupsPage` 的 `GroupFormModal`(:208-221)加 Switch「允许组成员新建项目」+ 说明文案(建后自动成为该项目管理员);列表加徽标;
-- **flag 读回**:组**列表**接口(directory.py 无组详情路由,编辑弹窗数据来自列表行 `AdminGroupsPage.tsx:171`)追加一次 `read(object=organization:<tenant_key>)`、过滤 project_creator tuples,`DirectoryGroupOut` 加 `can_create_project` 字段回显(列表徽标与编辑回显的数据源;组管理页仅系统 admin 访问,一次 FGA read 开销可忽略);
+- **flag 读回**:组**列表**接口(directory.py 无组详情路由,编辑弹窗数据来自列表行 `AdminGroupsPage.tsx:171`)追加一次**定向 read**(`object=organization:<tenant_key>, relation=project_creator`)拿全部置位组,`DirectoryGroupOut` 加 `can_create_project` 字段回显——**必须带 relation 过滤**:不带 relation 的全量 read 会撞 OpenFGA read 单页上限(organization 上每个启用用户一条 `#member` tuple,`directory.py:146/:239`,百人级单页必漏);定向结果只有置位组、量小单页即回;
+- 组 create/update 的 tuple 写失败:**尽力而为 + log.warning**(先例 `directory.py:143-150`),不 500——flag 读回展示的是真实 tuple 状态,管理员见「开着却显示关」重试 PATCH 即补写;
 - audit:`group_created` / `group_updated` details 增 `can_create_project`,不新增 event_type;
 - 开关仅系统 admin 可操作(组 CRUD 本就 require_system_admin),提权面不扩大。
 
 ### 2.3 守门与弱门放宽
 
 - `deps.py` 新增 `require_project_creator` / `get_is_project_creator`——**语义统一为 `is_org_admin ∨ check(project_creator)`**(系统 admin 恒可建项目,不受组 flag 影响;check 写法仿 `is_org_admin` `permissions.py:444-451`;default org 缺失行为对齐 `deps.py:205-206` / `:229-230`);
-- `create_project`(`projects.py:56`)守门换 `require_project_creator`;`admin_user_id` 必填与 initial_grants 校验(:98-138)/直通写(:167-194)**不动**——组长自建默认 admin_user_id = me.id(NewProjectModal :53)、bucket 默认 ms-dev;
+- `create_project`(`projects.py:56`)守门换 `require_project_creator`,且**非系统 admin 的创建者强制忽略 `payload.organization_id`**(置 None 走 user org/default 解析,`projects.py:80-96`;该字段可选且前端从不传——不收口则 creator 可 API 直调在任意 org 下建项目并 bootstrap 该 org 关系,属本次新开的提权口);`admin_user_id` 必填与 initial_grants 校验(:98-138)/直通写(:167-194)**不动**——组长自建默认 admin_user_id = me.id(NewProjectModal :53)、bucket 默认 ms-dev;
 - **弱门放宽(必改,否则零项目的新组长填不了表单)**:
   - `GET /users`(`users.py:40`)、`GET /groups`(`groups.py:37`)的 require_admin(系统 admin 或任一项目 can_admin)对零项目组长 403 → 并入 is_project_creator(SubjectPicker/UserPicker 候选来源);
   - `GET /admin/grant-templates`(`admin.py:317`)读端点同样放宽;**写端点 POST/PATCH/DELETE 保持 require_system_admin**。
@@ -135,15 +136,15 @@ model test(组员 ✓ / 非组员 ✗ / 移出组 ✗);组 CRUD flag → tuple �
 - 默认模板 stale 条目(user 已删/停用、group 已删)**跳过 + log.warning,不阻塞**——过期默认模板不能卡死建项目;
 - **50 上限只拦 payload**(helper 补写不占上限,防合法创建被 422);
 - audit:默认模板来源记 `via: "default_template"`(手选仍 initial_grants),幂等跳过不写;
-- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`:读默认模板 → 主体存在性过滤(stale 跳过+log)→ `read` 项目现有 tuples **求差集** → **批量写**(OpenFGA 单次 write ≤100 tuple 分块;分块写先例 `revoke_user_completely` `permissions.py:418-422`(BATCH=50)、多 tuple 单写先例 `bootstrap_project` :189-204——刷新场景若逐条写会是万次级 HTTP 调用)→ 逐条 audit。create 侧:直通写完成后调用(read 差集天然排除 payload 已写条目);刷新侧:直接调用。重复调用差集为空、零写入,幂等。本节与 §3.2 同一实现,勿写两份。
+- **共享 helper** `app/services/default_grants.py: apply_default_template_grants(...)`:读默认模板 → 主体存在性过滤(stale 跳过+log)→ `read` 项目现有 tuples(**翻页聚合**:OpenFGA read 单页有上限、project tuples 可超一页(payload 直通写后最多 200 条 + 既有授权),须跟 continuation_token 拉全——全库现无翻页先例,封装小工具 `read_all_tuples` 复用)→ 求差集 → **批量写**(单次 write ≤100 tuple 分块,先例 `revoke_user_completely` `permissions.py:418-422`(BATCH=50)、`bootstrap_project` :189-204;批量 write 撞 already exists 会**整批失败**,**逐块捕获 `is_already_exists_error` 按幂等成功跳过**(同 `add_project_member` :579 口径)——刷新场景若逐条写会是万次级 HTTP 调用)→ 逐条 audit。create 侧:直通写完成后调用(read 差集天然排除 payload 已写条目);刷新侧:直接调用。重复调用差集为空、零写入,幂等。本节与 §3.2 同一实现,勿写两份。
 
-**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区;有默认模板时提交区明示「创建后将自动合并默认模板的授权」(现有「仅预填,不锁定」类文案同步核改)——防「行内显式删掉的角色被默认模板 union 顶回」无感知。
+**前端**(NewProjectModal):删默认预选(:69-75 的 `defaultTemplate` / `effectiveTemplateId` 回退 / `effectiveRows` 预填),Select 默认「不使用模板」;显式选模板仍逐条预填初始权限区;有默认模板时提交区明示「创建后将自动合并默认模板的授权」(现有「仅预填,不锁定」类文案同步核改,含管理页副标题 `AdminGrantTemplatesPage.tsx:83`「仅预填,不进入授权链路」——默认模板直通后该描述不实)——防「行内显式删掉的角色被默认模板 union 顶回」无感知。
 
 **原则点名**:打破「后端不感知模板」原则,**仅默认模板例外**(须对 API/脚本直调生效、提交时取最新默认);非默认模板仍纯前端预填。
 
 ### 3.2 管理页「刷新默认权限」(存量项目按需补)
 
-- **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,数据源 = 项目列表**循环分页拉全量**——`GET /projects` 默认 limit=100 会静默截断(`projects.py:280`),且系统 admin 分支每项目一次 FGA 回路填 admins(`projects.py:231-236`),项目数百个时打开变慢、现网量级可接受;按项目名/编码搜);**勾选上限 100(= API 单批上限,超限禁止再勾并提示分批操作)**;确认调 API,结果按项目报 `{applied, skipped_stale}`;
+- **UI**(`AdminGrantTemplatesPage`):头部(:84 旁)加按钮;无默认模板 → disabled + tooltip;点击 Modal 内嵌 antd `Transfer`(showSearch,数据源 = 项目列表**循环分页拉全量**——`GET /projects` 默认 limit=100 会静默截断(`projects.py:280`),且系统 admin 分支每项目一次 FGA 回路填 admins(`projects.py:231-236`),项目数百个时打开变慢,现网量级可接受(可选优化:list_projects 加跳过 admins 填充的查询参数);按项目名/编码搜);**勾选上限 100(= API 单批上限,超限禁止再勾并提示分批操作)**;确认调 API,结果按项目报 `{applied, skipped_stale}`;
 - **API**:`POST /api/v1/admin/grant-templates/apply-default`,body `{project_ids: list[uuid](1..100)}`,`require_system_admin` → 逐项目调 §3.1 helper → `{results: [{project_id, applied, skipped_stale}], total_applied, total_skipped}`;
 - **语义写死:叠加不删**——helper read 差集后批量写(见 §3.1),只补缺失 (subject, role),已存在天然跳过;**不移除任何授权**(FGA tuple 无来源标记,对齐式收回必误伤手动授权,不做);模板改版删掉的角色需手动在成员抽屉撤;
 - 边界:project_ids 去重;项目不存在/跨 org → 400 指明;无默认模板 → 400(UI 已 disabled,API 兜底);audit 逐条 `project_member_added`(via: "default_template");
@@ -193,7 +194,7 @@ create 合并:用户三例逐条断言 / stale 条目跳过且创建成功 / via
 | 默认模板 stale 静默跳过 | 创建/刷新一致;模板编辑页已有 missing 标记引导清理 |
 | 放弃 org 派生 | 见 §0;存量不自动覆盖,刷新按需补 |
 | 批量前缀无 undo | add 逆操作 = remove,预览缓解 |
-| model 回滚纪律 | 回代码不回 model 无害;回 model 不回代码会炸(check unknown relation)——**同批回** |
+| model 回滚纪律 | **只回代码、不回 model**:authorization model 是 append-only 版本链,「回 model」须 push 去掉 relation 的新版本,而存量 project_creator tuple 在新 model 下 invalid 会让 read/check 异常——不存在干净的 model 回滚;回代码后 relation 不再被 check,tuple 残留无害 |
 
 ---
 
