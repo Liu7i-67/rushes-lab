@@ -1,12 +1,13 @@
 /**
  * /admin/grant-templates — 项目权限模板管理(方案 §4.4)。
  * 模板 = 保存的授权组合预设(一组 {主体, 角色});新建项目时选模板预填初始权限
- * (前端预填,后端不感知 — 提交走 initial_grants)。布局 / 门控照 AdminGroupsPage。
+ * (提交走 initial_grants)。PR-3 起默认模板例外:创建时由后端直通合并(不再前端预选),
+ * 头部「刷新默认权限」可为存量项目按需补(叠加不删)。布局 / 门控照 AdminGroupsPage。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
 } from 'antd';
-import { LayoutTemplate, Plus, Trash2 } from 'lucide-react';
+import { LayoutTemplate, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
   useMe, useGrantTemplates, useCreateGrantTemplate, useUpdateGrantTemplate,
@@ -17,6 +18,7 @@ import { useCompactViewport } from '../lib/use-viewports';
 import type { GrantEntry, GrantTemplate, Me, ProjectRole } from '../api/types';
 import { SubjectPicker, type Subject } from '../components/SubjectPicker';
 import { RoleChipGroup, RoleBadges } from '../components/RoleChipGroup';
+import { ApplyDefaultModal } from '../components/ApplyDefaultModal';
 
 export default function AdminGrantTemplatesPage() {
   const { data: me } = useMe();
@@ -36,7 +38,7 @@ export default function AdminGrantTemplatesPage() {
 
   return (
     <div className="ms-enter">
-      <TemplatesHeader me={me} />
+      <TemplatesHeader me={me} templates={data} />
       {isLoading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {[0, 1].map(i => (
@@ -64,8 +66,11 @@ export default function AdminGrantTemplatesPage() {
   );
 }
 
-function TemplatesHeader({ me }: { me: Me | undefined }) {
+function TemplatesHeader({ me, templates }: { me: Me | undefined; templates: GrantTemplate[] | undefined }) {
   const [open, setOpen] = useState(false);
+  const [applyOpen, setApplyOpen] = useState(false);
+  // PR-3: 无默认模板时「刷新默认权限」不可用(接口也会 400,这里提前 disabled)
+  const hasDefault = !!templates?.some(t => t.is_default);
   return (
     <div style={{
       display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
@@ -78,14 +83,26 @@ function TemplatesHeader({ me }: { me: Me | undefined }) {
           color: 'var(--ms-ink)', lineHeight: 1.1,
         }}>权限模板</h1>
         <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ms-ink-muted)' }}>
-          项目授权预设 — 新建项目时按模板预填初始权限;仅预填,不进入授权链路
+          项目授权预设 — 新建项目时按模板预填初始权限;默认模板的授权由创建流程自动合并
         </p>
       </div>
-      <Button type="primary" icon={<Plus size={14} strokeWidth={2} />}
-              onClick={() => setOpen(true)}>
-        新建模板
-      </Button>
+      <div style={{ display: 'flex', gap: 8, flexShrink: 0 }}>
+        <Tooltip title={hasDefault
+          ? '为存量项目补齐默认模板授权(叠加不删)'
+          : '需先设一个默认模板'}>
+          <Button icon={<RefreshCw size={14} strokeWidth={2} />}
+                  disabled={!hasDefault}
+                  onClick={() => setApplyOpen(true)}>
+            刷新默认权限
+          </Button>
+        </Tooltip>
+        <Button type="primary" icon={<Plus size={14} strokeWidth={2} />}
+                onClick={() => setOpen(true)}>
+          新建模板
+        </Button>
+      </div>
       {me && <TemplateFormModal me={me} open={open} onClose={() => setOpen(false)} />}
+      <ApplyDefaultModal open={applyOpen} onClose={() => setApplyOpen(false)} />
     </div>
   );
 }
@@ -180,7 +197,7 @@ function TemplateRow({ template, me }: { template: GrantTemplate; me: Me | undef
         <Button size="small" onClick={() => setEditOpen(true)}>编辑</Button>
         <Popconfirm
           title={`删除权限模板「${template.name}」?`}
-          description={`${template.items.length} 条授权条目将一并删除;已建项目不受影响(模板仅预填)`}
+          description={`${template.items.length} 条授权条目将一并删除;已建项目不受影响`}
           okText="删除" okButtonProps={{ danger: true }}
           onConfirm={doDelete}
         >
@@ -308,7 +325,7 @@ function TemplateFormModal({ open, onClose, template, me }: {
           <Input.TextArea rows={2} maxLength={1024} showCount />
         </Form.Item>
         <Form.Item name="is_default" label="设为默认模板" valuePropName="checked"
-                   extra="新建项目弹窗将自动选中该模板并预填;每 org 至多一个默认,设为默认会自动取消原默认">
+                   extra="默认模板的授权会在项目创建时自动合并(存量项目可用「刷新默认权限」补齐);每 org 至多一个默认,设为默认会自动取消原默认">
           <Switch checkedChildren="默认" unCheckedChildren="关" />
         </Form.Item>
         <Form.Item label="授权条目"

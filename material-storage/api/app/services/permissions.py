@@ -43,6 +43,10 @@ log = logging.getLogger(__name__)
 USER_DIRECT_RELATIONS: tuple[tuple[str, str], ...] = (
     ("organization", "admin"),
     ("organization", "member"),
+    # ("organization", "project_creator"):防御性补项(方案 §2.5)—— UI 只写
+    # 组主体,user 直授留口未启用;该 (type, relation) 未部署时
+    # revoke_user_completely 的 list_objects 会异常并被 continue 容错,不炸
+    ("organization", "project_creator"),
     ("department", "member"),
     ("group", "member"),
     ("project", "admin"),
@@ -181,6 +185,44 @@ class PermissionsService:
                 out.append(uid)
         return out
 
+    async def read_all_tuples(
+        self,
+        *,
+        object_type: str,
+        object_id: str,
+        relation: str | None = None,
+    ) -> list[tuple[str, str, str]]:
+        """读某 object 上全部 tuple,跟随 continuation_token 翻页聚合(方案 §3.1)。
+
+        OpenFGA read 单页有上限(全库现无翻页先例,此处封装首例):project 在
+        initial_grants 直通写后最多 50 条 * 4 角色 + 既有授权,可超一页,
+        不翻页会静默漏尾页。relation 传 None = 不过滤(项目现有 tuples 差集用);
+        定向读(组列表的 project_creator flag 回显)传 relation 后量小单页即回,
+        但同样走本工具免两套写法。
+
+        返回 (user, relation, object) 三元组列表。
+        """
+        from openfga_sdk.models import ReadRequestTupleKey
+        out: list[tuple[str, str, str]] = []
+        continuation_token: str | None = None
+        while True:
+            key = ReadRequestTupleKey(  # type: ignore[no-untyped-call]
+                object=f"{object_type}:{object_id}",
+                **({"relation": relation} if relation is not None else {}),
+            )
+            # SDK options 值类型是宽联合,dict 不变式下收窄成 dict[str, str] 会撞 mypy arg-type
+            opts: dict[str, int | str] = (
+                {"continuation_token": continuation_token} if continuation_token else {}
+            )
+            resp = await self._client.read(key, options=opts or None)
+            for t in resp.tuples:
+                out.append((t.key.user, t.key.relation, t.key.object))
+            token: str | None = resp.continuation_token or None
+            if token is None:
+                break
+            continuation_token = token
+        return out
+
     # ───────────────────────── bootstrap ──────────────────────────────────────
     async def bootstrap_project(
         self, *, project_id: str, organization_tenant_key: str, creator_user_id: str
@@ -278,6 +320,25 @@ class PermissionsService:
             ClientWriteRequest(
                 deletes=[
                     ClientTuple(user=subject, relation=role, object=f"project:{project_id}")
+                ]
+            )
+        )
+
+    async def add_project_subjects_bulk(
+        self, *, project_id: str, tuples: list[tuple[str, str]]
+    ) -> None:
+        """批量写 project tuples(方案 §3.1 默认模板直通用)。
+
+        tuples 为 (subject, role) 对;调用方保证单次 ≤100(OpenFGA write 上限内分块,
+        常量在 default_grants.py)。批量 write 是原子的:块内任一 tuple 已存在则
+        整块失败 —— 调用方捕获 is_already_exists_error 后将该块降级为逐条写,
+        直接整块跳过会丢块内其余合法 tuple。
+        """
+        await self._client.write(
+            ClientWriteRequest(
+                writes=[
+                    ClientTuple(user=subject, relation=role, object=f"project:{project_id}")
+                    for subject, role in tuples
                 ]
             )
         )
@@ -440,12 +501,72 @@ class PermissionsService:
             )
         )
 
+    async def add_org_relation(
+        self, *, organization_tenant_key: str, subject: str, relation: str
+    ) -> None:
+        """写 organization:<tenant_key> 上的 (subject, relation) tuple。
+
+        组级开关(organization#project_creator,方案 §2.2)用;subject 经
+        fmt_subject() 构造(如 group:<gid>#member)。重复写由调用方按
+        is_already_exists_error 幂等处理。
+        """
+        await self._client.write(
+            ClientWriteRequest(
+                writes=[
+                    ClientTuple(
+                        user=subject,
+                        relation=relation,
+                        object=f"organization:{organization_tenant_key}",
+                    )
+                ]
+            )
+        )
+
+    async def remove_org_relation(
+        self, *, organization_tenant_key: str, subject: str, relation: str
+    ) -> None:
+        """删 organization:<tenant_key> 上的 (subject, relation) tuple(方案 §2.2)。
+
+        被删 tuple 不存在(stale 重复撤销 / 组本就未置位)→ 幂等 no-op 吞
+        is_not_exists_error(同 remove_project_member 口径);其他异常上抛。
+        """
+        try:
+            await self._client.write(
+                ClientWriteRequest(
+                    deletes=[
+                        ClientTuple(
+                            user=subject,
+                            relation=relation,
+                            object=f"organization:{organization_tenant_key}",
+                        )
+                    ]
+                )
+            )
+        except Exception as e:
+            if not is_not_exists_error(e):
+                raise
+
     # ───────────────────────── admin 判定 helpers ────────────────────────────
     async def is_org_admin(self, *, user_id: str, organization_tenant_key: str) -> bool:
         """是否企业管理员(organization.admin)。"""
         return await self.check(
             user_subject=f"user:{user_id}",
             relation="admin",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_project_creator(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#project_creator check(组开关经 group#member 展开)。
+
+        这是 check 半边而已 —— 应用层守门 / /me 的完整口径 =
+        is_org_admin 或本方法(系统 admin 恒可建,方案 §2.3)。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="project_creator",
             object_type="organization",
             object_id=organization_tenant_key,
         )

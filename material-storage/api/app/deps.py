@@ -167,6 +167,7 @@ async def get_request_context(request: Request) -> dict[str, str | None]:
 # ─── admin enforce(polish — org admin OR 任意 project admin)─────────────────
 from fastapi import Depends as _Depends  # noqa: E402
 
+
 async def require_admin(
     request: Request,
     user: CurrentUser = _Depends(get_current_user),
@@ -235,3 +236,95 @@ async def get_is_system_admin(
         )
     except Exception:  # noqa: BLE001
         return False
+
+
+# ─── 组级「新建项目」权限(方案 §2.3/§2.4)────────────────────────────────────
+async def require_project_creator(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> CurrentUser:
+    """建项目守门 — POST /projects 用(替换原 require_system_admin)。
+
+    口径:is_org_admin 或 check(organization#project_creator)—— 系统 admin
+    恒可建(不受组 flag 影响),组开关成员经 group#member 自动展开。
+    default org 缺失行为对齐 require_system_admin(500);FGA 异常不上吞
+    (与 require_system_admin 同:部署顺序保证 model 先 push,见方案 §4)。
+    403 文案与 require_system_admin 区分(契约表)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if await perms.is_org_admin(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        return user
+    if not await perms.is_org_project_creator(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        raise HTTPException(
+            403,
+            "project creator permission required(仅系统管理员或被授权「可新建项目」的组成员可创建项目)",
+        )
+    return user
+
+
+async def get_is_project_creator(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> bool:
+    """返当前 user 是否可新建项目(不抛 403,bool;/me 与前端闸门用)。
+
+    与 require_project_creator 同口径(is_org_admin 或 project_creator check);
+    default org 缺失 → False、FGA 抖动 try/except → False(对齐
+    get_is_system_admin 惯例,FGA 抖动 / model 未 push 不致 /me 500)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        return False
+    _, tenant_key = org
+    try:
+        if await perms.is_org_admin(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return True
+        return await perms.is_org_project_creator(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def require_admin_or_project_creator(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> CurrentUser:
+    """弱门 — 原 require_admin 语义 或 project_creator(方案 §2.3 弱门放宽)。
+
+    GET /users、GET /groups 用:零项目组员(project_creator 置位)也要能拉
+    SubjectPicker / UserPicker 候选。project_creator 口径已含 is_org_admin,
+    故合取 = is_org_admin 或 project_creator check 或任意 project can_admin。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if org:
+        _, tenant_key = org
+        if await perms.is_org_admin(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return user
+        if await perms.is_org_project_creator(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return user
+    if await perms.has_any_project_admin(user_id=str(user.id)):
+        return user
+    raise HTTPException(403, "admin permission required")

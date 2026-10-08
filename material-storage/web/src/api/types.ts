@@ -9,6 +9,9 @@ export interface Me {
   organization_id: string | null;
   is_active: boolean;
   is_system_admin: boolean;
+  // PR-2: 可新建项目(口径 = is_org_admin ∨ 用户组 project_creator,含系统 admin)。
+  // 可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
+  is_project_creator?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -42,6 +45,8 @@ export interface DirectoryGroup {
   description: string | null;
   member_count: number;
   created_at: string;
+  // PR-2: 组级「新建项目」权限回显(新后端定向 read OpenFGA tuple;旧后端无此字段 → undefined 视为 false)
+  can_create_project?: boolean;
 }
 
 export interface DirectoryGroupMember {
@@ -88,6 +93,33 @@ export interface GrantTemplate {
   description: string | null;
   is_default: boolean;
   items: GrantTemplateItem[];
+}
+
+// ─── GET /api/v1/users(PR-2 起弱门放宽至 project creator)────────────────────
+/** /users 精简条目(镜像 users.UserBrief;只回 active 用户,停用走短 id 兜底)。*/
+export interface UserBrief {
+  id: string;
+  username: string | null;
+  open_id: string | null;
+  union_id: string | null;
+  name: string;
+  email: string | null;
+}
+
+// ─── 默认模板直通 / 刷新默认权限(PR-3)─────────────────────────────────────
+/** apply-default 单项目结果:成功项有 applied / skipped_stale,失败项只有 error(两种形状勿混用)。*/
+export interface ApplyDefaultProjectResult {
+  project_id: string;
+  applied?: number;        // 实际补写的授权条目数(read 差集后,幂等跳过不计)
+  skipped_stale?: number;  // 默认模板中主体已删/停用而跳过的条目数
+  error?: string;          // 仅失败项有(部分成功语义:单项目失败不阻塞其余)
+}
+
+/** POST /api/v1/admin/grant-templates/apply-default 响应。*/
+export interface ApplyDefaultResult {
+  results: ApplyDefaultProjectResult[];
+  total_applied: number;
+  total_skipped: number;
 }
 
 export interface Folder {

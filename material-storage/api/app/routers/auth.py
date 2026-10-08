@@ -128,8 +128,12 @@ async def me(
 
     # 查 is_system_admin(organization#admin)给前端判 NewProjectModal 是否可用
     is_system_admin = False
+    # is_project_creator 与 create_project 守门同口径(方案 §2.3/§2.4:
+    # is_org_admin 或 organization#project_creator check,组开关经 group#member
+    # 自动展开;故系统 admin 恒为 true,只在非 admin 时补查)
     from app.services.org import get_default_organization
     org = await get_default_organization(db)
+    is_project_creator = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -139,6 +143,16 @@ async def me(
             )
         except Exception:  # noqa: BLE001
             pass
+        # 系统 admin 直通 true(admin 蕴含于守门口径,不重复 check);
+        # 非 admin 才进下方 check 分支覆盖该值
+        is_project_creator = bool(is_system_admin)
+        if not is_system_admin:
+            try:
+                is_project_creator = await perms.is_org_project_creator(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
 
     return {
         "id": str(user.id),
@@ -150,6 +164,8 @@ async def me(
         "organization_id": str(user.organization_id) if user.organization_id else None,
         "is_active": user.is_active,
         "is_system_admin": is_system_admin,
+        # 组级「新建项目」权限(方案 §2.4):与守门同口径;前端闸门用
+        "is_project_creator": is_project_creator,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)
