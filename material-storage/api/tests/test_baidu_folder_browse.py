@@ -11,9 +11,9 @@ fixture 与 _h/_touch_binding/random_fsid helper)。list mock 在既有 BaiduScr
 (folder=1 服务端过滤口径)——若端点回归成 folders_only=True,文件行会被 mock 如实
 滤掉,两态断言即红(正是 F1 要拦的回归);另补两点:truncated 剧本化、list_dir
 调用留痕((path, folders_only) 元组,缓存命中计数与请求口径断言用)。
-seed 行按真实 xpan list 形态(调研脚本 scripts/task/baidu_file_list.py 实测口径):
-目录行 isdir=1、path 即完整路径;文件行 isdir=0、path 是父目录(不是完整路径)、
-名在 server_filename、size 为字节数。
+seed 行按真实 xpan list 形态:目录行 isdir=1、path 即完整路径;文件行 isdir=0、
+名在 server_filename、size 为字节数(文件条目的 path 字段实测亦为完整路径,
+与枚举侧口径一致;本 mock 刻意按父目录造数,以证明实现不依赖该字段)。
 
 测试函数 → 需求「测试功能点」映射(PM 验收对照):
   1. mock list 返回混合条目 → 端点两态条目:文件 is_dir=false/size_bytes 正确/
@@ -111,7 +111,9 @@ def mock_browse(monkeypatch: pytest.MonkeyPatch) -> FolderBrowseScript:
 def _seed_dir_listing(script: FolderBrowseScript, dir_path: str, *,
                       dirs: list[str], files: list[tuple[str, int]]) -> None:
     """按真实 xpan list 行形态 seed 条目(字段口径见模块头);不预排序,seed 顺序
-    保持调用方给定 —— 排序断言才有区分度。文件行 path=父目录(非完整路径)。"""
+    保持调用方给定 —— 排序断言才有区分度。文件行 path 刻意按父目录造数(真实
+    API 该字段实为完整路径;浏览侧只按 server_filename 拼接、不读该字段,mock
+    如此造数恰可证明实现不依赖它)。"""
     rows: list[dict[str, Any]] = [
         {"fs_id": random_fsid(), "path": f"{dir_path.rstrip('/')}/{name}",
          "server_filename": name, "isdir": 1}

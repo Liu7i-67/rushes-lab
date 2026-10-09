@@ -925,8 +925,9 @@ class TestNetdiskFoldersCache:
 class TestNetdiskFolderEntryParsing:
     """_parse_list_entries(dir_path, items):目录/文件两态输出 + 排序 + 脏条目跳过。
 
-    字段口径(调研脚本 baidu_file_list.py 实测):目录行 isdir=1、path 即完整路径;
-    文件行 isdir=0、path 是父目录(不是完整路径)、文件名取 server_filename。
+    字段口径:目录行 isdir=1、path 即完整路径;文件行 isdir=0、文件名取
+    server_filename(文件条目的 path 字段实测亦为完整路径,与枚举侧口径一致;
+    本组用例的文件行刻意按父目录造数,以证明实现不依赖该字段)。
     """
 
     DIR: ClassVar[dict[str, Any]] = {"fs_id": 11, "path": "/media/二级目录", "isdir": 1}
@@ -944,8 +945,9 @@ class TestNetdiskFolderEntryParsing:
         assert out[0].path == "/media/二级目录", "目录 path 即完整路径(现状口径)"
         assert out[0].name == "二级目录", "目录 name 从 path 末段派生"
 
-    def test_file_full_path_joined_from_parent_dir(self) -> None:
-        """xpan list 文件条目 path 是父目录 → 完整路径必须后端拼(本改动最易踩的坑)。"""
+    def test_file_full_path_joined_from_dir_and_name(self) -> None:
+        """完整 path = dir_path + server_filename,不依赖条目 path 字段
+        (该字段实测为完整路径,实现仍显式拼接以自证;mock 行按父目录造数)。"""
         out = _parse_list_entries("/media", [self.FILE])
         assert out[0].path == "/media/a.png"
         assert out[0].name == "a.png", "文件 name 取 server_filename"
@@ -977,6 +979,16 @@ class TestNetdiskFolderEntryParsing:
         ])
         assert [e.name for e in out] == ["a.png"], "脏文件条目跳过不炸整列表"
         assert any("server_filename" in r.getMessage() for r in caplog.records), "跳过须 warning"
+
+    def test_dirty_file_entry_non_numeric_size_skipped(self, caplog) -> None:
+        """size 非数字(如 "abc")→ 与缺字段同款脏条目语义:跳过 + warning,不炸整列表。"""
+        out = _parse_list_entries("/media", [
+            {"fs_id": 6, "path": "/media", "server_filename": "bad.bin",
+             "size": "abc", "isdir": 0},
+            self.FILE,
+        ])
+        assert [e.name for e in out] == ["a.png"], 'size="abc" 不得 ValueError 冒泡 500'
+        assert any("size 非数字" in r.getMessage() for r in caplog.records), "跳过须 warning"
 
     def test_dirty_dir_entry_without_path_skipped(self, caplog) -> None:
         out = _parse_list_entries("/media", [

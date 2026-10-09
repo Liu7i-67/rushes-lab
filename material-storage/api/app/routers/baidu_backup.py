@@ -495,11 +495,12 @@ def _parse_list_entries(
 
     - 目录(isdir 真值,1/"1" 均见):path 即完整路径(现状口径),name 取末段,
       size_bytes=None;
-    - 文件:完整 path 由后端拼 `dir_path + server_filename` —— xpan list 文件条目
-      的 path 字段是父目录,不是完整路径(调研脚本 baidu_file_list.py 实测口径),
-      name 取 server_filename,size 取 size(缺省按 0);
-    - 缺关键字段的脏条目(目录行缺 path / 文件行缺 server_filename)跳过并
-      warning,不炸整列表。
+    - 文件:name 取 server_filename,size 取 size(缺省按 0);完整 path 由后端拼
+      `dir_path + server_filename` —— 文件条目的 path 字段实测亦为完整路径
+      (与枚举侧口径一致,经 007 真实导入验证),此处仍显式拼接以自证、不依赖
+      该字段口径;
+    - 缺关键字段的脏条目(目录行缺 path / 文件行缺 server_filename / 文件行
+      size 非数字)跳过并 warning,不炸整列表。
     """
     dirs: list[BaiduNetdiskFolderOut] = []
     files: list[BaiduNetdiskFolderOut] = []
@@ -520,10 +521,15 @@ def _parse_list_entries(
                 log.warning("baidu folders: 文件条目缺 server_filename,跳过 keys=%s",
                             sorted(item))
                 continue
+            try:
+                size_bytes = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                log.warning("baidu folders: 文件条目 size 非数字(%r),跳过 name=%s",
+                            item.get("size"), name)
+                continue
             files.append(BaiduNetdiskFolderOut(
                 path=f"{dir_path.rstrip('/')}/{name}",
-                name=name, is_dir=False,
-                size_bytes=int(item.get("size") or 0),
+                name=name, is_dir=False, size_bytes=size_bytes,
             ))
     dirs.sort(key=lambda e: e.name)
     files.sort(key=lambda e: e.name)

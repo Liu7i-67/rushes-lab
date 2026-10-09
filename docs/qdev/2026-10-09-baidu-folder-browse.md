@@ -37,7 +37,7 @@
 | --- | --- | --- | --- | --- |
 | `GET /backup/netdisk/folders` | 返回条目由「仅目录」变「目录+文件」，条目结构扩展 | `path`（不变） | `BaiduNetdiskFoldersOut{ list: [{path, name, is_dir, size_bytes}], truncated }` | 沿用（400 path/409 binding_inactive/百度错误映射） |
 
-注意：xpan list 文件条目的 `path` 字段是**父目录路径**，完整路径需后端拼 `dir_path.rstrip('/') + '/' + server_filename`；目录条目的 `path` 是完整路径（现状口径）。字段口径参照调研脚本 `scripts/task/baidu_file_list.py`（列表行含 `isdir`(0/1)、`server_filename`、`size`）。
+注意（口径更正，专职测试复核）：xpan list 文件条目的 `path` 字段实测为**完整路径**（与枚举侧口径一致，经 007 真实导入验证：枚举 source_path 直接取 item path 且嵌套 rel_path 正确）。浏览侧实现采用 `dir_path.rstrip('/') + '/' + server_filename` 拼接——与该值等价，但显式自证、不依赖该字段。目录条目的 `path` 是完整路径（现状口径）。字段参照调研脚本 `scripts/task/baidu_file_list.py`（列表行含 `isdir`(0/1)、`server_filename`、`size`）。
 
 ## 前端改动点（`material-storage/web/`）
 
