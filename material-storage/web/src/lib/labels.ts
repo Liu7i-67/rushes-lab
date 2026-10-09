@@ -65,6 +65,7 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   baidu_task_retry: '备份任务重试',
   baidu_file_retry: '备份文件重试',
   baidu_file_overwrite: '备份文件覆盖导入',
+  baidu_file_random_suffix: '备份文件随机后缀导入',
   baidu_file_imported: '备份文件导入',
   baidu_task_auto_finalized: '备份任务自动终态',
 };
@@ -118,6 +119,17 @@ export const BAIDU_FAIL_REASON_LABEL: Record<string, string> = {
   enum_failed: '枚举源目录失败',
   manifest_too_large: '文件数超过 20,000 上限,请拆分目录后重建任务',
   feature_disabled: '功能已被管理员停用,断点已保留(重新开启后可继续)',
+};
+
+/**
+ * 百度文件行 last_error / 批量前缀 skipped_reasons 的已知前缀 → 用户可读文案。
+ * last_error 形如 `<prefix>: <明细>`,展示时换标签并保留明细(占用者文件名等);
+ * skipped_reasons 同源键直接整词匹配(键固定 ASCII,无明细后缀)。
+ */
+export const BAIDU_FILE_ERROR_LABEL: Record<string, string> = {
+  key_conflict: '存储位置与其他文件冲突',
+  key_copy_failed: '存储端复制失败',
+  overwrite_forbidden_for_holder: '对占用文件无管理权限,覆盖被拒绝',
 };
 
 /**

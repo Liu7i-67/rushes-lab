@@ -179,6 +179,7 @@ class FakeRow:
         self.dlink_fetched_at: datetime | None = NOW - timedelta(hours=1)
         self.dlink_expires_at: datetime | None = NOW + timedelta(hours=7)
         self.overwrite = False
+        self.reserved_key: str | None = None
         self.bytes_done = 0
         self.minio_upload_id: str | None = "upload-1"
         self.source_size = 1024

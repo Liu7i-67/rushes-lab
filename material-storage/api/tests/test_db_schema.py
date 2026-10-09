@@ -151,6 +151,19 @@ def test_baidu_task_file_fk_ondelete() -> None:
     assert task_fks["target_folder_id"].ondelete == "SET NULL"
 
 
+def test_baidu_task_file_reserved_key_column() -> None:
+    """F2b 预定 key 列(migration 20261009_0014):nullable varchar(1024)。
+
+    NULL=未预定走 canonical key;不复用 minio_key(断点续传会话寻址语义)。
+    """
+    from sqlalchemy import String
+
+    col = BaiduBackupTaskFile.__table__.c.reserved_key
+    assert col.nullable is True
+    assert isinstance(col.type, String)
+    assert col.type.length == 1024
+
+
 # ─── 数据库层唯一约束(F3,容器测试)────────────────────────────────────────────
 async def test_live_db_unique_constraints_on_local_identity() -> None:
     """F3:username / oidc_sub 的 UNIQUE 必须真实存在于数据库层。

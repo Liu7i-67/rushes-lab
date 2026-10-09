@@ -3,17 +3,19 @@
  * 头部:返回 + 来源/目标 + 进度(文件数/字节)+ ETA + 失败原因;
  * 主体:manifest Table,状态筛选 Tabs(服务端 status 过滤 + 分页),
  * 行操作:重试(failed 任务失败行;non_retryable 置灰)/ 覆盖导入(failed/completed
- * 任务的跳过行,清除-再导入,永久删除原文件)。
+ * 任务的跳过行与 key_conflict 失败行,清除-再导入,永久删除原文件)/
+ * 随机后缀导入(key_conflict 失败行,换不冲突 key 重导,原文件名不变)。
  */
 import { App, Alert, Button, Popconfirm, Progress, Space, Spin, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { ArrowLeft } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../api/client';
-import { useBaiduOverwriteFile, useBaiduRetryFile, useBaiduTask, useBaiduTaskFiles } from '../api/hooks';
+import { useBaiduFileRandomSuffix, useBaiduOverwriteFile, useBaiduRetryFile, useBaiduTask, useBaiduTaskFiles } from '../api/hooks';
 import type { BaiduTaskFile } from '../api/types';
 import {
   BAIDU_FAIL_REASON_LABEL,
+  BAIDU_FILE_ERROR_LABEL,
   BAIDU_FILE_STATUS_COLOR,
   BAIDU_FILE_STATUS_LABEL,
   BAIDU_TASK_STATUS_COLOR,
@@ -43,6 +45,7 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
   const { data: task } = useBaiduTask(taskId);
   const retryFile = useBaiduRetryFile();
   const overwriteFile = useBaiduOverwriteFile();
+  const randomSuffixFile = useBaiduFileRandomSuffix();
 
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [page, setPage] = useState(1);
@@ -76,6 +79,15 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
       message.success(`「${fileName(f)}」已加入覆盖导入(原文件将在导入前被永久删除)`);
     } catch (e) {
       message.error(errorMessage(e, '覆盖导入失败'));
+    }
+  };
+
+  const randomSuffix = async (f: BaiduTaskFile) => {
+    try {
+      await randomSuffixFile.mutateAsync({ taskId, fileId: f.id });
+      message.success(`「${fileName(f)}」已用随机后缀重新导入`);
+    } catch (e) {
+      message.error(errorMessage(e, '随机后缀导入失败'));
     }
   };
 
@@ -136,11 +148,16 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
     {
       title: '操作',
       key: 'actions',
-      width: 150,
+      width: 170,
       render: (_v, row) => {
-        const canRetry = task?.status === 'failed' && row.status === 'failed';
+        // key_conflict 失败行:原样重试必然再次命中同一冲突,操作列改为
+        // 【覆盖导入】【随机后缀导入】两条处置出路(F2),不显示普通重试
+        const isKeyConflict = isKeyConflictRow(row);
+        const canRetry = task?.status === 'failed' && row.status === 'failed' && !isKeyConflict;
         const canOverwrite = (task?.status === 'failed' || task?.status === 'completed')
           && row.status === 'skipped_exists';
+        const canResolveConflict = isKeyConflict
+          && (task?.status === 'failed' || task?.status === 'completed');
         return (
           <Space size={4}>
             {canRetry && (
@@ -151,6 +168,28 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
                         loading={retryFile.isPending && retryFile.variables?.fileId === row.id}
                         onClick={() => retry(row)}>
                   重试
+                </Button>
+              </Tooltip>
+            )}
+            {canResolveConflict && (
+              <Popconfirm
+                title="覆盖导入?"
+                description={keyConflictOverwriteDesc(row.last_error)}
+                okText="覆盖导入" okButtonProps={{ danger: true }}
+                onConfirm={() => overwrite(row)}
+              >
+                <Button size="small" type="link" danger
+                        loading={overwriteFile.isPending && overwriteFile.variables?.fileId === row.id}>
+                  覆盖导入
+                </Button>
+              </Popconfirm>
+            )}
+            {canResolveConflict && (
+              <Tooltip title="换一个不冲突的存储位置重新导入(网盘原文件名不变)">
+                <Button size="small" type="link"
+                        loading={randomSuffixFile.isPending && randomSuffixFile.variables?.fileId === row.id}
+                        onClick={() => randomSuffix(row)}>
+                  随机后缀导入
                 </Button>
               </Tooltip>
             )}
@@ -298,8 +337,35 @@ const tlabelTask = (s: string) => BAIDU_TASK_STATUS_LABEL[s] ?? s;
 const tlabelFile = (s: string) => BAIDU_FILE_STATUS_LABEL[s] ?? s;
 const tlabelFail = (s: string) => BAIDU_FAIL_REASON_LABEL[s] ?? s;
 
-/** 失败原因用户化:overwrite_ambiguous 引导文案(§7 文案基调)。 */
+/** key_conflict 失败行(F1 格式:last_error 以 `key_conflict:` 开头,点名占用者)。 */
+function isKeyConflictRow(f: BaiduTaskFile): boolean {
+  return f.status === 'failed' && !!f.last_error?.startsWith('key_conflict:');
+}
+
+/** 从 key_conflict last_error 解析占用者文件名列表(`key_conflict: <key> 已被 a、b 占用`);解析不出返回 null。 */
+function keyConflictHolders(err: string): string[] | null {
+  const m = /^key_conflict:\s*.+?\s*已被\s+(.+?)占用/.exec(err);
+  if (!m) return null;
+  const holders = m[1].split('、').map(s => s.trim()).filter(Boolean);
+  return holders.length > 0 ? holders : null;
+}
+
+/** key_conflict 行覆盖导入确认文案:点名将删除的占用者文件(解析失败回退通用文案)。 */
+function keyConflictOverwriteDesc(lastError: string | null): string {
+  const holders = lastError ? keyConflictHolders(lastError) : null;
+  return holders
+    ? `将删除占用该位置的文件:${holders.join('、')},且不可恢复(需对占用文件有管理权限)。`
+    : '将永久删除占用该位置的文件后重新导入,且不可恢复(需对占用文件有管理权限)。';
+}
+
+/** 失败原因用户化:已知前缀换中文标签并保留明细,overwrite_ambiguous 引导文案(§7 文案基调)。 */
 function fileErrorText(err: string): string {
+  for (const [prefix, label] of Object.entries(BAIDU_FILE_ERROR_LABEL)) {
+    if (err.startsWith(`${prefix}:`)) {
+      const detail = err.slice(prefix.length + 1).trim();
+      return detail ? `${label}:${detail}` : label;
+    }
+  }
   if (err.includes('overwrite_ambiguous')) {
     return '目标位置存在同名文件(可能位于回收站),请先彻底删除后再重试覆盖导入';
   }

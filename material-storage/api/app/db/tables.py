@@ -576,6 +576,9 @@ class BaiduBackupTaskFile(Base, TimestampMixin):
     minio_upload_id: Mapped[str | None] = mapped_column(Text)
     minio_bucket: Mapped[str | None] = mapped_column(String(63))   # 列宽对齐 assets.minio_bucket
     minio_key: Mapped[str | None] = mapped_column(String(1024))
+    # F2b 预定目标 key(random-suffix 导入;NULL=未预定走 canonical key;成功终态
+    # 保留可溯)。不复用 minio_key —— 该列承担断点续传会话寻址语义,耦合易错
+    reserved_key: Mapped[str | None] = mapped_column(String(1024))
     attempts: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     last_error: Mapped[str | None] = mapped_column(String(512))
     # not_found 类终态:retry-failed 排除、单文件 retry 409、UI 置灰

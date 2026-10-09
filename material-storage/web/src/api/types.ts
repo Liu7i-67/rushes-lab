@@ -356,3 +356,9 @@ export interface BaiduTaskFilesPage {
   items: BaiduTaskFile[];
   total: number;
 }
+
+/** 复活型操作(retry-failed/单文件 retry/overwrite/random-suffix)202 响应。 */
+export interface BaiduReviveOut {
+  finalized: boolean;                    // true=已直接复位派发,false=交 worker 消费
+  status: string;                        // 复活后的目标任务状态(enumerating/running)
+}

@@ -3,7 +3,7 @@
 挂载:main.py → prefix="/api/v1/baidu";受 settings.baidu_backup_enabled 门控
 (默认 false),未启用时统一返回 404。
 
-路由全集(14 条):
+路由全集(15 条):
   GET    /backup/binding                绑定状态
   POST   /backup/binding/authorize-url  生成 oob 授权链接
   POST   /backup/binding                授权码换 token 落库(Fernet 加密 + 限流)
@@ -19,7 +19,9 @@
   DELETE /backup/tasks/{id}             删除(终态 CAS + abort_leftover_sessions)
   POST   /backup/tasks/{id}/retry-failed       复活(统一前置见方案 §5.2)
   POST   /backup/tasks/{id}/files/{fid}/retry      单文件重试
-  POST   /backup/tasks/{id}/files/{fid}/overwrite  覆盖导入(清除-再导入)
+  POST   /backup/tasks/{id}/files/{fid}/overwrite  覆盖导入(清除-再导入;failed+
+                                        key_conflict 行亦可,key 占用清除语义)
+  POST   /backup/tasks/{id}/files/{fid}/random-suffix  随机后缀导入(预定不冲突 key)
 
 换绑/解绑的断点作废统一口径(§5.2 覆盖前处置①②,三处用户触发路径共用
 `abort_leftover_sessions` helper,实现于 services/baidu_backup.py)。
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -79,9 +82,14 @@ from app.services.baidu_backup import (
     find_root_level_folder,
     guard_revival,
     has_active_task,
+    is_key_conflict_error,
     lease_free,
     load_session_refs,
+    random_key_taken,
+    random_suffix_key,
     recompute_aggregates,
+    reserve_random_key,
+    reset_failed_row_for_overwrite,
     reset_failed_rows,
     reset_importing_rows,
     reset_one_failed_row,
@@ -91,7 +99,12 @@ from app.services.baidu_backup import (
     validate_source_dir,
 )
 from app.services.baidu_client import BaiduApiError, BaiduNetdiskClient
-from app.services.folder_chain import FolderChainError, ensure_root_folder_at_project
+from app.services.folder_chain import (
+    KEY_MAX_BYTES,
+    KEY_MAX_CHARS,
+    FolderChainError,
+    ensure_root_folder_at_project,
+)
 from app.services.org import get_default_organization
 from app.services.permissions import PermissionsService
 from app.services.presign import PresignService
@@ -1105,9 +1118,10 @@ async def overwrite_file(
     audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
     ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008  # FastAPI DI,repo 全量同款
 ) -> BaiduReviveOut:
-    """覆盖导入(§5.2 复活型):failed/completed 任务的 skipped_exists 行 →
-    pending 且置 overwrite=true(清除-再导入;worker 导入时复查 can_admin);
-    completed 回摆语义由派发步与聚合重算承接。"""
+    """覆盖导入(§5.2 复活型):failed/completed 任务的 skipped_exists 行,或
+    failed 且 last_error 为 key_conflict(F1 点名占用者)的行 → pending 且置
+    overwrite=true(清除-再导入;worker 导入时对同 key 占用行复查 can_admin 后
+    物理清除);completed 回摆语义由派发步与聚合重算承接。"""
     _ensure_enabled()
     task = await _own_task(db, task_id, user.id)
     if task.status not in (STATUS_FAILED, "completed"):
@@ -1118,19 +1132,124 @@ async def overwrite_file(
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
 
+    action_reason: str | None = None
     reset = await reset_skipped_row_for_overwrite(db, task_id=task.id, file_id=file_id)
     if reset == 0:
-        raise HTTPException(409, "仅跳过(已存在)的文件可覆盖导入")
+        # F2a 扩展准入:key_conflict 失败行(key 被其他资产行引用,无同名行或同名
+        # 行已消歧)→ 复位 pending + overwrite=true,worker 侧按 key 占用清除
+        reset = await reset_failed_row_for_overwrite(db, task_id=task.id, file_id=file_id)
+        if reset:
+            action_reason = "key_conflict"
+    if reset == 0:
+        raise HTTPException(409, "仅跳过(已存在)或 key 冲突失败的文件可覆盖导入")
+    target_status = await _revive_and_dispatch(
+        db, request, task=task, allowed_from=(STATUS_FAILED, "completed"),
+    )
+
+    details: dict[str, str] = {"task_id": str(task.id), "file_id": str(file_id)}
+    if action_reason:
+        details["action_reason"] = action_reason
+    await audit.write(
+        event_type="baidu_file_overwrite",
+        actor_user_id=user.id,
+        details=details,
+        request_ip=ctx.get("request_ip"),
+        user_agent=ctx.get("user_agent"),
+    )
+    log.info("baidu file overwrite task=%s file=%s action_reason=%s",
+             task.id, file_id, action_reason)
+    return BaiduReviveOut(finalized=True, status=target_status)
+
+
+# ─── F2b 随机后缀导入(key_conflict 行级出路)─────────────────────────────────
+
+_RANDOM_KEY_ATTEMPTS = 5   # 预定 key 冲突重生成上限(仍冲突 409 交用户重试)
+
+
+@router.post(
+    "/backup/tasks/{task_id}/files/{file_id}/random-suffix",
+    response_model=BaiduReviveOut, status_code=202,
+)
+async def random_suffix_file(
+    task_id: uuid.UUID,
+    file_id: uuid.UUID,
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),  # noqa: B008  # FastAPI DI,repo 全量同款
+    db: AsyncSession = Depends(get_db),  # noqa: B008  # FastAPI DI,repo 全量同款
+    audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008  # FastAPI DI,repo 全量同款
+) -> BaiduReviveOut:
+    """随机后缀导入(F2b):仅 failed 且 last_error 为 key_conflict 的行可用
+    (幂等:行已有 reserved_key 时直接复用,不再新生成)。路由侧生成不冲突预定
+    key(`{stem}.{8 位随机}[.{ext}]`,与 canonical key 同目录前缀;跨资产 key 引用
+    计数=0 校验,冲突重生成 ≤5 次)→ 行复位 pending(overwrite=false)+ 写
+    reserved_key + 派发;worker 全程按预定 key 落库,filename 保持网盘原文件名。"""
+    _ensure_enabled()
+    task = await _own_task(db, task_id, user.id)
+    if task.status not in (STATUS_FAILED, "completed"):
+        raise HTTPException(409, "仅失败或已完成任务支持随机后缀导入")
+    binding = await _get_binding(db, user.id)
+    try:
+        await guard_revival(db, task=task, binding=binding)
+    except BaiduTaskError as e:
+        raise _task_error_to_http(e) from e
+
+    row = (await db.execute(
+        select(BaiduBackupTaskFile).where(
+            BaiduBackupTaskFile.id == file_id,
+            BaiduBackupTaskFile.task_id == task.id,
+        )
+    )).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(404, "file not found")
+
+    reserved = row.reserved_key
+    if reserved is None:
+        # 首次预定:仅 key_conflict 失败行(可重试)可生成
+        if row.status != STATUS_FAILED or row.non_retryable \
+                or not is_key_conflict_error(row.last_error):
+            raise HTTPException(409, "仅 key 冲突失败的文件可随机后缀导入")
+        assert task.target_folder_id is not None  # guard_revival 已断言
+        folder = await db.get(Folder, task.target_folder_id)
+        project = await db.get(Project, task.project_id)
+        if folder is None or project is None:
+            raise HTTPException(409, "目标文件夹或项目不存在,无法生成预定 key")
+        # 预定 key 与 canonical key 同目录前缀(参照 prefix+filename 规则拼装)
+        canonical = f"{folder.minio_prefix.rstrip('/')}/{row.rel_path}"
+        for _ in range(_RANDOM_KEY_ATTEMPTS):
+            candidate = random_suffix_key(canonical, secrets.token_hex(4))
+            if len(candidate) > KEY_MAX_CHARS or len(candidate.encode("utf-8")) > KEY_MAX_BYTES:
+                raise HTTPException(409, "文件路径过长,无法生成随机后缀 key")
+            taken = await random_key_taken(
+                db, bucket=project.minio_bucket, key=candidate,
+                task_id=task.id, exclude_file_id=row.id,
+            )
+            if not taken:
+                reserved = candidate
+                break
+        if reserved is None:
+            raise HTTPException(409, "随机后缀 key 连续冲突,请稍后重试")
+    elif row.status not in (STATUS_FAILED, "pending"):
+        # 幂等复用仅覆盖「派发前中断(已复位 pending)」与「再次失败」两种窗口;
+        # importing/success 等状态不得借本端点重置(成功行 reserved_key 历史可溯)
+        raise HTTPException(409, "该文件当前状态不可随机后缀导入")
+
+    reset = await reserve_random_key(
+        db, task_id=task.id, file_id=file_id, reserved_key=reserved,
+    )
+    if reset == 0:
+        raise HTTPException(409, "文件状态已变化,请刷新后重试")
     target_status = await _revive_and_dispatch(
         db, request, task=task, allowed_from=(STATUS_FAILED, "completed"),
     )
 
     await audit.write(
-        event_type="baidu_file_overwrite",
+        event_type="baidu_file_random_suffix",
         actor_user_id=user.id,
-        details={"task_id": str(task.id), "file_id": str(file_id)},
+        details={"task_id": str(task.id), "file_id": str(file_id), "reserved_key": reserved},
         request_ip=ctx.get("request_ip"),
         user_agent=ctx.get("user_agent"),
     )
-    log.info("baidu file overwrite task=%s file=%s", task.id, file_id)
+    log.info("baidu file random-suffix task=%s file=%s reserved_key=%s",
+             task.id, file_id, reserved)
     return BaiduReviveOut(finalized=True, status=target_status)

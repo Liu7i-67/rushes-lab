@@ -73,6 +73,7 @@ from app.services.baidu_backup import (
     finalize_rows_failed,
     finalize_task_terminal,
     force_refresh_access_token,
+    format_key_conflict_message,
     mark_binding_expired,
     recompute_aggregates,
     relay_dispatch,
@@ -762,16 +763,21 @@ async def _check_upload_perm(db: AsyncSession, runner: Runner, folder_id: uuid.U
     return allowed
 
 
-async def _cross_key_count(
+async def _key_conflict_holders(
     db: AsyncSession, *, bucket: str, key: str, exclude_asset_id: uuid.UUID | None,
-) -> int:
-    """跨资产 key 引用计数(不区分软删;§6 步骤 2/5)。"""
+) -> list[Asset]:
+    """跨资产 key 占用行明细(含软删,与既有跨资产 key 预检计数口径一致;§6
+    步骤 2/5):F1 点名占用者与 F2a 逐行权限复查共用。"""
     conditions = [Asset.minio_bucket == bucket, Asset.minio_key == key]
     if exclude_asset_id is not None:
         conditions.append(Asset.id != exclude_asset_id)
-    return int(await db.scalar(
-        select(func.count()).select_from(Asset).where(*conditions)
-    ) or 0)
+    res = await db.execute(select(Asset).where(*conditions).order_by(Asset.id))
+    return list(res.scalars().all())
+
+
+def _holder_names(holders: list[Asset]) -> list[tuple[str, bool]]:
+    """F1 文案入参:(filename, 是否软删)(软删者附`(回收站)`)。"""
+    return [(h.filename, h.deleted_at is not None) for h in holders]
 
 
 def _content_type_for(filename: str) -> str:
@@ -826,6 +832,10 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
         await db.commit()
     folder_id = node.folder_id
     key = f"{node.prefix.rstrip('/')}/{filename}"
+    # F2b:预留 key 行(random-suffix 导入)全程用预定 key 落库,filename 不变
+    # (head 快捷/md5 旁证/multipart 会话/complete 前复检/asset 落库均按最终 key)
+    if row.reserved_key:
+        key = row.reserved_key
 
     # ── 步骤 2:权限复查与同名处置(对象=建链后的行落位目录,§6)──────────────
     if not await _check_upload_perm(db, runner, folder_id):
@@ -838,11 +848,15 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
             Asset.deleted_at.is_(None),
         )
     )).scalars().all()
-    if existing_assets and not row.overwrite:
+    if existing_assets and not row.overwrite and not row.reserved_key:
+        # 预留 key 行的 key 不与同名行冲突(filename 重名不共享物理对象),不适用
+        # 既有「同名跳过」语义(F2b:filename 保持网盘原文件名)
         return await _mark_skipped(db, runner, row)
     suppress_head_shortcut = False
-    if existing_assets and row.overwrite:
+    if existing_assets and row.overwrite and not row.reserved_key:
         # 清除-再导入:复查 can_admin + 目标夹非 sensitive + 跨资产 key → purge
+        # (仅 canonical key 行;预留 key 行的同名文件与目标 key 无关,不得误清,
+        # 其 key 占用统一交 _transfer_and_finalize 首检按 key 占用处置)
         fail = await _overwrite_precheck_and_purge(
             db, runner, row, existing_assets[0], folder_id, bucket, key,
             same_name_count=len(existing_assets), operator_user_id=task.user_id,
@@ -1100,6 +1114,57 @@ async def _ensure_dlink(db: AsyncSession, runner: Runner, row: TaskFile) -> str:
     return got
 
 
+async def _purge_key_holders(
+    db: AsyncSession, runner: Runner, row: TaskFile, *, folder_id: uuid.UUID,
+    bucket: str, key: str, operator_user_id: uuid.UUID | None,
+) -> str | None:
+    """F2a:overwrite 行遇同 key 占用行 → 逐行权限复查 → purge_active_asset 物理清除。
+
+    - 目标夹 sensitive 一律拒绝(与既有同名覆盖流同款,org admin 亦无豁免)
+    - **全部占用行先复查权限,任一无权不动手**(避免部分清除);不通过 →
+      failed('overwrite_forbidden_for_holder') 点名无权占用者(清 overwrite 标志,
+      与既有 overwrite_forbidden 同理由:防 retry 复位后残留标志再触清除循环)
+    - 逐行 purge(purge 前按 DB 现存占用行重查,已清行不重复 purge);purge 未证实
+      → failed('purge_incomplete')(保留 overwrite 标志,重试续清剩余占用行)
+    - 返回 None = key 已无占用行,可继续导入;否则为行级失败结果
+    """
+    folder = await db.get(Folder, folder_id)
+    if folder is not None and folder.is_sensitive:
+        return await _fail_row(db, runner, row, "overwrite_forbidden", clear_overwrite=True,
+                               message="目标目录不允许覆盖导入")
+    holders = await _key_conflict_holders(db, bucket=bucket, key=key, exclude_asset_id=None)
+    if not holders:
+        return None
+    for holder in holders:
+        allowed = await _org_admin_allowed(runner) or await runner.permissions.check(
+            user_subject=f"user:{operator_user_id}" if operator_user_id else "user:unknown",
+            relation="can_admin", object_type="asset", object_id=str(holder.id),
+        )
+        if not allowed:
+            return await _fail_row(
+                db, runner, row, "overwrite_forbidden_for_holder", clear_overwrite=True,
+                message=f"对占用文件「{holder.filename}」无管理权限,覆盖导入被拒绝",
+            )
+    for holder in holders:
+        async with get_sessionmaker()() as audit_session:
+            try:
+                await purge_active_asset(
+                    db=db, permissions=runner.permissions, presign=runner.presign,
+                    audit=AuditService(audit_session), asset_id=holder.id,
+                    actor_user_id=operator_user_id,
+                    audit_details={"task_id": str(runner.task_id), "file_id": str(row.id)},
+                )
+            except PurgeIncompleteError as e:
+                # purge 未证实 → 行级 last_error 附结构化快照(重试按 DB 现存占用行续清)
+                return await _fail_row(
+                    db, runner, row, "purge_incomplete",
+                    message=f"bucket={e.bucket} key={e.key}",
+                )
+    log.info("baidu overwrite purged key holders task=%s file=%s key=%s count=%d",
+             runner.task_id, row.id, key, len(holders))
+    return None
+
+
 async def _overwrite_precheck_and_purge(
     db: AsyncSession, runner: Runner, row: TaskFile, existing_asset: Asset,
     folder_id: uuid.UUID, bucket: str, key: str, *,
@@ -1108,11 +1173,14 @@ async def _overwrite_precheck_and_purge(
     """覆盖导入前置(§6 步骤 2):can_admin + 目标夹非 sensitive + 跨资产 key 预检
     → 活跃 asset 物理删除业务流。返回 None = 清除完成可导入;否则为行级失败结果。
 
-    - 权限/引用复查未通过 → failed('overwrite_forbidden'/'overwrite_ambiguous')
-      并**清 overwrite 标志**(仅限「旧 asset 存在但复查未通过」的情形;否则
-      retry-failed 复位后残留标志会再次触发清除流程陷入循环)
-    - purge 未证实 → failed('purge_incomplete')(可重试;保留标志,重试按快照
-      直接 purge+head 断言,不依赖已删除的 asset 行反查)
+    - 权限/引用复查未通过 → failed('overwrite_forbidden'/'overwrite_ambiguous'/
+      'overwrite_forbidden_for_holder') 并**清 overwrite 标志**(仅限「旧 asset
+      存在但复查未通过」的情形;否则 retry-failed 复位后残留标志会再次触发清除
+      流程陷入循环)
+    - F2a:同 key 的其他占用行(批量前缀 filename≠key 残留等,含软删)与既有同名行
+      一并纳入清除范围 —— 全部占用行先复查权限(任一无权不动手,防部分清除),
+      再随同名行 purge 之后逐行物理清除(按 DB 现存行重查,不重复 purge)
+    - purge 未证实 → failed('purge_incomplete')(可重试;保留标志)
     - sensitive 防御断言命中一律拒绝,不做 org admin 豁免(v1 三层禁敏感目标使
       该分支正常不可达;assets.py:759-769 口径留 v2 评估)
     """
@@ -1130,10 +1198,20 @@ async def _overwrite_precheck_and_purge(
     if same_name_count > 1:
         return await _fail_row(db, runner, row, "overwrite_ambiguous", clear_overwrite=True,
                                message="目标位置存在多个同名文件,请先人工处理")
-    if await _cross_key_count(db, bucket=bucket, key=key,
-                              exclude_asset_id=existing_asset.id) > 0:
-        return await _fail_row(db, runner, row, "overwrite_ambiguous", clear_overwrite=True,
-                               message="同 key 对象被其他文件(可能位于回收站)引用,请先彻底删除")
+    # F2a:同 key 其他占用行先全部复查权限(任一无权不动手 —— 同名行亦不 purge,
+    # 避免部分清除;无权者点名交 overwrite_forbidden_for_holder)
+    holders = await _key_conflict_holders(db, bucket=bucket, key=key,
+                                          exclude_asset_id=existing_asset.id)
+    for holder in holders:
+        holder_allowed = await _org_admin_allowed(runner) or await runner.permissions.check(
+            user_subject=f"user:{operator_user_id}" if operator_user_id else "user:unknown",
+            relation="can_admin", object_type="asset", object_id=str(holder.id),
+        )
+        if not holder_allowed:
+            return await _fail_row(
+                db, runner, row, "overwrite_forbidden_for_holder", clear_overwrite=True,
+                message=f"对占用文件「{holder.filename}」无管理权限,覆盖导入被拒绝",
+            )
     # purge 前先做一次租约续期(缓解长 purge 期间无检查点触发 sweeper 接管 churn,§6)
     state = await renew_lease(
         db, task_id=runner.task_id, expected_seq=runner.expected_seq,
@@ -1161,6 +1239,14 @@ async def _overwrite_precheck_and_purge(
                 db, runner, row, "purge_incomplete",
                 message=f"bucket={e.bucket} key={e.key}",
             )
+    # F2a:同 key 其他占用行逐行清除(_purge_key_holders 按 DB 现存行重查并复检
+    # 权限;同名行已 purge 不在列,不重复 purge)
+    fail = await _purge_key_holders(
+        db, runner, row, folder_id=folder_id, bucket=bucket, key=key,
+        operator_user_id=operator_user_id,
+    )
+    if fail is not None:
+        return fail
     log.info("baidu overwrite purged old asset task=%s file=%s asset=%s",
              runner.task_id, row.id, existing_asset.id)
     return None
@@ -1327,10 +1413,32 @@ async def _transfer_and_finalize(
     size = row.source_size
 
     # ── 跨资产 key 引用预检(所有落库路径的公共第一道,§6)────────────────────
-    if await _cross_key_count(db, bucket=bucket, key=key, exclude_asset_id=None) > 0:
+    holders = await _key_conflict_holders(db, bucket=bucket, key=key, exclude_asset_id=None)
+    if holders and row.overwrite:
+        # F2a:覆盖行遇 key 占用(无同名行的 key_conflict 出路/预留 key TOCTOU)→
+        # 租约续期 + 检查点后逐行复查权限并物理清除(与既有同名覆盖清除流同构;
+        # 已清行按 DB 现存重查,不重复 purge)
+        state = await renew_lease(
+            db, task_id=runner.task_id, expected_seq=runner.expected_seq,
+            runner_id=runner.runner_id, now=_now(), lease_s=runner.settings.baidu_lease_s,
+        )
+        await db.commit()
+        if state is None:
+            return "lost"
+        outcome = await checkpoint(db, runner)
+        if outcome is not None:
+            return await consume_outcome(db, runner, outcome)
+        fail = await _purge_key_holders(
+            db, runner, row, folder_id=folder_id, bucket=bucket, key=key,
+            operator_user_id=task.user_id,
+        )
+        if fail is not None:
+            return fail
+    elif holders:
+        # F1:非覆盖导入点名占用者(保持可重试;行级出路=覆盖/随机后缀导入)
         return await _fail_row(
-            db, runner, row, "overwrite_ambiguous",
-            message="同 key 对象被其他文件(可能位于回收站)引用,请先彻底删除",
+            db, runner, row, "key_conflict",
+            message=format_key_conflict_message(key, _holder_names(holders)),
         )
 
     if size == 0:
@@ -1365,10 +1473,15 @@ async def _transfer_and_finalize(
             if dl.outcome is not None:
                 return dl.outcome
             # ── complete 前跨资产 key 引用预检(普通导入同样做,收窄窗口,§6)──
-            if await _cross_key_count(db, bucket=bucket, key=key, exclude_asset_id=None) > 0:
+            # F1:传输窗口内新出现占用行 → 点名失败(不在此 purge;重试走首检的
+            # F2a 清除路径,避免 complete 前长 purge 拖住 multipart 会话)
+            holders = await _key_conflict_holders(
+                db, bucket=bucket, key=key, exclude_asset_id=None,
+            )
+            if holders:
                 return await _fail_row(
-                    db, runner, row, "overwrite_ambiguous",
-                    message="同 key 对象被其他文件(可能位于回收站)引用,请先彻底删除",
+                    db, runner, row, "key_conflict",
+                    message=format_key_conflict_message(key, _holder_names(holders)),
                 )
             try:
                 await runner.store.complete_multipart_upload(bucket, key, upload_id, dl.parts)

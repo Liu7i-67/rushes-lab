@@ -14,6 +14,7 @@ import type {
   BaiduBackupTask,
   BaiduBinding,
   BaiduNetdiskFolder,
+  BaiduReviveOut,
   BaiduTaskFilesPage,
   BaiduTasksPage,
   DirectoryGroup,
@@ -915,8 +916,8 @@ export const useBaiduRetryFile = () => {
   });
 };
 
-/** POST /backup/tasks/{id}/files/{fid}/overwrite — 覆盖导入(failed/completed 任务跳过行;
- *  清除-再导入,需对原 asset 有 can_admin)。 */
+/** POST /backup/tasks/{id}/files/{fid}/overwrite — 覆盖导入(failed/completed 任务跳过行
+ *  与 key_conflict 失败行;清除-再导入,需对原 asset 有 can_admin)。 */
 export const useBaiduOverwriteFile = () => {
   const invalidate = useInvalidateBaiduTasks();
   return useMutation({
@@ -925,6 +926,19 @@ export const useBaiduOverwriteFile = () => {
         `${BAIDU_BACKUP_BASE}/tasks/${args.taskId}/files/${args.fileId}/overwrite`,
       );
     },
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** POST /backup/tasks/{id}/files/{fid}/random-suffix — key_conflict 失败行改用随机后缀
+ *  key 重新导入(网盘原文件名不变;行已有预定 key 时幂等复用,不漂移)。 */
+export const useBaiduFileRandomSuffix = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (args: { taskId: string; fileId: string }) =>
+      (await http.post<BaiduReviveOut>(
+        `${BAIDU_BACKUP_BASE}/tasks/${args.taskId}/files/${args.fileId}/random-suffix`,
+      )).data,
     onSuccess: () => invalidate(),
   });
 };

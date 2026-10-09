@@ -589,15 +589,21 @@ async def update_asset_meta(
     return AssetOut.model_validate(asset)
 
 
-# ─── 批量文件名前缀(方案 §1.1)───────────────────────────────────────────────
+# ─── 批量文件名前缀(方案 §1.1;key 同步迁移 §F3)────────────────────────────
 class BatchPrefixReasonsOut(BaseModel):
-    """五类跳过原因计数(键固定 ASCII,前端中文映射;deleted = 已删/不存在,不细分)。"""
+    """跳过原因计数(键固定 ASCII,前端中文映射;deleted = 已删/不存在,不细分)。
+
+    七类:原五类(NFC/谓词/软删语义)+ F3 key 迁移新增两类 —— key_conflict
+    (新 key 已被其他资产行引用,含软删)与 key_copy_failed(MinIO copy 失败)。
+    """
 
     too_long: int = 0
     no_match: int = 0
     already_prefixed: int = 0
     empty_result: int = 0
     deleted: int = 0
+    key_conflict: int = 0
+    key_copy_failed: int = 0
 
 
 class AssetBatchPrefixOut(BaseModel):
@@ -613,13 +619,13 @@ async def batch_prefix(
     payload: AssetBatchPrefixIn,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
+    presign: PresignService = Depends(get_presign),  # noqa: B008  # FastAPI DI,repo 全量同款
     audit: AuditService = Depends(get_audit),
     user: CurrentUser = Depends(get_current_user),
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict[str, Any] = Depends(get_request_context),
 ) -> AssetBatchPrefixOut:
-    """批量加 / 去文件名前缀(纯 DB 改名,MinIO key 不动 —— 下载文件名由
-    filename 动态生成 Content-Disposition)。
+    """批量加 / 去文件名前缀,并同步迁移 MinIO key(F3,根治 filename≠key 残留)。
 
     语义:add = prefix + filename,已带该前缀跳过(already_prefixed),结果
     >512 跳过(too_long);remove = 恰好以 prefix 开头(大小写敏感)剥离一次,
@@ -630,19 +636,31 @@ async def batch_prefix(
     remove 余量 = NFC(filename)[len(prefix_nfc):] 落库(NFC 串码点数与原串
     不同,不能按原串长度切);add 结果按 NFC 落库(库内 filename 逐步收敛 NFC)。
 
+    **key 迁移(F3)**:新 filename 确定后按 complete_upload 同规则算新 key
+    (`{folder.minio_prefix.rstrip('/')}/{新 filename}`);新 key 被其他资产行
+    引用(含软删,与导入侧 `_key_conflict_holders` 同口径)→ 该文件 skip
+    (key_conflict,行不动);否则 MinIO copy_object(旧 key→新 key)失败 →
+    skip(key_copy_failed,行不动);copy 成功 → UPDATE 行(filename+minio_key,
+    etag 用 copy 返回的新值,没有则保留原值;size_bytes/content_type 不变),
+    **事务 commit 成功后**再删旧对象 —— delete 失败仅 log.warning 留孤儿
+    (行已指向新 key,孤儿不可见无权限含义,不回滚不抛错)。
+
     权限:按 folder_id 分组逐组 can_upload check(对齐 update_asset_meta;
     敏感夹按 sensitive_folder 类型 —— 受邀 downloader 亦可改名,与打标同语义),
     系统 admin 直通;任一组无权限 → 403 整批不执行,文案笼统不带 folder 名
     (反探测约定,与 GET /assets 403 同口径)。
 
-    实现四步(单事务):① asset_ids 去重 + SELECT 快照(软删行查不到 → 计
+    实现五步(单事务):① asset_ids 去重 + SELECT 快照(软删行查不到 → 计
     deleted);② Python 端按语义算新名分桶;③ Core 语句逐 id UPDATE —— 不用
     ORM flush(并发 hard purge 抛 StaleDataError,restore 先例),不用单条
     IN...RETURNING(add 各 id 新名不同,executemany 不累积 RETURNING);add
     谓词 NOT starts_with(normalize(filename, NFC), :prefix) 是二次防线,防
     SELECT 与 UPDATE 之间并发提交的 add 叠出双前缀(remove 侧不加内容谓词,
     字节级谓词与 NFC 口径不对称,对 NFD 存量名会静默不命中);④ rowcount=0
-    补查归因,保证 renamed + skipped 与提交数严格对账。
+    补查归因,保证 renamed + skipped 与提交数严格对账;⑤ commit 成功后逐个
+    删除已迁移行的旧 MinIO 对象(串行 to_thread,失败留孤儿)。MinIO 的
+    copy/delete 是同步 boto3(重试+超时最坏数分钟),一律 asyncio.to_thread
+    执行,防 MinIO 抖动时阻塞事件循环(delete_asset hard 分支同款)。
     """
     user_id = user.id
     # prefix 已在 AssetBatchPrefixIn 校验器里 NFC 归一;此处再归一一次是幂等的,
@@ -651,22 +669,27 @@ async def batch_prefix(
     reasons = BatchPrefixReasonsOut()
 
     # ① 去重(dict.fromkeys 保序,防重复 id 被计入 deleted/统计两次)+ 快照
+    # (快照含 bucket/key/folder 前缀:F3 逐文件算新 key、跨资产占用预检、
+    #  copy/delete 都要用,避免循环内二次查询)
     unique_ids = list(dict.fromkeys(payload.asset_ids))
     rows = (
         await db.execute(
             select(
                 Asset.id, Asset.filename, Asset.folder_id,
-                Folder.project_id, Folder.is_sensitive,
+                Asset.minio_bucket, Asset.minio_key,
+                Folder.minio_prefix, Folder.project_id, Folder.is_sensitive,
             )
             .join(Folder, Asset.folder_id == Folder.id)
             .where(Asset.id.in_(unique_ids), Asset.deleted_at.is_(None))
         )
     ).all()
-    snap: dict[uuid.UUID, tuple[str, uuid.UUID, bool]] = {}
+    snap: dict[uuid.UUID, tuple[str, uuid.UUID, bool, str, str, str]] = {}
+    # snap 值 = (filename, folder_id, is_sensitive, bucket, old_key, minio_prefix)
     folder_groups: dict[uuid.UUID, bool] = {}  # folder_id -> is_sensitive
     project_ids: set[uuid.UUID] = set()
-    for asset_id, filename, folder_id, project_id, is_sensitive in rows:
-        snap[asset_id] = (filename, folder_id, is_sensitive)
+    for (asset_id, filename, folder_id, bucket, old_key,
+         minio_prefix, project_id, is_sensitive) in rows:
+        snap[asset_id] = (filename, folder_id, is_sensitive, bucket, old_key, minio_prefix)
         folder_groups.setdefault(folder_id, is_sensitive)
         project_ids.add(project_id)
     # 全批恰属一个项目时 audit 带 target_project_id(对齐单资产端点写法),跨项目留空
@@ -729,13 +752,48 @@ async def batch_prefix(
                 continue
             new_names[asset_id] = rest
 
-    # ③ Core 语句单事务逐 id UPDATE。add 谓词里的 normalize form 参数是不带
-    # 引号的 SQL 关键字 NFC(literal_column —— 写成 'NFC' 字符串是 PG 语法
-    # 错误);用 starts_with 不用 LIKE(_ / % 通配符会被误拦,免转义先例
-    # _escape_like)。rowcount 由逐条 UPDATE 直接拿,不依赖 ORM flush 校验。
+    # ③ 逐文件 key 迁移 + 单事务 UPDATE(F3)。顺序:跨资产占用预检 → MinIO
+    # copy_object(旧 key→新 key)→ UPDATE 行(filename+minio_key)→ 统一 commit
+    # 后删旧对象。预检与导入侧 _key_conflict_holders 同口径:含软删行(软删行仍引用
+    # 旧对象,写该 key 会覆盖其内容),排除自身。同一批内前序行已写入本事务的
+    # 新 key 对后续行的预检可见(读己之写),批内互撞自然落到 key_conflict。
+    # copy/delete 是同步 boto3(重试+超时最坏数分钟),一律 asyncio.to_thread
+    # 执行(防 MinIO 抖动冻结事件循环,delete_asset hard 分支同款);逐文件串行,
+    # 量级 ≤1000 小文件可接受,不并行轰炸 MinIO。
     renamed_ids: list[uuid.UUID] = []
     raced_ids: list[uuid.UUID] = []
+    moved_old_objects: list[tuple[str, str]] = []  # (bucket, 旧 key) — commit 成功后删
     for asset_id, new_name in new_names.items():
+        _, _, _, bucket, old_key, minio_prefix = snap[asset_id]
+        new_key = _new_asset_key(minio_prefix, new_name)
+        copy_meta: dict[str, Any] | None = None
+        if new_key != old_key:
+            # 新 key 已被其他资产行引用(含软删)→ skip,行不动(不偷别人的对象)
+            occupied = await db.scalar(
+                select(func.count()).select_from(Asset).where(
+                    Asset.minio_bucket == bucket,
+                    Asset.minio_key == new_key,
+                    Asset.id != asset_id,
+                )
+            )
+            if occupied:
+                reasons.key_conflict += 1
+                continue
+            try:
+                copy_meta = await asyncio.to_thread(
+                    presign.copy_object, bucket, old_key, new_key,
+                )
+            except Exception as e:  # MinIO 侧任何失败都只 skip 该文件(留 log 供排查)
+                log.warning(
+                    "batch_prefix copy failed asset=%s bucket=%s %r -> %r err=%s",
+                    asset_id, bucket, old_key, new_key, e,
+                )
+                reasons.key_copy_failed += 1
+                continue
+        # Core 语句逐 id UPDATE。add 谓词里的 normalize form 参数是不带引号的
+        # SQL 关键字 NFC(literal_column —— 写成 'NFC' 字符串是 PG 语法错误);
+        # 用 starts_with 不用 LIKE(_ / % 通配符会被误拦,免转义先例
+        # _escape_like)。rowcount 由逐条 UPDATE 直接拿,不依赖 ORM flush 校验。
         stmt = update(Asset).where(Asset.id == asset_id, Asset.deleted_at.is_(None))
         if payload.action == "add":
             stmt = stmt.where(
@@ -743,12 +801,28 @@ async def batch_prefix(
                     func.normalize(Asset.filename, literal_column("NFC")), prefix_nfc
                 )
             )
-        result = await db.execute(stmt.values(filename=new_name))
+        values: dict[str, Any] = {"filename": new_name}
+        if copy_meta is not None:
+            values["minio_key"] = new_key
+            # etag 用 copy 返回的新值,没有则保留原值(不写该键);version_id 同款
+            # 口径 —— 无版本化 bucket copy 不返回,行值保持;size_bytes/content_type
+            # 语义不变(对象是同一份内容的服务端拷贝)
+            if copy_meta.get("etag"):
+                values["etag"] = copy_meta["etag"]
+            if copy_meta.get("version_id"):
+                values["minio_version_id"] = copy_meta["version_id"]
+        result = await db.execute(stmt.values(**values))
         # asyncpg DML 实际返回 CursorResult(带 rowcount);基类 Result 的类型
         # 标注未声明该属性,cast 仅为过 mypy strict,运行时行为不变
         if cast("CursorResult[Any]", result).rowcount == 1:
             renamed_ids.append(asset_id)
+            if copy_meta is not None:
+                moved_old_objects.append((bucket, old_key))
         else:
+            # SELECT 与 UPDATE 之间行被并发变更(软删/竞写):该行 UPDATE 未生效,
+            # DB 自洽;已做的 copy 成孤儿(不可见、无权限含义)不补偿删除 ——
+            # 旧对象仍被该行(若还在)引用,必须保留;新 key 对象也绝不能删
+            # (可能已是并发写方的合法对象)
             raced_ids.append(asset_id)
 
     # ④ 对账:rowcount=0 = SELECT 与 UPDATE 之间有并发变更,补查归因,
@@ -775,7 +849,32 @@ async def batch_prefix(
             )
             reasons.deleted += 1
 
-    await db.commit()
+    # F3 新增暴露面:UPDATE 现在含 minio_key,预检之后、commit 之前的并发窗口
+    # 里他事务插入/改到同一 (bucket, key, version_id) 会撞
+    # uq_asset_minio_object_version。PG 约束冲突中止整个事务 → 整批回滚(逐文件
+    # UPDATE 同事务,部分成功只在「copy 失败 skip」这一层承诺);已 copy 的对象
+    # 成孤儿(不可见、无权限含义),重试的预检按 DB 行计数不会被孤儿挡住。
+    # 409 与 complete_upload 的 IntegrityError→409 同语义。
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            409, "部分文件的目标位置被并发修改,请刷新后重试"
+        ) from e
+
+    # ⑤ commit 成功后清理旧对象(F3 时序:行已持久指向新 key 才动手删)。
+    # delete 失败仅 log 留孤儿 —— 行已指向新 key,旧对象不可见、无权限含义,
+    # 不抛错不回滚(与 purge_asset_storage 的 best-effort 同取舍)
+    for old_bucket, old_key in moved_old_objects:
+        try:
+            await asyncio.to_thread(presign.delete_object, old_bucket, old_key)
+        except Exception as e:  # delete 失败只留孤儿,绝不向上抛(行已指向新 key)
+            log.warning(
+                "batch_prefix old object delete failed (orphan kept)"
+                " bucket=%s key=%s err=%s",
+                old_bucket, old_key, e,
+            )
 
     # 聚合 audit:采样前 50 条 {id, old, new},超出只以 renamed/skipped 计数
     skipped_total = sum(reasons.model_dump().values())
@@ -792,6 +891,9 @@ async def batch_prefix(
             "prefix": prefix_nfc,
             "renamed": len(renamed_ids),
             "skipped": skipped_total,
+            # F3:key 是否发生迁移 + 迁移条数(混合批次下裸布尔不歧义,补计数)
+            "key_moved": bool(moved_old_objects),
+            "key_moved_count": len(moved_old_objects),
             "sample": sample,
         },
         **ctx,
@@ -1147,6 +1249,13 @@ def _normalize_labels(labels: list[str]) -> list[str]:
         if len(out) >= _MAX_LABELS:
             break
     return out
+
+
+def _new_asset_key(minio_prefix: str, filename: str) -> str:
+    """资产 canonical key 规则 —— 与 complete_upload 的拼接规则逐字一致:
+    `f"{folder.minio_prefix.rstrip('/')}/{filename}"`(§F3;百度导入侧按同一
+    规则落库 —— 三处口径必须一致,这里抽函数供单测钉死,改动需三处同步)。"""
+    return f"{minio_prefix.rstrip('/')}/{filename}"
 
 
 async def _project_bucket(db: AsyncSession, project_id: uuid.UUID) -> str:

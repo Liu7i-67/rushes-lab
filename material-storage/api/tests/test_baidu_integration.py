@@ -50,7 +50,7 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | overwrite 无 can_admin → failed('overwrite_forbidden')(清 overwrite 标志) | test_overwrite_forbidden_without_can_admin_clears_flag |
 | overwrite(防御性)sensitive 目标 → failed('overwrite_forbidden') | test_overwrite_defensive_sensitive_target_failed |
 | overwrite 同夹同名多行 → failed('overwrite_ambiguous')       | test_overwrite_ambiguous_same_folder_duplicate_rows |
-| 跨资产 key 引用预检(含软删行)→ failed('overwrite_ambiguous') | test_overwrite_cross_asset_key_reference_ambiguous |
+| 跨资产 key 占用行:F2a 有权限 purge 后 success / 无权 overwrite_forbidden_for_holder 点名 | test_overwrite_cross_asset_key_holder_purged_then_success / test_overwrite_cross_asset_key_holder_without_permission_fails_named |
 | purge 未证实 → failed('purge_incomplete')可重试、覆盖行禁用 head 快捷路径 | test_overwrite_purge_incomplete_retry_no_head_shortcut |
 | 换绑(不同 uid)后名下残留 minio_upload_id 全部作废(abort+清零) | test_rebind_different_uid_invalidates_leftover_breakpoints |
 | 软解绑:行保留 + 断点作废 + 活动任务取消(binding_replaced)   | test_unbind_soft_deletes_and_invalidates_breakpoints |
@@ -65,7 +65,7 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | multipart 断点续传真实恢复(bytes_done 偏移续传)【集成】      | test_multipart_breakpoint_real_resume_from_bytes_done |
 | 死会话(NoSuchUpload)自动清零重传【集成】                     | test_dead_session_no_such_upload_resets_retransmit |
 | complete 后崩溃(upload_id 已死)→ 接管后 head 命中直接落库【集成】 | test_crash_after_complete_head_hit_finalizes_asset |
-| head 命中路径含同夹同名软删行占位 → failed('overwrite_ambiguous')【集成】 | test_head_hit_with_soft_deleted_same_name_ambiguous |
+| head 命中路径含同夹同名软删行占位 → failed('key_conflict') 点名+(回收站)【集成】 | test_head_hit_with_soft_deleted_same_name_ambiguous |
 | 零字节文件 put_object 直传【集成】                            | test_zero_byte_file_put_object_direct |
 | size 不符 → failed('size_mismatch')拦截(断点错位不落库)【集成】 | test_size_mismatch_row_failed_intercepted |
 | >1000 parts 死会话接管续传不回退(直 seed 1001x5MiB + mock 下载流)【集成】 | test_seed_1001_parts_takeover_resume_no_rollback |
@@ -2085,11 +2085,14 @@ async def test_overwrite_ambiguous_same_folder_duplicate_rows(
         assert await db.get(Asset, old_asset.id) is not None, "歧义时不得清除任何一方"
 
 
-async def test_overwrite_cross_asset_key_reference_ambiguous(
+async def test_overwrite_cross_asset_key_holder_purged_then_success(
     world: World, mock_baidu, client, enable_baidu, stack,
 ) -> None:
-    """跨资产 key 引用预检(含其他 folder 活跃行共享同 key)→ failed('overwrite_ambiguous')。【集成】P1"""
-    task, row, _old_asset, key = await _mk_completed_with_skipped(world, user=world.admin)
+    """F2a:admin 覆盖遇跨资产 key 占用(有 can_admin)→ 物理清除占用行后 success。【集成】P1"""
+    old_content = b"old-bytes"      # 9B,行 source_size 与其一致
+    task, row, old_asset, key = await _mk_completed_with_skipped(
+        world, old=old_content, user=world.admin,
+    )
     # 另一 folder 的活跃 asset 与旧 asset 共享 (bucket,key) —— 软删/跨项目共享均计数(§6 不区分软删)
     async with _db() as db:
         other_folder = Folder(project_id=world.project.id, name="other", minio_prefix="other/")
@@ -2098,20 +2101,89 @@ async def test_overwrite_cross_asset_key_reference_ambiguous(
         await db.refresh(other_folder)
     twin = Asset(folder_id=other_folder.id, filename="swing.mp4",
                  minio_bucket=world.project.minio_bucket, minio_key=key,
-                 size_bytes=16, uploader_id=world.admin.id)
+                 size_bytes=len(old_content), uploader_id=world.admin.id)
     async with _db() as db:
         db.add(twin)
         await db.commit()
+    # F2a 可 purge 前提 = 操作者对占用资产 can_admin:补 parent 链 tuple(project
+    # parent folder + bootstrap_asset,与 world 建夹/_mk_asset 同款)
+    perms = PermissionsService(get_settings())
+    try:
+        await _fga_write(perms, [
+            (f"project:{world.project.id}", "parent", f"folder:{other_folder.id}"),
+        ])
+        await perms.bootstrap_asset(asset_id=str(twin.id), parent_type="folder",
+                                    parent_id=str(other_folder.id))
+        if not await perms.check(user_subject=f"user:{world.admin.id}", relation="can_admin",
+                                 object_type="asset", object_id=str(twin.id)):
+            pytest.skip("admin 意外无 twin can_admin,用例前提不成立")
+    finally:
+        await perms.close()
+
+    new_content = b"new-bytes"       # 与行 source_size 等长(9B),落库完整性校验可过
+    r = await client.post(f"{BA}/tasks/{task.id}/files/{row.id}/overwrite",
+                          headers=_h(world.admin.id))
+    assert r.status_code == 202
+    mock_baidu.add((await _get_file(row.id)).fs_id, new_content)
+    await _claim_and_run(task.id)
+
+    frow = await _get_file(row.id)
+    assert frow.status == "success" and frow.asset_id is not None, \
+        f"有权限占用行应被清除后按 canonical key 导入,实际:{frow.last_error}"
+    from sqlalchemy import select
+    async with _db() as db:
+        assert await db.get(Asset, old_asset.id) is None, "同名旧 asset 行物理删除"
+        assert await db.get(Asset, twin.id) is None, "同 key 占用行(F2a)物理删除"
+        new_assets = (await db.execute(select(Asset).where(
+            Asset.minio_bucket == world.project.minio_bucket,
+            Asset.minio_key == key))).scalars().all()
+    assert len(new_assets) == 1 and new_assets[0].size_bytes == len(new_content), \
+        "canonical key 上仅剩新导入资产"
+    head = await _head(world.project.minio_bucket, key)
+    assert head is not None and head["ContentLength"] == len(new_content)
+
+
+async def test_overwrite_cross_asset_key_holder_without_permission_fails_named(
+    world: World, mock_baidu, client, enable_baidu, stack,
+) -> None:
+    """F2a:占用行无 can_admin → failed('overwrite_forbidden_for_holder') 点名占用者,
+    且任一无权不动手(同名行与占用行均原样保留,无部分清除)。【集成】P1"""
+    task, row, old_asset, key = await _mk_completed_with_skipped(world, user=world.admin)
+    # 占用行直插 DB、**不补任何 FGA tuple**(admin 对其无 can_admin 的自然构造)
+    async with _db() as db:
+        other_folder = Folder(project_id=world.project.id, name="other", minio_prefix="other/")
+        db.add(other_folder)
+        await db.commit()
+        await db.refresh(other_folder)
+    twin = Asset(folder_id=other_folder.id, filename="swing.mp4",
+                 minio_bucket=world.project.minio_bucket, minio_key=key,
+                 size_bytes=9, uploader_id=world.admin.id)
+    async with _db() as db:
+        db.add(twin)
+        await db.commit()
+    perms = PermissionsService(get_settings())
+    if await perms.check(user_subject=f"user:{world.admin.id}", relation="can_admin",
+                         object_type="asset", object_id=str(twin.id)):
+        pytest.skip("admin 意外持有 twin can_admin,用例前提不成立")
+    await perms.close()
 
     r = await client.post(f"{BA}/tasks/{task.id}/files/{row.id}/overwrite",
                           headers=_h(world.admin.id))
     assert r.status_code == 202
-    mock_baidu.add((await _get_file(row.id)).fs_id, b"x")
+    mock_baidu.add((await _get_file(row.id)).fs_id, b"should-not-land")
     await _claim_and_run(task.id)
 
     frow = await _get_file(row.id)
-    assert frow.status == "failed" and "overwrite_ambiguous" in (frow.last_error or ""), \
-        "purge+重写会让共享方得到新内容的假资产行,必须拦截"
+    assert frow.status == "failed" \
+        and "overwrite_forbidden_for_holder" in (frow.last_error or "") \
+        and "swing.mp4" in (frow.last_error or ""), \
+        "无权占用者必须被点名(信息含其 filename)"
+    assert frow.overwrite is False, "权限复查未通过 → 清 overwrite 标志(防 retry 循环)"
+    async with _db() as db:
+        assert await db.get(Asset, twin.id) is not None, "无权占用行原样保留"
+        assert await db.get(Asset, old_asset.id) is not None, \
+            "任一占用行无权限 → 不动手(同名行亦不得部分清除)"
+    assert await _head(world.project.minio_bucket, key) is not None, "共享对象不被误删"
 
 
 async def test_overwrite_purge_incomplete_retry_no_head_shortcut(
@@ -2643,7 +2715,8 @@ async def test_crash_after_complete_head_hit_finalizes_asset(
 async def test_head_hit_with_soft_deleted_same_name_ambiguous(
     world: World, mock_baidu, stack,
 ) -> None:
-    """head 命中路径含同夹同名软删行占位 → failed('overwrite_ambiguous') 而非落库共享对象。【集成】P1"""
+    """head 命中路径含同夹同名软删行占位 → failed('key_conflict') 点名+(回收站)标注
+    而非落库共享对象(F1 新格式;保持可重试,行级出路=覆盖/随机后缀导入)。【集成】P1"""
     content = os.urandom(1024)
     task = await _mk_task(world, status="running")
     key = _task_key(world.folder, "ghost.mp4")
@@ -2656,9 +2729,12 @@ async def test_head_hit_with_soft_deleted_same_name_ambiguous(
     await _dispatch_claim_run(task.id)
 
     row = await _get_file(row.id)
-    assert row.status == "failed" and "overwrite_ambiguous" in (row.last_error or ""), \
-        "同夹同名软删行不触发 skip、其对象仍在,直接落库即共享物理对象(§6 步骤 5)"
+    expected = f"key_conflict: {key} 已被 ghost.mp4(回收站)占用"
+    assert row.status == "failed" and (row.last_error or "") == expected, \
+        "F1:同夹同名软删行不触发 skip、其对象仍在,直接落库即共享物理对象(§6 步骤 5)," \
+        "last_error 须逐字为「key_conflict: <key> 已被 <filename>(回收站)占用」"
     assert row.asset_id is None
+    assert row.non_retryable is False, "key_conflict 保持可重试(行级出路=覆盖/随机后缀导入)"
     head = await _head(world.project.minio_bucket, key)
     assert head is not None and head["ContentLength"] == len(content)
 

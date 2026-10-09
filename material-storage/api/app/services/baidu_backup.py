@@ -29,9 +29,9 @@ from sqlalchemy import case, func, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from app.db.tables import Asset, BaiduBinding, Folder
 from app.db.tables import BaiduBackupTask as Task
 from app.db.tables import BaiduBackupTaskFile as TaskFile
-from app.db.tables import BaiduBinding, Folder
 from app.services.baidu_client import BaiduNetdiskClient
 from app.services.presign import PresignService
 from app.services.token_crypto import TokenCryptoService, TokenDecryptError
@@ -190,6 +190,25 @@ def validate_source_dir(source_dir: str) -> str:
 def source_dir_leaf_name(source_dir: str) -> str:
     """承接夹名 = source_dir rstrip('/') 后末段(§5.2,防尾斜杠取出空名)。"""
     return source_dir.rstrip("/").rpartition("/")[2]
+
+
+def format_key_conflict_message(key: str, holders: list[tuple[str, bool]]) -> str:
+    """F1 错误文案(F2b 前端按 `key_conflict:` 前缀解析行级出路):
+    `<key> 已被 <filename>[、<filename>…]占用`;软删占用者 filename 后附`(回收站)`,
+    多占用者全列(总长截断由 _fail_row 的 [:512] 统一承担)。"""
+    names = "、".join(f"{name}(回收站)" if deleted else name for name, deleted in holders)
+    return f"{key} 已被 {names}占用"
+
+
+def random_suffix_key(canonical_key: str, rand: str) -> str:
+    """F2b 预定 key(D5):canonical key 的末段文件名插入随机段,目录前缀不变 ——
+    `dir/1.txt → dir/1.<rand>.txt`;无扩展名(或 `.hidden` 形态)→ `dir/<name>.<rand>`。
+    filename 本身不变,仅 key 漂移。"""
+    dir_part, slash, filename = canonical_key.rpartition("/")
+    stem, dot, ext = filename.rpartition(".")
+    has_ext = bool(dot) and bool(stem)
+    suffixed = f"{stem}.{rand}.{ext}" if has_ext else f"{filename}.{rand}"
+    return f"{dir_part}{slash}{suffixed}"
 
 
 # ─── 事件 ID / 入队 ───────────────────────────────────────────────────────────
@@ -621,6 +640,82 @@ async def reset_skipped_row_for_overwrite(
             TaskFile.status == "skipped_exists",
         )
         .values(status="pending", attempts=0, overwrite=True)
+        .execution_options(**_SYNC_OFF)
+    )
+    return _rowcount(res)
+
+
+KEY_CONFLICT_PREFIX = "key_conflict:"
+
+
+def is_key_conflict_error(last_error: str | None) -> bool:
+    """F2 行级出路准入判定:failed 行的 last_error 是否为 key_conflict 失败(F1)。"""
+    return last_error is not None and last_error.startswith(KEY_CONFLICT_PREFIX)
+
+
+async def reset_failed_row_for_overwrite(
+    db: AsyncSession, *, task_id: uuid.UUID, file_id: uuid.UUID,
+) -> int:
+    """F2a overwrite 扩展准入:key_conflict 失败行(可重试)→ pending 且置
+    overwrite=true;worker 导入时对同 key 占用行做权限复查后物理清除。字段清理
+    语义与既有 reset 一致(不动 last_error/non_retryable —— key_conflict 行本就
+    non_retryable=false,last_error 留作历史)。"""
+    res = await db.execute(
+        update(TaskFile)
+        .where(
+            TaskFile.id == file_id,
+            TaskFile.task_id == task_id,
+            TaskFile.status == "failed",
+            TaskFile.non_retryable.is_(False),
+            TaskFile.last_error.like(f"{KEY_CONFLICT_PREFIX}%"),
+        )
+        .values(status="pending", attempts=0, overwrite=True)
+        .execution_options(**_SYNC_OFF)
+    )
+    return _rowcount(res)
+
+
+async def random_key_taken(
+    db: AsyncSession, *, bucket: str, key: str,
+    task_id: uuid.UUID, exclude_file_id: uuid.UUID,
+) -> bool:
+    """F2b 预定 key 冲突探测:任一 asset 行引用该 key(含软删,与 §6 预检口径一致),
+    或同任务其他 manifest 行已预定同一 key(排除自身)→ True。"""
+    asset_hit = await db.scalar(
+        select(func.count()).select_from(Asset).where(
+            Asset.minio_bucket == bucket, Asset.minio_key == key,
+        )
+    )
+    if int(asset_hit or 0) > 0:
+        return True
+    row_hit = await db.scalar(
+        select(func.count()).select_from(TaskFile).where(
+            TaskFile.task_id == task_id,
+            TaskFile.id != exclude_file_id,
+            TaskFile.reserved_key == key,
+        )
+    )
+    return int(row_hit or 0) > 0
+
+
+async def reserve_random_key(
+    db: AsyncSession, *, task_id: uuid.UUID, file_id: uuid.UUID, reserved_key: str,
+) -> int:
+    """F2b random-suffix 复位:key_conflict 失败行(或派发前中断的已预留 pending 行,
+    幂等复用)→ pending + 写 reserved_key + 清 last_error + overwrite=false
+    (attempts 归零按既有 reset 语义)。CAS 谓词防并发双请求双 key 漂移。"""
+    res = await db.execute(
+        update(TaskFile)
+        .where(
+            TaskFile.id == file_id,
+            TaskFile.task_id == task_id,
+            TaskFile.status.in_(("failed", "pending")),
+            TaskFile.non_retryable.is_(False),
+        )
+        .values(
+            status="pending", attempts=0, overwrite=False, last_error=None,
+            non_retryable=False, reserved_key=reserved_key,
+        )
         .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
