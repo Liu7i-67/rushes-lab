@@ -73,7 +73,7 @@ import hashlib
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 import pytest
@@ -82,7 +82,11 @@ from sqlalchemy import Select, Update
 import app.services.baidu_backup as baidu_backup_service
 import app.workers.baidu_backup as worker
 from app.db.tables import BaiduBackupTask, BaiduBinding, Folder, Project
-from app.routers.baidu_backup import _FOLDERS_CACHE_KEY, _FOLDERS_CACHE_TTL_S
+from app.routers.baidu_backup import (
+    _FOLDERS_CACHE_KEY,
+    _FOLDERS_CACHE_TTL_S,
+    _parse_list_entries,
+)
 from app.services.baidu_backup import (
     ENUM_BACKOFF_CAP_S,
     ENUM_BACKOFF_MAX_ATTEMPTS,
@@ -915,6 +919,93 @@ class TestNetdiskFoldersCache:
     def test_root_path_distinguished_from_child(self) -> None:
         uid = uuid.uuid4()
         assert self._cache_key(uid, "/") != self._cache_key(uid, "/apps")
+
+
+# ─── netdisk folders 条目两态解析(F1:目录+文件全条目;D4 后端排序)──────────
+class TestNetdiskFolderEntryParsing:
+    """_parse_list_entries(dir_path, items):目录/文件两态输出 + 排序 + 脏条目跳过。
+
+    字段口径:目录行 isdir=1、path 即完整路径;文件行 isdir=0、文件名取
+    server_filename(文件条目的 path 字段实测亦为完整路径,与枚举侧口径一致;
+    本组用例的文件行刻意按父目录造数,以证明实现不依赖该字段)。
+    """
+
+    DIR: ClassVar[dict[str, Any]] = {"fs_id": 11, "path": "/media/二级目录", "isdir": 1}
+    FILE: ClassVar[dict[str, Any]] = {"fs_id": 12, "path": "/media", "server_filename": "a.png",
+                                      "size": 1024, "isdir": 0}
+
+    def test_mixed_entries_dirs_first_files_after(self) -> None:
+        out = _parse_list_entries("/media", [self.FILE, self.DIR])
+        assert [e.name for e in out] == ["二级目录", "a.png"], "目录前文件后(D4)"
+        assert out[0].is_dir is True and out[0].size_bytes is None
+        assert out[1].is_dir is False and out[1].size_bytes == 1024
+
+    def test_dir_path_is_baidu_path_name_derived_from_tail(self) -> None:
+        out = _parse_list_entries("/media", [self.DIR])
+        assert out[0].path == "/media/二级目录", "目录 path 即完整路径(现状口径)"
+        assert out[0].name == "二级目录", "目录 name 从 path 末段派生"
+
+    def test_file_full_path_joined_from_dir_and_name(self) -> None:
+        """完整 path = dir_path + server_filename,不依赖条目 path 字段
+        (该字段实测为完整路径,实现仍显式拼接以自证;mock 行按父目录造数)。"""
+        out = _parse_list_entries("/media", [self.FILE])
+        assert out[0].path == "/media/a.png"
+        assert out[0].name == "a.png", "文件 name 取 server_filename"
+
+    def test_file_path_joined_on_root_dir_without_double_slash(self) -> None:
+        out = _parse_list_entries("/", [{**self.FILE, "server_filename": "根.mp4"}])
+        assert out[0].path == "/根.mp4", "根目录拼接不得出现 //"
+
+    def test_isdir_string_one_counts_as_dir(self) -> None:
+        """百度个别响应 isdir 为字符串 "1" → 仍按目录。"""
+        out = _parse_list_entries("/media", [{**self.DIR, "isdir": "1"}])
+        assert out[0].is_dir is True
+
+    def test_sorted_by_name_within_each_group(self) -> None:
+        items = [
+            {"fs_id": 1, "path": "/m/乙", "isdir": 1},
+            {"fs_id": 2, "path": "/m", "server_filename": "b.mp4", "size": 1, "isdir": 0},
+            {"fs_id": 3, "path": "/m/甲", "isdir": 1},
+            {"fs_id": 4, "path": "/m", "server_filename": "a.mp4", "size": 1, "isdir": 0},
+        ]
+        out = _parse_list_entries("/m", items)
+        assert [e.name for e in out] == ["乙", "甲", "a.mp4", "b.mp4"], \
+            "组内 name 升序(中文按码点系统序),组间不混排"
+
+    def test_dirty_file_entry_without_server_filename_skipped(self, caplog) -> None:
+        out = _parse_list_entries("/media", [
+            {"fs_id": 9, "path": "/media", "size": 5, "isdir": 0},  # 缺 server_filename
+            self.FILE,
+        ])
+        assert [e.name for e in out] == ["a.png"], "脏文件条目跳过不炸整列表"
+        assert any("server_filename" in r.getMessage() for r in caplog.records), "跳过须 warning"
+
+    def test_dirty_file_entry_non_numeric_size_skipped(self, caplog) -> None:
+        """size 非数字(如 "abc")→ 与缺字段同款脏条目语义:跳过 + warning,不炸整列表。"""
+        out = _parse_list_entries("/media", [
+            {"fs_id": 6, "path": "/media", "server_filename": "bad.bin",
+             "size": "abc", "isdir": 0},
+            self.FILE,
+        ])
+        assert [e.name for e in out] == ["a.png"], 'size="abc" 不得 ValueError 冒泡 500'
+        assert any("size 非数字" in r.getMessage() for r in caplog.records), "跳过须 warning"
+
+    def test_dirty_dir_entry_without_path_skipped(self, caplog) -> None:
+        out = _parse_list_entries("/media", [
+            {"fs_id": 8, "isdir": 1},  # 缺 path
+            self.DIR,
+        ])
+        assert [e.name for e in out] == ["二级目录"], "脏目录条目跳过不炸整列表"
+        assert any("缺 path" in r.message for r in caplog.records)
+
+    def test_file_size_missing_defaults_zero(self) -> None:
+        out = _parse_list_entries("/media", [
+            {"fs_id": 7, "path": "/media", "server_filename": "x.bin", "isdir": 0},
+        ])
+        assert out[0].size_bytes == 0, "size 缺省按 0(前端人类可读展示 0 B)"
+
+    def test_empty_items_return_empty_list(self) -> None:
+        assert _parse_list_entries("/media", []) == [], "纯文件空目录 → 空列表(非报错)"
 
 
 # ─── token 刷新单飞(§5.3;落地于 services/baidu_backup.ensure_fresh_access_token)

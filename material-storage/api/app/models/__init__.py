@@ -320,10 +320,18 @@ class BaiduBindOut(BaseModel):
 
 
 class BaiduNetdiskFolderOut(BaseModel):
-    """网盘目录树节点(folder=1 时百度仅返回 path,name 由后端从 path 末段派生)。"""
+    """网盘目录树条目(目录 + 文件两态;文件行前端灰显不可选,保持「选目录建任务」语义)。
+
+    目录:size_bytes=None,path 即完整路径(现状口径),name 从 path 末段派生;
+    文件:size_bytes 恒有值(百度缺省按 0),path 由路由层按目录 + server_filename
+    显式拼接(文件条目的 path 字段实测亦为完整路径,与枚举侧口径一致;拼接是
+    为了显式自证、不依赖该字段口径)。
+    """
 
     path: str
     name: str
+    is_dir: bool = True
+    size_bytes: int | None = None
 
 
 class BaiduNetdiskFoldersOut(BaseModel):

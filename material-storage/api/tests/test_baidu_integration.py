@@ -30,7 +30,7 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | sensitive 禁选 403(文案不含"敏感"字样)                      | test_create_task_explicit_sensitive_target_403_no_sensitive_wording |
 | 敏感祖先 403(沿 parent 链向上核查,创建期快败)               | test_create_task_sensitive_ancestor_403_fast_fail |
 | source_dir 护栏(/ 拒绝/相对路径/≤600/承接夹名>255→400/target 归属) | test_create_task_source_dir_guards_400 |
-| netdisk folders 绑定非 active 409(binding_inactive)         | test_binding_inactive_409_on_netdisk_folders |
+| netdisk folders 目录+文件全条目(F1 两态/排序/文件路径拼接) + 缓存 + truncated + 非 active 409 | test_binding_inactive_409_on_netdisk_folders |
 | 枚举重跑 ON CONFLICT 幂等(不重置已有行状态)【集成】          | test_enum_on_conflict_idempotent_preserves_row_states |
 | 枚举频控耗尽失败 → 复活后重枚举补全 manifest(enum_done=false) | test_enum_rate_limited_revival_reenumerates_completes_manifest |
 | manifest_too_large 复活后再次失败而非全量导入                | test_manifest_too_large_revival_fails_again_without_full_import |
@@ -1525,7 +1525,8 @@ async def test_create_task_source_dir_guards_400(
 async def test_binding_inactive_409_on_netdisk_folders(
     world: World, client, enable_baidu, mock_baidu, monkeypatch, stack,
 ) -> None:
-    """netdisk folders:60s (user_id,path) 缓存生效 + 绑定非 active → 409 binding_inactive。【集成】P1"""
+    """netdisk folders:目录+文件全条目两态返回(F1) + 60s 缓存 + truncated 透传
+    + 绑定非 active → 409 binding_inactive。【集成】P1"""
     calls: list[str] = []
     orig_list_dir = baidu_client_module.BaiduNetdiskClient.list_dir
     # mock_baidu 先行生效 → orig_list_dir 是 BaiduScript.list_dir 的 bound method
@@ -1537,21 +1538,60 @@ async def test_binding_inactive_409_on_netdisk_folders(
 
     monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "list_dir", _counting)
 
-    # 同 (user, path) 60s 内两次请求 → 只打一次百度(§9 频控缓解)
+    # 混合条目(真实口径:目录行 path=完整路径;文件行 path=父目录、名取 server_filename)
+    mock_baidu.listing = [
+        {"fs_id": 101, "path": "/docs/子目录", "server_filename": "子目录", "isdir": 1},
+        {"fs_id": 102, "path": "/docs", "server_filename": "b.png", "size": 2048, "isdir": 0},
+        {"fs_id": 103, "path": "/docs", "server_filename": "a.mp4", "size": 10, "isdir": 0},
+        {"fs_id": 104, "path": "/docs/甲目录", "server_filename": "甲目录", "isdir": 1},
+    ]
+
+    # 同 (user, path) 60s 内两次请求 → 只打一次百度(§9 频控缓解),且缓存返回全条目
     r1 = await client.get(f"{BA}/netdisk/folders", params={"path": "/docs"},
                           headers=_h(world.member.id))
     assert r1.status_code == 200, r1.text
+    body = r1.json()
+    entries = body["list"]
+    assert [(e["name"], e["is_dir"]) for e in entries] == [
+        ("子目录", True), ("甲目录", True), ("a.mp4", False), ("b.png", False),
+    ], "目录前文件后、组内 name 升序(D4 后端排序)"
+    assert entries[0]["path"] == "/docs/子目录", "目录 path 即完整路径(现状口径)"
+    assert entries[0]["size_bytes"] is None, "目录 size_bytes=None"
+    assert entries[2]["path"] == "/docs/a.mp4", "文件完整路径 = 父目录 + server_filename(后端拼)"
+    assert entries[2]["size_bytes"] == 10 and entries[3]["size_bytes"] == 2048
     r2 = await client.get(f"{BA}/netdisk/folders", params={"path": "/docs"},
                           headers=_h(world.member.id))
     assert r2.status_code == 200
+    assert r2.json() == body, "60s 缓存命中必须返回全条目(非空壳/非仅目录)"
     assert calls == ["/docs"], f"60s 缓存未生效: {calls}"
-    # 不同 path → 新请求
+
+    # 纯文件目录 → 非空列表(007「点开为空」场景直拍:1 png + 1 mp4 无子夹)
+    mock_baidu.listing = [
+        {"fs_id": 201, "path": "/灵机备份", "server_filename": "02.mp4", "size": 6, "isdir": 0},
+        {"fs_id": 202, "path": "/灵机备份", "server_filename": "01.png", "size": 5, "isdir": 0},
+    ]
     r3 = await client.get(f"{BA}/netdisk/folders", params={"path": "/other"},
                           headers=_h(world.member.id))
     assert r3.status_code == 200
+    names = [e["name"] for e in r3.json()["list"]]
+    assert names == ["01.png", "02.mp4"], "纯文件目录非空且组内 name 升序"
+    assert all(e["is_dir"] is False for e in r3.json()["list"])
     assert sorted(calls) == ["/docs", "/other"]
 
+    # truncated 透传(>max_pages 聚合未取尽 → 前端尾插「目录过大」提示行)
+    async def _truncated(self: Any, access_token: str, dir_path: str, **_k: Any) -> Any:
+        del access_token, dir_path
+        return BaiduListResult(items=list(mock_baidu.listing), truncated=True)
+
+    monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "list_dir", _truncated)
+    r_big = await client.get(f"{BA}/netdisk/folders", params={"path": "/big"},
+                             headers=_h(world.member.id))
+    assert r_big.status_code == 200
+    assert r_big.json()["truncated"] is True and len(r_big.json()["list"]) == 2, \
+        "truncated=True 透传且条目不丢"
+
     # 绑定非 active → 409(错误码 binding_inactive,与创建/复活接口同码同义)
+    monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "list_dir", _counting)
     await _touch_binding(world.binding.id, status="unbound")
     r4 = await client.get(f"{BA}/netdisk/folders", params={"path": "/"},
                           headers=_h(world.member.id))

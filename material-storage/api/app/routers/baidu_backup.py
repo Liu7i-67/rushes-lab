@@ -9,8 +9,9 @@
   POST   /backup/binding                授权码换 token 落库(Fernet 加密 + 限流)
   DELETE /backup/binding                软解绑(行保留,密文清空;①取消活动中任务
                                         ②作废残留断点,方案 §5.2 覆盖前处置)
-  GET    /backup/netdisk/folders        网盘目录树懒加载(folder=1 + 后端聚合分页
-                                        + 60s (user_id,path) Redis 缓存)
+  GET    /backup/netdisk/folders        网盘目录树懒加载(目录+文件全条目,目录前
+                                        文件后 + 后端聚合分页 + 60s (user_id,path)
+                                        Redis 缓存)
   POST   /backup/tasks                  创建任务(校验链 + 派发步入队)
   GET    /backup/tasks                  任务列表(created_at DESC, id DESC 稳定排序)
   GET    /backup/tasks/{id}             任务详情
@@ -33,6 +34,7 @@ import logging
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from arq.connections import ArqRedis
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -486,6 +488,54 @@ async def unbind(
 # ─── 网盘目录浏览(懒加载)─────────────────────────────────────────────────────
 
 
+def _parse_list_entries(
+    dir_path: str, items: list[dict[str, Any]],
+) -> list[BaiduNetdiskFolderOut]:
+    """list 条目 → 两态输出行(纯函数;D4:目录前文件后,组内 name 升序)。
+
+    - 目录(isdir 真值,1/"1" 均见):path 即完整路径(现状口径),name 取末段,
+      size_bytes=None;
+    - 文件:name 取 server_filename,size 取 size(缺省按 0);完整 path 由后端拼
+      `dir_path + server_filename` —— 文件条目的 path 字段实测亦为完整路径
+      (与枚举侧口径一致,经 007 真实导入验证),此处仍显式拼接以自证、不依赖
+      该字段口径;
+    - 缺关键字段的脏条目(目录行缺 path / 文件行缺 server_filename / 文件行
+      size 非数字)跳过并 warning,不炸整列表。
+    """
+    dirs: list[BaiduNetdiskFolderOut] = []
+    files: list[BaiduNetdiskFolderOut] = []
+    for item in items:
+        isdir = item.get("isdir")
+        if isdir is True or str(isdir or 0) == "1":
+            path = str(item.get("path") or "")
+            if not path:
+                log.warning("baidu folders: 目录条目缺 path,跳过 keys=%s", sorted(item))
+                continue
+            dirs.append(BaiduNetdiskFolderOut(
+                path=path, name=path.rstrip("/").rpartition("/")[2] or path,
+                is_dir=True, size_bytes=None,
+            ))
+        else:
+            name = str(item.get("server_filename") or "")
+            if not name:
+                log.warning("baidu folders: 文件条目缺 server_filename,跳过 keys=%s",
+                            sorted(item))
+                continue
+            try:
+                size_bytes = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                log.warning("baidu folders: 文件条目 size 非数字(%r),跳过 name=%s",
+                            item.get("size"), name)
+                continue
+            files.append(BaiduNetdiskFolderOut(
+                path=f"{dir_path.rstrip('/')}/{name}",
+                name=name, is_dir=False, size_bytes=size_bytes,
+            ))
+    dirs.sort(key=lambda e: e.name)
+    files.sort(key=lambda e: e.name)
+    return dirs + files
+
+
 @router.get("/backup/netdisk/folders", response_model=BaiduNetdiskFoldersOut)
 async def list_netdisk_folders(
     request: Request,
@@ -493,10 +543,12 @@ async def list_netdisk_folders(
     user: CurrentUser = Depends(get_current_user),  # noqa: B008  # FastAPI DI,repo 全量同款
     db: AsyncSession = Depends(get_db),  # noqa: B008  # FastAPI DI,repo 全量同款
 ) -> BaiduNetdiskFoldersOut:
-    """网盘目录树懒加载(§5.2):folder=1 仅目录;后端按 start/limit 循环聚合
-    同目录全部子目录(>1000 子目录静默截断不可接受,聚合页数上限内未取尽置
-    truncated=True 提示「目录过大,分批浏览」);60s (user_id,path) Redis 缓存;
-    绑定非 active → 409 binding_inactive(与创建/复活接口同码同义)。"""
+    """网盘目录树懒加载(§5.2):返回该目录的子文件夹 + 文件全条目(folder=0,
+    像网盘客户端浏览;文件行前端灰显不可选,保持「选目录创建任务」语义;排序
+    目录前文件后、组内 name 升序);后端按 start/limit 循环聚合(>1000 子条目
+    静默截断不可接受,聚合页数上限内未取尽置 truncated=True 提示「目录过大,
+    分批浏览」);60s (user_id,path) Redis 缓存;绑定非 active → 409
+    binding_inactive(与创建/复活接口同码同义)。"""
     _ensure_enabled()
     dir_path = (path or "/").strip() or "/"
     if not dir_path.startswith("/"):
@@ -521,16 +573,13 @@ async def list_netdisk_folders(
     crypto = _get_token_crypto(request)
     access_token = await ensure_fresh_access_token(db, binding, crypto=crypto, client=client)
     try:
-        result = await client.list_dir(access_token, dir_path, folders_only=True)
+        result = await client.list_dir(access_token, dir_path, folders_only=False)
     except BaiduApiError as e:
         raise _baidu_error_to_http(e) from e
 
-    folders = [
-        BaiduNetdiskFolderOut(path=p, name=p.rstrip("/").rpartition("/")[2] or p)
-        for item in result.items
-        if (p := str(item.get("path") or ""))
-    ]
-    out = BaiduNetdiskFoldersOut(list=folders, truncated=result.truncated)
+    out = BaiduNetdiskFoldersOut(
+        list=_parse_list_entries(dir_path, result.items), truncated=result.truncated,
+    )
     await redis.set(cache_key, out.model_dump_json(), ex=_FOLDERS_CACHE_TTL_S)
     return out
 

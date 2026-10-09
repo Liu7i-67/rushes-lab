@@ -288,10 +288,18 @@ export interface BaiduBinding {
   baidu_uid?: string | null;
 }
 
-/** GET /backup/netdisk/folders → 网盘目录(仅目录,懒加载一层) */
+/** GET /backup/netdisk/folders → 网盘条目(目录+文件,懒加载一层;排序后端做:目录前文件后) */
 export interface BaiduNetdiskFolder {
-  path: string;   // 绝对路径(以 / 开头)
+  path: string;              // 绝对路径(以 / 开头;文件为父目录+文件名拼好的完整路径)
   name: string;
+  is_dir: boolean;           // true=目录(可展开可选);false=文件(仅展示不可选)
+  size_bytes: number | null; // 文件字节数;目录为 null
+}
+
+/** GET /backup/netdisk/folders 完整响应;truncated=聚合分页未取尽(仅显示部分内容) */
+export interface BaiduNetdiskFoldersOut {
+  list: BaiduNetdiskFolder[];
+  truncated: boolean;
 }
 
 export type BaiduTaskStatus = 'enumerating' | 'running' | 'completed' | 'cancelled' | 'failed';
