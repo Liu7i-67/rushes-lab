@@ -44,6 +44,11 @@ migration `2026_10_08_0013_baidu_backup.py`（基于 head `2026_09_30_0012`）�
 5. ruff/mypy 验收口径：PM 以 PATH ruff 0.16.10 + 主仓 venv 复跑为准；新文件 ruff 仅存量同型 RUF100（已派清理）、mypy 新模块零错误（17 条报错全在存量文件）。
 6. `is_sensitive` 过时注释更正与 RUF100 清理已派后端小修；测试命名对齐已派测试小修（实跑单测至绿）。
 
+**WP6 测试期 PM 决策（2026-10-09）**：
+7. create-task 校验顺序分歧：实现「绑定 active（409 binding_inactive）先于权限（403）」与方案 §5.2 校验链排序一致——**维持实现，修正测试断言**（无绑定+无权限用户预期 409 binding_inactive，不落 access_denied）。
+8. 故障注入基建：Settings 补 `baidu_openapi_base_url/baidu_pan_base_url`（默认真实端点、测试可注入本地桩）——**采纳**（产品小改，kill -9/SIGTERM 两条 P0 场景依赖）。
+9. 集成层 49 条失败经逐条归因均为测试文件缺陷（导入路径×4/mock 签名/适配层漏 commit/enable_baidu 缺挂/同步 helper 被 await/arq.Redis 笔误/FGA tuple 类型/fixture 属主/环境前置）——派测试角色统一修复并在隔离栈重跑 65 条至绿、P0 四条真实全过后方可收尾。
+
 ## 工作包与进度
 
 | 工作包 | 角色 | 状态 |

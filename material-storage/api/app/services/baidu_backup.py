@@ -49,6 +49,15 @@ def statement_rowcount(result: Any) -> int:
     return _rowcount(result)
 
 
+# 本域全部 ORM UPDATE 统一 execution_options(synchronize_session=False):
+# 任务/清单表经 TimestampMixin 带 `updated_at onupdate=func.now()`,ORM UPDATE 默认
+# auto/evaluate 同步无法 evaluate 该列,会把命中行对应的会话内对象**置 expire**;
+# async 会话随后再读同对象(哪怕只读 updated_at)就是同步 IO → MissingGreenlet
+# (POST /tasks 500 已实证)。本域取值一律走 RETURNING / rowcount / 重查,不依赖
+# evaluate 的内存同步;凡调用方在 UPDATE 后需要读对象,必须显式 db.refresh 或重查。
+_SYNC_OFF = {"synchronize_session": False}
+
+
 # ─── 状态与谓词常量(§4)──────────────────────────────────────────────────────
 STATUS_ENUMERATING = "enumerating"
 STATUS_RUNNING = "running"
@@ -287,7 +296,11 @@ async def dispatch_task(
             Task.lease_until.is_(None) | (Task.lease_until < now),   # NULL 分支显式
             Task.dispatched_at.is_(None) | (Task.dispatched_at < deadline),
         )
-    stmt = stmt.values(**values).returning(Task.lease_seq)
+    stmt = (
+        stmt.values(**values)
+        .execution_options(**_SYNC_OFF)   # 防 onupdate expire 会话内 task(P0)
+        .returning(Task.lease_seq)
+    )
     res = await db.execute(stmt)
     row = res.first()
     return int(row.lease_seq) if row is not None else None
@@ -300,6 +313,7 @@ async def reset_importing_rows(db: AsyncSession, *, task_id: uuid.UUID) -> int:
         update(TaskFile)
         .where(TaskFile.task_id == task_id, TaskFile.status == "importing")
         .values(status="pending")
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -329,6 +343,7 @@ async def claim_task(
             speed_anchor_bytes=0,
             speed_anchor_at=None,
         )
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res) == 1
 
@@ -357,6 +372,7 @@ async def renew_lease(
             Task.runner_id == runner_id,
         )
         .values(lease_until=now + timedelta(seconds=lease_s))
+        .execution_options(**_SYNC_OFF)
         .returning(Task.cancel_requested, Task.cancel_reason, Task.round_started_at)
     )
     row = res.first()
@@ -389,6 +405,7 @@ async def relay_dispatch(
         .values(
             lease_seq=Task.lease_seq + 1, runner_id=None, lease_until=None, dispatched_at=now,
         )
+        .execution_options(**_SYNC_OFF)
         .returning(Task.lease_seq)
     )
     row = res.first()
@@ -409,6 +426,7 @@ async def release_for_queueing(
         update(Task)
         .where(Task.id == task_id, Task.lease_seq == expected_seq, Task.runner_id == runner_id)
         .values(round_started_at=None, runner_id=None, lease_until=None)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res) == 1
 
@@ -568,6 +586,7 @@ async def reset_failed_rows(db: AsyncSession, *, task_id: uuid.UUID) -> int:
             TaskFile.non_retryable.is_(False),
         )
         .values(status="pending", attempts=0)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -585,6 +604,7 @@ async def reset_one_failed_row(
             TaskFile.non_retryable.is_(False),
         )
         .values(status="pending", attempts=0)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -601,6 +621,7 @@ async def reset_skipped_row_for_overwrite(
             TaskFile.status == "skipped_exists",
         )
         .values(status="pending", attempts=0, overwrite=True)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -620,6 +641,7 @@ async def finalize_rows_cancelled(db: AsyncSession, *, task_id: uuid.UUID) -> in
                 else_=TaskFile.last_error,
             ),
         )
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -640,6 +662,7 @@ async def finalize_rows_failed(
                 else_=literal(reason),
             ),
         )
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res)
 
@@ -654,6 +677,7 @@ async def finalize_task_terminal(
         update(Task)
         .where(Task.id == task_id, Task.status.in_(ACTIVE_STATUSES))
         .values(status=status, fail_reason=fail_reason, runner_id=None, lease_until=None)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res) == 1
 
@@ -722,6 +746,7 @@ async def apply_aggregates(db: AsyncSession, *, task_id: uuid.UUID, agg: TaskAgg
             total_bytes=agg.total_bytes,
             done_bytes=agg.done_bytes,
         )
+        .execution_options(**_SYNC_OFF)
     )
 
 
@@ -766,6 +791,7 @@ async def bump_done_bytes(
             Task.status.in_(ACTIVE_STATUSES),
         )
         .values(done_bytes=Task.done_bytes + delta)
+        .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res) == 1
 
@@ -797,6 +823,7 @@ async def update_speed_anchor(
             Task.runner_id == runner_id,
         )
         .values(**values)
+        .execution_options(**_SYNC_OFF)
     )
 
 
@@ -831,6 +858,9 @@ async def _refresh_locked_once(
     if locked.access_token_expires_at > now + timedelta(seconds=TOKEN_EXPIRY_MARGIN_S):
         # 并发请求已完成刷新(单飞)→ 释放行锁直接复用现存 token
         await db.rollback()
+        # rollback 会 expire 会话内全部对象;直接读 locked.access_token_enc 是
+        # 同步 IO(async 下 MissingGreenlet),先显式 refresh 再解密
+        await db.refresh(locked)
         return await decrypt_access_token(db, locked, crypto)
     try:
         tokens = await client.refresh_token(crypto.decrypt(locked.refresh_token_enc))

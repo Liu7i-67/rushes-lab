@@ -140,7 +140,9 @@ class Asset(Base, TimestampMixin):
     minio_key: Mapped[str] = mapped_column(String(1024), nullable=False)
     etag: Mapped[str | None] = mapped_column(String(128))
     minio_version_id: Mapped[str | None] = mapped_column(String(128))
-    size_bytes: Mapped[int] = mapped_column(nullable=False)
+    # 显式 BigInteger(对齐 migration 0001 的 bigint 列):裸 Mapped[int] 会被推导为
+    # Integer,>2.1GB 资产 INSERT 参数按 int4 编码 → asyncpg OverflowError
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     content_type: Mapped[str | None] = mapped_column(String(255))
     media_metadata: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     tags: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)

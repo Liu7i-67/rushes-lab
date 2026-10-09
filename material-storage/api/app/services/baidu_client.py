@@ -28,13 +28,10 @@ from app.settings import Settings
 
 log = logging.getLogger(__name__)
 
-# ─── 端点与常量(与调研脚本实测一致)─────────────────────────────────────────
-_OAUTH_AUTHORIZE_URL = "https://openapi.baidu.com/oauth/2.0/authorize"
-_OAUTH_TOKEN_URL = "https://openapi.baidu.com/oauth/2.0/token"
-_XPAN_FILE_URL = "https://pan.baidu.com/rest/2.0/xpan/file"
-_XPAN_MULTIMEDIA_URL = "https://pan.baidu.com/rest/2.0/xpan/multimedia"
-_XPAN_NAS_URL = "https://pan.baidu.com/rest/2.0/xpan/nas"
-
+# ─── 端点与常量(端点路径与调研脚本实测一致;base 从 Settings 注入,便于测试)──
+# openapi/pan 的 base URL 由 settings.baidu_openapi_base_url / baidu_pan_base_url
+# 提供(默认生产端点),构造时拼出下列路径;下载 CDN 白名单与 d.pcs 重定向逻辑
+# 不随此开关,见 _ALLOWED_DL_HOST_SUFFIXES / stream_download
 _PAN_UA = "pan.baidu.com"          # xpan/下载接口官方要求 UA
 _REDIRECT_URI_DEFAULT = "oob"
 _OAUTH_SCOPE = "basic,netdisk"
@@ -184,6 +181,14 @@ class BaiduNetdiskClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
+        # 端点从 settings 拼(默认生产;测试/调试注入本地桩);rstrip 防末尾斜杠双 //
+        openapi = settings.baidu_openapi_base_url.rstrip("/")
+        pan = settings.baidu_pan_base_url.rstrip("/")
+        self._oauth_authorize_url = f"{openapi}/oauth/2.0/authorize"
+        self._oauth_token_url = f"{openapi}/oauth/2.0/token"
+        self._xpan_file_url = f"{pan}/rest/2.0/xpan/file"
+        self._xpan_multimedia_url = f"{pan}/rest/2.0/xpan/multimedia"
+        self._xpan_nas_url = f"{pan}/rest/2.0/xpan/nas"
         # read timeout ≤15s(§6);follow_redirects 关闭 —— 下载 302 需逐跳做宿主白名单校验
         self._http = httpx.AsyncClient(
             timeout=httpx.Timeout(connect=10.0, read=_READ_TIMEOUT_S, write=15.0, pool=15.0),
@@ -210,7 +215,7 @@ class BaiduNetdiskClient:
             "redirect_uri": redirect_uri,
             "scope": _OAUTH_SCOPE,
         }
-        return f"{_OAUTH_AUTHORIZE_URL}?{urlencode(params)}"
+        return f"{self._oauth_authorize_url}?{urlencode(params)}"
 
     async def exchange_code(
         self, code: str, redirect_uri: str = _REDIRECT_URI_DEFAULT,
@@ -241,7 +246,7 @@ class BaiduNetdiskClient:
         self, data: dict[str, str], *, context: str,
     ) -> BaiduTokenPair:
         try:
-            resp = await self._http.post(_OAUTH_TOKEN_URL, data=data)
+            resp = await self._http.post(self._oauth_token_url, data=data)
         except httpx.HTTPError as e:
             raise BaiduApiError(
                 CATEGORY_UNKNOWN, f"{context}:网络错误({sanitize_message(str(e))})",
@@ -277,7 +282,7 @@ class BaiduNetdiskClient:
         注:uid/nickname 的响应字段名待批次 1 真机实测核定(§10 批次 1),
         此处按官方文档口径多候选解析。
         """
-        body = await self._xpan_get_json(_XPAN_NAS_URL, {"method": "uinfo"}, access_token)
+        body = await self._xpan_get_json(self._xpan_nas_url, {"method": "uinfo"}, access_token)
         uid = body.get("user_id") or body.get("baidu_uid") or body.get("uk")
         if uid in (None, ""):
             raise BaiduApiError(
@@ -313,7 +318,7 @@ class BaiduNetdiskClient:
             }
             if folders_only:
                 params["folder"] = 1
-            body = await self._xpan_get_json(_XPAN_FILE_URL, params, access_token)
+            body = await self._xpan_get_json(self._xpan_file_url, params, access_token)
             page = body.get("data", {}).get("list") if isinstance(
                 body.get("data"), dict,
             ) else body.get("list")
@@ -344,7 +349,7 @@ class BaiduNetdiskClient:
             "fsids": json.dumps(fsid_list),
             "dlink": 1 if dlink else 0,
         }
-        body = await self._xpan_get_json(_XPAN_MULTIMEDIA_URL, params, access_token)
+        body = await self._xpan_get_json(self._xpan_multimedia_url, params, access_token)
         data = body.get("data")
         rows = data.get("list") if isinstance(data, dict) else body.get("list")
         return list(rows or [])

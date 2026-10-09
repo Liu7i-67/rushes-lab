@@ -171,7 +171,8 @@ async def _clear_dlink_cache(db: AsyncSession, user_id: uuid.UUID) -> None:
         .where(BaiduBackupTaskFile.task_id.in_(
             select(BaiduBackupTask.id).where(BaiduBackupTask.user_id == user_id),
         ))
-        .values(dlink=None, dlink_expires_at=None),
+        .values(dlink=None, dlink_expires_at=None)
+        .execution_options(synchronize_session=False),  # onupdate expire 同防(服务层 _SYNC_OFF 同因)
     )
 
 
@@ -225,6 +226,7 @@ async def _cancel_active_tasks_of_binding(
                 BaiduBackupTask.status.in_(ACTIVE_STATUSES),
             )
             .values(cancel_requested=True, cancel_reason=CANCEL_BINDING_REPLACED)
+            .execution_options(synchronize_session=False)  # onupdate expire 同防(服务层 _SYNC_OFF 同因)
         )
         if statement_rowcount(res):
             log.info("baidu task cancel deferred to runner task=%s", task.id)
@@ -748,6 +750,12 @@ async def create_task(
     if outcome.seq is None:
         raise HTTPException(409, "任务派发失败(状态已变化),请重试")
 
+    # INSERT 的 server_default 列(created_at/updated_at)与派发步 UPDATE 的落库值
+    # 都不在会话内对象上(UPDATE 已 synchronize_session=False,不再靠 evaluate 回写),
+    # 构造响应前显式 refresh —— 否则 _build_task_outs 读 updated_at 触发同步 IO
+    # → MissingGreenlet(探针实证的 P0 500)。
+    await db.refresh(task)
+
     await audit.write(
         event_type="baidu_task_create",
         actor_user_id=user.id,
@@ -917,6 +925,7 @@ async def cancel_task(
                 BaiduBackupTask.status.in_(ACTIVE_STATUSES),
             )
             .values(cancel_requested=True, cancel_reason=CANCEL_USER)
+            .execution_options(synchronize_session=False)  # onupdate expire 同防(服务层 _SYNC_OFF 同因)
         )
         if statement_rowcount(res) == 0:
             raise HTTPException(409, "任务状态已变化,请刷新后重试")

@@ -11,8 +11,6 @@ from app.db.tables import (
     BaiduBinding,
     Base,
     Folder,
-    Organization,
-    Project,
     User,
 )
 
@@ -43,6 +41,18 @@ def test_asset_unique_constraint() -> None:
     """asset 表必须有 (bucket, key, version) 唯一约束。"""
     constraints = {c.name for c in Asset.__table__.constraints}
     assert "uq_asset_minio_object_version" in constraints
+
+
+def test_asset_size_bytes_is_bigint() -> None:
+    """size_bytes 必须显式 BigInteger(对齐 migration 0001 的 bigint 列)。
+
+    裸 Mapped[int] 会被推导成 Integer:>2.1GB 资产的 INSERT 参数按 int4 编码,
+    asyncpg 直接 OverflowError(普通上传与百度导入同命中)。
+    """
+    from sqlalchemy import BigInteger
+
+    col = Asset.__table__.c.size_bytes
+    assert isinstance(col.type, BigInteger), f"size_bytes 列类型应为 BIGINT,实际 {col.type}"
 
 
 def test_folder_unique_constraint() -> None:
@@ -99,6 +109,27 @@ def test_baidu_task_active_partial_unique_index() -> None:
     # partial 谓词:WHERE status IN ('enumerating','running')
     where_sql = str(idx.dialect_options["postgresql"]["where"])
     assert "enumerating" in where_sql and "running" in where_sql
+
+
+def test_baidu_task_active_index_predicate_matches_active_statuses() -> None:
+    """uq_baidu_task_active 的 partial 谓词状态集与 ACTIVE_STATUSES 常量严格一致。
+
+    防回归:任一侧增删活动状态(如新增状态机档位)而另一侧未跟 → 硬兜底与
+    应用层谓词(claim/renew/终态化全走 ACTIVE_STATUSES)漂移,出现「应用层放行、
+    索引拒绝」或反之的并发窗口。
+    """
+    import re
+
+    from app.services.baidu_backup import ACTIVE_STATUSES
+
+    indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
+    idx = indices["uq_baidu_task_active"]
+    where_sql = str(idx.dialect_options["postgresql"]["where"])
+    statuses_in_predicate = set(re.findall(r"'([a-z_]+)'", where_sql))
+    assert statuses_in_predicate == set(ACTIVE_STATUSES), (
+        f"uq_baidu_task_active 谓词 {sorted(statuses_in_predicate)} 与 "
+        f"ACTIVE_STATUSES {sorted(ACTIVE_STATUSES)} 不一致"
+    )
 
 
 def test_baidu_task_file_relpath_unique() -> None:

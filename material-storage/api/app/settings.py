@@ -134,6 +134,11 @@ class Settings(BaseSettings):
     baidu_lease_s: int = 60               # runner 租约(心跳)时长;≥ 2x 检查点周期
     baidu_sweep_throttle_s: int = 600     # sweeper 接管节流(dispatched_at 超此时长才可派发)
     baidu_part_size_bytes: int = 16 * 1024 * 1024  # multipart 分片(下限 5MiB,见校验)
+    # ── API 端点(默认生产端点;集成测试/调试可注入本地 mock 桩,如 kill -9/SIGTERM
+    # 故障注入把 openapi/pan 指向本地服务器;下载 CDN 白名单 *.pcs.baidu.com/
+    # *.baidupcs.com 不受此影响,仍按宿主后缀硬校验)
+    baidu_openapi_base_url: str = "https://openapi.baidu.com"  # OAuth authorize/token
+    baidu_pan_base_url: str = "https://pan.baidu.com"          # xpan file/multimedia/nas
 
     def validate_baidu_settings(self) -> None:
         """百度备份配置的启动断言(方案 §6)——配置关系错误宁可启动失败,不带病运行。

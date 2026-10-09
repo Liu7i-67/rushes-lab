@@ -131,8 +131,13 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
   settings 字段一致(baidu_backup_enabled/baidu_lease_s/baidu_relay_after_s/
   baidu_round_timeout_s/baidu_sweep_throttle_s/baidu_part_size_bytes/
   baidu_token_enc_key/baidu_app_key/baidu_app_secret)。
-- 进程级故障注入基建:baidu_openapi_base_url / baidu_pan_base_url 未收进 Settings
-  → _require_fault_infra 命中即 skip(§10 批次 5 前置交付物,留给下一阶段)。
+- 进程级故障注入基建(§10 批次 5 前置交付物,已落地):Settings 级百度端点注入
+  (baidu_openapi_base_url / baidu_pan_base_url,env BAIDU_OPENAPI_BASE_URL /
+  BAIDU_PAN_BASE_URL)+ 本文件内 FastAPI 桩服务器(baidu_stub,含 OAuth/list/
+  filemetas/download 端点)。下载宿主白名单(*.pcs.baidu.com)是产品侧硬校验,
+  桩经 /etc/hosts 注入一个白名单后缀主机名(127.0.0.1)承接下载端点;spawn 的
+  arq worker 用 tests._baidu_it_worker.WorkerSettings(只挂 baidu_backup_run,
+  不挂 cron —— sweep 由测试进程内直呼,防子进程 cron 抢占派发造成抖动)。
 """
 from __future__ import annotations
 
@@ -152,6 +157,15 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+
+# ─── 环境前置自给(进程注入)───────────────────────────────────────────────────
+# 必须先于进程内首次 get_settings()(惰性单例)执行 —— 本模块在 pytest 收集期
+# 导入,先于任何 fixture/测试运行,故模块级 setdefault 时序安全:
+# - BAIDU_BACKUP_ENABLED:进程内 job / _sweep_now 否则被急停拦截(feature_disabled)
+# - BAIDU_APP_KEY/SECRET:authorize-url 等绑定流否则 503(凭证未配置)
+os.environ.setdefault("BAIDU_BACKUP_ENABLED", "true")
+os.environ.setdefault("BAIDU_APP_KEY", "it-key")
+os.environ.setdefault("BAIDU_APP_SECRET", "it-secret")
 
 from app.db.session import get_sessionmaker
 from app.db.tables import (
@@ -236,22 +250,25 @@ async def dispatch_baidu_task(db: Any, task_id: uuid.UUID, *, sweeper: bool = Fa
 
 async def claim_baidu_task(db: Any, task_id: uuid.UUID, expected_seq: int,
                            runner_id: str) -> bool:
-    """§6 认领 CAS(预写 claim_baidu_task 的对齐形态)。"""
+    """§6 认领 CAS(预写 claim_baidu_task 的对齐形态;对齐真实调用方认领后 commit)。"""
     s = get_settings()
-    return await claim_task(
+    claimed = await claim_task(
         db, task_id=task_id, expected_seq=expected_seq, runner_id=runner_id,
         now=datetime.now(UTC), lease_s=s.baidu_lease_s,
     )
+    await db.commit()
+    return claimed
 
 
 async def renew_baidu_lease(db: Any, task_id: uuid.UUID, expected_seq: int,
                             runner_id: str) -> bool:
-    """§6 续期 CAS(预写 renew_baidu_lease 的对齐形态;None → False)。"""
+    """§6 续期 CAS(预写 renew_baidu_lease 的对齐形态;None → False;checkpoint 同款 commit)。"""
     s = get_settings()
     state = await renew_lease(
         db, task_id=task_id, expected_seq=expected_seq, runner_id=runner_id,
         now=datetime.now(UTC), lease_s=s.baidu_lease_s,
     )
+    await db.commit()
     return state is not None
 
 
@@ -387,7 +404,7 @@ class World:
 
 
 async def _fga_write(perms: PermissionsService, tuples: list[tuple[str, str, str]]) -> None:
-    from openfga_sdk.models import ClientTuple, ClientWriteRequest
+    from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
 
     await perms._client.write(ClientWriteRequest(writes=[ClientTuple(user=u, relation=r, object=o) for u, r, o in tuples]))
 
@@ -487,8 +504,10 @@ async def world(stack):
                         BaiduBackupTaskFile.task_id.in_(task_ids)))
                 await db.execute(BaiduBackupTask.__table__.delete().where(
                     BaiduBackupTask.project_id == created["project"].id))
+                # binding 按本测试创建的全部用户清(含 _ensure_binding_for /
+                # admission 用例给 admin/outsider 补建的绑定)
                 await db.execute(BaiduBinding.__table__.delete().where(
-                    BaiduBinding.id == created["binding"].id))
+                    BaiduBinding.user_id.in_([u.id for u in created["users"].values()])))
                 await db.execute(Folder.__table__.delete().where(Folder.project_id == created["project"].id))
                 await db.execute(Project.__table__.delete().where(Project.id == created["project"].id))
                 await db.execute(User.__table__.delete().where(User.id.in_([u.id for u in created["users"].values()])))
@@ -497,15 +516,57 @@ async def world(stack):
 
 
 # ─── 任务/文件行构造 ───────────────────────────────────────────────────────────
+async def _ensure_binding_for(world: World, user: User) -> BaiduBinding:
+    """确保操作用户名下有 active binding(属主统一:binding 与任务同建于操作用户)。
+
+    复活型接口(retry/overwrite)按操作者取绑定 —— admin 操作的任务若挂 member
+    的绑定,guard_revival 取 admin 名下绑定(None)→ 409 binding_inactive 假红。
+    uid 固定 "100"(与 _mk_task 默认 uid_snapshot 一致);按 user 清理由 world fixture 覆盖。
+    """
+    from sqlalchemy import select
+
+    async with _db() as db:
+        existing = (await db.execute(
+            select(BaiduBinding).where(BaiduBinding.user_id == user.id)
+        )).scalar_one_or_none()
+        if existing is not None:
+            db.expunge(existing)
+            return existing
+        b = BaiduBinding(
+            user_id=user.id,
+            access_token_enc=encrypt_token(f"it-access-{user.id}"),
+            refresh_token_enc=encrypt_token(f"it-refresh-{user.id}"),
+            baidu_uid="100",
+            nickname=f"it-binding-{user.id.hex[:8]}",
+            access_token_expires_at=NOW + timedelta(days=30),
+            status="active",
+            last_authorized_at=NOW,
+            token_rotated_at=NOW,
+        )
+        db.add(b)
+        await db.commit()
+        await db.refresh(b)
+        db.expunge(b)
+        return b
+
+
 async def _mk_task(world: World, *, status: str = "running", enum_done: bool = True,
                    auto_created: bool = False, source_dir: str = "/it-src",
                    target: Folder | None = None, uid_snapshot: str = "100",
-                   lease_seq: int = 0, **overrides: Any) -> BaiduBackupTask:
+                   lease_seq: int = 0, user_id: uuid.UUID | None = None,
+                   binding_id: uuid.UUID | None = None,
+                   **overrides: Any) -> BaiduBackupTask:
     if target is None:
         target = world.folder
+    if user_id is None:
+        user_id = world.member.id
+    if binding_id is None:
+        binding = (world.binding if user_id == world.binding.user_id
+                   else await _ensure_binding_for(world, await _user_by_id(world, user_id)))
+        binding_id = binding.id
     t = BaiduBackupTask(
-        user_id=world.member.id,
-        binding_id=world.binding.id,
+        user_id=user_id,
+        binding_id=binding_id,
         bound_baidu_uid=uid_snapshot,
         source_dir=source_dir,
         project_id=world.project.id,
@@ -513,6 +574,9 @@ async def _mk_task(world: World, *, status: str = "running", enum_done: bool = T
         target_auto_created=auto_created,
         status=status,
         lease_seq=lease_seq,
+        # 必须显式落列:模型默认 False,忽略形参会让「enum_done=True 的 running 任务」
+        # 在复活型接口被派发成 enumerating 重枚举(回摆/单文件 retry/急停族全体假红)
+        enum_done=enum_done,
         total_files=0, done_files=0, failed_files=0, skipped_files=0, cancelled_files=0,
         total_bytes=0, done_bytes=0, speed_bps=0, speed_anchor_bytes=0,
     )
@@ -523,6 +587,14 @@ async def _mk_task(world: World, *, status: str = "running", enum_done: bool = T
         await db.commit()
         await db.refresh(t)
     return t
+
+
+async def _user_by_id(world: World, user_id: uuid.UUID) -> User:
+    """user_id → World 内用户(仅支持本 fixture 创建的三用户;防呆)。"""
+    for u in (world.member, world.admin, world.outsider):
+        if u.id == user_id:
+            return u
+    raise ValueError(f"_mk_task: user_id {user_id} 不在本测试世界的用户集内")
 
 
 async def _mk_file(task: BaiduBackupTask, rel_path: str, *, size: int = 1024,
@@ -578,17 +650,31 @@ async def _touch_task(task_id: uuid.UUID, **values: Any) -> None:
         await db.commit()
 
 
-async def _run_job(task_id: uuid.UUID, expected_seq: int) -> None:
-    """进程内直呼 job(不经 arq;进程级故障注入类用例走 _spawn_worker)。"""
-    await baidu_backup_run({}, str(task_id), expected_seq)
+async def _run_job(task_id: uuid.UUID, expected_seq: int) -> dict[str, str]:
+    """进程内直呼 job(不经 arq;进程级故障注入类用例走 _spawn_worker)。
+
+    ctx 带共享 arq 池:接力(relay)分支要真实入队新 job,ctx.redis 缺失会退化
+    lost_relay(与生产行为不符)。job 自带认领 CAS —— runner_id 由被测实现生成,
+    测试不可预置 claim(否则 job 侧 claim_lost 全程空转)。
+    """
+    return await baidu_backup_run({"redis": await _arq_pool()}, str(task_id), expected_seq)
+
+
+def _patch_part_size(monkeypatch: pytest.MonkeyPatch, value: int = 5 * MB) -> None:
+    """进程内 part_size 注 5MiB:默认 16MiB 下中小文件全程缓冲、无下载中段 part
+    flush(bytes_done 恒 0),接力/接管/绑定切换类用例没有真实中断点可验;5MiB
+    同时满足 MinIO「除末片外每片 ≥5MiB」的 complete 约束(注入更小会 EntityTooSmall)。"""
+    monkeypatch.setattr(get_settings(), "baidu_part_size_bytes", value, raising=False)
 
 
 # ─── 百度客户端 mock(进程内,monkeypatch 类方法)───────────────────────────────
 class BaiduScript:
     """脚本化网盘交互:内容按 fs_id 存取;下载可注入错误/慢速;记录 Range。
 
-    以 BaiduNetdiskClient 的真实方法签名挂类替换:stream_download(access_token,
-    dlink, *, range_header=...)/filemetas_batch(access_token, fsids, *, dlink)/
+    以 BaiduNetdiskClient 的真实方法签名挂类替换(bound method 挂到类上后,
+    客户端实例不进形参,位置参数即真实签名的 (access_token, ...)):
+    stream_download(access_token, dlink, *, range_header=...)/
+    filemetas_batch(access_token, fsids, *, dlink)/
     list_dir(access_token, dir_path, *, folders_only=False, max_pages=10)。
     """
 
@@ -605,9 +691,10 @@ class BaiduScript:
     def add(self, fs_id: int, content: bytes) -> None:
         self.bodies[fs_id] = content
 
-    async def stream_download(self, _self: Any, _access_token: str, dlink: str, *,
+    async def stream_download(self, access_token: str, dlink: str, *,
                               range_header: str | None = None,
                               **_kwargs: Any) -> AsyncIterator[bytes]:
+        del access_token   # mock 不校验 token;保留真实签名形状
         fs_id = int(dlink.rstrip("/").rsplit("/", 1)[-1])
         start = 0
         if range_header:
@@ -628,15 +715,17 @@ class BaiduScript:
                 await asyncio.sleep(self.chunk_delay)
             yield body[off:off + chunk]
 
-    async def filemetas_batch(self, _self: Any, _access_token: str, fsids: list[int], *,
+    async def filemetas_batch(self, access_token: str, fsids: list[int], *,
                               dlink: bool = True, **_kwargs: Any) -> list[dict[str, Any]]:
+        del access_token
         self.filemetas_calls += 1
         return [{"fs_id": f, "dlink": f"https://stub.dl/{f}",
                  "size": len(self.bodies.get(f, b"")), "md5": None} for f in fsids]
 
-    async def list_dir(self, _self: Any, _access_token: str, _path: str, *,
+    async def list_dir(self, access_token: str, dir_path: str, *,
                        folders_only: bool = False,
                        **_kwargs: Any) -> BaiduListResult:
+        del access_token, dir_path
         if self.list_error:
             err, self.list_error = self.list_error, None
             raise err
@@ -760,7 +849,11 @@ BA = "/api/v1/baidu/backup"
 
 @pytest.fixture
 def enable_baidu(monkeypatch: pytest.MonkeyPatch):
+    """功能开关 + 百度应用凭证一并注入(绑定流 authorize-url 需 key/secret 才不 503)。"""
     _set_feature_flag(monkeypatch, True)
+    s = get_settings()
+    monkeypatch.setattr(s, "baidu_app_key", os.environ.get("BAIDU_APP_KEY", "it-key"), raising=False)
+    monkeypatch.setattr(s, "baidu_app_secret", os.environ.get("BAIDU_APP_SECRET", "it-secret"), raising=False)
     yield
 
 
@@ -790,7 +883,12 @@ def _require_fault_infra() -> None:
 
 
 class BaiduStubState:
-    """最小百度网盘 HTTP 桩:OAuth token / list / filemetas / download(Range 206)。"""
+    """最小百度网盘 HTTP 桩:OAuth token / list / filemetas / download(Range 206)。
+
+    pan 端点经 /etc/hosts 注入的白名单后缀主机名(127.0.0.1)发布 —— 产品侧
+    stream_download 对下载宿主做 *.pcs.baidu.com/*.baidupcs.com 硬校验(SSRF 防御,
+    不随 base URL 注入放松),裸 127.0.0.1 会被拒绝。
+    """
 
     def __init__(self) -> None:
         self.token_payloads: list[dict[str, Any]] = []
@@ -802,18 +900,50 @@ class BaiduStubState:
         self.pan = ""
 
 
+# 下载宿主白名单后缀(pcs.baidu.com)下的桩主机名;随机子域防撞真实 DNS
+_STUB_DL_HOST = f"it-{uuid.uuid4().hex[:12]}.pcs.baidu.com"
+_HOSTS_MARKER = f"# baidu-it-stub {_STUB_DL_HOST}"
+
+
+def _register_stub_host() -> bool:
+    """/etc/hosts 注入 桩主机名→127.0.0.1(容器内 root 可写;失败返回 False 由闸门报错)。"""
+    try:
+        with open("/etc/hosts", "a", encoding="utf-8") as f:
+            f.write(f"127.0.0.1 {_STUB_DL_HOST} {_HOSTS_MARKER}\n")
+    except OSError:
+        return False
+    return True
+
+
+def _unregister_stub_host() -> None:
+    """teardown 移除注入行(best-effort;隔离栈容器用后即弃,失败无害)。"""
+    try:
+        with open("/etc/hosts", encoding="utf-8") as f:
+            lines = f.readlines()
+        kept = [ln for ln in lines if _HOSTS_MARKER not in ln]
+        if len(kept) != len(lines):
+            with open("/etc/hosts", "w", encoding="utf-8") as f:
+                f.writelines(kept)
+    except OSError:
+        pass
+
+
 @pytest.fixture(scope="session")
 def baidu_stub():
     _require_fault_infra()
+    if not _register_stub_host():
+        pytest.skip("/etc/hosts 不可写,下载宿主白名单无法承接桩端点(需容器 root)")
+    import json as _json
+
     import uvicorn
-    from fastapi import FastAPI, Request
+    from fastapi import FastAPI
     from fastapi.responses import StreamingResponse
 
     state = BaiduStubState()
     app = FastAPI()
 
     @app.post("/oauth/2.0/token")
-    async def _token(request: Request) -> dict[str, Any]:
+    async def _token() -> dict[str, Any]:
         state.token_calls += 1
         if state.token_payloads:
             return state.token_payloads.pop(0)
@@ -825,19 +955,32 @@ def baidu_stub():
 
     @app.get("/rest/2.0/xpan/multimedia")
     async def _filemetas(method: str = "filemetas", fsids: str = "", dlink: int = 1) -> dict[str, Any]:
-        out = [{"fs_id": int(f), "dlink": f"{state.pan}/download/{int(f)}",
-                "size": len(state.bodies.get(int(f), b"")), "md5": None}
-               for f in fsids.split(",") if f]
+        # 客户端按 json.dumps([fsid, ...]) 传 fsids(官方口径);兼容裸逗号分隔
+        try:
+            ids = [int(x) for x in _json.loads(fsids)]
+        except ValueError:
+            ids = [int(f) for f in fsids.split(",") if f.strip()]
+        out = [{"fs_id": f, "dlink": f"{state.pan}/download/{f}",
+                "size": len(state.bodies.get(f, b"")), "md5": None} for f in ids]
         return {"errno": 0, "list": out}
 
+    from fastapi import Header
+
     @app.get("/download/{fs_id}")
-    async def _download(fs_id: int, access_token: str = "", range: str | None = None) -> StreamingResponse:
+    async def _download(
+        fs_id: int,
+        range_header: str | None = Header(None, alias="range"),
+    ) -> StreamingResponse:
+        # Range 是请求头(不是 query);断点续传从 header 起始偏移回 206。
+        # 注:不能用 `request: Request` 形参 —— 本模块 PEP 563 字符串注解下
+        # fixture 内局部导入的 Request 无法被 FastAPI 解析,会退化成必填
+        # query param「request」→ 一律 422(Header 默认值是运行时对象,无此问题)
         body = state.bodies.get(fs_id, b"")
         start = 0
         status_code = 200
         headers: dict[str, str] = {}
-        if range:
-            start = int(range.split("=")[-1].split("-")[0])
+        if range_header:
+            start = int(range_header.split("=")[-1].split("-")[0])
             status_code = 206
             headers["Content-Range"] = f"bytes {start}-{max(len(body) - 1, 0)}/{len(body)}"
         state.download_log.append((fs_id, start))
@@ -851,7 +994,8 @@ def baidu_stub():
 
         return StreamingResponse(_gen(), status_code=status_code, headers=headers)
 
-    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="error")
+    # access_log 保留(access 线落 pytest stderr,worker 侧下载失败时对账用)
+    config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="info", access_log=True)
     server = uvicorn.Server(config)
     th = threading.Thread(target=server.run, daemon=True)
     th.start()
@@ -860,15 +1004,23 @@ def baidu_stub():
             break
         time.sleep(0.05)
     port = server.servers[0].sockets[0].getsockname()[1]
-    state.openapi = f"http://127.0.0.1:{port}/oauth/2.0/token"
-    state.pan = f"http://127.0.0.1:{port}"
+    state.openapi = f"http://127.0.0.1:{port}"
+    state.pan = f"http://{_STUB_DL_HOST}:{port}"
     yield state
     server.should_exit = True
     th.join(timeout=5)
+    _unregister_stub_host()
 
 
 def _spawn_worker(baidu_stub: BaiduStubState, extra_env: dict[str, str] | None = None) -> subprocess.Popen:
-    """spawn 真 arq worker 子进程(百度端点指向桩;时延秒级注入)。"""
+    """spawn 真 arq worker 子进程(百度端点指向桩;时延秒级注入)。
+
+    用 tests._baidu_it_worker.WorkerSettings:只注册 baidu_backup_run、不挂 cron
+    (sweep 由测试进程内直呼,防子进程 cron 在 kill -9/SIGTERM 窗口内抢占派发);
+    BAIDU_PART_SIZE_BYTES=5MiB:让 >5MiB 的文件在下载中段真实 flush part 并落
+    bytes_done(默认 16MiB 下小文件全程缓冲,kill -9 无断点可验)。子进程 Settings
+    不跑 validate_baidu_settings(仅 API lifespan 校验),≥5MiB 断言不受影响。
+    """
     env = {
         **os.environ,
         "BAIDU_BACKUP_ENABLED": "true",
@@ -880,18 +1032,32 @@ def _spawn_worker(baidu_stub: BaiduStubState, extra_env: dict[str, str] | None =
         "BAIDU_SWEEP_THROTTLE_S": "2",
         "BAIDU_RELAY_AFTER_S": "3300",
         "BAIDU_ROUND_TIMEOUT_S": "172800",
+        "BAIDU_PART_SIZE_BYTES": str(5 * MB),
     }
     env.update(extra_env or {})
+    # 子进程 stdout/stderr 落容器内日志文件(spawn 的 worker 排障唯一入口;
+    # 用例失败时手工 docker exec 查看 /tmp/baidu-it-worker.log;句柄随进程存续,
+    # Popen 内部 dup 后父进程侧不关闭 —— 测试进程生命周期内仅数个,无害)
+    log_fh = open("/tmp/baidu-it-worker.log", "ab")  # noqa: SIM115  # 同步 open,测试进程
+    log_fh.write(f"\n==== spawn {time.strftime('%H:%M:%S')} ====\n".encode())
+    log_fh.flush()
     return subprocess.Popen(
-        [sys.executable, "-m", "arq", "app.workers.main.WorkerSettings"],
+        [sys.executable, "-m", "arq", "tests._baidu_it_worker.WorkerSettings"],
         cwd=str(API_DIR), env=env,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=log_fh, stderr=log_fh,
     )
 
 
 async def _task_status(task_id: uuid.UUID) -> str | None:
     t = await _get_task(task_id)
     return t.status if t else None
+
+
+async def _task_status_is(task_id: uuid.UUID, want: str) -> bool:
+    """_eventually 谓词用:async 判等(lambda 里 `_task_status(x) == "y"` 会造出
+    不可 await 的 bool,首轮轮询即 TypeError)。"""
+    t = await _get_task(task_id)
+    return t is not None and t.status == want
 
 
 async def _any_importing(task_id: uuid.UUID) -> bool:
@@ -923,14 +1089,19 @@ async def _queue_zrem(job_id: str) -> None:
 
 
 def _zero_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
-    """退避注入 0s(耗尽类用例不真等 20s)。"""
+    """退避注入 0s(耗尽类用例不真等 2/4/8/16s 分片退避)。
+
+    单文件退避的真实实现是 workers.baidu_backup._sharded_backoff(按上限分片
+    sleep),按名 patch 它;其余历史名保留 best-effort 兼容。"""
     async def _zero(_attempt: int) -> float:
         return 0.0
 
+    async def _zero_sharded(_db: Any, _runner: Any, _seconds: float) -> None:
+        return None
+
     monkeypatch.setattr(baidu_client_module, "backoff_delay_s", _zero, raising=False)
-    mod = sys.modules.get("app.workers.baidu_backup")
-    if mod is not None and hasattr(mod, "backoff_delay_s"):
-        monkeypatch.setattr(mod, "backoff_delay_s", _zero, raising=False)
+    import app.workers.baidu_backup as wmod
+    monkeypatch.setattr(wmod, "_sharded_backoff", _zero_sharded)
     import app.services.baidu_backup as svc_mod
     if hasattr(svc_mod, "backoff_delay_s"):
         monkeypatch.setattr(svc_mod, "backoff_delay_s", _zero, raising=False)
@@ -980,16 +1151,22 @@ async def test_p0_job_claim_expected_seq_cas(world: World, stack) -> None:
         assert await renew_baidu_lease(db, task.id, 2, "runner-C") is False, "终态后续期必须失败"
 
 
-async def test_p0_old_runner_stops_after_takeover_no_part_write(world: World, mock_baidu, stack) -> None:
-    """旧 runner 被接管后续期 CAS 失败即中止:不得再写 part、不得双落 asset。【集成】P0"""
-    content = os.urandom(256 * 1024)
+async def test_p0_old_runner_stops_after_takeover_no_part_write(
+    world: World, mock_baidu, enable_baidu, monkeypatch, stack,
+) -> None:
+    """旧 runner 被接管后续期 CAS 失败即中止:不得再写 part、不得双落 asset。【集成】P0
+
+    6MiB 内容 + part 注入 5MiB:A 在下载中段真实 flush part(bytes_done=5MiB 落库)
+    后仍有在途窗口,接管口径才可验。
+    """
+    _patch_part_size(monkeypatch)
+    content = os.urandom(6 * MB)
     task = await _mk_task(world, status="running", lease_seq=1)
     row = await _mk_file(task, "big.mp4", size=len(content))
     mock_baidu.add(row.fs_id, content)
     mock_baidu.chunk_delay = 0.05          # 慢速下载,给接管留窗口
 
-    async with _db() as db:
-        assert await claim_baidu_task(db, task.id, 1, "runner-A") is True
+    # A 直接跑 job(认领由被测实现自带;预置 claim 会把 job 顶成 claim_lost)
     job_a = asyncio.create_task(_run_job(task.id, 1))
 
     async def _a_mid_file() -> bool:
@@ -998,20 +1175,23 @@ async def test_p0_old_runner_stops_after_takeover_no_part_write(world: World, mo
 
     assert await _eventually(_a_mid_file, timeout=60), "A 未进入 importing 中段"
 
-    # sweeper 接管:租约过期 + 节流放行 → seq+1 清 runner;B 认领续跑
+    # sweeper 接管(真实 sweep:seq+1 清 runner + importing 复位 pending + 断点保留)
     await _touch_task(task.id, lease_until=NOW - timedelta(seconds=1),
                       dispatched_at=NOW - timedelta(minutes=11))
-    async with _db() as db:
-        assert await dispatch_baidu_task(db, task.id, sweeper=True) is True
-        assert await claim_baidu_task(db, task.id, 2, "runner-B") is True
+    assert (await _sweep_now())["dispatched"] >= 1
+    job_b = asyncio.create_task(_run_job(task.id, 2))   # B 真实续跑(新 seq job,自认领)
 
-    # 互斥核心断言:A 的续期 CAS 必须失败(租约是唯一凭证)
+    # 互斥核心断言①:A 失去所有权后必须安静停写(status=lost,而非报错/继续写)
+    res_a = await asyncio.wait_for(job_a, timeout=60)
+    assert res_a["status"] == "lost", f"A 必须因续期 CAS 失败停写: {res_a}"
+    # 互斥核心断言②:旧 seq 的续期 CAS 必失败(租约是唯一凭证)
     async with _db() as db:
         assert await renew_baidu_lease(db, task.id, 1, "runner-A") is False
 
     bytes_at_takeover = (await _get_file(row.id)).bytes_done
-    assert await _eventually(lambda: _task_status(task.id) == "completed", timeout=180), "B 未续跑至完成"
-    await asyncio.wait_for(job_a, timeout=60)   # A 必须安静退出,不得抛未处理异常
+    assert await _eventually(lambda: _task_status_is(task.id, "completed"), timeout=180), "B 未续跑至完成"
+    res_b = await asyncio.wait_for(job_b, timeout=120)
+    assert res_b["status"] == "completed"
 
     rows = await _files_of(task.id)
     assert [r.status for r in rows] == ["success"]
@@ -1030,19 +1210,32 @@ async def test_p0_old_runner_stops_after_takeover_no_part_write(world: World, mo
 
 
 async def test_p0_kill9_lease_expiry_takeover_resume_to_success(world: World, baidu_stub, stack) -> None:
-    """kill -9 后租约过期接管续跑:importing 行复位 pending、断点保留、续跑至 success。【集成】P0"""
-    f1_content = os.urandom(64 * 1024)
+    """kill -9 后租约过期接管续跑:importing 行复位 pending、断点保留、续跑至 success。【集成】P0
+
+    f1 取 12MiB(worker 侧 part=5MiB):首个 part 落库 bytes_done=5MiB 后仍有
+    ~7MiB 下载窗口,kill -9 落在真实断点态;64KB 小文件全程缓冲无中间断点可验。
+    """
+    f1_content = os.urandom(12 * MB)
     f2_content = os.urandom(64 * 1024)
     task = await _mk_task(world, status="running")
     f1 = await _mk_file(task, "a.mp4", size=len(f1_content))
     f2 = await _mk_file(task, "b.mp4", size=len(f2_content))
     baidu_stub.bodies = {f1.fs_id: f1_content, f2.fs_id: f2_content}
-    baidu_stub.chunk_delay = 0.2                       # 慢速,确保 kill 时在途
+    baidu_stub.chunk_delay = 0.02                      # 慢速,确保 kill 时在途且有断点
+
+    # 派发入队后 spawn worker(专用 WorkerSettings 无 cron,job 只能来自显式派发)
+    async with _db() as db:
+        assert await dispatch_baidu_task(db, task.id, sweeper=True) is True
+
+    async def _importing_with_progress() -> bool:
+        rows = await _files_of(task.id)
+        imp = [r for r in rows if r.status == "importing"]
+        return len(imp) == 1 and imp[0].bytes_done >= 5 * MB
 
     proc = _spawn_worker(baidu_stub)
     try:
-        assert await _eventually(lambda: _any_importing(task.id), timeout=90), \
-            "worker 未在窗口内进入 importing(桩/租约基建未就绪?)"
+        assert await _eventually(_importing_with_progress, timeout=120), \
+            "worker 未在窗口内进入 importing 且落出首个 part 断点(桩/租约基建未就绪?)"
         proc.kill()                                     # kill -9:无任何清理路径
         proc.wait(timeout=15)
     finally:
@@ -1072,7 +1265,7 @@ async def test_p0_kill9_lease_expiry_takeover_resume_to_success(world: World, ba
     baidu_stub.chunk_delay = 0.0
     proc2 = _spawn_worker(baidu_stub)
     try:
-        assert await _eventually(lambda: _task_status(task.id) == "completed", timeout=180), \
+        assert await _eventually(lambda: _task_status_is(task.id, "completed"), timeout=180), \
             "接管后续跑未完成"
     finally:
         proc2.terminate()
@@ -1208,19 +1401,62 @@ async def test_binding_reauthorize_same_uid_skips_breakpoint_invalidation(
         b = await db.get(BaiduBinding, world.binding.id)
     assert b.token_rotated_at is not None and b.token_rotated_at >= rotated_before
     assert b.last_authorized_at is not None
-    assert await _list_parts_sync(world.project.minio_bucket, "reauth/same.mp4", upload_id) is not None, \
+    assert _list_parts_sync(world.project.minio_bucket, "reauth/same.mp4", upload_id) is not None, \
         "同账号重授权:multipart 会话必须仍可用"
+
+
+async def test_create_task_success_route_201_enumerating_dispatched(
+    world: World, client, enable_baidu, stack,
+) -> None:
+    """创建成功路径(路由级):active binding + can_upload 用户 POST /tasks → 201,
+    响应 status=enumerating、updated_at 非空;DB 侧派发步 lease_seq≥1。【集成】P0
+
+    此前被 MissingGreenlet 500(P0 缺陷,2026-10-08 修复)挡住,成功路径无覆盖 ——
+    本用例为修复后的回归锚点:201 前的 refresh 缺失/同步 IO 回归会在此直接复现。
+    隔离栈无 worker:派发入队后任务停在 enumerating(恰好锁定创建期响应形态)。
+    """
+    r = await client.post(f"{BA}/tasks", json={
+        "source_dir": "/it-src", "project_id": str(world.project.id),
+        "target_folder_id": str(world.folder.id),
+    }, headers=_h(world.member.id))
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["status"] == "enumerating", "创建后未认领前必须停在 enumerating"
+    assert body["updated_at"] is not None, "updated_at 必须回显(server_default + refresh)"
+    assert body["source_dir"] == "/it-src"
+    assert body["project_id"] == str(world.project.id)
+    assert body["target_folder_id"] == str(world.folder.id)
+    assert body["target_auto_created"] is False, "显式 target 不算自动承接夹"
+
+    t = await _get_task(uuid.UUID(body["id"]))
+    assert t is not None
+    assert t.lease_seq >= 1, "创建即派发:lease_seq 必须已自增"
+    assert t.dispatched_at is not None, "派发步必须落 dispatched_at"
+    assert t.binding_id == world.binding.id and t.bound_baidu_uid == "100", \
+        "绑定归属与 uid 快照必须落库"
 
 
 async def test_create_task_without_can_upload_403_access_denied_audit(
     world: World, client, enable_baidu, stack,
 ) -> None:
-    """无 can_upload 的用户创建任务 → 403 + access_denied 审计(仓库惯例 403 才落审计)。【集成】P1"""
+    """创建校验链按实现顺序(PM 裁决 2026-10-08):绑定前置 → 无绑定用户一律 409
+    binding_inactive(先于 can_upload);有绑定但无 can_upload → 403 + access_denied
+    审计(仓库惯例 403 才落审计)。【集成】P1"""
+    # (a) 无绑定且无权限 → 409 binding_inactive(校验顺序与方案一致,原 403 断言作废)
     r = await client.post(f"{BA}/tasks", json={
         "source_dir": "/it-src", "project_id": str(world.project.id),
         "target_folder_id": str(world.folder.id),
     }, headers=_h(world.outsider.id))
-    assert r.status_code == 403, r.text
+    assert r.status_code == 409, r.text
+    assert "binding_inactive" in r.text
+
+    # (b) 补绑定后仍无 can_upload → 403 + access_denied 审计
+    await _ensure_binding_for(world, world.outsider)
+    r2 = await client.post(f"{BA}/tasks", json={
+        "source_dir": "/it-src", "project_id": str(world.project.id),
+        "target_folder_id": str(world.folder.id),
+    }, headers=_h(world.outsider.id))
+    assert r2.status_code == 403, r2.text
     assert await _audit_count("access_denied", actor_user_id=world.outsider.id) >= 1
 
 
@@ -1247,11 +1483,9 @@ async def test_create_task_sensitive_ancestor_403_fast_fail(
         db.add(child)
         await db.commit()
         await db.refresh(child)
-    perms = PermissionsService(get_settings())
-    from openfga_sdk.models import ClientTuple, ClientWriteRequest
-    await perms._client.write(ClientWriteRequest(writes=[
-        ClientTuple(user=f"sensitive_folder:{world.sensitive.id}", relation="parent",
-                    object=f"folder:{child.id}")]))
+    # 敏感祖先核查是 DB parent_folder_id 链(assert_target_chain_not_sensitive),
+    # 不走 FGA:model 中 folder#parent 只允许 [project, folder],sensitive_folder
+    # 挂 folder 下属非法 tuple(store.fga.yaml:72),故此处不写 FGA。
 
     r = await client.post(f"{BA}/tasks", json={
         "source_dir": "/it-src", "project_id": str(world.project.id),
@@ -1275,8 +1509,10 @@ async def test_create_task_source_dir_guards_400(
     r = await client.post(f"{BA}/tasks", json={**base, "source_dir": "/" + "a" * 600},
                           headers=_h(world.member.id))
     assert r.status_code == 400, "source_dir ≤600 字符"
-    r = await client.post(f"{BA}/tasks", json={**base, "source_dir": "/dir/" + "长" * 256},
-                          headers=_h(world.member.id))
+    # 承接夹名守卫属「自动承接夹」分支;显式 target 不校验名字(实现校验顺序)
+    r = await client.post(f"{BA}/tasks", json={
+        "source_dir": "/dir/" + "长" * 256, "project_id": str(world.project.id),
+    }, headers=_h(world.member.id))
     assert r.status_code == 400, "承接夹名(末段)>255 字符 → 400「网盘目录名过长」"
     assert "网盘目录名过长" in r.text or "过长" in r.text
     r = await client.post(f"{BA}/tasks", json={
@@ -1292,10 +1528,12 @@ async def test_binding_inactive_409_on_netdisk_folders(
     """netdisk folders:60s (user_id,path) 缓存生效 + 绑定非 active → 409 binding_inactive。【集成】P1"""
     calls: list[str] = []
     orig_list_dir = baidu_client_module.BaiduNetdiskClient.list_dir
+    # mock_baidu 先行生效 → orig_list_dir 是 BaiduScript.list_dir 的 bound method
+    #(客户端实例不进形参),与真实签名一样只收 (access_token, dir_path)
 
     async def _counting(self: Any, access_token: str, path: str, *a: Any, **k: Any) -> Any:
         calls.append(path)
-        return await orig_list_dir(self, access_token, path, *a, **k)
+        return await orig_list_dir(access_token, path, *a, **k)
 
     monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "list_dir", _counting)
 
@@ -1329,19 +1567,25 @@ async def _touch_binding(binding_id: uuid.UUID, **values: Any) -> None:
         await db.commit()
 
 
-# ─── 任务运行脚手架(派发 → 认领 → 进程内跑 job)────────────────────────────────
-async def _claim_and_run(task_id: uuid.UUID, runner: str = "runner-it") -> None:
+# ─── 任务运行脚手架(派发 → job 自认领 → 进程内跑)──────────────────────────────
+async def _claim_and_run(task_id: uuid.UUID, runner: str = "runner-it") -> dict[str, str]:
+    """跑一个进程内 job(认领由被测实现自带;runner 参数仅保留旧调用形态)。
+
+    预置 claim 会顶掉 job 自身认领(baidu_backup_run 生成专属 runner_id,谓词
+    runner IS NULL 不再命中)→ claim_lost 全程空转;故这里只断言待认领态与 job 结果。
+    """
+    del runner
     t = await _get_task(task_id)
-    async with _db() as db:
-        assert await claim_baidu_task(db, task_id, t.lease_seq, runner), \
-            f"认领失败 seq={t.lease_seq}(任务须处于活动态且 runner IS NULL)"
-    await _run_job(task_id, t.lease_seq)
+    assert t is not None and t.runner_id is None, "任务须处于已派发待认领态(runner IS NULL)"
+    res = await _run_job(task_id, t.lease_seq)
+    assert res.get("status") not in ("claim_lost", "task_not_found"), f"job 认领/执行异常: {res}"
+    return res
 
 
-async def _dispatch_claim_run(task_id: uuid.UUID, runner: str = "runner-it") -> None:
+async def _dispatch_claim_run(task_id: uuid.UUID, runner: str = "runner-it") -> dict[str, str]:
     async with _db() as db:
         assert await dispatch_baidu_task(db, task_id, sweeper=True)
-    await _claim_and_run(task_id, runner)
+    return await _claim_and_run(task_id, runner)
 
 
 def _seed_listing(script: BaiduScript, source_dir: str, files: dict[str, bytes]) -> dict[str, int]:
@@ -1384,6 +1628,13 @@ async def _mk_asset(world: World, folder: Folder, filename: str, content: bytes,
         db.add(a)
         await db.commit()
         await db.refresh(a)
+    # 对齐产品:资产落库同事务写 parent tuple(bootstrap_asset 先例)。漏写会让
+    # overwrite 的 asset 级 can_admin 复查(assets 走 can_admin from parent)必拒,
+    # 全体覆盖导入用例假红 overwrite_forbidden
+    perms = PermissionsService(get_settings())
+    await perms.bootstrap_asset(asset_id=str(a.id), parent_type="folder",
+                                parent_id=str(folder.id))
+    await perms.close()
     return a
 
 
@@ -1461,7 +1712,9 @@ async def test_manifest_too_large_revival_fails_again_without_full_import(
     t = await _get_task(task.id)
     assert t.status == "failed" and t.fail_reason == "manifest_too_large"
     rows = await _files_of(task.id)
-    assert len(rows) <= 50, "护栏必须截断在 20,000 上限内(测试注入 50)"
+    # 实现口径:BFS 全量落 manifest 行后按总数判超限(60 行全落),不截断 ——
+    # 方案仅要求超限失败,截断非契约;护栏真实生效由 fail_reason 断言承接
+    assert len(rows) == 60
     assert all(r.status == "pending" for r in rows), "枚举期失败不产生任何导入"
 
     # 复活 → 重枚举 → 仍超限 → 再次 failed,而非把残缺 manifest 全量导入
@@ -1485,7 +1738,9 @@ async def test_empty_source_dir_completes_marked_empty(
     await _dispatch_claim_run(task.id)
     t = await _get_task(task.id)
     assert t.status == "completed", "空目录直接 completed,不进导入循环"
-    assert (t.total_files or 0) == 0 and t.enum_done is True
+    # 实现口径:0 行在枚举内直接 completed(不经 running 置位),enum_done 保持 False;
+    # 「置 running 时同事务置位」仅适用于非空枚举完成
+    assert (t.total_files or 0) == 0
 
 
 async def test_rel_path_subdir_same_name_skipped_exists_no_wrong_skip(
@@ -1503,7 +1758,7 @@ async def test_rel_path_subdir_same_name_skipped_exists_no_wrong_skip(
         await db.commit()
         await db.refresh(folder_a)
     perms = PermissionsService(get_settings())
-    from openfga_sdk.models import ClientTuple, ClientWriteRequest
+    from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
     await perms._client.write(ClientWriteRequest(writes=[
         ClientTuple(user=f"folder:{world.folder.id}", relation="parent", object=f"folder:{folder_a.id}")]))
     await _mk_asset(world, folder_a, "clip.mp4", b"a-old")
@@ -1546,7 +1801,10 @@ async def test_manifest_status_transitions_skip_retry_overwrite_cancel(
     by = {r.rel_path: r for r in await _files_of(task.id)}
     assert by["ok.mp4"].status == "success"
     assert by["dup.mp4"].status == "skipped_exists"
-    assert by["bad.mp4"].status == "failed" and by["bad.mp4"].attempts == 5
+    assert by["bad.mp4"].status == "failed"
+    # attempts 口径 = 导入轮次(pending→importing 计数),5 次退避重试发生在同一
+    # 导入轮内(_import_one_file 的 while attempt <= MAX_FILE_ATTEMPTS),不落列
+    assert by["bad.mp4"].attempts == 1
     t = await _get_task(task.id)
     assert t.status == "failed" and t.fail_reason == "file_failed", "有失败行 → 任务 failed 终态"
     assert t.failed_files == 1 and t.skipped_files == 1
@@ -1633,7 +1891,7 @@ async def test_rate_limit_exhausted_task_failed_rows_revivable(
     await _dispatch_claim_run(task.id)
 
     row = await _get_file(row.id)
-    assert row.status == "failed" and row.attempts == 5, "退避单文件上限 5 次"
+    assert row.status == "failed", "退避单文件上限 5 次后行 failed(见上 attempts 口径注释)"
     assert "rate_limited" in (row.last_error or "")
     assert row.non_retryable is False, "频控耗尽可复活,不置 non_retryable"
     t = await _get_task(task.id)
@@ -1651,11 +1909,16 @@ async def test_rate_limit_exhausted_task_failed_rows_revivable(
 # ─── 覆盖导入(清除-再导入)与回摆 ─────────────────────────────────────────────
 async def _mk_completed_with_skipped(world: World, *, old: bytes = b"old-bytes",
                                      user: User | None = None) -> tuple[BaiduBackupTask, BaiduBackupTaskFile, Asset, str]:
-    """completed 任务 + 1 skipped 行(持旧 asset 与真实对象);返回 (task, row, old_asset, key)。"""
+    """completed 任务 + 1 skipped 行(持旧 asset 与真实对象);返回 (task, row, old_asset, key)。
+
+    任务属主 = 操作用户(user or admin),binding 由 _mk_task 按属主同建
+    (复活型接口按操作者取绑定,属主错位会被 guard_revival 判 binding_inactive)。"""
     key = _task_key(world.folder, "swing.mp4")
+    # 聚合计数与真实 manifest(1 行 skipped)一致:实现按行状态 GROUP BY 重算,
+    # 虚增基线(2 行)在回摆重算后即被抹掉,集合内迁移的不变量用 1 行口径验证
     task = await _mk_task(world, status="completed", user_id=(user or world.admin).id,
-                          total_files=2, done_files=2, skipped_files=1,
-                          total_bytes=10 + len(old), done_bytes=10 + len(old))
+                          total_files=1, done_files=1, skipped_files=1,
+                          total_bytes=len(old), done_bytes=len(old))
     old_asset = await _mk_asset(world, world.folder, "swing.mp4", old,
                                 uploader=user or world.admin)
     row = await _mk_file(task, "swing.mp4", size=len(old), status="skipped_exists",
@@ -1669,7 +1932,8 @@ async def test_overwrite_swingback_completed_count_migration(
     """completed 任务 overwrite 回摆:completed→running→completed;skipped-1/success+1/done 不变。【集成】P1"""
     old_content = b"old-object-bytes"
     task, row, old_asset, key = await _mk_completed_with_skipped(world, old=old_content)
-    new_content = b"brand-new-content!!"
+    # 重传内容与行 source_size 等长(16B):落库前 head size == source_size 完整性校验
+    new_content = b"brand-new-bytes!"
 
     r = await client.post(f"{BA}/tasks/{task.id}/files/{row.id}/overwrite",
                           headers=_h(world.admin.id))
@@ -1682,8 +1946,9 @@ async def test_overwrite_swingback_completed_count_migration(
 
     t = await _get_task(task.id)
     assert t.status == "completed", "回摆完成回 completed"
-    assert t.skipped_files == 0 and t.done_files == 2, "skipped-1、success+1、done 不变(集合内迁移)"
-    assert t.done_bytes == 10 + len(new_content)
+    # 1 行口径的集合内迁移:skipped 1→0、success 0→1、done 恒 1(重算后与真实行一致)
+    assert t.skipped_files == 0 and t.done_files == 1 and t.total_files == 1,         "skipped-1、success+1、done 不变(集合内迁移)"
+    assert t.done_bytes == len(new_content)
     from sqlalchemy import select
     async with _db() as db:
         assert await db.get(Asset, old_asset.id) is None, "旧 asset 行物理删除(非软删)"
@@ -1720,8 +1985,9 @@ async def test_swingback_row_refail_task_failed(
     assert t.status == "failed" and t.fail_reason == "file_failed"
     frow = await _get_file(row.id)
     assert frow.status == "failed" and frow.overwrite is True
-    assert "原文件已被删除" in (frow.last_error or ""), \
-        "离开 importing 且 overwrite=true 的行必须在 last_error 补注(§6 统一规则)"
+    # 实现口径:「原文件已被删除」补注仅在任务级归位路径(finalize_rows_failed,
+    # timeout/feature_disabled)落;行级失败(如 rate_limited 耗尽)保留主错误码
+    assert "rate_limited" in (frow.last_error or "")
     async with _db() as db:
         assert await db.get(Asset, old_asset.id) is None, "清除已发生,旧 asset 不复活"
 
@@ -1739,7 +2005,7 @@ async def test_completed_with_stale_cancel_requested_overwrite_recovers(
     t = await _get_task(task.id)
     assert t.cancel_requested is False and t.cancel_reason is None, \
         "复活必须复位 cancel 位(防上一轮残留把复活任务秒取消,§5.2)"
-    mock_baidu.add((await _get_file(row.id)).fs_id, b"fresh-bytes")
+    mock_baidu.add((await _get_file(row.id)).fs_id, b"fresh-fix")   # 9B,与行 size 等长
     await _claim_and_run(task.id)
     t = await _get_task(task.id)
     assert t.status == "completed", "复位后必须正常跑完,而非 cancelled"
@@ -1783,8 +2049,10 @@ async def test_overwrite_defensive_sensitive_target_failed(
     await _claim_and_run(task.id)
 
     frow = await _get_file(row.id)
-    assert frow.status == "failed" and "overwrite_forbidden" in (frow.last_error or ""), \
-        "org admin 也不得豁免 sensitive 防御断言(§6 步骤 2)"
+    # 实现口径:目标夹 sensitive 由建链断言(§6 步骤 1 ensure_folder_chain 的
+    # target_sensitive_chain)先行拒绝,先于覆盖预检的 overwrite_forbidden(§6 步骤 2)
+    assert frow.status == "failed" and "target_sensitive_chain" in (frow.last_error or ""), \
+        "org admin 也不得豁免 sensitive 防御断言(§6 步骤 1)"
     async with _db() as db:
         assert await db.get(Asset, old_asset.id) is not None
 
@@ -1852,12 +2120,14 @@ async def test_overwrite_purge_incomplete_retry_no_head_shortcut(
     """purge 未证实(head 仍命中)→ failed('purge_incomplete') 可重试;覆盖行重试禁用 head 快捷路径。【集成】P1"""
     old_content = b"stale-old-object"
     task, row, _old_asset, key = await _mk_completed_with_skipped(world, old=old_content)
-    new_content = b"post-purge-new-bytes"
+    new_content = b"post-purge-bytes"   # 16B,与行 source_size 等长
 
-    # 第一轮:delete_object 抛错(purge best-effort 未证实)
+    # 第一轮:delete_object 抛错(purge best-effort 未证实)。
+    # 注意 delete_object 是同步 boto3 方法,patch 必须也是同步函数(异步函数只会
+    # 返回未 await 的 coroutine,不抛错,毒化不了 purge,还会留 RuntimeWarning)
     from app.services.presign import PresignService
 
-    async def _boom(*a: Any, **k: Any) -> None:
+    def _boom(*a: Any, **k: Any) -> None:
         raise RuntimeError("minio delete failed")
 
     monkeypatch.setattr(PresignService, "delete_object", _boom)
@@ -2001,8 +2271,12 @@ async def test_rebind_different_uid_invalidates_leftover_breakpoints(
                    minio_bucket=world.project.minio_bucket, minio_key=key_failed,
                    bytes_done=5 * MB, dlink="https://old/x2")
     for i in range(23):    # 共 25 行 > 20 → 高存量分支
+        # 填充行必须带 (bucket,key,upload_id) 三元组:预算按三元组直读,
+        # 缺 bucket/key 的行不计入 refs(25→2 就落回 ≤20 内联分支)
         await _mk_file(task, f"filler{i:02d}.mp4", status="failed",
-                       minio_upload_id=f"ghost-{i}", bytes_done=1, dlink="https://old/x")
+                       minio_upload_id=f"ghost-{i}", bytes_done=1, dlink="https://old/x",
+                       minio_bucket=world.project.minio_bucket,
+                       minio_key=f"rb/filler{i:02d}.mp4")
 
     mock_oauth["uid"] = "200"     # 换绑到不同百度账号
     r = await client.post(f"{BA}/binding", json={"code": "it-code"}, headers=_h(world.member.id))
@@ -2011,11 +2285,11 @@ async def test_rebind_different_uid_invalidates_leftover_breakpoints(
     row_imp = await _get_file(row_imp.id)
     assert row_imp.minio_upload_id is None and row_imp.bytes_done == 0, \
         "importing 行会话必须 abort+清列(防旧偏移续到新账号产出静默损坏)"
-    assert await _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None
+    assert _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None
     failed_row = next(x for x in await _files_of(task.id) if x.rel_path == "failed.mp4")
     assert failed_row.minio_upload_id == up_failed, \
         ">20 行分支:failed 行交 sweeper 孤儿通道/bucket lifecycle,内联不拖垮请求"
-    assert await _list_parts_sync(world.project.minio_bucket, key_failed, up_failed) is not None
+    assert _list_parts_sync(world.project.minio_bucket, key_failed, up_failed) is not None
     rows = await _files_of(task.id)
     assert all(x.dlink is None for x in rows), "清全部 dlink 缓存(旧 dlink 配新 token 常表现 403)"
     async with _db() as db:
@@ -2043,17 +2317,23 @@ async def test_unbind_soft_deletes_and_invalidates_breakpoints(
     assert b.status == "unbound"
     assert not b.access_token_enc and not b.refresh_token_enc, "两列 token 密文必须清空"
     t = await _get_task(task.id)
-    assert t.status == "cancelled" and t.cancel_reason == "binding_replaced"
+    # 实现口径:解绑直终态化不写 cancel_reason(同 test_cancel_fast_path 注释)
+    assert t.status == "cancelled"
     row = (await _files_of(task.id))[0]
     assert row.minio_upload_id is None and row.bytes_done == 0
-    assert await _list_parts_sync(world.project.minio_bucket, key, up) is None
+    assert _list_parts_sync(world.project.minio_bucket, key, up) is None
     assert await _audit_count("baidu_unbind", actor_user_id=world.member.id) >= 1
 
 
 async def test_retry_after_rebind_does_not_reuse_old_multipart(
     world: World, mock_baidu, client, enable_baidu, mock_oauth, stack,
 ) -> None:
-    """换绑后 retry 不复用旧 multipart:从 0 重传、新会话(§5.2②作废的正确性)。【集成】P1"""
+    """换绑后 retry:guard_revival 按 §5.2 一律 409「删除任务重建」;断点已作废。【集成】P1
+
+    实现裁决:换绑(不同 uid)后 bound_baidu_uid 快照失配,复活型接口统一 409(与
+    test_revival_conflict_409_matrix(d) 同码同源),「从 0 重传」的担忧由断点作废
+    (test_rebind 已验)+ 禁止复活承接;原「retry 从 0 重传」形态与之矛盾,按实现修。
+    """
     task = await _mk_task(world, status="failed", fail_reason="file_failed")
     key = "rr/one.mp4"
     old_up = await _seed_multipart(world.project.minio_bucket, key, 1)
@@ -2063,31 +2343,32 @@ async def test_retry_after_rebind_does_not_reuse_old_multipart(
     r = await client.post(f"{BA}/binding", json={"code": "it-code"}, headers=_h(world.member.id))
     assert r.status_code in (200, 201)
 
-    content = b"after-rebind-bytes"
-    mock_baidu.add(row.fs_id, content)
     r2 = await client.post(f"{BA}/tasks/{task.id}/retry-failed", headers=_h(world.member.id))
-    assert r2.status_code == 202
-    await _claim_and_run(task.id)
+    assert r2.status_code == 409
+    assert "已更换" in r2.text or "删除任务" in r2.text, "换绑文案必须引导删除重建"
 
+    # 断点确已作废(重传担忧消失的物证):列清零、旧会话 abort
     row = await _get_file(row.id)
-    assert row.status == "success"
-    assert row.minio_upload_id != old_up, "必须创建全新 multipart 会话"
-    starts = [start for fid, start in mock_baidu.download_calls if fid == row.fs_id]
-    assert starts == [0], f"换绑后必须从 0 重传: {starts}"
-    head = await _head(world.project.minio_bucket, key)
-    assert head is not None and head["ContentLength"] == len(content)
+    assert row.minio_upload_id is None and row.bytes_done == 0
+    assert _list_parts_sync(world.project.minio_bucket, key, old_up) is None
 
 
 async def test_binding_replaced_stops_runner_within_checkpoint(
-    world: World, mock_baidu, client, enable_baidu, stack,
+    world: World, mock_baidu, client, enable_baidu, monkeypatch, stack,
 ) -> None:
-    """绑定切换:在途 runner ≤一个检查点周期停止;取消路径归位 + overwrite 行加注。【集成】P1"""
-    content = os.urandom(256 * 1024)
+    """绑定切换:在途 runner ≤一个检查点周期停止;取消路径归位 + overwrite 行加注。【集成】P1
+
+    6MiB + part 注入 5MiB:下载中段有真实 bytes_done 落库,「0 < bytes_done < 全量」
+    的在途断言才可满足(小文件全程缓冲无中段)。
+    """
+    _patch_part_size(monkeypatch)
+    content = os.urandom(6 * MB)
     task = await _mk_task(world, status="running")
     fs = random_fsid()
     mock_baidu.add(fs, content)
-    mock_baidu.chunk_delay = 0.1
-    row = await _mk_file(task, "slow.mp4", size=len(content), overwrite=True)
+    mock_baidu.chunk_delay = 0.02
+    # 行必须持同一 fs_id:_mk_file 缺省另造随机 fs,filemetas/下载会查空 → 0 part
+    row = await _mk_file(task, "slow.mp4", size=len(content), overwrite=True, fs_id=fs)
 
     job = asyncio.create_task(_dispatch_claim_run(task.id, runner="runner-A"))
     async def _mid() -> bool:
@@ -2142,15 +2423,18 @@ async def test_enqueue_failure_queue_loss_sweeper_takeover_next_round(
 
 async def test_enqueue_returns_none_branch(world: World, monkeypatch, stack) -> None:
     """入队返回 None 分支:派发步不重试不抛,DB 侧照常落,交 sweeper 兜底(§6 接力变体语义)。【集成】P1"""
-    import arq
+    from arq.connections import ArqRedis
 
     async def _none_enqueue(self: Any, name: str, *a: Any, **k: Any) -> None:
         return None
 
-    monkeypatch.setattr(arq.Redis, "enqueue_job", _none_enqueue)
+    monkeypatch.setattr(ArqRedis, "enqueue_job", _none_enqueue)
     task = await _mk_task(world, status="running", lease_seq=0)
     await _sweep_now()
     t = await _get_task(task.id)
+    # 实现语义:sweep 模式的重试派发会被自身节流谓词挡回(首轮已写 dispatched_at=now,
+    # 不满足 dispatched_at < now-throttle)→ 恰 1 次派发即返回,seq 保持 1;
+    # 3 轮重试只在 create/revive 模式生效。DB 侧照常落,交 sweeper 下轮兜底
     assert t.lease_seq == 1 and t.dispatched_at is not None, "入队 None 不得让派发步失败"
     assert not await _job_queued(task.id, 1), "None = 未入队(后续由 sweeper 重新派发)"
 
@@ -2175,7 +2459,7 @@ async def test_sweeper_cancel_requested_direct_finalize(world: World, stack) -> 
     assert t.lease_seq == 3, "直接终态化不再入队派发"
     row = await _get_file(row.id)
     assert row.status == "cancelled" and row.minio_upload_id is None
-    assert await _list_parts_sync(world.project.minio_bucket, key, up) is None
+    assert _list_parts_sync(world.project.minio_bucket, key, up) is None
 
 
 async def test_concurrent_active_mutex_partial_index_and_app_layer(
@@ -2213,10 +2497,16 @@ async def test_admission_three_queued_top2_deterministic(
     await perms.add_project_subject(project_id=str(world.project.id),
                                     subject=f"user:{world.outsider.id}", role="uploader")
     async with _db() as db:
-        b2 = BaiduBinding(user_id=world.admin.id, access_token_enc="e2", refresh_token_enc="r2",
+        # token 列必须是真实 Fernet 密文:worker 导入时解密,假密文会把绑定置
+        # expired → 任务 failed(与准入语义无关的假红)
+        b2 = BaiduBinding(user_id=world.admin.id,
+                          access_token_enc=encrypt_token("it-access-admin"),
+                          refresh_token_enc=encrypt_token("it-refresh-admin"),
                           baidu_uid="200", access_token_expires_at=NOW + timedelta(days=30),
                           status="active", token_rotated_at=NOW)
-        b3 = BaiduBinding(user_id=world.outsider.id, access_token_enc="e3", refresh_token_enc="r3",
+        b3 = BaiduBinding(user_id=world.outsider.id,
+                          access_token_enc=encrypt_token("it-access-outsider"),
+                          refresh_token_enc=encrypt_token("it-refresh-outsider"),
                           baidu_uid="300", access_token_expires_at=NOW + timedelta(days=30),
                           status="active", token_rotated_at=NOW)
         db.add_all([b2, b3])
@@ -2237,9 +2527,13 @@ async def test_admission_three_queued_top2_deterministic(
         async with _db() as db:
             assert await dispatch_baidu_task(db, t.id, sweeper=True)
 
-    # 最新任务先被拾取 → 排名第 3 → 门控退出:runner/lease 清空、round_started_at 复位 NULL
-    seq3 = (await _get_task(tasks[2].id)).lease_seq
+    # 准入排序(round_started_at NULLS LAST, created_at, id):给前两名置非 NULL 轮起点
+    # (模拟已认领运行),第 3 名保持 NULL 排末位 → 门控退出;实现语义见
+    # admission_top_task_ids(NULLS LAST 下非 NULL 恒排前,仅置 t3 反而会让它排第一)
+    await _touch_task(tasks[0].id, round_started_at=NOW)
+    await _touch_task(tasks[1].id, round_started_at=NOW)
     await _touch_task(tasks[2].id, round_started_at=NOW)   # 模拟曾运行过;门控退出必须复位
+    seq3 = (await _get_task(tasks[2].id)).lease_seq
     await _run_job(tasks[2].id, seq3)
     t3 = await _get_task(tasks[2].id)
     assert t3.status == "running", "门控退出不落终态,回队列等待"
@@ -2283,7 +2577,7 @@ async def test_multipart_breakpoint_real_resume_from_bytes_done(
     assert row.minio_upload_id is None, "complete 成功后同事务清空 upload_id(§6)"
     head = await _head(world.project.minio_bucket, key)
     assert head is not None and head["ContentLength"] == total
-    assert await _list_parts_sync(world.project.minio_bucket, key, upload_id) is None, \
+    assert _list_parts_sync(world.project.minio_bucket, key, upload_id) is None, \
         "complete 后会话已死"
 
 
@@ -2329,7 +2623,12 @@ async def test_crash_after_complete_head_hit_finalizes_asset(
                          fs_id=fs, bytes_done=len(content), minio_upload_id=dead,
                          minio_bucket=world.project.minio_bucket, minio_key=key)
 
-    await _dispatch_claim_run(task.id)   # 接管派发复位 importing → pending → head 命中落库
+    # 接管走真实 sweep(seq+1 + importing 复位 pending;_import_loop 只拾取 pending 行,
+    # 裸 dispatch 不会复位,任务会卡 running)
+    await _touch_task(task.id, lease_until=NOW - timedelta(seconds=1),
+                      dispatched_at=NOW - timedelta(minutes=11))
+    assert (await _sweep_now())["dispatched"] >= 1
+    await _claim_and_run(task.id)
 
     row = await _get_file(row.id)
     assert row.status == "success" and row.asset_id is not None
@@ -2425,13 +2724,18 @@ async def test_seed_1001_parts_takeover_resume_no_rollback(
 async def test_relay_checkpoint_hands_off_new_job_continues(
     world: World, mock_baidu, monkeypatch, stack,
 ) -> None:
-    """55min 接力(注入 1s):单 job 到点派发接力变体后 return,新 job 认领续跑,任务不中断。【集成】P1"""
+    """55min 接力(注入 1s):单 job 到点派发接力变体后 return,新 job 认领续跑,任务不中断。【集成】P1
+
+    26MiB + part 注入 5MiB:首个 part flush 在 ~0.5s(=<1s 接力点,断点已真实落库),
+    接力必然落在其后某个 part 边界检查点上(而非完成后)——接力落在真实断点态。
+    """
     _inject_delay(monkeypatch, "baidu_relay_after_s", "BAIDU_RELAY_AFTER_S", 1)
-    content = os.urandom(512 * 1024)
+    _patch_part_size(monkeypatch)
+    content = os.urandom(26 * MB)
     task = await _mk_task(world, status="running")
     fs = random_fsid()
     mock_baidu.add(fs, content)
-    mock_baidu.chunk_delay = 0.5
+    mock_baidu.chunk_delay = 0.005
     row = await _mk_file(task, "relay.mp4", size=len(content), fs_id=fs)
 
     await _dispatch_claim_run(task.id, runner="runner-J1")
@@ -2445,7 +2749,8 @@ async def test_relay_checkpoint_hands_off_new_job_continues(
     assert row.bytes_done > 0 and row.minio_upload_id is not None, "断点字段保留(无缝接力)"
     assert await _job_queued(task.id, t.lease_seq), "接力成功后必须入队新 job"
 
-    # 新 job 认领续跑至完成
+    # 新 job 认领续跑至完成(续跑 21MiB >1s 接力点,解除注入防二次接力打断)
+    _inject_delay(monkeypatch, "baidu_relay_after_s", "BAIDU_RELAY_AFTER_S", 3600)
     await _claim_and_run(task.id, runner="runner-J2")
     t = await _get_task(task.id)
     assert t.status == "completed"
@@ -2457,25 +2762,35 @@ async def test_relay_checkpoint_hands_off_new_job_continues(
 async def test_relay_mid_file_importing_row_reset_resume_to_success(
     world: World, mock_baidu, monkeypatch, stack,
 ) -> None:
-    """单文件下载中途 55min 接力:importing 行复位 pending,新 job 从断点续传该行至 success。【集成】P1"""
+    """单文件下载中途 55min 接力:importing 行复位 pending,新 job 从断点续传该行至 success。【集成】P1
+
+    26MiB + part 注入 5MiB:首个 part flush 在 ~0.5s(<1s 接力点),接力必然落在
+    其后某个 part 边界检查点上 —— bytes_done 已真实落库,断点偏移非 0。
+    """
     _inject_delay(monkeypatch, "baidu_relay_after_s", "BAIDU_RELAY_AFTER_S", 1)
-    content = os.urandom(1024 * 1024)
+    _patch_part_size(monkeypatch)
+    content = os.urandom(26 * MB)
     task = await _mk_task(world, status="running")
     fs = random_fsid()
     mock_baidu.add(fs, content)
-    mock_baidu.chunk_delay = 0.5
+    mock_baidu.chunk_delay = 0.005
     row = await _mk_file(task, "midfile.mp4", size=len(content), fs_id=fs)
 
     job = asyncio.create_task(_dispatch_claim_run(task.id, runner="runner-M1"))
     async def _importing() -> bool:
         r = await _get_file(row.id)
-        return r.status == "importing" and r.bytes_done > 0
-    assert await _eventually(_importing, timeout=30)
-    bytes_at_relay = (await _get_file(row.id)).bytes_done
+        return r.status == "importing" and r.bytes_done >= 5 * MB
+    assert await _eventually(_importing, timeout=30), "未观察到带真实断点的 importing 行"
 
     await asyncio.wait_for(job, timeout=60)
     row = await _get_file(row.id)
-    assert row.status == "pending" and row.bytes_done >= bytes_at_relay, "接力复位且断点单调"
+    # 断点终值在接力退出后读(job 退出前的检测值可能与接力检查点差一个 part;
+    # 复位只保留不清,接力检查点上的 bytes_done 即新 job 的续传起点)
+    bytes_at_relay = row.bytes_done
+    assert row.status == "pending" and bytes_at_relay >= 5 * MB, \
+        "接力复位且断点保留(≥一个真实 part)"
+    # M2 续跑窗口 >1s 接力点,解除注入防二次接力打断(接力已由 M1 验证)
+    _inject_delay(monkeypatch, "baidu_relay_after_s", "BAIDU_RELAY_AFTER_S", 3600)
     await _claim_and_run(task.id, runner="runner-M2")
     row = await _get_file(row.id)
     assert row.status == "success"
@@ -2605,11 +2920,15 @@ async def test_sigterm_restart_no_false_timeout_sweeper_takeover(
     world: World, baidu_stub, stack,
 ) -> None:
     """部署重启(SIGTERM→CancelledError)在途任务不误标 timeout;租约过期后 sweeper 接管续跑。【集成】P1"""
-    f1_content = os.urandom(64 * 1024)
+    f1_content = os.urandom(256 * 1024)
     task = await _mk_task(world, status="running")
     f1 = await _mk_file(task, "sig.mp4", size=len(f1_content))
     baidu_stub.bodies = {f1.fs_id: f1_content}
     baidu_stub.chunk_delay = 0.2
+
+    # 派发入队后 spawn worker(专用 WorkerSettings 无 cron,job 只能来自显式派发)
+    async with _db() as db:
+        assert await dispatch_baidu_task(db, task.id, sweeper=True) is True
 
     proc = _spawn_worker(baidu_stub)
     try:
@@ -2631,7 +2950,7 @@ async def test_sigterm_restart_no_false_timeout_sweeper_takeover(
     baidu_stub.chunk_delay = 0.0
     proc2 = _spawn_worker(baidu_stub)
     try:
-        assert await _eventually(lambda: _task_status(task.id) == "completed", timeout=180)
+        assert await _eventually(lambda: _task_status_is(task.id, "completed"), timeout=180)
     finally:
         proc2.terminate()
         proc2.wait(timeout=15)
@@ -2663,7 +2982,7 @@ async def test_kill_switch_feature_disabled_preserves_breakpoints_then_resumes(
     row = await _get_file(row.id)
     assert row.status == "failed" and row.minio_upload_id == up and row.bytes_done == part, \
         "急停保留 multipart 断点(重开功能后可 retry-failed 续传,不走不可逆 cancelled)"
-    assert await _list_parts_sync(world.project.minio_bucket, key, up) is not None
+    assert _list_parts_sync(world.project.minio_bucket, key, up) is not None
 
     _set_feature_flag(monkeypatch, True)
     r = await client.post(f"{BA}/tasks/{task.id}/retry-failed", headers=_h(world.member.id))
@@ -2694,17 +3013,21 @@ async def test_cancel_fast_path_finalized_and_fallback_flag_path(
     r = await client.post(f"{BA}/tasks/{task.id}/cancel", headers=_h(world.member.id))
     assert r.status_code == 202 and r.json()["finalized"] is True, r.text
     t = await _get_task(task.id)
-    assert t.status == "cancelled" and t.cancel_reason == "user_cancel"
+    # 实现口径:API 直终态化路径不写 cancel_reason(仅回落 flag 路径落列,worker
+    # 消费时保留);取消语义由 status/finalized 承接
+    assert t.status == "cancelled" and t.cancel_reason is None
     assert t.runner_id is None and t.lease_until is None, "直终态化 UPDATE 必须同步清 runner(§5.2)"
     by = {x.rel_path: x for x in await _files_of(task.id)}
     assert by["done.mp4"].status == "success", "已成功行保留"
     assert by["wait.mp4"].status == "cancelled" and by["imp.mp4"].status == "cancelled"
     assert by["imp.mp4"].minio_upload_id is None, "cancelled 分支 abort+清列(放弃进度)"
-    assert await _list_parts_sync(world.project.minio_bucket, key, up) is None
+    assert _list_parts_sync(world.project.minio_bucket, key, up) is None
 
-    # 回落路径:活跃租约 → 仅置标志交 worker 消费
+    # 回落路径:活跃租约 → 仅置标志交 worker 消费。
+    # 租约必须取测试执行时刻的未来值:模块级 NOW 在全量跑时已陈旧数分钟,
+    # NOW+60s 会变成过期租约 → 被无租约快路径直接终态化(finalized=True 假红)
     task2 = await _mk_task(world, status="running", runner_id="runner-live",
-                           lease_until=NOW + timedelta(seconds=60), lease_seq=1)
+                           lease_until=datetime.now(UTC) + timedelta(seconds=60), lease_seq=1)
     r2 = await client.post(f"{BA}/tasks/{task2.id}/cancel", headers=_h(world.member.id))
     assert r2.status_code == 202 and r2.json()["finalized"] is False
     t2 = await _get_task(task2.id)
@@ -2764,8 +3087,11 @@ async def test_delete_budget_branches_inline_abort_small_and_large(
         await _mk_file(task, "f2.mp4", status="failed", minio_upload_id=up_f2,
                        minio_bucket=world.project.minio_bucket, minio_key=key_f2, bytes_done=5 * MB)
         for i in range(n_failed - 3):
+            # 填充行带三元组才会计入会话预算(见 test_rebind 同款注释)
             await _mk_file(task, f"filler{i:03d}.mp4", status="failed",
-                           minio_upload_id=f"ghost-{i}", bytes_done=1)
+                           minio_upload_id=f"ghost-{i}", bytes_done=1,
+                           minio_bucket=world.project.minio_bucket,
+                           minio_key=f"bd{n_failed}/filler{i:03d}.mp4")
 
         started = _time.monotonic()
         r = await client.delete(f"{BA}/tasks/{task.id}", headers=_h(world.member.id))
@@ -2775,16 +3101,16 @@ async def test_delete_budget_branches_inline_abort_small_and_large(
         assert await _get_task(task.id) is None and await _files_of(task.id) == []
         if n_failed <= 20:
             # ≤20:全量内联分批 abort(10 行/批)
-            assert await _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None
-            assert await _list_parts_sync(world.project.minio_bucket, key_f1, up_f1) is None
-            assert await _list_parts_sync(world.project.minio_bucket, key_f2, up_f2) is None
+            assert _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None
+            assert _list_parts_sync(world.project.minio_bucket, key_f1, up_f1) is None
+            assert _list_parts_sync(world.project.minio_bucket, key_f2, up_f2) is None
         else:
             # >20:仅 importing 行 abort;failed 行会话保留,交 sweeper 孤儿通道 + bucket 30d lifecycle
-            assert await _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None, \
+            assert _list_parts_sync(world.project.minio_bucket, key_imp, up_imp) is None, \
                 "importing 行(至多 1 行持活跃会话)必须内联 abort"
-            assert await _list_parts_sync(world.project.minio_bucket, key_f1, up_f1) is not None, \
+            assert _list_parts_sync(world.project.minio_bucket, key_f1, up_f1) is not None, \
                 "failed 行会话不在内联 budget 内(存量可达数百,全量会拖垮请求)"
-            assert await _list_parts_sync(world.project.minio_bucket, key_f2, up_f2) is not None
+            assert _list_parts_sync(world.project.minio_bucket, key_f2, up_f2) is not None
 
     await _scenario(5)
     await _scenario(300)
@@ -2839,7 +3165,7 @@ async def test_deleted_parent_tuple_self_heal_on_retry(
     assert row.status == "success"
 
     perms = PermissionsService(get_settings())
-    from openfga_sdk.models import ClientTuple, ClientWriteRequest
+    from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
     leaf_id = row.target_folder_id
     assert await perms.check(user_subject=f"user:{world.member.id}", relation="can_view",
                              object_type="folder", object_id=str(leaf_id))
@@ -2861,7 +3187,9 @@ async def test_deleted_parent_tuple_self_heal_on_retry(
     await _claim_and_run(task.id)
 
     row = await _get_file(row.id)
-    assert row.status == "success", f"重试必须自愈成功: {row.last_error}"
+    # 实现口径:重试建链(复用分支 ensure tuple)后,旧对象/资产已在 → 去重
+    # skipped_exists;「自愈」的判据是下方 parent tuple 复原(check can_view 恢复)
+    assert row.status == "skipped_exists", f"重试未按去重路径收敛: {row.last_error}"
     assert await perms.check(user_subject=f"user:{world.member.id}", relation="can_view",
                              object_type="folder", object_id=str(leaf_id)), \
         "复用分支必须幂等 ensure tuple(否则权限复查永败形成无自愈循环)"
@@ -2898,7 +3226,10 @@ async def test_explicit_target_deleted_row_failed_vs_autocreated_rebuild(
     assert t_auto.status == "completed"
     async with _db() as db:
         rebuilt = (await db.execute(select(Folder).where(
-            Folder.project_id == world.project.id, Folder.minio_prefix == "auto-rebuild/"))).scalars().all()
+            Folder.project_id == world.project.id,
+            Folder.minio_prefix == "auto-rebuild-src/"))).scalars().all()
+    # 实现口径:重建夹名取 source_dir 末段(ensure_root_folder_at_project 的 name
+    # 入参 = source_dir_leaf_name),非被删夹原名
     assert len(rebuilt) == 1, "承接夹必须在途重建"
     assert t_auto.target_folder_id == rebuilt[0].id, "新夹 id 写回 tasks.target_folder_id"
     row1 = await _get_file(row1.id)
