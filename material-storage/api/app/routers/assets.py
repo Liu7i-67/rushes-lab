@@ -642,8 +642,9 @@ async def batch_prefix(
     (key_conflict,行不动);否则 MinIO copy_object(旧 key→新 key)失败 →
     skip(key_copy_failed,行不动);copy 成功 → UPDATE 行(filename+minio_key,
     etag 用 copy 返回的新值,没有则保留原值;size_bytes/content_type 不变),
-    **事务 commit 成功后**再删旧对象 —— delete 失败仅 log.warning 留孤儿
-    (行已指向新 key,孤儿不可见无权限含义,不回滚不抛错)。
+    **事务 commit 成功后**再删旧对象 —— 删前重验现值,旧 key 已被其他行重新
+    引用(链式改名同批互踩/并发写回)则保留对象防悬挂引用;delete 失败仅
+    log.warning 留孤儿(行已指向新 key,孤儿不可见无权限含义,不回滚不抛错)。
 
     权限:按 folder_id 分组逐组 can_upload check(对齐 update_asset_meta;
     敏感夹按 sensitive_folder 类型 —— 受邀 downloader 亦可改名,与打标同语义),
@@ -658,7 +659,8 @@ async def batch_prefix(
     SELECT 与 UPDATE 之间并发提交的 add 叠出双前缀(remove 侧不加内容谓词,
     字节级谓词与 NFC 口径不对称,对 NFD 存量名会静默不命中);④ rowcount=0
     补查归因,保证 renamed + skipped 与提交数严格对账;⑤ commit 成功后逐个
-    删除已迁移行的旧 MinIO 对象(串行 to_thread,失败留孤儿)。MinIO 的
+    删除已迁移行的旧 MinIO 对象(串行 to_thread;删前重验旧 key 无任何行
+    现值引用,防链式改名互踩删掉他人现指向的对象;失败留孤儿)。MinIO 的
     copy/delete 是同步 boto3(重试+超时最坏数分钟),一律 asyncio.to_thread
     执行,防 MinIO 抖动时阻塞事件循环(delete_asset hard 分支同款)。
     """
@@ -864,9 +866,33 @@ async def batch_prefix(
         ) from e
 
     # ⑤ commit 成功后清理旧对象(F3 时序:行已持久指向新 key 才动手删)。
-    # delete 失败仅 log 留孤儿 —— 行已指向新 key,旧对象不可见、无权限含义,
-    # 不抛错不回滚(与 purge_asset_storage 的 best-effort 同取舍)
+    # 删前重验现值:本事务已提交,重查即全库当前引用 —— 旧 key 若已被任何行的
+    # 现值重新引用(链式改名同批互踩:Y 先迁出让出旧 key,同批 X 恰迁入该 key,
+    # 其 copy 已落在那里;或并发写回),跳过删除留孤儿。该对象此刻的内容已是
+    # 引用方所需,硬删就是悬挂引用(静默数据丢失);孤儿不可见、无权限含义,
+    # 与 delete 失败同取舍。复查自身失败同样按不删处理(宁孤儿不悬挂)。
     for old_bucket, old_key in moved_old_objects:
+        try:
+            still_used = await db.scalar(
+                select(func.count()).select_from(Asset).where(
+                    Asset.minio_bucket == old_bucket,
+                    Asset.minio_key == old_key,
+                )
+            )
+        except Exception as e:  # 复查不了就不删,保引用方安全
+            log.warning(
+                "batch_prefix old key recheck failed (object kept)"
+                " bucket=%s key=%s err=%s",
+                old_bucket, old_key, e,
+            )
+            continue
+        if still_used:
+            log.info(
+                "batch_prefix old key re-referenced, object kept"
+                " bucket=%s key=%s refs=%s",
+                old_bucket, old_key, still_used,
+            )
+            continue
         try:
             await asyncio.to_thread(presign.delete_object, old_bucket, old_key)
         except Exception as e:  # delete 失败只留孤儿,绝不向上抛(行已指向新 key)

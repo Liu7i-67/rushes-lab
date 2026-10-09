@@ -1121,9 +1121,11 @@ async def _purge_key_holders(
     """F2a:overwrite 行遇同 key 占用行 → 逐行权限复查 → purge_active_asset 物理清除。
 
     - 目标夹 sensitive 一律拒绝(与既有同名覆盖流同款,org admin 亦无豁免)
-    - **全部占用行先复查权限,任一无权不动手**(避免部分清除);不通过 →
-      failed('overwrite_forbidden_for_holder') 点名无权占用者(清 overwrite 标志,
-      与既有 overwrite_forbidden 同理由:防 retry 复位后残留标志再触清除循环)
+    - **全部占用行先复查权限,任一无权不动手**(函数自身范围内避免部分清除);
+      不通过 → failed('overwrite_forbidden_for_holder') 点名无权占用者(清
+      overwrite 标志,与既有 overwrite_forbidden 同理由:防 retry 复位后残留
+      标志再触清除循环)。本函数亦是 _overwrite_precheck_and_purge 同名行
+      purge 之后的二次复查兜底 —— 该窗口内才拒则同名行已 purge,不回滚
     - 逐行 purge(purge 前按 DB 现存占用行重查,已清行不重复 purge);purge 未证实
       → failed('purge_incomplete')(保留 overwrite 标志,重试续清剩余占用行)
     - 返回 None = key 已无占用行,可继续导入;否则为行级失败结果
@@ -1178,8 +1180,11 @@ async def _overwrite_precheck_and_purge(
       存在但复查未通过」的情形;否则 retry-failed 复位后残留标志会再次触发清除
       流程陷入循环)
     - F2a:同 key 的其他占用行(批量前缀 filename≠key 残留等,含软删)与既有同名行
-      一并纳入清除范围 —— 全部占用行先复查权限(任一无权不动手,防部分清除),
-      再随同名行 purge 之后逐行物理清除(按 DB 现存行重查,不重复 purge)
+      一并纳入清除范围 —— 动手前先对已知占用行全量复查权限(把「无权」尽量挡在
+      purge 之前)。窄 TOCTOU 如实注记:同名行 purge 之后 _purge_key_holders
+      还会按 DB 现值对占用行二次复查权限兜底,此时才拒 → 行失败
+      overwrite_forbidden_for_holder,已 purge 的同名行不回滚(窗口内新增占用行
+      或权限回退仅经此路径可达)
     - purge 未证实 → failed('purge_incomplete')(可重试;保留标志)
     - sensitive 防御断言命中一律拒绝,不做 org admin 豁免(v1 三层禁敏感目标使
       该分支正常不可达;assets.py:759-769 口径留 v2 评估)
@@ -1198,8 +1203,9 @@ async def _overwrite_precheck_and_purge(
     if same_name_count > 1:
         return await _fail_row(db, runner, row, "overwrite_ambiguous", clear_overwrite=True,
                                message="目标位置存在多个同名文件,请先人工处理")
-    # F2a:同 key 其他占用行先全部复查权限(任一无权不动手 —— 同名行亦不 purge,
-    # 避免部分清除;无权者点名交 overwrite_forbidden_for_holder)
+    # F2a:同 key 其他占用行先全部复查权限(把「无权」挡在动手前,尽力避免部分
+    # 清除;无权者点名交 overwrite_forbidden_for_holder。窄 TOCTOU:同名行 purge
+    # 后 _purge_key_holders 还有二次复查兜底,见函数 docstring)
     holders = await _key_conflict_holders(db, bucket=bucket, key=key,
                                           exclude_asset_id=existing_asset.id)
     for holder in holders:

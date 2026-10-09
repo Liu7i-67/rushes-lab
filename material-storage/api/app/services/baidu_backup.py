@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from arq.connections import ArqRedis
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
-from sqlalchemy import case, func, literal, select, update
+from sqlalchemy import case, func, literal, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -703,7 +703,14 @@ async def reserve_random_key(
 ) -> int:
     """F2b random-suffix 复位:key_conflict 失败行(或派发前中断的已预留 pending 行,
     幂等复用)→ pending + 写 reserved_key + 清 last_error + overwrite=false
-    (attempts 归零按既有 reset 语义)。CAS 谓词防并发双请求双 key 漂移。"""
+    (attempts 归零按既有 reset 语义)。
+
+    CAS 谓词防并发双请求双 key 漂移:两请求并发各自生成候选 key 时,先写者
+    落 key(rowcount=1),后写者谓词不命中(rowcount=0,路由侧转 409)。
+    修复注记(P2-1):原谓词只卡状态,行复位 pending 后仍命中,并发首次预定
+    两事务先后写均 rowcount=1 → key 被后写者静默改写;现谓词要求「行尚未
+    预定(reserved_key IS NULL,首次预定)」或「reserved_key 与本次写入值
+    相等(幂等复用,覆盖 failed 重试 / pending 断点续派)」二者其一。"""
     res = await db.execute(
         update(TaskFile)
         .where(
@@ -711,6 +718,11 @@ async def reserve_random_key(
             TaskFile.task_id == task_id,
             TaskFile.status.in_(("failed", "pending")),
             TaskFile.non_retryable.is_(False),
+            # 首次预定或同值复用才命中;他请求已预定成别的 key → 0 行,不漂移
+            or_(
+                TaskFile.reserved_key.is_(None),
+                TaskFile.reserved_key == reserved_key,
+            ),
         )
         .values(
             status="pending", attempts=0, overwrite=False, last_error=None,

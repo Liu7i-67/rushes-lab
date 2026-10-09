@@ -29,6 +29,8 @@ fixture,session 级 stack/client 同进程共享,不重复建 app)。沿用该�
                                               → test_trash_holder_named_recycle_bin_and_random_suffix_unaffected
   7. 同名活行回归:目标夹同名活跃文件默认仍 skipped_exists(不走 key_conflict)
                                               → test_same_name_active_row_still_skipped_exists
+  P2-1 专职测试实锤:reserve_random_key CAS 并发首次预定先写者胜、后写者 0 行
+      (双事务先后 reserve,服务层交错断言)    → test_reserve_random_key_first_write_wins_no_drift
   11. 既有 66 集成用例回归全绿 + 本地单测回归 + ruff/mypy/lint/build 基线不升
       —— 闸门项,无独立测试函数:由全量 `pytest tests/`、`ruff check`、`mypy`
       与前端 build 基线对比承接(PM 验收阶段跑)。
@@ -502,3 +504,49 @@ async def test_same_name_active_row_still_skipped_exists(
     assert "key_conflict" not in (frow.last_error or "")
     t = await _get_task(task.id)
     assert t.status == "completed", "纯 skip 无失败 → 任务 completed"
+
+
+# ─── P2-1:reserve_random_key CAS —— 并发首次预定先写者胜,后写者 0 行不漂移 ────
+async def test_reserve_random_key_first_write_wins_no_drift(
+    world: World, stack,
+) -> None:
+    """service 层 CAS 回归(P2-1):同一 failed 行两事务先后 reserve 不同候选
+    key —— 首写落定 rowcount=1,后写谓词不命中 rowcount=0,reserved_key 保持
+    先写者值。修复前:谓词只卡 status,行复位 pending 后仍命中,双事务先后
+    写均 rowcount=1 → key 被后写者静默改写(与 docstring 宣称相悖)。末段
+    顺带钉住同值幂等复用分支(行已有 K1 再 reserve K1 仍 rowcount=1)。
+    【集成】复用测试者实锤手法:两事务先后 reserve。"""
+    from app.services.baidu_backup import reserve_random_key
+
+    task = await _mk_task(world, status="failed")
+    row = await _mk_file(
+        task, "cas.txt", status="failed",
+        # F1 真实格式:names 与「占用」间无空格(format_key_conflict_message)
+        last_error="key_conflict: cas.txt 已被 other.txt占用", non_retryable=False,
+    )
+    prefix = f"{world.folder.minio_prefix.rstrip('/')}/"
+    k1, k2 = f"{prefix}1.aaaa1111.txt", f"{prefix}1.bbbb2222.txt"
+
+    # 事务 1(先写者):行 reserved_key IS NULL → 命中,落定 K1
+    async with _db() as db:
+        n1 = await reserve_random_key(db, task_id=task.id, file_id=row.id, reserved_key=k1)
+        await db.commit()
+    assert n1 == 1
+
+    # 事务 2(后写者):行已有 K1 ≠ 本次 K2 → 谓词不命中 → 0 行(key 不漂移)
+    async with _db() as db:
+        n2 = await reserve_random_key(db, task_id=task.id, file_id=row.id, reserved_key=k2)
+        await db.commit()
+    assert n2 == 0, "并发首次预定的后写者必须 0 行(否则 reserved_key 被静默改写)"
+
+    # 现值:先写者的 key 原样保留,行复位 pending(overwrite=false)
+    frow = await _get_file(row.id)
+    assert str(frow.reserved_key) == k1, f"reserved_key 必须保持先写者值: {frow.reserved_key!r}"
+    assert frow.status == "pending" and frow.overwrite is False
+
+    # 同值幂等复用分支不回退:行已有 K1 再 reserve K1 仍命中(failed/pending 复用)
+    async with _db() as db:
+        n3 = await reserve_random_key(db, task_id=task.id, file_id=row.id, reserved_key=k1)
+        await db.commit()
+    assert n3 == 1
+    assert str((await _get_file(row.id)).reserved_key) == k1

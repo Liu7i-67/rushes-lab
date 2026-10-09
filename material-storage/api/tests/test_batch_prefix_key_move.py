@@ -29,6 +29,8 @@ head 断言 helper 本文件自含。沿用预写名约定:`skipped_reasons` 新
      双方对象原样、audit key_moved=false     → test_batch_prefix_new_key_occupied_skips_key_conflict
   10. F3 copy 失败(注入 copy_object 异常):skip key_copy_failed、行不动
                                               → test_batch_prefix_copy_failure_skips_key_copy_failed
+  P1-1 专职测试实锤:链式改名同批互踩(Y 迁出让出的 key 恰被同批 X 迁入,
+      删 Y 旧对象不得悬挂 X 引用)                            → test_batch_prefix_chain_rename_no_dangling_key
   11. 既有 66 集成用例回归全绿 + 本地单测回归 + ruff/mypy/lint/build 基线不升
       —— 闸门项,无独立测试函数:由全量 `pytest tests/`、`ruff check`、`mypy`
       与前端 build 基线对比承接(PM 验收阶段跑)。
@@ -372,6 +374,53 @@ async def test_batch_prefix_copy_failure_skips_key_copy_failed(
     finally:
         monkeypatch.undo()   # 先撤注入再清理(清理由 copy 正常路径无关的 API 完成)
         await _hard_cleanup(client, [aid], [folder["id"]])
+
+
+# ─── P1-1:链式改名同批互踩 → 删旧对象不得悬挂他行引用(专职测试实锤回归)─────────
+@pytest.mark.asyncio
+async def test_batch_prefix_chain_rename_no_dangling_key(stack_ready, client: AsyncClient) -> None:
+    """链式改名:同夹 Y=P_a.txt(key {fp}P_a.txt)与 X=P_P_a.txt(key {fp}P_P_a.txt)
+    同批 remove P_,提交序 Y 在前 —— Y 先迁到 {fp}a.txt 让出 {fp}P_a.txt,X 的
+    占用预检(读己之写)恰见该 key 空闲 → copy 落 {fp}P_a.txt 并 UPDATE。
+
+    修复前:commit 后按 moved 列表删 Y 的旧对象 {fp}P_a.txt = 删掉 X 现指向的
+    对象(X 行悬挂,接口仍报 renamed=2 成功 —— 静默数据丢失)。
+    修复后:删前重验旧 key 的当前 DB 引用,已被 X 引用 → 保留对象,两行完好:
+    各自 key head 200、内容各自正确、X 原对象 {fp}P_P_a.txt 正常删除。【集成】"""
+    uniq = _uniq("zz_km_chain")
+    folder = await _create_folder(client, PROJECT_EVENT, uniq)
+    bucket = await _project_bucket()
+    fp = await _folder_prefix(folder["id"])
+    y_content, x_content = b"Y-chain-bytes", b"X-chain-bytes"
+    # _insert_asset_with_object:filename 与 key 同规则(canonical),对象真实在位
+    y = await _insert_asset_with_object(folder["id"], "P_a.txt", y_content, bucket=bucket)
+    x = await _insert_asset_with_object(folder["id"], "P_P_a.txt", x_content, bucket=bucket)
+    try:
+        # 提交序 Y 在前:复刻「Y 先迁出让 key、X 后迁入同 key」的互踩时序
+        r = await _batch_prefix(client, [y, x], "remove", "P_")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["renamed"] == 2
+        assert body["skipped_reasons"]["key_conflict"] == 0
+
+        # Y:迁到 {fp}a.txt,对象在位且内容为 Y
+        yf, yk = await _asset_core(y)
+        assert (yf, yk) == ("a.txt", f"{fp}a.txt")
+        hy = await _head(bucket, yk)
+        assert hy is not None and hy["ContentLength"] == len(y_content)
+
+        # X:迁到 {fp}P_a.txt(恰是 Y 的旧 key),对象必须仍在且内容为 X ——
+        # 不得被「Y 旧对象清理」删成悬挂引用(P1-1 坏态断言点)
+        xf, xk = await _asset_core(x)
+        assert (xf, xk) == ("P_a.txt", f"{fp}P_a.txt")
+        hx = await _head(bucket, xk)
+        assert hx is not None, "X 现指向的对象被误删(悬挂 minio_key,静默数据丢失)"
+        assert hx["ContentLength"] == len(x_content)
+
+        # X 的原对象正常删除;Y 的旧对象因被 X 引用而保留(内容已是 X 的拷贝)
+        assert await _head(bucket, f"{fp}P_P_a.txt") is None
+    finally:
+        await _hard_cleanup(client, [y, x], [folder["id"]])
 
 
 # 清理兜底说明:_hard_cleanup 走 API 软删+hard purge(purge 内部 delete_object,

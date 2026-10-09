@@ -342,11 +342,33 @@ function isKeyConflictRow(f: BaiduTaskFile): boolean {
   return f.status === 'failed' && !!f.last_error?.startsWith('key_conflict:');
 }
 
-/** 从 key_conflict last_error 解析占用者文件名列表(`key_conflict: <key> 已被 a、b 占用`);解析不出返回 null。 */
+/**
+ * 从 key_conflict last_error 解析占用者文件名列表(F1 格式,后端
+ * `format_key_conflict_message`:f"{key} 已被 {names}占用" — names 与「占用」间无空格;
+ * 占用者软删时名后直拼 `(回收站)`,整串经 _fail_row [:512] 截断),
+ * 解析不出/格式不可信返回 null(调用方回退通用确认文案)。
+ *
+ * 从右侧锚定最后一个 ` 已被 ` 解析:占用者名自身可含「占用」「已被」等字样,
+ * 左侧懒惰匹配会把名截断失真(如「已占用.txt」解析成「已」)。
+ * 终止符「占用」要求整段以它收尾——512 截断的串没有该尾部,直接回退;
+ * 剥离只做一次且锚定段尾,避免误剥名字本身以「占用」结尾的合法名(如「已占用」)。
+ * 「、」既是多名分隔符又是名字合法字符,单个含「、」的名拆分后拼接回显示串
+ * 与后端原文逐字节一致(仅 1/N 个文件的语义歧义,无法从格式判别)。
+ */
 function keyConflictHolders(err: string): string[] | null {
-  const m = /^key_conflict:\s*.+?\s*已被\s+(.+?)占用/.exec(err);
-  if (!m) return null;
-  const holders = m[1].split('、').map(s => s.trim()).filter(Boolean);
+  const marker = ' 已被 ';
+  const terminator = '占用';
+  const recycleSuffix = '(回收站)';
+  const idx = err.lastIndexOf(marker);               // 右锚:躲开名内「已被」字样
+  if (idx < 0) return null;
+  let segment = err.slice(idx + marker.length);
+  if (!segment.endsWith(terminator)) return null;    // 无终止符=截断/非 F1 格式 → 回退
+  segment = segment.slice(0, -terminator.length);
+  if (!segment) return null;
+  const holders = segment
+    .split('、')
+    .map(s => (s.endsWith(recycleSuffix) ? s.slice(0, -recycleSuffix.length).trim() : s.trim()))
+    .filter(s => s.length > 0 && !s.includes(marker)); // 空名/残留标记位=解析不可信 → 回退
   return holders.length > 0 ? holders : null;
 }
 
