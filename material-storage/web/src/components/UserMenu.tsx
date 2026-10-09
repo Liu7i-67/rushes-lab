@@ -1,14 +1,17 @@
 import { App, Avatar, Dropdown } from 'antd';
-import { Check, Copy, KeyRound, LogOut, User as UserIcon } from 'lucide-react';
+import { Check, CloudDownload, Copy, KeyRound, LogOut, User as UserIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { setDevUserId, getDevUserId, http } from '../api/client';
 import type { Me } from '../api/types';
+import { BaiduBackupDrawer } from './BaiduBackupDrawer';
 
 export function UserMenu({ me }: { me: Me }) {
   const isDev = !!getDevUserId();
   const { message } = App.useApp();
   const [copied, setCopied] = useState(false);
+  // 百度网盘备份抽屉(方案 §3.1):入口挂本菜单内,Drawer 随本组件挂载
+  const [baiduOpen, setBaiduOpen] = useState(false);
 
   const copyOpenId = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -39,6 +42,7 @@ export function UserMenu({ me }: { me: Me }) {
   const initial = (me.name || '?').slice(0, 1).toUpperCase();
 
   return (
+    <>
     <Dropdown
       menu={{
         items: [
@@ -100,6 +104,14 @@ export function UserMenu({ me }: { me: Me }) {
             icon: <KeyRound size={14} />,
             label: <Link to="/change-password">修改密码</Link>,
           }] : []),
+          // 百度网盘备份(方案 §3.1):置于 password_set 条件块之外(未设本地密码
+          // 的用户同样可见),显隐由后端功能开关 me.baidu_backup_enabled 门控
+          ...(me.baidu_backup_enabled ? [{
+            key: 'baidu-backup',
+            icon: <CloudDownload size={14} />,
+            label: '百度网盘备份',
+            onClick: () => setBaiduOpen(true),
+          }] : []),
           { type: 'divider' },
           { key: 'logout', icon: <LogOut size={14} />, label: '退出登录',
             onClick: handleLogout, danger: true },
@@ -157,5 +169,7 @@ export function UserMenu({ me }: { me: Me }) {
         )}
       </button>
     </Dropdown>
+    <BaiduBackupDrawer open={baiduOpen} onClose={() => setBaiduOpen(false)} me={me} />
+    </>
   );
 }
