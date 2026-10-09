@@ -153,12 +153,15 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
                 showIcon
                 blockNode
                 loadData={async (node) => {
+                  const parentKey = String(node.key);
                   try {
-                    const { list, truncated } = await fetchNetdiskFolders(String(node.key));
-                    return toNetdiskNodes(String(node.key), list, truncated);
+                    const { list, truncated } = await fetchNetdiskFolders(parentKey);
+                    // antd 官方懒加载模式:rc-tree onNodeLoad 只标记 loadedKeys 并 resolve,
+                    // loadData 的返回值会被丢弃,必须在此把子节点合并进受控 treeData 再 resolve。
+                    setTreeData(prev => attachChildren(prev, parentKey, toNetdiskNodes(parentKey, list, truncated)));
                   } catch (e) {
                     message.error(errorMessage(e, '读取网盘子目录失败'));
-                    throw e;   // 不吞错返回 [](会把错误伪装成空目录):antd Tree 保持节点未展开,可重试点开
+                    throw e;   // reject 不置 loadedKeys:节点保持未展开,可重试点开
                   }
                 }}
                 selectedKeys={sourceDir ? [sourceDir] : []}
@@ -266,6 +269,31 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
 // isLeaf+selectable:false+灰显(「已选来源」恒为目录,创建任务逻辑零改动)。
 // truncated=true 时在子节点尾部插一条不可选提示行(大目录聚合分页未取尽)。
 const TRUNCATED_HINT_KEY = (parent: string) => `${parent}::truncated-hint`;
+
+/**
+ * 把 children 挂为 treeData 中 key === parentKey 节点的 children(整体替换,D2)。
+ * 纯函数 + 不可变更新:命中路径上的节点浅拷贝新建,未受影响分支保持原引用;
+ * 全树未命中 parentKey 时返回原数组引用(如刷新竞态:attach 到已清空的树上 = 无操作)。
+ * 重复挂载无需特殊处理:rc-tree loadedKeys 保证已加载节点不会再次进入 loadData。
+ */
+function attachChildren(treeData: TreeDataNode[], parentKey: string, children: TreeDataNode[]): TreeDataNode[] {
+  let changed = false;
+  const next = treeData.map(node => {
+    if (String(node.key) === parentKey) {
+      changed = true;
+      return { ...node, children };
+    }
+    if (node.children?.length) {
+      const merged = attachChildren(node.children, parentKey, children);
+      if (merged !== node.children) {
+        changed = true;
+        return { ...node, children: merged };
+      }
+    }
+    return node;
+  });
+  return changed ? next : treeData;
+}
 
 function toNetdiskNodes(parent: string, list: BaiduNetdiskFolder[], truncated: boolean): TreeDataNode[] {
   const nodes = list.map(toNetdiskNode);
