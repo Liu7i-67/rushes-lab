@@ -97,6 +97,23 @@ class PresignService:
         """删除主存储对象(purge 用;软删本身不删对象)。"""
         self._s3_internal.delete_object(Bucket=bucket, Key=key)
 
+    def copy_object(self, bucket: str, source_key: str, dest_key: str) -> dict[str, Any]:
+        """同 bucket 服务端复制对象(batch-prefix key 迁移用,§F3)。
+
+        走 s3_internal(admin client,与 create/complete multipart 同通道);
+        返回新对象的 etag / version_id(无版本化 bucket 两者常为 None),
+        供 DB 行 UPDATE 时沿用「copy 有新值则用新值,否则保留原值」语义。
+        """
+        resp = self._s3_internal.copy_object(
+            Bucket=bucket,
+            Key=dest_key,
+            CopySource={"Bucket": bucket, "Key": source_key},
+        )
+        return {
+            "etag": (resp.get("CopyObjectResult", {}).get("ETag") or "").strip('"') or None,
+            "version_id": resp.get("VersionId"),
+        }
+
     def delete_thumbnail_object(self, key: str) -> None:
         """删除缩略图 MinIO(SSD,ADR-0008 P1 独立实例)上的派生对象。"""
         self._s3_thumb_internal.delete_object(

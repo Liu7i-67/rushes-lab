@@ -56,7 +56,95 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   group_deleted: '用户组删除',
   group_member_added: '用户组成员添加',
   group_member_removed: '用户组成员移除',
+  // ── 百度网盘备份(方案 §8 audit 全集)─────────────────────────────────────
+  baidu_bind: '百度网盘绑定',
+  baidu_unbind: '百度网盘解绑',
+  baidu_task_create: '备份任务创建',
+  baidu_task_cancel: '备份任务取消',
+  baidu_task_delete: '备份任务删除',
+  baidu_task_retry: '备份任务重试',
+  baidu_file_retry: '备份文件重试',
+  baidu_file_overwrite: '备份文件覆盖导入',
+  baidu_file_random_suffix: '备份文件随机后缀导入',
+  baidu_file_imported: '备份文件导入',
+  baidu_task_auto_finalized: '备份任务自动终态',
 };
+
+/** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */
+export const BAIDU_TASK_STATUS_LABEL: Record<string, string> = {
+  enumerating: '清单准备中',
+  running: '进行中',
+  queued: '排队中',
+  completed: '已完成',
+  cancelled: '已取消',
+  failed: '失败',
+};
+
+/** 百度备份任务状态 → antd Tag 色。 */
+export const BAIDU_TASK_STATUS_COLOR: Record<string, string> = {
+  enumerating: 'processing',
+  running: 'processing',
+  queued: 'gold',
+  completed: 'green',
+  cancelled: 'default',
+  failed: 'red',
+};
+
+/** 百度备份 manifest 文件行状态 → Tag 文案。 */
+export const BAIDU_FILE_STATUS_LABEL: Record<string, string> = {
+  pending: '等待',
+  importing: '导入中',
+  success: '成功',
+  skipped_exists: '跳过(已存在)',
+  failed: '失败',
+  cancelled: '已取消',
+};
+
+/** 百度备份 manifest 文件行状态 → antd Tag 色。 */
+export const BAIDU_FILE_STATUS_COLOR: Record<string, string> = {
+  pending: 'default',
+  importing: 'processing',
+  success: 'green',
+  skipped_exists: 'cyan',
+  failed: 'red',
+  cancelled: 'default',
+};
+
+/** 任务 fail_reason → 用户可读文案(§4 取值域)。 */
+export const BAIDU_FAIL_REASON_LABEL: Record<string, string> = {
+  binding_expired: '百度绑定已失效,请重新绑定后重试',
+  timeout: '达到单轮 48h 上限,可用「全部重试失败」断点续传',
+  file_failed: '部分文件失败',
+  enum_rate_limited: '百度接口频控,枚举未完成',
+  enum_failed: '枚举源目录失败',
+  manifest_too_large: '文件数超过 20,000 上限,请拆分目录后重建任务',
+  feature_disabled: '功能已被管理员停用,断点已保留(重新开启后可继续)',
+};
+
+/**
+ * 百度文件行 last_error / 批量前缀 skipped_reasons 的已知前缀 → 用户可读文案。
+ * last_error 形如 `<prefix>: <明细>`,展示时换标签并保留明细(占用者文件名等);
+ * skipped_reasons 同源键直接整词匹配(键固定 ASCII,无明细后缀)。
+ */
+export const BAIDU_FILE_ERROR_LABEL: Record<string, string> = {
+  key_conflict: '存储位置与其他文件冲突',
+  key_copy_failed: '存储端复制失败',
+  overwrite_forbidden_for_holder: '对占用文件无管理权限,覆盖被拒绝',
+};
+
+/**
+ * 任务状态展示态(§3.1 口径):接口派生 queued=true(活动中但无 runner 实际推进)
+ * 时,enumerating/running 显示为「排队中」。
+ */
+interface BaiduTaskStatusLike {
+  status: string;
+  queued?: boolean;
+}
+
+export const baiduTaskDisplayStatus = (
+  t: Pick<BaiduTaskStatusLike, 'status' | 'queued'>,
+): string =>
+  t.queued && (t.status === 'running' || t.status === 'enumerating') ? 'queued' : t.status;
 
 export const ACTION_LABEL: Record<string, string> = {
   access: '访问',

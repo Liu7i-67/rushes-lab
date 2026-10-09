@@ -1,10 +1,11 @@
-"""PR-1 批量文件名前缀(POST /api/v1/assets/batch-prefix)— 集成测试,容器内跑。
+"""批量文件名前缀(POST /api/v1/assets/batch-prefix)— 集成测试,容器内跑。
 
 对应方案:`rushes-spec/material-storage/netdisk-import-batch-rename-roles-plan.md`
-§1.1(API 契约与语义:五类 skipped_reasons、NFC 两侧归一、逐 id UPDATE + 对账)、
-§1.4(测试清单);实施文档 `docs/qdev/2026-10-08-batch-prefix-creator-template.md` PR-1。
+§1.1(API 契约与语义:skipped_reasons、NFC 两侧归一、逐 id UPDATE + 对账)、
+§1.4(测试清单);实施文档 `docs/qdev/2026-10-08-batch-prefix-creator-template.md` PR-1;
+F3 key 同步迁移见 `docs/qdev/2026-10-09-baidu-import-key-conflict-fix.md`。
 
-用例 → 测试函数对照(§1.4 清单逐条落函数):
+用例 → 测试函数对照(§1.4 清单 + F3 逐条落函数):
   1. add 全成功 + audit `asset.batch_renamed` 采样  → test_batch_prefix_add_all_renamed_and_audit
   2. add 时已带前缀跳过(already_prefixed,不叠双层)→ test_batch_prefix_add_already_prefixed_skipped
   3. remove 部分匹配(no_match / empty_result)      → test_batch_prefix_remove_partial_matches
@@ -18,14 +19,25 @@
   10. labels_mode=merge 并集 + 默认 replace 不变    → test_meta_labels_mode_merge_and_default_replace
                                                       test_meta_labels_mode_merge_cap_50
   11. 对账 renamed + skipped == 去重后提交数        → test_batch_prefix_reconciliation_add_mixed
+  F3 集成点 8/9/10(key 迁移:对象搬家 / key_conflict / key_copy_failed)
+    落同目录 test_batch_prefix_key_move.py(脚手架复用本文件,不重复落函数)
+  纯逻辑:key 规则与 complete_upload 同源(本地可跑,无需容器栈)
+                                                     → test_pure_new_asset_key_rule
+                                                     test_pure_skipped_reasons_schema_keys
 
 预期前置(同 test_v4_permissions.py / test_trash_and_purge.py):
   1. seed_demo_data.py 已跑过(Evan = 系统 admin;outsider = 无任何权限的契约账号)
   2. OpenFGA store / model 已 push
   3. env=dev(允许 X-User-Id header 模拟身份)
+  4. MinIO 可达(F3 起改名会真实 copy/delete 对象;期望改名的用例须先播种
+     源对象,见 _seed_object)
 
 资产入库存走 DB 直插(presign 的 PUT 指向 MinIO 公网 endpoint,容器内不通,
-与 test_trash_and_purge 同理由);批量改名是纯 DB 操作,不触 MinIO。
+与 test_trash_and_purge 同理由);F3 起改名不再「纯 DB」—— 逐文件跨资产 key
+预检(DB)→ copy_object → UPDATE → commit 后删旧对象(真实 MinIO),故:
+  - 期望改名的用例先 _seed_object 播种旧 key 对象,否则 copy NoSuchKey →
+    key_copy_failed 跳过(该路径本身由 F3-10 用例覆盖);
+  - 纯逻辑用例(test_pure_*)不依赖容器栈,本地 `pytest -k test_pure` 可跑。
 """
 from __future__ import annotations
 
@@ -41,6 +53,7 @@ from sqlalchemy import select, update
 from app.db.session import get_sessionmaker
 from app.db.tables import Asset, AuditEvent
 from app.main import create_app
+from app.routers.assets import _new_asset_key
 
 EVAN_ID = "3f1b659e-9ef1-4e65-aa03-4407ad7bcfc4"          # 系统 admin(org admin)
 OUTSIDER_ID = "00000000-0000-0000-0000-0000000000aa"      # 无任何角色的契约账号
@@ -50,8 +63,13 @@ PROJECT_EVENT = "11111111-1111-1111-1111-111111111103"    # public
 NFD_E = "e\u0301"
 NFC_E = "\u00e9"
 
-# skipped_reasons 五个键,方案 §1.1 写死(键固定 ASCII,前端做中文映射)
-SKIPPED_KEYS = {"too_long", "no_match", "already_prefixed", "empty_result", "deleted"}
+# skipped_reasons 七个键,方案 §1.1 写死五类 + F3 增两类(键固定 ASCII,前端做中文映射)
+SKIPPED_KEYS = {
+    "too_long", "no_match", "already_prefixed", "empty_result", "deleted",
+    "key_conflict", "key_copy_failed",
+}
+
+_TEST_BUCKET = "ms-dev"  # 与 _insert_asset 的 minio_bucket 一致(dev 默认桶)
 
 
 def _h(uid: str = EVAN_ID) -> dict[str, str]:
@@ -87,6 +105,57 @@ async def _create_folder(
     )
     assert r.status_code == 201, r.text
     return r.json()
+
+
+def _minio_client():  # type: ignore[no-untyped-def]
+    """容器内视角的 MinIO client(test_baidu_integration._minio_client 同款)。"""
+    import boto3
+
+    from app.settings import get_settings
+    s = get_settings()
+    return boto3.client(
+        "s3",
+        endpoint_url=s.minio_endpoint_internal,
+        aws_access_key_id=s.minio_access_key,
+        aws_secret_access_key=s.minio_secret_key,
+        region_name="us-east-1",
+    )
+
+
+async def _seed_object(bucket: str, key: str, body: bytes = b"hello-bp") -> None:
+    """播种 MinIO 对象(F3 起改名 = copy_object,源对象必须在位)。
+
+    bucket 缺失则先建(与 test_baidu_integration 同款防御,dev 桶一般已存在)。
+    ⚠️ MinIO 对象名上限 255 字符(比 S3 规范的 1024 严):超长名 PutObject 直接
+    400 XMinioInvalidObjectName("unsupported characters"),造数时须守此限。
+    """
+    def _sync() -> None:
+        c = _minio_client()
+        try:
+            c.head_bucket(Bucket=bucket)
+        except c.exceptions.ClientError:
+            c.create_bucket(Bucket=bucket)
+        c.put_object(Bucket=bucket, Key=key, Body=body, ContentLength=len(body))
+
+    await asyncio.to_thread(_sync)
+
+
+async def _head_object(bucket: str, key: str) -> dict | None:
+    """head 对象;404(不存在)返回 None,其余返回 size_bytes 等 meta。"""
+    def _sync() -> dict | None:
+        c = _minio_client()
+        try:
+            resp = c.head_object(Bucket=bucket, Key=key)
+        except c.exceptions.ClientError:
+            return None
+        return {"size_bytes": int(resp.get("ContentLength", 0))}
+
+    return await asyncio.to_thread(_sync)
+
+
+async def _drop_object(bucket: str, key: str) -> None:
+    """best-effort 删对象(清孤儿用;不存在时 S3 delete 幂等成功)。"""
+    await asyncio.to_thread(_minio_client().delete_object, Bucket=bucket, Key=key)
 
 
 async def _insert_asset(
@@ -195,11 +264,17 @@ def _find_sample_list(details: dict) -> list | None:
 async def test_batch_prefix_add_all_renamed_and_audit(client: AsyncClient) -> None:
     """多文件 add 全部改名:filename 落库为 NFC(prefix + filename)、renamed 计数、
     audit `asset.batch_renamed` 落库(action / prefix / renamed / skipped + 采样明细)、
-    MinIO key 不动(纯 DB 改名)。"""
+    MinIO key 同步迁移(F3:key 末段 = 新 filename,旧对象删、新对象在位)。"""
     uniq = _uniq("zz_bp_add")
     folder = await _create_folder(client, PROJECT_EVENT, uniq)
     aid1 = await _insert_asset(folder["id"], f"{uniq}_a1.txt")
     aid2 = await _insert_asset(folder["id"], f"{uniq}_a2.txt")
+    # F3:改名会 copy_object,先播种旧 key 对象(旧 key 与夹前缀刻意错位,
+    # 复刻线上「filename≠key 残留」形态)
+    old_key1 = f"zz-test/{uniq}_a1.txt"
+    old_key2 = f"zz-test/{uniq}_a2.txt"
+    await _seed_object(_TEST_BUCKET, old_key1)
+    await _seed_object(_TEST_BUCKET, old_key2)
     t0 = datetime.now(timezone.utc)
     try:
         r = await _batch_prefix(client, [aid1, aid2], "add", f"{uniq}_P_")
@@ -207,15 +282,25 @@ async def test_batch_prefix_add_all_renamed_and_audit(client: AsyncClient) -> No
         body = r.json()
         assert body["renamed"] == 2
         assert body["skipped"] == 0
-        # 五个 skipped_reasons 键固定存在且全 0(方案 §1.1:键固定 ASCII)
+        # skipped_reasons 键固定存在且全 0(方案 §1.1 五类 + F3 两类,键固定 ASCII)
         assert set(body["skipped_reasons"]) == SKIPPED_KEYS
         assert all(v == 0 for v in body["skipped_reasons"].values())
 
-        # 落库文件名 = prefix + filename(ASCII 场景 NFC 即原样);MinIO key 不动
+        # 落库文件名 = prefix + filename(ASCII 场景 NFC 即原样);
+        # F3:key = {folder.minio_prefix}/{新 filename}(与 complete_upload 同规则)
         fname1, key1 = await _get_asset_core(aid1)
+        new_key1 = f"{uniq}/{uniq}_P_{uniq}_a1.txt"
         assert fname1 == f"{uniq}_P_{uniq}_a1.txt"
-        assert key1 == f"zz-test/{uniq}_a1.txt"
-        assert (await _filename_of(aid2)) == f"{uniq}_P_{uniq}_a2.txt"
+        assert key1 == new_key1
+        fname2, key2 = await _get_asset_core(aid2)
+        assert fname2 == f"{uniq}_P_{uniq}_a2.txt"
+        assert key2 == f"{uniq}/{uniq}_P_{uniq}_a2.txt"
+
+        # F3 对象语义【集成】:新对象在位且 size 不变;旧对象已删(commit 后清理)
+        head_new = await _head_object(_TEST_BUCKET, new_key1)
+        assert head_new is not None, "copy 后新 key 对象应在位"
+        assert head_new["size_bytes"] == 8  # _seed_object 默认 body 长度
+        assert await _head_object(_TEST_BUCKET, old_key1) is None, "旧 key 对象应已删除"
 
         # 聚合 audit:asset.batch_renamed,含 action / prefix / renamed / skipped / 采样
         rows = [e for e in await _audit_since("asset.batch_renamed", t0)
@@ -225,6 +310,8 @@ async def test_batch_prefix_add_all_renamed_and_audit(client: AsyncClient) -> No
         assert details.get("action") == "add"
         assert details.get("renamed") == 2
         assert details.get("skipped") == 0
+        assert details.get("key_moved") is True  # F3:本批发生了 key 迁移
+        assert details.get("key_moved_count") == 2
         samples = _find_sample_list(details)
         assert samples is not None, f"audit 采样明细缺失: {details}"
         by_id = {str(s.get("id")): s for s in samples}
@@ -232,6 +319,11 @@ async def test_batch_prefix_add_all_renamed_and_audit(client: AsyncClient) -> No
         assert s1.get("old") == f"{uniq}_a1.txt"
         assert s1.get("new") == f"{uniq}_P_{uniq}_a1.txt"
     finally:
+        # 清场:新 key 对象(旧 key 对象已被端点删;万一 skip 残留也兜底删掉)
+        await _drop_object(_TEST_BUCKET, f"{uniq}/{uniq}_P_{uniq}_a1.txt")
+        await _drop_object(_TEST_BUCKET, f"{uniq}/{uniq}_P_{uniq}_a2.txt")
+        await _drop_object(_TEST_BUCKET, old_key1)
+        await _drop_object(_TEST_BUCKET, old_key2)
         await _hard_cleanup(client, [aid1, aid2], [folder["id"]])
 
 
@@ -245,6 +337,8 @@ async def test_batch_prefix_add_already_prefixed_skipped(client: AsyncClient) ->
     prefix = f"{uniq}_P_"
     aid_ap = await _insert_asset(folder["id"], f"{prefix}already.txt")  # 已带前缀
     aid_new = await _insert_asset(folder["id"], f"{uniq}_fresh.txt")
+    # F3:aid_new 会改名 → 播种源对象;aid_ap 已带前缀不动,无需播种
+    await _seed_object(_TEST_BUCKET, f"zz-test/{uniq}_fresh.txt")
     try:
         r = await _batch_prefix(client, [aid_ap, aid_new], "add", prefix)
         assert r.status_code == 200, r.text
@@ -257,6 +351,7 @@ async def test_batch_prefix_add_already_prefixed_skipped(client: AsyncClient) ->
         assert (await _filename_of(aid_ap)) == f"{prefix}already.txt"
         assert (await _filename_of(aid_new)) == f"{prefix}{uniq}_fresh.txt"
     finally:
+        await _drop_object(_TEST_BUCKET, f"{uniq}/{prefix}{uniq}_fresh.txt")
         await _hard_cleanup(client, [aid_ap, aid_new], [folder["id"]])
 
 
@@ -271,6 +366,8 @@ async def test_batch_prefix_remove_partial_matches(client: AsyncClient) -> None:
     aid_hit = await _insert_asset(folder["id"], f"{prefix}hit.txt")
     aid_miss = await _insert_asset(folder["id"], f"{uniq}_miss.txt")
     aid_empty = await _insert_asset(folder["id"], prefix)  # 剥离后变空串
+    # F3:仅 aid_hit 会改名 → 播种源对象
+    await _seed_object(_TEST_BUCKET, f"zz-test/{prefix}hit.txt")
     try:
         r = await _batch_prefix(client, [aid_hit, aid_miss, aid_empty], "remove", prefix)
         assert r.status_code == 200, r.text
@@ -286,6 +383,7 @@ async def test_batch_prefix_remove_partial_matches(client: AsyncClient) -> None:
         assert (await _filename_of(aid_miss)) == f"{uniq}_miss.txt"
         assert (await _filename_of(aid_empty)) == prefix  # 空串结果不落库
     finally:
+        await _drop_object(_TEST_BUCKET, f"{uniq}/hit.txt")
         await _hard_cleanup(client, [aid_hit, aid_miss, aid_empty], [folder["id"]])
 
 
@@ -301,6 +399,8 @@ async def test_batch_prefix_nfd_filename_cross_normalization(client: AsyncClient
     aid_rm = await _insert_asset(folder["id"], f"{NFD_E}{uniq}_etude.txt")
     # 已带「NFD 形式前缀」的存量,add NFC 前缀时应判 already_prefixed
     aid_ap = await _insert_asset(folder["id"], f"{NFD_E}{uniq}_has.txt")
+    # F3:remove 会命中 aid_rm 改名 → 播种源对象(插入 helper 用原串拼 key)
+    await _seed_object(_TEST_BUCKET, f"zz-test/{NFD_E}{uniq}_etude.txt")
     try:
         # remove:NFC 前缀命中 NFD 存量名
         r = await _batch_prefix(client, [aid_rm], "remove", NFC_E)
@@ -319,6 +419,7 @@ async def test_batch_prefix_nfd_filename_cross_normalization(client: AsyncClient
         assert body2["skipped_reasons"]["already_prefixed"] == 1
         assert (await _filename_of(aid_ap)) == f"{NFD_E}{uniq}_has.txt"
     finally:
+        await _drop_object(_TEST_BUCKET, f"{uniq}/{uniq}_etude.txt")
         await _hard_cleanup(client, [aid_rm, aid_ap], [folder["id"]])
 
 
@@ -393,7 +494,16 @@ async def test_batch_prefix_payload_shape_422(client: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_batch_prefix_too_long_skip_and_duplicate_ids_dedup(client: AsyncClient) -> None:
     """add 结果 >512 计 too_long 原样跳过(=512 恰好可改,边界含);同一 id 重复
-    提交只计一次(防重复计入 deleted / renamed)。"""
+    提交只计一次(防重复计入 deleted / renamed)。
+
+    F3 边界修正:MinIO 对象名上限 255 字符(超长 PutObject/CopyObject 直接
+    400 XMinioInvalidObjectName),510/511 字符 filename 的真实对象既播不了种
+    也搬不动 —— 故:
+      - too_long 行(511L)在进入 key 迁移前就被过滤,**不播种任何对象**;
+      - =512 边界行(510E)改为「minio_key 已是改名目标 key」的残留形态:
+        new_key == old_key → 端点短路、只改 filename 不触 MinIO,边界语义
+        (=512 恰好可改、renamed=1)保留,对象操作零参与。
+    """
     uniq = _uniq("zz_bp_long")
     folder = await _create_folder(client, PROJECT_EVENT, uniq)
     long_name = "L" * 511  # 库内可行(≤512),add 2 字符前缀 → 513 > 512
@@ -401,8 +511,17 @@ async def test_batch_prefix_too_long_skip_and_duplicate_ids_dedup(client: AsyncC
     edge_name = "E" * 510  # add 2 字符前缀 → 恰好 512,应成功
     aid_edge = await _insert_asset(folder["id"], edge_name)
     aid_dup = await _insert_asset(folder["id"], f"{uniq}_dup.txt")
+    # F3:aid_dup 会改名 → 播种短名源对象;aid_long(too_long)不触 MinIO;
+    # aid_edge 预置 key = 改名后的目标 key(见上方 F3 边界修正说明)
+    await _seed_object(_TEST_BUCKET, f"zz-test/{uniq}_dup.txt")
+    edge_target_key = f"{uniq}/AB{edge_name}"
+    async with get_sessionmaker()() as db:
+        await db.execute(
+            update(Asset).where(Asset.id == aid_edge).values(minio_key=edge_target_key)
+        )
+        await db.commit()
     try:
-        # too_long:>512 跳过
+        # too_long:>512 跳过(在 key 迁移之前过滤,不触 MinIO)
         r = await _batch_prefix(client, [aid_long], "add", "AB")
         assert r.status_code == 200, r.text
         body = r.json()
@@ -411,11 +530,13 @@ async def test_batch_prefix_too_long_skip_and_duplicate_ids_dedup(client: AsyncC
         assert body["skipped_reasons"]["too_long"] == 1
         assert (await _filename_of(aid_long)) == long_name
 
-        # 边界:结果恰 512 → 正常改名
+        # 边界:结果恰 512 → 正常改名(new_key == old_key → 仅改 filename,
+        # minio_key 原样、无对象操作)
         r_edge = await _batch_prefix(client, [aid_edge], "add", "AB")
         assert r_edge.status_code == 200, r_edge.text
         assert r_edge.json()["renamed"] == 1
         assert (await _filename_of(aid_edge)) == "AB" + edge_name
+        assert (await _get_asset_core(aid_edge))[1] == edge_target_key
 
         # 重复 id 提交只计一次:renamed + skipped == 去重后提交数(1)
         r2 = await _batch_prefix(client, [aid_dup, aid_dup], "add", "P_")
@@ -427,6 +548,11 @@ async def test_batch_prefix_too_long_skip_and_duplicate_ids_dedup(client: AsyncC
         # 前缀只叠一层
         assert (await _filename_of(aid_dup)) == f"P_{uniq}_dup.txt"
     finally:
+        # edge_target_key 超长(530 字符)且本就无对象 —— 不可也不必 drop
+        # (MinIO 对超长名连 delete 都 400);edge 行的 hard purge 对该 key
+        # 的删除失败由 purge 自身的 best-effort 吞掉,只留 warning 日志
+        await _drop_object(_TEST_BUCKET, f"zz-test/{uniq}_dup.txt")
+        await _drop_object(_TEST_BUCKET, f"{uniq}/P_{uniq}_dup.txt")
         await _hard_cleanup(client, [aid_long, aid_edge, aid_dup], [folder["id"]])
 
 
@@ -469,11 +595,17 @@ async def test_batch_prefix_soft_deleted_between_select_and_update(client: Async
        `deleted_at IS NULL` → 0 行 → 对账归入 deleted 桶。
 
     行锁保证次序确定:请求的 UPDATE 必然晚于软删提交,断言无竞态。
+
+    F3 注意:请求在 UPDATE 等锁**之前**已完成 key 占用预检与 copy_object
+    (MinIO 无行锁概念),故必须播种源对象;UPDATE 落空后已 copy 的新 key
+    对象成孤儿 —— 清场时兜底删除(端点侧不删:raced 行的旧对象必须保留)。
     """
     uniq = _uniq("zz_bp_race")
     folder = await _create_folder(client, PROJECT_EVENT, uniq)
     name = f"{uniq}_race.txt"
     aid = await _insert_asset(folder["id"], name)
+    await _seed_object(_TEST_BUCKET, f"zz-test/{name}")
+    orphan_new_key = f"{uniq}/P_{name}"
     try:
         async with get_sessionmaker()() as locker:
             # ① 行锁(事务保持打开)
@@ -498,6 +630,8 @@ async def test_batch_prefix_soft_deleted_between_select_and_update(client: Async
         assert body["skipped_reasons"]["deleted"] == 1
         assert (await _filename_of(aid)) == name
     finally:
+        # 清孤儿 copy(端点对 raced 行不删任何对象);旧 key 对象走 hard purge
+        await _drop_object(_TEST_BUCKET, orphan_new_key)
         # 已软删的行:第一个 DELETE 幂等 204,再 hard purge 清场
         await _hard_cleanup(client, [aid], [folder["id"]])
 
@@ -510,6 +644,8 @@ async def test_batch_prefix_sensitive_folder_permission(client: AsyncClient) -> 
     uniq = _uniq("zz_bp_sens")
     folder = await _create_folder(client, PROJECT_EVENT, uniq, sensitive=True)
     aid = await _insert_asset(folder["id"], f"{uniq}_sens.txt")
+    # F3:受邀后那次改名会 copy → 播种源对象
+    await _seed_object(_TEST_BUCKET, f"zz-test/{uniq}_sens.txt")
     try:
         # 未受邀 → 403(整批不执行)
         r = await _batch_prefix(client, [aid], "add", "S_", uid=OUTSIDER_ID)
@@ -632,6 +768,8 @@ async def test_batch_prefix_reconciliation_add_mixed(client: AsyncClient) -> Non
     aid_ap = await _insert_asset(folder["id"], f"{prefix}ap.txt")
     aid_long = await _insert_asset(folder["id"], "X" * 511)
     ghost = uuid.uuid4()  # 不存在 → deleted 桶
+    # F3:仅 aid_ok 会改名 → 播种源对象
+    await _seed_object(_TEST_BUCKET, f"zz-test/{uniq}_ok.txt")
     try:
         # 提交 5 个原始 id(aid_ok 重复一次 → 去重后 4 个唯一 id)
         r = await _batch_prefix(
@@ -651,4 +789,25 @@ async def test_batch_prefix_reconciliation_add_mixed(client: AsyncClient) -> Non
         assert (await _filename_of(aid_ap)) == f"{prefix}ap.txt"
         assert (await _filename_of(aid_long)) == "X" * 511
     finally:
+        await _drop_object(_TEST_BUCKET, f"{uniq}/{prefix}{uniq}_ok.txt")
         await _hard_cleanup(client, [aid_ok, aid_ap, aid_long], [folder["id"]])
+
+
+# ─── 纯逻辑(无容器栈,本地 pytest -k test_pure 可跑)───────────────────────────
+def test_pure_new_asset_key_rule() -> None:
+    """纯逻辑:key 规则与 complete_upload 同源 —— minio_prefix 尾斜杠归一
+    (rstrip 后补一个),文件名原样拼接。百度导入按同一规则落库,三处必须
+    一致,这里钉死 rstrip 语义。"""
+    assert _new_asset_key("11/", "P_1.txt") == "11/P_1.txt"
+    assert _new_asset_key("11", "1.txt") == "11/1.txt"          # 无尾斜杠补 /
+    assert _new_asset_key("a/b/c//", "x.txt") == "a/b/c/x.txt"  # 多个尾斜杠全归一
+    assert _new_asset_key("p/", "中文名.txt") == "p/中文名.txt"  # 非 ASCII 原样
+    assert _new_asset_key("p/", "") == "p/"                     # 空名不崩(理论不可达)
+
+
+def test_pure_skipped_reasons_schema_keys() -> None:
+    """纯逻辑:响应契约 —— skipped_reasons 键集合固定为七类(§1.1 五类 + F3
+    两类),前端 labels.ts 按此映射。"""
+    from app.routers.assets import BatchPrefixReasonsOut
+
+    assert set(BatchPrefixReasonsOut().model_dump()) == SKIPPED_KEYS

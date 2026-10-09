@@ -25,6 +25,8 @@ const SKIPPED_REASON_LABEL: Record<string, string> = {
   already_prefixed: '已带该前缀',
   empty_result: '去后为空',
   deleted: '已删除/不存在',
+  key_conflict: '新名存储位置被占',
+  key_copy_failed: '存储端复制失败',
 };
 
 interface Props {

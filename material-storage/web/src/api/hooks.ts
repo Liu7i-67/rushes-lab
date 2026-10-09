@@ -1,5 +1,6 @@
 /** react-query hooks — 包 ms-api endpoints。*/
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { http } from './client';
 import type {
   Approval,
@@ -10,6 +11,12 @@ import type {
   AssetBatchPrefixResult,
   AssetList,
   BatchPrefixAction,
+  BaiduBackupTask,
+  BaiduBinding,
+  BaiduNetdiskFolder,
+  BaiduReviveOut,
+  BaiduTaskFilesPage,
+  BaiduTasksPage,
   DirectoryGroup,
   DirectoryGroupMember,
   DirectoryUser,
@@ -715,5 +722,223 @@ export const useMarkNotificationsRead = () => {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['notifications'] });
     },
+  });
+};
+
+// ─── 百度网盘备份(方案 §5.2;路由挂 /api/v1/baidu)──────────────────────────
+// 开关未启用时后端统一 404;前端菜单显隐已由 me.baidu_backup_enabled 门控,
+// 抽屉关闭时 query 不发请求(enabled)。
+export const BAIDU_BACKUP_BASE = '/api/v1/baidu/backup';
+
+/** 方案 §5.2:netdisk folders 前端单独放宽 timeout —— 频控退避 + 后端多页聚合
+ *  可能超过 client.ts 全局 30s,该请求单独放宽到 120s。 */
+export const BAIDU_FOLDERS_TIMEOUT_MS = 120_000;
+
+/** 任务/文件轮询节奏(§7):有进行中(含清单准备中)任务 5s,否则 15s。 */
+const baiduTaskActive = (t: Pick<BaiduBackupTask, 'status'>) =>
+  t.status === 'enumerating' || t.status === 'running';
+const baiduPollMs = (data?: BaiduTasksPage) =>
+  data && data.items.some(baiduTaskActive) ? 5_000 : 15_000;
+
+/** GET /backup/binding — 绑定状态(enabled=false 不发请求,抽屉关闭不轮询)。 */
+export const useBaiduBinding = (enabled = true) =>
+  useQuery({
+    queryKey: ['baidu-binding'],
+    queryFn: async () => (await http.get<BaiduBinding>(`${BAIDU_BACKUP_BASE}/binding`)).data,
+    enabled,
+  });
+
+/** POST /backup/binding/authorize-url — 生成 oob 授权链接。 */
+export const useBaiduAuthorizeUrl = () =>
+  useMutation({
+    mutationFn: async () =>
+      (await http.post<{ url: string }>(`${BAIDU_BACKUP_BASE}/binding/authorize-url`)).data,
+  });
+
+/** POST /backup/binding — 授权码换 token 落库(含重新授权/切换账号,覆盖同一行)。 */
+export const useBaiduBind = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (code: string) =>
+      (await http.post<{ bound: boolean }>(`${BAIDU_BACKUP_BASE}/binding`, { code })).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['baidu-binding'] });
+      qc.invalidateQueries({ queryKey: ['baidu-tasks'] });
+    },
+  });
+};
+
+/** DELETE /backup/binding — 软解绑(名下活动中任务取消 + 断点作废)。 */
+export const useBaiduUnbind = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      await http.delete(`${BAIDU_BACKUP_BASE}/binding`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['baidu-binding'] });
+      qc.invalidateQueries({ queryKey: ['baidu-tasks'] });
+    },
+  });
+};
+
+/** GET /backup/netdisk/folders?path= — 网盘目录树懒加载取数器。
+ *  走 queryClient.fetchQuery:同 path 结果缓存复用(后端另有 60s Redis 缓存),
+ *  antd Tree loadData 直接 await 该函数。 */
+export const useBaiduNetdiskFolders = () => {
+  const qc = useQueryClient();
+  return useCallback(
+    async (path: string): Promise<BaiduNetdiskFolder[]> =>
+      qc.fetchQuery({
+        queryKey: ['baidu-netdisk-folders', path],
+        queryFn: async () =>
+          (await http.get<{ list: BaiduNetdiskFolder[] }>(
+            `${BAIDU_BACKUP_BASE}/netdisk/folders`,
+            { params: { path }, timeout: BAIDU_FOLDERS_TIMEOUT_MS },
+          )).data.list,
+        staleTime: 60_000,
+        gcTime: 5 * 60_000,
+      }),
+    [qc],
+  );
+};
+
+/** POST /backup/tasks — 创建备份任务(status=enumerating)。 */
+export const useBaiduCreateTask = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      source_dir: string;
+      project_id: string;
+      target_folder_id?: string;   // 不传 = 项目根(自动创建承接夹)
+    }) => (await http.post<BaiduBackupTask>(`${BAIDU_BACKUP_BASE}/tasks`, body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['baidu-tasks'] }),
+  });
+};
+
+/** GET /backup/tasks — 仅本人任务分页(带进度/ETA;轮询 5s/15s)。 */
+export const useBaiduTasks = (limit: number, offset: number, enabled = true) =>
+  useQuery({
+    queryKey: ['baidu-tasks', limit, offset],
+    queryFn: async () =>
+      (await http.get<BaiduTasksPage>(`${BAIDU_BACKUP_BASE}/tasks`, {
+        params: { limit, offset },
+      })).data,
+    enabled,
+    placeholderData: keepPreviousData,
+    refetchInterval: (query) => baiduPollMs(query.state.data),
+  });
+
+/** GET /backup/tasks/{id} — 单任务详情(进度/ETA 轮询同列表口径)。 */
+export const useBaiduTask = (taskId: string | undefined) =>
+  useQuery({
+    queryKey: ['baidu-task', taskId],
+    queryFn: async () =>
+      (await http.get<BaiduBackupTask>(`${BAIDU_BACKUP_BASE}/tasks/${taskId}`)).data,
+    enabled: !!taskId,
+    refetchInterval: (query) =>
+      query.state.data && baiduTaskActive(query.state.data) ? 5_000 : 15_000,
+  });
+
+/** GET /backup/tasks/{id}/files — manifest 分页(status 筛选;active 时 5s 轮询)。 */
+export const useBaiduTaskFiles = (
+  taskId: string | undefined,
+  status: string | undefined,
+  limit: number,
+  offset: number,
+  active = false,
+) =>
+  useQuery({
+    queryKey: ['baidu-task-files', taskId, status ?? 'all', limit, offset],
+    queryFn: async () =>
+      (await http.get<BaiduTaskFilesPage>(`${BAIDU_BACKUP_BASE}/tasks/${taskId}/files`, {
+        params: { ...(status ? { status } : {}), limit, offset },
+      })).data,
+    enabled: !!taskId,
+    placeholderData: keepPreviousData,
+    refetchInterval: active ? 5_000 : false,
+  });
+
+/** 任务动作成功后的缓存失效(列表 + 全部详情 + 全部 manifest 筛选页)。 */
+const useInvalidateBaiduTasks = () => {
+  const qc = useQueryClient();
+  return useCallback(() => {
+    qc.invalidateQueries({ queryKey: ['baidu-tasks'] });
+    qc.invalidateQueries({ queryKey: ['baidu-task'] });
+    qc.invalidateQueries({ queryKey: ['baidu-task-files'] });
+  }, [qc]);
+};
+
+/** POST /backup/tasks/{id}/cancel — 202 {finalized}(true=已终态化,false=交 worker 消费)。 */
+export const useBaiduCancelTask = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (taskId: string) =>
+      (await http.post<{ finalized: boolean }>(
+        `${BAIDU_BACKUP_BASE}/tasks/${taskId}/cancel`,
+      )).data,
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** DELETE /backup/tasks/{id} — 仅终态任务可删(204)。 */
+export const useBaiduDeleteTask = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (taskId: string) => {
+      await http.delete(`${BAIDU_BACKUP_BASE}/tasks/${taskId}`);
+    },
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** POST /backup/tasks/{id}/retry-failed — 全部重试失败(仅 failed 任务;复活型)。 */
+export const useBaiduRetryTaskFailed = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (taskId: string) => {
+      await http.post(`${BAIDU_BACKUP_BASE}/tasks/${taskId}/retry-failed`);
+    },
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** POST /backup/tasks/{id}/files/{fid}/retry — 单文件重试(仅 failed 任务失败行)。 */
+export const useBaiduRetryFile = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (args: { taskId: string; fileId: string }) => {
+      await http.post(
+        `${BAIDU_BACKUP_BASE}/tasks/${args.taskId}/files/${args.fileId}/retry`,
+      );
+    },
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** POST /backup/tasks/{id}/files/{fid}/overwrite — 覆盖导入(failed/completed 任务跳过行
+ *  与 key_conflict 失败行;清除-再导入,需对原 asset 有 can_admin)。 */
+export const useBaiduOverwriteFile = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (args: { taskId: string; fileId: string }) => {
+      await http.post(
+        `${BAIDU_BACKUP_BASE}/tasks/${args.taskId}/files/${args.fileId}/overwrite`,
+      );
+    },
+    onSuccess: () => invalidate(),
+  });
+};
+
+/** POST /backup/tasks/{id}/files/{fid}/random-suffix — key_conflict 失败行改用随机后缀
+ *  key 重新导入(网盘原文件名不变;行已有预定 key 时幂等复用,不漂移)。 */
+export const useBaiduFileRandomSuffix = () => {
+  const invalidate = useInvalidateBaiduTasks();
+  return useMutation({
+    mutationFn: async (args: { taskId: string; fileId: string }) =>
+      (await http.post<BaiduReviveOut>(
+        `${BAIDU_BACKUP_BASE}/tasks/${args.taskId}/files/${args.fileId}/random-suffix`,
+      )).data,
+    onSuccess: () => invalidate(),
   });
 };

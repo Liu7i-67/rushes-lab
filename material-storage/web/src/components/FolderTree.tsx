@@ -16,6 +16,11 @@ interface Props {
   onCreateRoot?: () => void;
   /** 项目级上传权限(uploader/admin)— 后端建目录强制 can_upload,前端据此隐藏入口 */
   canUpload?: boolean;
+  /** 选择模式(备份目标选择等):仅选择语义,不隐藏标题区;onSelect 行为不变 */
+  selectMode?: boolean;
+  /** 禁选节点 id 集合 — 命中节点**及其整棵子树**一律禁选
+   *  (antd Tree 节点 disabled;备份目标选择时传 sensitive 集合,§7)。 */
+  disabledIds?: string[];
 }
 
 interface TreeNode {
@@ -23,10 +28,11 @@ interface TreeNode {
   title: React.ReactNode;
   icon: React.ReactNode;
   isLeaf?: boolean;
+  disabled?: boolean;
   children?: TreeNode[];
 }
 
-function buildTree(folders: Folder[]): TreeNode[] {
+function buildTree(folders: Folder[], disabledSet: Set<string>): TreeNode[] {
   const byParent = new Map<string | null, Folder[]>();
   for (const f of folders) {
     const k = f.parent_folder_id ?? null;
@@ -42,11 +48,14 @@ function buildTree(folders: Folder[]): TreeNode[] {
     });
   }
 
-  const build = (parent: string | null): TreeNode[] =>
+  const build = (parent: string | null, ancestorDisabled: boolean): TreeNode[] =>
     (byParent.get(parent) ?? []).map(f => {
-      const sub = build(f.id);
+      // 整棵子树级联禁选:命中集合的节点其后代全部 disabled
+      const disabled = ancestorDisabled || disabledSet.has(f.id);
+      const sub = build(f.id, disabled);
       return {
         key: f.id,
+        disabled: disabled || undefined,
         title: (
           <span style={{
             display: 'inline-flex',
@@ -60,7 +69,7 @@ function buildTree(folders: Folder[]): TreeNode[] {
             {f.is_sensitive && (
               <span
                 aria-label="敏感目录"
-                title="敏感目录 — 仅邀请可见"
+                title={disabled ? '敏感目录及其子目录不可选' : '敏感目录 — 仅邀请可见'}
                 style={{
                   position: 'absolute',
                   left: -2, top: 4, bottom: 4,
@@ -93,13 +102,15 @@ function buildTree(folders: Folder[]): TreeNode[] {
         children: sub.length > 0 ? sub : undefined,
       };
     });
-  return build(null);
+  return build(null, false);
 }
 
 export function FolderTree({
   folders, projectName, activeFolderId, onSelect, onCreateChild, onCreateRoot, canUpload,
+  selectMode, disabledIds,
 }: Props) {
-  const tree = useMemo(() => buildTree(folders), [folders]);
+  const disabledSet = useMemo(() => new Set(disabledIds ?? []), [disabledIds]);
+  const tree = useMemo(() => buildTree(folders, disabledSet), [folders, disabledSet]);
 
   const defaultExpanded = useMemo(() => {
     if (!activeFolderId) return [];
@@ -126,7 +137,7 @@ export function FolderTree({
           color: 'var(--ms-ink-subtle)', fontFamily: 'var(--ms-font-mono)',
           fontWeight: 500,
         }}>
-          Folders
+          {selectMode ? '选择目标目录' : 'Folders'}
         </div>
         {projectName && (
           <div style={{
