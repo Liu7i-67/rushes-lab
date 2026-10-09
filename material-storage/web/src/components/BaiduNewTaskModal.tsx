@@ -1,13 +1,14 @@
 /**
  * BaiduNewTaskModal — 新建百度网盘备份任务(方案 §3.3,双栏)。
- * 左栏:百度网盘目录树(懒加载 GET /backup/netdisk/folders?path=,根部为网盘根);
+ * 左栏:百度网盘目录树(懒加载 GET /backup/netdisk/folders?path=,根部为网盘根;
+ * 条目为目录+文件——目录可选可展开,文件仅展示不可选,保持「选目录创建任务」语义);
  * 右栏:项目选择(is_system_admin || 我可上传)+ 目标目录(FolderTree 复用,
  * sensitive 及其整棵子树禁选;选项目根 = 自动创建承接夹)。
  * 底部文案按 §3.3:限速 / 单轮上限 / 单文件上限 / 覆盖导入警示。
  */
 import { App, Alert, Button, Empty, Modal, Select, Space, Spin, Tree, Typography } from 'antd';
 import type { TreeDataNode } from 'antd';
-import { Folder as FolderIcon, RefreshCw } from 'lucide-react';
+import { File as FileIcon, FileText, Folder as FolderIcon, Image as ImageIcon, Play, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { useBaiduCreateTask, useBaiduNetdiskFolders, useFolders, useProjects } from '../api/hooks';
@@ -51,8 +52,8 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
     if (!open) return;
     let cancelled = false;
     fetchNetdiskFolders('/')
-      .then(list => {
-        if (!cancelled) setTreeData(list.map(toNetdiskNode));
+      .then(({ list, truncated }) => {
+        if (!cancelled) setTreeData(toNetdiskNodes('/', list, truncated));
       })
       .catch(e => {
         if (!cancelled) message.error(errorMessage(e, '读取百度网盘目录失败'));
@@ -153,11 +154,11 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
                 blockNode
                 loadData={async (node) => {
                   try {
-                    const kids = await fetchNetdiskFolders(String(node.key));
-                    return kids.map(toNetdiskNode);
+                    const { list, truncated } = await fetchNetdiskFolders(String(node.key));
+                    return toNetdiskNodes(String(node.key), list, truncated);
                   } catch (e) {
                     message.error(errorMessage(e, '读取网盘子目录失败'));
-                    return [];   // 展开失败收口为空目录,可手动刷新重试
+                    throw e;   // 不吞错返回 [](会把错误伪装成空目录):antd Tree 保持节点未展开,可重试点开
                   }
                 }}
                 selectedKeys={sourceDir ? [sourceDir] : []}
@@ -260,13 +261,78 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
   );
 }
 
+// ── 网盘树节点构造 ──────────────────────────────────────────────────────
+// 条目 → 树节点(F2):目录=现状(可选可展开);文件=类型图标+名称+大小,
+// isLeaf+selectable:false+灰显(「已选来源」恒为目录,创建任务逻辑零改动)。
+// truncated=true 时在子节点尾部插一条不可选提示行(大目录聚合分页未取尽)。
+const TRUNCATED_HINT_KEY = (parent: string) => `${parent}::truncated-hint`;
+
+function toNetdiskNodes(parent: string, list: BaiduNetdiskFolder[], truncated: boolean): TreeDataNode[] {
+  const nodes = list.map(toNetdiskNode);
+  if (truncated) {
+    nodes.push({
+      key: TRUNCATED_HINT_KEY(parent),
+      title: '目录过大,仅显示部分内容',
+      icon: <FolderIcon size={14} strokeWidth={1.7} style={{ visibility: 'hidden' }} />,   // 占位对齐,不显示
+      isLeaf: true,
+      selectable: false,
+      style: { color: 'var(--ms-amber)', fontStyle: 'italic' },
+    });
+  }
+  return nodes;
+}
+
 function toNetdiskNode(f: BaiduNetdiskFolder): TreeDataNode {
+  if (f.is_dir) {
+    return {
+      key: f.path,
+      title: f.name,
+      icon: <FolderIcon size={14} strokeWidth={1.7} style={{ color: 'var(--ms-ink-muted)' }} />,
+      isLeaf: false,   // 目录可能有子目录,展开时懒加载;加载为空则自动收口
+    };
+  }
+  // 文件行:仅展示不可选(D2),灰显低对比度
   return {
     key: f.path,
-    title: f.name,
-    icon: <FolderIcon size={14} strokeWidth={1.7} style={{ color: 'var(--ms-ink-muted)' }} />,
-    isLeaf: false,   // 目录可能有子目录,展开时懒加载;加载为空则自动收口
+    title: (
+      <span>
+        {f.name}
+        {f.size_bytes != null && (
+          <span style={{ marginLeft: 8, fontSize: 11, color: 'var(--ms-ink-subtle)' }}>
+            {fmtBytes(f.size_bytes)}
+          </span>
+        )}
+      </span>
+    ),
+    icon: <FileTypeIcon name={f.name} />,
+    isLeaf: true,
+    selectable: false,
+    style: { color: 'var(--ms-ink-muted)' },
   };
+}
+
+// 文件类型图标(按扩展名,沿用仓内 AssetPreviewModal 的 ImageIcon/Play/FileText 惯例)
+const IMAGE_EXT = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.heic', '.heif', '.tif', '.tiff', '.svg']);
+const VIDEO_EXT = new Set(['.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv', '.flv', '.3gp']);
+const DOC_EXT = new Set(['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.md', '.csv']);
+
+function FileTypeIcon({ name }: { name: string }) {
+  const dot = name.lastIndexOf('.');
+  const ext = dot >= 0 ? name.slice(dot).toLowerCase() : '';
+  const style: React.CSSProperties = { color: 'var(--ms-ink-muted)' };
+  if (IMAGE_EXT.has(ext)) return <ImageIcon size={14} strokeWidth={1.7} style={style} />;
+  if (VIDEO_EXT.has(ext)) return <Play size={14} strokeWidth={1.7} style={style} />;
+  if (DOC_EXT.has(ext)) return <FileText size={14} strokeWidth={1.7} style={style} />;
+  return <FileIcon size={14} strokeWidth={1.7} style={style} />;
+}
+
+// bytes 人类可读(与 BaiduBackupDrawer / TaskCenterDrawer 的 fmtBytes 同口径)
+function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(2)} GB`;
+  return `${(n / 1024 ** 4).toFixed(2)} TB`;
 }
 
 /** 网盘目录末段(承接夹命名口径,§5.2:先 rstrip('/') 再取末段)。 */

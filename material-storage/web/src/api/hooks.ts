@@ -13,7 +13,7 @@ import type {
   BatchPrefixAction,
   BaiduBackupTask,
   BaiduBinding,
-  BaiduNetdiskFolder,
+  BaiduNetdiskFoldersOut,
   BaiduReviveOut,
   BaiduTaskFilesPage,
   BaiduTasksPage,
@@ -784,18 +784,18 @@ export const useBaiduUnbind = () => {
 
 /** GET /backup/netdisk/folders?path= — 网盘目录树懒加载取数器。
  *  走 queryClient.fetchQuery:同 path 结果缓存复用(后端另有 60s Redis 缓存),
- *  antd Tree loadData 直接 await 该函数。 */
+ *  antd Tree loadData 直接 await 该函数。返回全条目(目录+文件)+ truncated 标记。 */
 export const useBaiduNetdiskFolders = () => {
   const qc = useQueryClient();
   return useCallback(
-    async (path: string): Promise<BaiduNetdiskFolder[]> =>
+    async (path: string): Promise<BaiduNetdiskFoldersOut> =>
       qc.fetchQuery({
         queryKey: ['baidu-netdisk-folders', path],
         queryFn: async () =>
-          (await http.get<{ list: BaiduNetdiskFolder[] }>(
+          (await http.get<BaiduNetdiskFoldersOut>(
             `${BAIDU_BACKUP_BASE}/netdisk/folders`,
             { params: { path }, timeout: BAIDU_FOLDERS_TIMEOUT_MS },
-          )).data.list,
+          )).data,
         staleTime: 60_000,
         gcTime: 5 * 60_000,
       }),
