@@ -15,6 +15,9 @@ export interface Me {
   // 项目逻辑删除(§10):可删除项目(口径 = is_org_admin ∨ 用户组 project_deleter,含系统 admin)。
   // 可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
   is_project_deleter?: boolean;
+  // 目录模板(方案 §3.3):可管理目录模板(口径 = is_org_admin ∨ 用户组 folder_template_manager,
+  // 含系统 admin)。可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
+  is_folder_template_manager?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -75,6 +78,8 @@ export interface DirectoryGroup {
   can_create_project?: boolean;
   // §5: 组级「删除项目」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
   can_delete_project?: boolean;
+  // 目录模板(方案 §4.3):组级「管理目录模板」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
+  can_manage_folder_templates?: boolean;
 }
 
 export interface DirectoryGroupMember {
@@ -142,6 +147,21 @@ export interface GrantTemplate {
   description: string | null;
   is_default: boolean;
   items: GrantTemplateItem[];
+}
+
+// ─── 目录模板(方案 §4.1;/api/v1/admin/folder-templates)─────────────────────
+/** 目录模板条目:项目根下的相对路径(如 `素材/视频/原始`;无前后 `/`)。*/
+export interface FolderTemplateEntry {
+  path: string;
+}
+
+/** 目录模板(列表项与 POST/PATCH 返回同形;entries 全量返回供树预览)。*/
+export interface FolderTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  entry_count: number;
+  entries: FolderTemplateEntry[];
 }
 
 // ─── GET /api/v1/users(PR-2 起弱门放宽至 project creator)────────────────────

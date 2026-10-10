@@ -45,6 +45,7 @@ const EVENT_TYPES = [
   'user_created', 'user_updated',
   'group_member_added', 'group_member_removed',
   'folder_created', 'sensitive_folder_invited', 'sensitive_folder_revoked',
+  'folder_template_changed', 'folder_template_applied',
   'invite_notified', 'share_link_created', 'share_link_accessed',
 ];
 

@@ -6,6 +6,8 @@
  * 改动过 Switch 时才携带该字段,省略 = 不动)+ 列表「可建项目」徽标。
  * 管理后台优化:组级「删除项目」开关(can_delete_project,同款 tri-state)+
  * 列表「可删项目」徽标;成员弹窗限高滚动 + 组内搜索过滤(F2)。
+ * 目录模板(方案 §4.3/F8):第 3 个组级开关「管理目录模板」(can_manage_folder_templates,
+ * tri-state 同款;建组态与编辑态均展示,照 can_create_project 形态)+ 列表「可管模板」徽标。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
@@ -162,6 +164,17 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
               }}>可删项目</span>
             </Tooltip>
           )}
+          {/* can_manage_folder_templates 徽标(目录模板方案 §4.3;与「可建项目」同款样式) */}
+          {group.can_manage_folder_templates && (
+            <Tooltip title="组内成员可维护目录模板(新建 / 编辑 / 删除),并在新建项目时选用">
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
+                borderRadius: 3,
+              }}>可管模板</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -213,6 +226,8 @@ function GroupFormModal({ open, onClose, group }: {
   const [flagTouched, setFlagTouched] = useState(false);
   // can_delete_project 同款 tri-state(仅在编辑态展示)
   const [deleteFlagTouched, setDeleteFlagTouched] = useState(false);
+  // can_manage_folder_templates 同款 tri-state(建组态与编辑态均展示,方案 §4.3)
+  const [folderFlagTouched, setFolderFlagTouched] = useState(false);
 
   const submit = async () => {
     try {
@@ -224,6 +239,8 @@ function GroupFormModal({ open, onClose, group }: {
           description: v.description?.trim() || null,
           ...(flagTouched ? { can_create_project: v.can_create_project === true } : {}),
           ...(deleteFlagTouched ? { can_delete_project: v.can_delete_project === true } : {}),
+          ...(folderFlagTouched
+            ? { can_manage_folder_templates: v.can_manage_folder_templates === true } : {}),
         });
         message.success('已保存');
       } else {
@@ -231,6 +248,7 @@ function GroupFormModal({ open, onClose, group }: {
           name: v.name.trim(),
           description: v.description?.trim(),
           can_create_project: v.can_create_project === true,
+          can_manage_folder_templates: v.can_manage_folder_templates === true,
         });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
@@ -245,7 +263,7 @@ function GroupFormModal({ open, onClose, group }: {
     <Modal title={isEdit ? `编辑用户组 — ${group.name}` : '新建用户组'}
            open={open} onCancel={onClose} destroyOnClose
            afterOpenChange={(o) => {
-             if (!o) { setFlagTouched(false); setDeleteFlagTouched(false); }
+             if (!o) { setFlagTouched(false); setDeleteFlagTouched(false); setFolderFlagTouched(false); }
            }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
            onOk={submit} okText={isEdit ? '保存' : '创建'}>
@@ -254,7 +272,8 @@ function GroupFormModal({ open, onClose, group }: {
               name: group.name, description: group.description || undefined,
               can_create_project: group.can_create_project ?? false,
               can_delete_project: group.can_delete_project ?? false,
-            } : { can_create_project: false }}>
+              can_manage_folder_templates: group.can_manage_folder_templates ?? false,
+            } : { can_create_project: false, can_manage_folder_templates: false }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
         </Form.Item>
@@ -265,6 +284,14 @@ function GroupFormModal({ open, onClose, group }: {
                    extra="开启后组内成员可自行新建项目,并自动成为所建项目的管理员;系统管理员不受此开关影响">
           <Switch checkedChildren="开" unCheckedChildren="关"
                   onChange={() => setFlagTouched(true)} />
+        </Form.Item>
+        {/* 目录模板第 3 开关(建组态与编辑态均展示,照 can_create_project 形态;勿改回
+            can_delete_project 的仅编辑态 {isEdit && …} 形态,方案 §6-F8) */}
+        <Form.Item name="can_manage_folder_templates" label="允许组成员管理目录模板"
+                   valuePropName="checked"
+                   extra="开启后组内成员可维护目录模板(新建 / 编辑 / 删除),并在新建项目时选用;系统管理员不受此开关影响">
+          <Switch checkedChildren="开" unCheckedChildren="关"
+                  onChange={() => setFolderFlagTouched(true)} />
         </Form.Item>
         {isEdit && (
           <Form.Item name="can_delete_project" label="允许组成员删除项目" valuePropName="checked"

@@ -135,6 +135,7 @@ async def me(
     org = await get_default_organization(db)
     is_project_creator = False
     is_project_deleter = False
+    is_folder_template_manager = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -166,6 +167,18 @@ async def me(
             except Exception:  # noqa: BLE001
                 pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
 
+        # 组级「管理目录模板」权限(目录模板方案 §3.3):与写守门
+        # require_folder_template_manager 同口径(is_org_admin 或
+        # organization#folder_template_manager,组开关经 group#member 展开)
+        is_folder_template_manager = bool(is_system_admin)
+        if not is_system_admin:
+            try:  # noqa: SIM105  与上方两个 flag 块同款 try/except 形状(不换 contextlib.suppress)
+                is_folder_template_manager = await perms.is_org_folder_template_manager(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )
+            except Exception:
+                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
+
     return {
         "id": str(user.id),
         # #154:open_id/union_id 保留只读(历史对照),不再参与登录与权限
@@ -180,6 +193,8 @@ async def me(
         "is_project_creator": is_project_creator,
         # 组级「删除项目」权限(F6.7):与守门同口径;前端闸门用
         "is_project_deleter": is_project_deleter,
+        # 组级「管理目录模板」权限(目录模板方案 §3.3):与守门同口径;前端闸门用
+        "is_folder_template_manager": is_folder_template_manager,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

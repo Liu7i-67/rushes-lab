@@ -27,6 +27,8 @@ import type {
   DeletedProjectsPage,
   DownloadLink,
   Folder,
+  FolderTemplate,
+  FolderTemplateEntry,
   GrantEntry,
   GrantTemplate,
   Me,
@@ -186,12 +188,14 @@ export const useCreateProject = () => {
       minio_bucket: string;
       admin_user_id: string;   // 必填:指派项目 admin(可以是自己;users.id UUID)
       initial_grants?: GrantEntry[];   // 可选:创建时同时授权(方案 §3;不传/空 = 现行为)
+      folder_template_id?: string;     // 目录模板(方案 §4.2):可选;不选不传 = 与现状一致
     }) => {
-      const { organization_id, initial_grants, ...rest } = body;
+      const { organization_id, initial_grants, folder_template_id, ...rest } = body;
       const payload = {
         ...rest,
         ...(organization_id ? { organization_id } : {}),
         ...(initial_grants && initial_grants.length > 0 ? { initial_grants } : {}),
+        ...(folder_template_id ? { folder_template_id } : {}),
       };
       return (await http.post<Project>('/api/v1/projects', payload)).data;
     },
@@ -653,6 +657,8 @@ export const useCreateGroup = () => {
       name: string;
       description?: string;
       can_create_project?: boolean;
+      // 目录模板(方案 §4.3):组级「管理目录模板」开关(同款 Create bool)
+      can_manage_folder_templates?: boolean;
     }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
@@ -671,6 +677,8 @@ export const useUpdateGroup = () => {
       can_create_project?: boolean;
       // §5: can_delete_project 同款 tri-state(组级「删除项目」开关)
       can_delete_project?: boolean;
+      // 目录模板(方案 §4.3):can_manage_folder_templates 同款 tri-state
+      can_manage_folder_templates?: boolean;
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;
@@ -791,6 +799,59 @@ export const useApplyDefaultTemplate = () =>
         '/api/v1/admin/grant-templates/apply-default', body,
       )).data,
   });
+
+// ─── 目录模板(方案 §4.1;/api/v1/admin/folder-templates)─────────────────────
+// 列表(带全量 entries 供树预览)。读门为组合弱门(org admin ∨ project_creator ∨
+// folder_template_manager flag),非授权 403 由全局 queryCache 静默跳过;调用方
+// (新建项目弹窗的目录模板 Select)对 undefined 数据自行降级为只有「不使用模板」。
+// enabled:NewProjectModal 对全员挂载,关闭态不取数,免无谓 403(照 useGrantTemplates)。
+export const useFolderTemplates = (enabled = true) =>
+  useQuery({
+    queryKey: ['folder-templates'],
+    queryFn: async () => (await http.get<FolderTemplate[]>('/api/v1/admin/folder-templates')).data,
+    enabled,
+  });
+
+export const useCreateFolderTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      name: string;
+      description?: string;
+      entries: FolderTemplateEntry[];   // 1..200 条;路径合法性服务端复检
+    }) => (await http.post<FolderTemplate>('/api/v1/admin/folder-templates', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['folder-templates'] }),
+  });
+};
+
+// PATCH:均可选;description 显式 null = 清空;entries 传即全量替换(至少 1 条)
+export const useUpdateFolderTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: {
+      templateId: string;
+      name?: string;
+      description?: string | null;
+      entries?: FolderTemplateEntry[];
+    }) => {
+      const { templateId, ...body } = args;
+      return (await http.patch<FolderTemplate>(
+        `/api/v1/admin/folder-templates/${templateId}`, body,
+      )).data;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['folder-templates'] }),
+  });
+};
+
+export const useDeleteFolderTemplate = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (templateId: string) => {
+      await http.delete(`/api/v1/admin/folder-templates/${templateId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['folder-templates'] }),
+  });
+};
 
 // ─── notifications(#153)— 轮询即可,不做 WebSocket ─────────────────────────
 /** 未读计数 — Bell badge 轮询用(30s;页面聚焦时由 refetchOnWindowFocus 兜底)。 */

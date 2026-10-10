@@ -47,6 +47,10 @@ USER_DIRECT_RELATIONS: tuple[tuple[str, str], ...] = (
     # 组主体,user 直授留口未启用;该 (type, relation) 未部署时
     # revoke_user_completely 的 list_objects 会异常并被 continue 容错,不炸
     ("organization", "project_creator"),
+    # ("organization", "folder_template_manager"):同款防御性补项(目录模板方案
+    # §3.3,照 project_creator 先例)—— UI 只写组主体,user 直授留口未启用;
+    # 未部署时同样被 continue 容错,不炸
+    ("organization", "folder_template_manager"),
     ("department", "member"),
     ("group", "member"),
     ("project", "admin"),
@@ -582,6 +586,22 @@ class PermissionsService:
         return await self.check(
             user_subject=f"user:{user_id}",
             relation="project_deleter",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_folder_template_manager(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#folder_template_manager check(组开关经 group#member 展开)。
+
+        仿 is_org_project_creator(2026-10-10 目录模板):应用层写守门 / /me 的
+        完整口径 = is_org_admin 或本方法(系统 admin 恒可管,方案 §3.3);
+        读门 require_folder_templates_reader 另含 is_org_project_creator 支。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="folder_template_manager",
             object_type="organization",
             object_id=organization_tenant_key,
         )

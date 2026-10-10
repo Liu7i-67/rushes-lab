@@ -29,6 +29,8 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   folder_deleted: '文件夹删除',
   folder_grant_added: '文件夹权限授予',
   folder_grant_removed: '文件夹权限撤销',
+  folder_template_applied: '目录模板应用',  // 目录模板:项目创建时按模板建目录
+  folder_template_changed: '目录模板变更',  // 目录模板增删改
   grant_revoked: '授权撤回',
   grant_template_changed: '权限模板变更',  // 批次三:项目权限模板增删改
   invite_notified: '邀请通知已发送',

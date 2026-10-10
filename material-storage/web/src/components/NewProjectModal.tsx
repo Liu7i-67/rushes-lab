@@ -5,17 +5,20 @@
  * 「权限(可选)」组(PR-3 重排):PC 双栏(左基础字段 / 右权限组),移动端单栏权限在尾;
  * 组内顶部模板 Select 仅显式选中时预填初始权限(可再增删改)—— 默认模板不再前端预选,
  * 改由后端创建时直通合并(有默认模板时提交区明示)。
+ * 「目录模板(可选)」(folder-templates 方案 §6-F6,初始权限区之后):选中模板提交
+ * folder_template_id,目录树由后端创建流程自动建立;不选不传字段,行为与现状一致。
  */
-import { Alert, App, Button, Form, Input, Modal, Select, Tooltip } from 'antd';
-import { ShieldCheck, Trash2, Users as UsersIcon } from 'lucide-react';
+import { Alert, App, Button, Form, Input, Modal, Select, Tooltip, Tree } from 'antd';
+import { Folder, ShieldCheck, Trash2, Users as UsersIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useAllUsers, useCreateProject, useGrantTemplates } from '../api/hooks';
+import { useAllUsers, useCreateProject, useFolderTemplates, useGrantTemplates } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { useCompactViewport } from '../lib/use-viewports';
-import type { GrantEntry, GrantTemplate, Me, ProjectRole } from '../api/types';
+import type { FolderTemplate, GrantEntry, GrantTemplate, Me, ProjectRole } from '../api/types';
 import { UserPicker } from './UserPicker';
 import { SubjectPicker, type Subject } from './SubjectPicker';
 import { RoleChipGroup } from './RoleChipGroup';
+import { pathsToTreeData, collectTreeKeys } from '../utils/folder-tree';
 
 interface Props {
   open: boolean;
@@ -57,12 +60,15 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
   // '' = 不使用模板(默认);其余 = 显式选中的模板 id。
   // PR-3 起「自动跟随默认模板」已删:默认模板由后端创建时直通合并,前端不再预选/预填
   const [templateId, setTemplateId] = useState<string>('');
+  // 目录模板(folder-templates §6-F6):'' = 不使用模板(默认);其余 = 模板 id
+  const [folderTemplateId, setFolderTemplateId] = useState<string>('');
 
   // 模板列表;手选用户名典(SubjectPicker 的 user 分支只回传 id,行显名用)。
   // nameById 走已放宽的 GET /api/v1/users(offset 分页拉全;原 directory 端点
   // require_system_admin 未放宽,零项目组长会 403)。
   // 弹窗对全员挂载,关闭态不取数(403/失败 → 静默降级为只有「不使用模板」)
   const { data: templates } = useGrantTemplates(open);
+  const { data: folderTemplates } = useFolderTemplates(open);
   const { data: allUsers } = useAllUsers(open);
   const nameById = useMemo(
     () => new Map((allUsers ?? []).map(u => [u.id, u.name])),
@@ -71,6 +77,8 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
 
   const templateList = templates ?? [];
   const defaultTemplate = templateList.find(t => t.is_default);
+  const folderTemplateList = folderTemplates ?? [];
+  const selectedFolderTemplate = folderTemplateList.find(t => t.id === folderTemplateId);
 
   // 打开即重置表单到默认态:有意的「open 翻转重置」,改 render 期重置/key 重挂载会改动态,豁免 cascading 警告
   /* eslint-disable react-hooks/set-state-in-effect */
@@ -80,6 +88,7 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       setAdminUserId(me.id);  // 默认 admin = 自己(users.id UUID)
       setRows([]);
       setTemplateId('');
+      setFolderTemplateId('');
     }
   }, [open, form, me.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -132,6 +141,8 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         minio_bucket: v.minio_bucket || 'ms-dev',
         admin_user_id: adminUserId,
         ...(initial_grants.length > 0 ? { initial_grants } : {}),
+        // 目录模板:不选不传字段,与不选模板的现状行为完全一致(方案 §4.2)
+        ...(folderTemplateId ? { folder_template_id: folderTemplateId } : {}),
       });
       message.success(initial_grants.length > 0
         ? `项目 "${p.name}" 已创建,已为 ${initial_grants.length} 个主体授予初始权限`
@@ -193,6 +204,33 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         </div>
       ),
     }))),
+  ];
+
+  // 目录模板下拉项(「不使用模板(默认)」置顶;option 副标带条目数)
+  const folderTemplateOptions = [
+    { value: '', labelText: '不使用模板(默认)', label: '不使用模板(默认)' },
+    ...folderTemplateList.map(t => ({
+      value: t.id,
+      labelText: t.name,
+      label: (
+        <div style={{ display: 'flex', flexDirection: 'column', padding: '2px 0' }}>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ fontSize: 13, color: 'var(--ms-ink)' }}>{t.name}</span>
+            <span style={{
+              fontFamily: 'var(--ms-font-mono)', fontSize: 9.5, color: 'var(--ms-ink-subtle)',
+              padding: '0 5px', background: 'var(--ms-hairline-soft)', borderRadius: 2,
+              lineHeight: '14px',
+            }}>{t.entry_count} 个目录</span>
+          </span>
+          {t.description && (
+            <span style={{
+              fontSize: 11, color: 'var(--ms-ink-subtle)', lineHeight: 1.5,
+              display: 'flex', flexDirection: 'column',
+            }}>{t.description}</span>
+          )}
+        </div>
+      ),
+    })),
   ];
 
   return (
@@ -296,6 +334,28 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
                 </div>
               )}
             </Form.Item>
+
+            {/* 目录模板(可选,folder-templates §6-F6):选中提交 folder_template_id,
+                目录树由后端创建流程自动建立;不选不传字段,行为与现状一致 */}
+            <Form.Item label="目录模板(可选)"
+                       extra="选中模板后,项目创建时将按模板自动建立素材目录树;不选则行为不变">
+              <Select
+                value={folderTemplateId}
+                onChange={setFolderTemplateId}
+                optionLabelProp="labelText"
+                options={folderTemplateOptions}
+              />
+              {selectedFolderTemplate && <FolderTemplatePreview template={selectedFolderTemplate} />}
+              {folderTemplateId && (
+                <div style={{
+                  marginTop: 6, fontSize: 11, color: 'var(--ms-ink-subtle)',
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}>
+                  <Folder size={11} strokeWidth={1.8} />
+                  目录将在项目创建后自动建立
+                </div>
+              )}
+            </Form.Item>
           </div>
         </div>
 
@@ -311,6 +371,31 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         )}
       </Form>
     </Modal>
+  );
+}
+
+/** 目录模板只读树预览(选中模板时展示;与 AdminFolderTemplatesPage 共用 paths→treeData 纯函数)。*/
+function FolderTemplatePreview({ template }: { template: FolderTemplate }) {
+  const paths = useMemo(() => template.entries.map(e => e.path), [template]);
+  const treeData = useMemo(() => pathsToTreeData(paths), [paths]);
+  const treeKeys = useMemo(() => collectTreeKeys(treeData), [treeData]);
+  return (
+    <div style={{
+      marginTop: 12, padding: '10px 12px', background: 'var(--ms-surface)',
+      border: '1px solid var(--ms-hairline)', borderRadius: 'var(--ms-radius-md)',
+      maxHeight: 260, overflowY: 'auto',
+    }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', gap: 8,
+        fontSize: 11, color: 'var(--ms-ink-subtle)', marginBottom: 4,
+      }}>
+        <span>目录树预览</span>
+        <span>{paths.length} 条路径 · 去重后 {treeKeys.length} 个目录</span>
+      </div>
+      {/* key 取全部节点 key 签名:结构变化即重挂载,保证 defaultExpandAll 恒全展开 */}
+      <Tree blockNode showLine selectable={false} defaultExpandAll
+            key={treeKeys.join('\n')} treeData={treeData} />
+    </div>
   );
 }
 

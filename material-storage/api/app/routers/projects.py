@@ -19,6 +19,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -27,7 +28,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Group, Project, User
+from app.db.tables import Group, Project, ProjectFolderTemplate, ProjectFolderTemplateEntry, User
 from app.deps import (
     CurrentUser,
     get_audit,
@@ -41,6 +42,7 @@ from app.deps import (
 from app.models import ProjectCreateIn, ProjectOut
 from app.services.audit import AuditService
 from app.services.default_grants import apply_default_template_grants
+from app.services.folder_templates import apply_folder_template
 from app.services.permissions import (
     PermissionsService,
     fmt_subject,
@@ -164,6 +166,25 @@ async def create_project(
                     400, f"initial_grants 第 {i} 条主体不存在:group {g.id}",
                 )
 
+    # ── 目录模板前置校验(方案 §4.2:在 initial_grants 校验段之后、DB 写入之前;
+    # 模板不存在 / 跨 org → 400,不传 / null = 现状零回归)───────────────────────
+    folder_template: ProjectFolderTemplate | None = None
+    template_entry_paths: list[str] = []
+    if payload.folder_template_id is not None:
+        folder_template = await db.get(ProjectFolderTemplate, payload.folder_template_id)
+        if folder_template is None:
+            raise HTTPException(400, f"folder template not found:{payload.folder_template_id}")
+        if folder_template.organization_id != org_id:
+            raise HTTPException(
+                400, "folder template belongs to another organization",
+            )
+        res_paths = await db.execute(
+            select(ProjectFolderTemplateEntry.path)
+            .where(ProjectFolderTemplateEntry.template_id == folder_template.id)
+            .order_by(ProjectFolderTemplateEntry.path)
+        )
+        template_entry_paths = [row[0] for row in res_paths.all()]
+
     project = Project(
         id=uuid.uuid4(),
         organization_id=org_id,
@@ -232,17 +253,54 @@ async def create_project(
         actor_user_id=user_id, ctx=ctx,
     )
 
+    # ── 目录模板应用(方案 §4.2;不选模板 = 与现状逐字节一致,零回归)────────────
+    # 先把 audit 与响应所需的 ORM 属性全部读入局部变量(六项缺一不可):
+    # apply_folder_template 逐条容错的 rollback 会无条件过期 identity_map 中
+    # 全部持久态对象(project 与 admin_user 同 session 加载),audit 处任一同步
+    # 属性读都会 MissingGreenlet(方案 §1-D3/§4.2)
+    project_id_v = project.id
+    project_code_v = project.code
+    project_name_v = project.name
+    project_visibility_v = project.visibility
+    admin_user_id_v = admin_user.id
+    admin_user_name_v = admin_user.name
+
+    details: dict[str, Any] = {
+        "code": project_code_v, "name": project_name_v,
+        "visibility": project_visibility_v,
+        "admin_user_id": str(admin_user_id_v),
+        "admin_name": admin_user_name_v,
+        "initial_grants_count": len(initial_grants),
+    }
+    if folder_template is not None:
+        # 模板两值同款入口物化(apply 签名只收纯值,不收 ORM 对象,方案 §5-B7):
+        # apply 逐条容错正常返回,但其内部 rollback 已无条件过期 identity_map 中
+        # 的 folder_template(同 session 加载),调用之后一律用局部值,再读 ORM
+        # 属性即 MissingGreenlet → 500 → project_created audit 丢失
+        template_id_v = folder_template.id
+        template_name_v = folder_template.name
+        applied = await apply_folder_template(
+            db, permissions, audit,
+            project_id=project_id_v,
+            template_id=template_id_v,
+            template_name=template_name_v,
+            entry_paths=template_entry_paths,
+            actor_user_id=user_id,
+            ctx=ctx,
+        )
+        # 有模板才写相关键(未选模板省略而非 null,防 details 恒 null 噪音);
+        # audit details 用局部值;failed 截前 10 条 + failed_count 总数(方案 §4.2)
+        failed_all: list[dict[str, str]] = applied["failed"]
+        details["folder_template_id"] = str(template_id_v)
+        details["created_folder_count"] = applied["created_folder_count"]
+        details["failed"] = failed_all[:10]
+        details["failed_count"] = len(failed_all)
+
     await audit.write(
         event_type="project_created",
         actor_user_id=user_id,
-        target_project_id=project.id,
-        details={
-            "code": project.code, "name": project.name,
-            "visibility": project.visibility,
-            "admin_user_id": str(admin_user.id),
-            "admin_name": admin_user.name,
-            "initial_grants_count": len(initial_grants),
-        },
+        target_project_id=project_id_v,
+        details=details,
         **ctx,
     )
 
