@@ -571,6 +571,21 @@ class PermissionsService:
             object_id=organization_tenant_key,
         )
 
+    async def is_org_project_deleter(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#project_deleter check(组开关经 group#member 展开)。
+
+        仿 is_org_project_creator(2026-10-10 F6 项目逻辑删除):应用层守门 /
+        /me 的完整口径 = is_org_admin 或本方法(系统 admin 恒可删,需求 D2)。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="project_deleter",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
     async def has_any_project_admin(self, *, user_id: str) -> bool:
         """user 是否对任意 project 有 can_admin(管理后台 polish 用)。"""
         ids = await self.list_objects(

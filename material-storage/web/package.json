@@ -21,6 +21,7 @@
     "@uppy/locales": "^5.1.1",
     "antd": "^6.4.2",
     "axios": "^1.16.1",
+    "copy-to-clipboard": "^4.0.2",
     "dayjs": "^1.11.20",
     "lucide-react": "^1.16.0",
     "motion": "^12.38.0",

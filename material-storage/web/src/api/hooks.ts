@@ -21,6 +21,10 @@ import type {
   DirectoryGroupMember,
   DirectoryUser,
   DirectoryUserCreateOut,
+  DirectoryUserDetail,
+  DirectoryUserUpdateIn,
+  DirectoryUsersPage,
+  DeletedProjectsPage,
   DownloadLink,
   Folder,
   GrantEntry,
@@ -118,6 +122,58 @@ export const useProject = (id: string | undefined) =>
     queryFn: async () => (await http.get<Project>(`/api/v1/projects/${id}`)).data,
     enabled: !!id,
   });
+
+// ─── 项目逻辑删除(§6-§8:深隐藏+可恢复)────────────────────────────────────
+// §7:已删除项目分页(q 过 code/name;deleted_at 倒序,带 deleted_by_name)
+export const DELETED_PROJECTS_PAGE_SIZE = 20;
+export const useDeletedProjects = (
+  params: { q?: string; limit?: number; offset?: number } | null,
+) =>
+  useQuery({
+    queryKey: ['projects-deleted', params],
+    queryFn: async () =>
+      (await http.get<DeletedProjectsPage>('/api/v1/projects/deleted', {
+        params: params ?? {},
+      })).data,
+    enabled: params !== null,
+    placeholderData: keepPreviousData,
+  });
+
+// §6:DELETE /projects/{id} — 逻辑删除(守门 project_deleter;数据/tuple/桶/分享全不动)。
+// 注意:不 invalidate ['project', id] —— 从详情页删除瞬间该 query 的 observer 还挂着,
+// 失效会立刻触发一次注定 404 的 GET 并弹全局错误 toast(与 useDeleteFolder 同款取舍);
+// 删除后项目从列表消失、详情不可再进入,导航走后缓存自然无人引用
+export const useDeleteProject = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (projectId: string) =>
+      (await http.delete<{ ok: boolean; project_id: string; deleted_at: string }>(
+        `/api/v1/projects/${projectId}`,
+      )).data,
+    onSuccess: (_d, projectId) => {
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['projects-all'] });
+      qc.invalidateQueries({ queryKey: ['projects-deleted'] });
+      qc.removeQueries({ queryKey: ['project', projectId] });
+    },
+  });
+};
+
+// §8:POST /projects/{id}/restore — 恢复(仅作用于已删除项目,否则 404)
+export const useRestoreProject = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (projectId: string) =>
+      (await http.post<{ ok: boolean; project_id: string }>(
+        `/api/v1/projects/${projectId}/restore`,
+      )).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['projects-all'] });
+      qc.invalidateQueries({ queryKey: ['projects-deleted'] });
+    },
+  });
+};
 
 export const useCreateProject = () => {
   const qc = useQueryClient();
@@ -489,24 +545,67 @@ export const useResolveShare = (token: string | undefined) =>
   });
 
 // ─── directory(#150 本地用户/组管理,admin only)────────────────────────────
-// params 传 null = 不启用(挂载但不取数;新建项目弹窗关闭期间不白打请求)
+// params 传 null = 不启用(挂载但不取数;新建项目弹窗关闭期间不白打请求)。
+// §4: 返回 {items,total,limit,offset}(D4 破坏性);limit/offset 进 queryKey 各页独立缓存,
+// placeholderData 保旧页,翻页不白屏
+export const USERS_PAGE_SIZE = 20;
 export const useDirectoryUsers = (
-  params: { q?: string; is_active?: boolean; limit?: number } | null = {},
+  params: { q?: string; is_active?: boolean; limit?: number; offset?: number } | null = {},
 ) =>
   useQuery({
     queryKey: ['directory-users', params],
     queryFn: async () =>
-      (await http.get<DirectoryUser[]>('/api/v1/admin/directory/users', { params: params ?? {} }))
-        .data,
+      (await http.get<DirectoryUsersPage>('/api/v1/admin/directory/users', {
+        params: params ?? {},
+      })).data,
     enabled: params !== null,
+    placeholderData: keepPreviousData,
   });
 
 export const useCreateUser = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: { username: string; name: string; email?: string }) =>
-      (await http.post<DirectoryUserCreateOut>('/api/v1/admin/directory/users', body)).data,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-users'] }),
+    mutationFn: async (body: {
+      username: string;
+      name: string;
+      email?: string;
+      // §1: 可选,默认 [];创建成功后逐组加成员双写(≤50,无效组 422 原子失败)
+      group_ids?: string[];
+    }) => (await http.post<DirectoryUserCreateOut>('/api/v1/admin/directory/users', body)).data,
+    // 建用户带组会改组成员计数,组列表一起失效
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['directory-users'] });
+      qc.invalidateQueries({ queryKey: ['directory-groups'] });
+    },
+  });
+};
+
+// §2: 用户详情(编辑弹窗回显:含 group_ids/group_names)
+export const useDirectoryUserDetail = (userId: string | undefined) =>
+  useQuery({
+    queryKey: ['directory-user', userId],
+    queryFn: async () =>
+      (await http.get<DirectoryUserDetail>(`/api/v1/admin/directory/users/${userId}`)).data,
+    enabled: !!userId,
+  });
+
+// §3: PATCH 用户(name/email/group_ids 全量同步终态;email 显式 null = 清空)。
+// 组 diff 加/移成员会改组成员计数与各组成员列表,一并失效
+export const useUpdateUser = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { userId: string; body: DirectoryUserUpdateIn }) => {
+      const { userId, body } = args;
+      return (await http.patch<DirectoryUser>(
+        `/api/v1/admin/directory/users/${userId}`, body,
+      )).data;
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['directory-users'] });
+      qc.invalidateQueries({ queryKey: ['directory-user'] });
+      qc.invalidateQueries({ queryKey: ['directory-groups'] });
+      qc.invalidateQueries({ queryKey: ['directory-group-members'] });
+    },
   });
 };
 
@@ -570,6 +669,8 @@ export const useUpdateGroup = () => {
       // PR-2 tri-state:仅在调用方显式传入时才携带(undefined 经 JSON 序列化自动省略
       // = None 不动;非 Optional 布尔会让仅改名的不带字段 PATCH 静默撤权,方案 §2.2)
       can_create_project?: boolean;
+      // §5: can_delete_project 同款 tri-state(组级「删除项目」开关)
+      can_delete_project?: boolean;
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;

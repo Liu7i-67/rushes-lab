@@ -12,6 +12,7 @@ import type { Asset, Folder, Me } from '../api/types';
 import { useDownloadLink, useUpdateAssetMeta } from '../api/hooks';
 import { useDownloads } from '../lib/download-store';
 import { errorMessage } from '../api/client';
+import { copyToClipboard } from '../utils/copy';
 import { ShareModal } from './ShareModal';
 import { FolderInvitePanel } from './FolderInvitePanel';
 import { FolderGrantsPanel } from './FolderGrantsPanel';
@@ -92,11 +93,10 @@ export function AssetSummaryPanel({ selected, me, folder }: Props) {
         }
       }
     };
-    const handleCopyId = async () => {
-      try {
-        await navigator.clipboard.writeText(a.id);
+    const handleCopyId = () => {
+      if (copyToClipboard(a.id)) {
         message.success('Asset ID 已复制');
-      } catch { message.error('复制失败'); }
+      } else { message.error('复制失败'); }
     };
 
     return (
@@ -172,9 +172,12 @@ export function AssetSummaryPanel({ selected, me, folder }: Props) {
                        onClick={handleCopyId} />
           <QuickAction icon={<Hash size={14} strokeWidth={1.8} />}
                        label="复制 key"
-                       onClick={async () => {
-                         await navigator.clipboard.writeText(a.minio_key);
-                         message.success('MinIO key 已复制');
+                       onClick={() => {
+                         if (copyToClipboard(a.minio_key)) {
+                           message.success('MinIO key 已复制');
+                         } else {
+                           message.error('复制失败');
+                         }
                        }} />
         </div>
 

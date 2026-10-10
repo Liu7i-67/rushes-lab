@@ -134,6 +134,7 @@ async def me(
     from app.services.org import get_default_organization
     org = await get_default_organization(db)
     is_project_creator = False
+    is_project_deleter = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -154,6 +155,17 @@ async def me(
             except Exception:  # noqa: BLE001
                 pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
 
+        # 组级「删除项目」权限(F6.7):与 require_project_deleter 守门同口径
+        # (is_org_admin 或 organization#project_deleter,组开关经 group#member 展开)
+        is_project_deleter = bool(is_system_admin)
+        if not is_system_admin:
+            try:
+                is_project_deleter = await perms.is_org_project_deleter(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )
+            except Exception:  # noqa: BLE001
+                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
+
     return {
         "id": str(user.id),
         # #154:open_id/union_id 保留只读(历史对照),不再参与登录与权限
@@ -166,6 +178,8 @@ async def me(
         "is_system_admin": is_system_admin,
         # 组级「新建项目」权限(方案 §2.4):与守门同口径;前端闸门用
         "is_project_creator": is_project_creator,
+        # 组级「删除项目」权限(F6.7):与守门同口径;前端闸门用
+        "is_project_deleter": is_project_deleter,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

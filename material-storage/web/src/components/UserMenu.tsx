@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { setDevUserId, getDevUserId, http } from '../api/client';
 import type { Me } from '../api/types';
+import { copyToClipboard } from '../utils/copy';
 import { BaiduBackupDrawer } from './BaiduBackupDrawer';
 
 export function UserMenu({ me }: { me: Me }) {
@@ -13,15 +14,14 @@ export function UserMenu({ me }: { me: Me }) {
   // 百度网盘备份抽屉(方案 §3.1):入口挂本菜单内,Drawer 随本组件挂载
   const [baiduOpen, setBaiduOpen] = useState(false);
 
-  const copyOpenId = async (e: React.MouseEvent) => {
+  const copyOpenId = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!me.open_id) return;
-    try {
-      await navigator.clipboard.writeText(me.open_id);
+    if (copyToClipboard(me.open_id)) {
       setCopied(true);
       message.success('open_id 已复制');
       setTimeout(() => setCopied(false), 1500);
-    } catch {
+    } else {
       message.error('复制失败');
     }
   };

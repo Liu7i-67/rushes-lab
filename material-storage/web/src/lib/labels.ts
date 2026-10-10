@@ -37,6 +37,8 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   notification_sent: '通知已发送',
   password_changed: '修改密码',
   project_created: '项目创建',
+  project_deleted: '项目删除',  // 项目逻辑删除(可恢复)
+  project_restored: '项目恢复',
   project_member_added: '项目成员添加',
   project_member_removed: '项目成员移除',
   proxy_download: '代理下载',
@@ -48,6 +50,7 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   upload: '上传',
   // #150 本地目录 CRUD(users/groups)
   user_created: '用户创建',
+  user_updated: '用户更新',
   user_disabled: '用户停用',
   user_enabled: '用户启用',
   user_password_reset: '密码重置',

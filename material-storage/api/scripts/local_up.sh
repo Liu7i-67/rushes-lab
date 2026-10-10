@@ -167,7 +167,7 @@ cat <<EOF
   前端(先起):  cd material-storage/web && pnpm dev
   密码登录:     http://localhost:5173/ms-static/web/login(与生产同链路)
                   alice     / alice2026     org admin + 系统 admin
-                  bob       / bob2026       项目 member(无敏感目录权限)
+                  bob       / bobdev2026    项目 member(无敏感目录权限)
                   evan      / evan2026      demo org admin(seed 契约账号)
                   outsider  / outsider2026  无权限账号(负向测试)
   API:          $API_URL/healthz

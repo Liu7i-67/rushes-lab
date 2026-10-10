@@ -82,11 +82,11 @@ async def test_create_user_returns_temp_password(client: AsyncClient) -> None:
     assert len(body["temporary_password"]) >= 8
     assert "password_hash" not in body  # 不泄露 hash
 
-    # 列表里能看到且不含 hash
+    # 列表里能看到且不含 hash(D4:返回改 {items,total,limit,offset})
     r2 = await client.get("/api/v1/admin/directory/users",
                           params={"q": uname}, headers=_h(EVAN_ID))
     assert r2.status_code == 200
-    found = [u for u in r2.json() if u["username"] == uname]
+    found = [u for u in r2.json()["items"] if u["username"] == uname]
     assert found and "password_hash" not in found[0]
 
     # /me 可见(本地用户无飞书字段也不崩)
@@ -237,9 +237,9 @@ async def test_reset_password(client: AsyncClient) -> None:
     )
     assert r2.status_code == 200, r2.text
     assert len(r2.json()["temporary_password"]) >= 8
-    # 重置后强制改密
+    # 重置后强制改密(D4:列表返回 {items,...})
     r3 = await client.get("/api/v1/admin/directory/users", headers=_h(EVAN_ID))
-    u = next(x for x in r3.json() if x["id"] == uid)
+    u = next(x for x in r3.json()["items"] if x["id"] == uid)
     assert u["must_change_password"] is True
 
     # 不存在的 user → 404

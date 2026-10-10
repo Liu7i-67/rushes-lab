@@ -14,8 +14,9 @@ import {
 import { useNavigate, useParams } from 'react-router-dom';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDownloadLink,
-  useFolder, useFolders, useMe, useProject, useTrashAssets, useUpdateAssetMeta,
+  ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDeleteProject,
+  useDownloadLink, useFolder, useFolders, useMe, useProject, useTrashAssets,
+  useUpdateAssetMeta,
 } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { FolderTree } from '../components/FolderTree';
@@ -135,7 +136,11 @@ export default function ProjectDetailPage() {
   const dlLink = useDownloadLink();
   const del = useDeleteAsset();
   const delFolder = useDeleteFolder();
+  // 项目逻辑删除(project_deleter 权限):详情页头部入口,删除后跳回项目列表
+  const delProject = useDeleteProject();
   const { message, modal } = App.useApp();
+  // 同 PR-2 回落口径:is_project_deleter 已含系统 admin,旧后端无字段回落 is_system_admin
+  const canDeleteProject = !!me && (me.is_project_deleter ?? me.is_system_admin);
 
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
   const [applySensitive, setApplySensitive] = useState(false);
@@ -258,6 +263,19 @@ export default function ProjectDetailPage() {
   const folderIsEmpty = assetTotal === 0 && folderChildCount === 0;
   const folderDeletable = folderIsEmpty && trashCount === 0;
 
+  // 项目逻辑删除(§6):深隐藏 + 可恢复;成功跳回项目列表(详情已 404,不能停留)。
+  // 列表/已删除列表缓存由 useDeleteProject onSuccess 失效
+  const handleDeleteProject = async () => {
+    if (!projectId || !project) return;
+    try {
+      await delProject.mutateAsync(projectId);
+      message.success(`项目「${project.name}」已删除,可在项目列表「已删除项目」中恢复`);
+      navigate('/projects');
+    } catch (e) {
+      message.error(errorMessage(e, '删除项目失败'));
+    }
+  };
+
   const handleDeleteFolder = async () => {
     if (!folder || !projectId) return;
     const parentId = folder.parent_folder_id;
@@ -314,6 +332,19 @@ export default function ProjectDetailPage() {
                     icon={<Key size={14} strokeWidth={2} />}>
               申请 sensitive 目录
             </Button>
+            {canDeleteProject && project && (
+              <Popconfirm
+                title={`删除项目「${project.name}」?`}
+                description="删除后所有成员均不可见;数据保留,可在项目列表「已删除项目」中恢复"
+                okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={handleDeleteProject}
+              >
+                <Button danger icon={<Trash2 size={14} strokeWidth={1.8} />}
+                        loading={delProject.isPending}>
+                  删除项目
+                </Button>
+              </Popconfirm>
+            )}
           </Space>
         </div>
         {applySensitive && (
@@ -570,6 +601,20 @@ export default function ProjectDetailPage() {
                     删除文件夹
                   </Button>
                 </Tooltip>
+              </Popconfirm>
+            )}
+            {/* 项目逻辑删除(project_deleter):详情页头部入口 */}
+            {canDeleteProject && project && (
+              <Popconfirm
+                title={`删除项目「${project.name}」?`}
+                description="删除后所有成员均不可见;数据保留,可在项目列表「已删除项目」中恢复"
+                okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={handleDeleteProject}
+              >
+                <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
+                        loading={delProject.isPending}>
+                  删除项目
+                </Button>
               </Popconfirm>
             )}
           </div>
@@ -889,6 +934,20 @@ export default function ProjectDetailPage() {
                     删除文件夹
                   </Button>
                 </Tooltip>
+              </Popconfirm>
+            )}
+            {/* 项目逻辑删除(project_deleter):详情页头部入口 */}
+            {canDeleteProject && project && (
+              <Popconfirm
+                title={`删除项目「${project.name}」?`}
+                description="删除后所有成员均不可见;数据保留,可在项目列表「已删除项目」中恢复"
+                okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={handleDeleteProject}
+              >
+                <Button size="small" danger icon={<Trash2 size={13} strokeWidth={1.8} />}
+                        loading={delProject.isPending}>
+                  删除项目
+                </Button>
               </Popconfirm>
             )}
           </div>

@@ -1,17 +1,21 @@
 /**
  * 项目列表 — 卡片网格(b1 现代化重做)。
  * 卡片左侧 4px visibility 色块条 + Fraunces display 大标题 + mono code + meta row。
+ * 管理后台优化:「已删除项目」入口 + Modal(分页 + 恢复)、卡片「删除项目」
+ * (逻辑删除,project_deleter 权限,Popconfirm 二次确认)。
  */
-import { Button, Skeleton, Tooltip } from 'antd';
-import { Plus, Lock, Globe, EyeOff, Link2 } from 'lucide-react';
+import { App, Button, Popconfirm, Skeleton, Tooltip } from 'antd';
+import { Plus, Lock, Globe, EyeOff, Link2, Archive, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import { useMe, useProjects } from '../api/hooks';
+import { useMe, useProjects, useDeleteProject } from '../api/hooks';
+import { errorMessage } from '../api/client';
 import { NewProjectModal } from '../components/NewProjectModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
+import { DeletedProjectsModal } from '../components/DeletedProjectsModal';
 import type { Project } from '../api/types';
 
 dayjs.extend(relativeTime);
@@ -30,10 +34,14 @@ export default function ProjectsPage() {
   const { data, isLoading } = useProjects();
   const { data: me } = useMe();
   const [createOpen, setCreateOpen] = useState(false);
+  // 项目逻辑删除:「已删除项目」Modal 入口(§6.8)
+  const [deletedOpen, setDeletedOpen] = useState(false);
   const navigate = useNavigate();
   // PR-2: 新建闸门口径回落式替换 —— 新后端 is_project_creator 已含系统 admin,
   // `??` 仅在旧后端(字段 undefined)时回落 is_system_admin
   const canCreate = me ? (me.is_project_creator ?? me.is_system_admin) : false;
+  // 同款口径:可删项目 = is_project_deleter(已含系统 admin)
+  const canDelete = me ? (me.is_project_deleter ?? me.is_system_admin) : false;
 
   return (
     <div className="ms-enter">
@@ -62,15 +70,24 @@ export default function ProjectsPage() {
           </p>
         </div>
         {me && (
-          <Tooltip title={canCreate ? '' : '需要组织管理员,或加入已开启「允许新建项目」的用户组'} placement="left">
-            <Button
-              type="primary"
-              icon={<Plus size={15} strokeWidth={2.2} />}
-              onClick={() => setCreateOpen(true)}
-              disabled={!canCreate}
-              style={{ height: 36, fontWeight: 500 }}
-            >新建项目</Button>
-          </Tooltip>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+            {canDelete && (
+              <Button
+                icon={<Archive size={14} strokeWidth={2} />}
+                onClick={() => setDeletedOpen(true)}
+                style={{ height: 36, fontWeight: 500 }}
+              >已删除项目</Button>
+            )}
+            <Tooltip title={canCreate ? '' : '需要组织管理员,或加入已开启「允许新建项目」的用户组'} placement="left">
+              <Button
+                type="primary"
+                icon={<Plus size={15} strokeWidth={2.2} />}
+                onClick={() => setCreateOpen(true)}
+                disabled={!canCreate}
+                style={{ height: 36, fontWeight: 500 }}
+              >新建项目</Button>
+            </Tooltip>
+          </div>
         )}
       </div>
 
@@ -83,7 +100,7 @@ export default function ProjectsPage() {
       ) : (
         <div className="ms-enter-stagger">
           <Grid>
-            {data.map(p => <ProjectCard key={p.id} project={p} />)}
+            {data.map(p => <ProjectCard key={p.id} project={p} canDelete={canDelete} />)}
           </Grid>
         </div>
       )}
@@ -96,6 +113,7 @@ export default function ProjectsPage() {
           me={me}
         />
       )}
+      <DeletedProjectsModal open={deletedOpen} onClose={() => setDeletedOpen(false)} />
     </div>
   );
 }
@@ -110,26 +128,38 @@ function Grid({ children }: { children: React.ReactNode }) {
   );
 }
 
-function ProjectCard({ project: p }: { project: Project }) {
+function ProjectCard({ project: p, canDelete }: { project: Project; canDelete: boolean }) {
+  const { message } = App.useApp();
   const vis = VIS_META[p.visibility] || VIS_META.private;
   const VisIcon = vis.Icon;
   // #112 PR-2: project admin 才显"生成申请链接"按钮
   const isAdmin = (p.my_roles ?? []).includes('admin');
   const [linkOpen, setLinkOpen] = useState(false);
+  const delProject = useDeleteProject();
+
+  // 逻辑删除:二次确认后提交;成功提示 + 列表失效(hook 内),卡片随重取消失
+  const handleDelete = async () => {
+    try {
+      await delProject.mutateAsync(p.id);
+      message.success(`项目「${p.name}」已删除,可在「已删除项目」中恢复`);
+    } catch (e) {
+      message.error(errorMessage(e, '删除失败'));
+    }
+  };
   return (
     <>
-    <Link
-      to={`/projects/${p.id}`}
+    {/* 卡片外壳是普通 div:操作按钮(申请链接/删除)放在 Link 子树之外 ——
+        antd v6 portal 内的点击会沿 React 组件树冒泡,Popconfirm 确认/取消曾把
+        Link 当祖先触发路由跳转(P1);结构性移出后该类问题不存在,不靠逐事件
+        stopPropagation 打补丁 */}
+    <div
       className="ms-card-hover"
       style={{
         position: 'relative',
-        display: 'block',
         padding: '24px 24px 20px 28px',
         background: 'var(--ms-surface)',
         border: '1px solid var(--ms-hairline)',
         borderRadius: 'var(--ms-radius-lg)',
-        textDecoration: 'none',
-        color: 'inherit',
         overflow: 'hidden',
       }}
     >
@@ -142,6 +172,15 @@ function ProjectCard({ project: p }: { project: Project }) {
         borderRadius: '0 2px 2px 0',
       }} />
 
+      {/* 主体(标题/描述/admins)整块可点 → 详情 */}
+      <Link
+        to={`/projects/${p.id}`}
+        style={{
+          display: 'block',
+          textDecoration: 'none',
+          color: 'inherit',
+        }}
+      >
       {/* 标题 + 我的角色 chip */}
       <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
         <h2 style={{
@@ -230,7 +269,10 @@ function ProjectCard({ project: p }: { project: Project }) {
             }}>未指派</span>
         )}
       </div>
+      </Link>
 
+      {/* 底部 meta 行在 Link 之外(负 margin 全出血布局不变):色块 chip 与时间戳
+          不再触发跳转,按钮天然不受 portal 冒泡影响 */}
       <div style={{
         margin: '14px -24px -20px -28px',
         padding: '14px 24px 0 28px',
@@ -250,7 +292,7 @@ function ProjectCard({ project: p }: { project: Project }) {
           {isAdmin && (
             <Tooltip title="生成一个申请链接,发给别人让他来申请这个项目的权限(不直接授权)">
               <button
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); setLinkOpen(true); }}
+                onClick={() => setLinkOpen(true)}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 4,
                   padding: '2px 8px', fontSize: 11,
@@ -267,10 +309,35 @@ function ProjectCard({ project: p }: { project: Project }) {
               </button>
             </Tooltip>
           )}
+          {/* 逻辑删除(project_deleter):已移出 Link 子树,确认/取消点击不会误触路由 */}
+          {canDelete && (
+            <Popconfirm
+              title={`删除项目「${p.name}」?`}
+              description="删除后所有成员均不可见;数据保留,可在「已删除项目」中恢复"
+              okText="删除" okButtonProps={{ danger: true }}
+              onConfirm={handleDelete}
+            >
+              <button
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  padding: '2px 8px', fontSize: 11,
+                  color: 'var(--ms-crimson)',
+                  background: 'transparent',
+                  border: '1px solid var(--ms-crimson)',
+                  borderRadius: 'var(--ms-radius-sm)',
+                  cursor: 'pointer',
+                  lineHeight: 1.4,
+                }}
+              >
+                <Trash2 size={11} strokeWidth={2} />
+                删除项目
+              </button>
+            </Popconfirm>
+          )}
           <span>{dayjs(p.created_at).fromNow()}</span>
         </span>
       </div>
-    </Link>
+    </div>
     {isAdmin && (
       <RequestLinkCreateModal
         open={linkOpen}

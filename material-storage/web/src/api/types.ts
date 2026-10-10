@@ -12,6 +12,9 @@ export interface Me {
   // PR-2: 可新建项目(口径 = is_org_admin ∨ 用户组 project_creator,含系统 admin)。
   // 可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
   is_project_creator?: boolean;
+  // 项目逻辑删除(§10):可删除项目(口径 = is_org_admin ∨ 用户组 project_deleter,含系统 admin)。
+  // 可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
+  is_project_deleter?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -41,6 +44,27 @@ export interface DirectoryUserCreateOut extends DirectoryUser {
   temporary_password: string;
 }
 
+// §4:用户列表分页返回(total = 同 q/is_active 条件 count;破坏性变更,D4)
+export interface DirectoryUsersPage {
+  items: DirectoryUser[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// §2:用户详情(编辑弹窗回显;group_names 与 group_ids 同序)
+export interface DirectoryUserDetail extends DirectoryUser {
+  group_ids: string[];
+  group_names: string[];
+}
+
+// §3:PATCH 用户(全部可选键,缺省=不改;email 显式 null = 清空;group_ids 全量同步终态)
+export interface DirectoryUserUpdateIn {
+  name?: string;
+  email?: string | null;
+  group_ids?: string[];
+}
+
 export interface DirectoryGroup {
   id: string;
   name: string;
@@ -49,6 +73,8 @@ export interface DirectoryGroup {
   created_at: string;
   // PR-2: 组级「新建项目」权限回显(新后端定向 read OpenFGA tuple;旧后端无此字段 → undefined 视为 false)
   can_create_project?: boolean;
+  // §5: 组级「删除项目」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
+  can_delete_project?: boolean;
 }
 
 export interface DirectoryGroupMember {
@@ -71,6 +97,27 @@ export interface Project {
   created_at: string;
   admins: AdminBrief[];
   my_roles: ('admin' | 'uploader' | 'downloader' | 'viewer')[];
+}
+
+// ─── 项目逻辑删除(§7:GET /api/v1/projects/deleted)──────────────────────────
+/** 已删除项目条目(深隐藏+可恢复;deleted_by_name 为后端解析的操作人姓名)。*/
+export interface DeletedProject {
+  id: string;
+  code: string;
+  name: string;
+  description: string | null;
+  visibility: Project['visibility'];
+  deleted_at: string;
+  deleted_by: string | null;
+  deleted_by_name: string | null;
+}
+
+/** 已删除项目分页窗口。*/
+export interface DeletedProjectsPage {
+  items: DeletedProject[];
+  total: number;
+  limit: number;
+  offset: number;
 }
 
 // ─── 项目角色 / initial_grants(方案 §3:创建时直通授权)─────────────────────

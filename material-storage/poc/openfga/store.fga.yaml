@@ -23,6 +23,9 @@ name: material-storage-poc
 #      - explicit_invited_* 时间限定版
 #   6. 移除旧 v3 的 editor / member / explicit_downloader on project
 #      (有 admin/viewer/downloader/uploader 已覆盖)
+#   7. 2026-10-10(F6 项目逻辑删除):organization 增 project_deleter: [user, group#member]
+#      —— 组级「可删除项目」开关,与 project_creator 同款模式(不改既有 relation;
+#      改后须重推 model,见 api/scripts/openfga_write_model.sh)
 
 model: |
   model
@@ -48,6 +51,10 @@ model: |
       # user 的入口本期不做,见方案 §6)。组员判定由 check 自动展开 group#member,
       # 应用层守门口径 = is_org_admin ∨ check(project_creator)(系统 admin 恒可建)
       define project_creator: [user, group#member]
+      # 组级「删除项目」权限(2026-10-10 F6):同 project_creator 模式 —— UI 只写
+      # 组主体,组员判定由 check 自动展开 group#member;应用层守门口径 =
+      # is_org_admin ∨ check(project_deleter)(系统 admin 恒可删)
+      define project_deleter: [user, group#member]
 
   type project
     relations
@@ -150,6 +157,11 @@ tuples:
   # 组级「新建项目」权限(方案 §2.1):剪辑师组可建项目
   - user: group:grp_editors#member
     relation: project_creator
+    object: organization:tenant_demo
+  # 组级「删除项目」权限(2026-10-10 F6):测试用例同样挂剪辑师组(生产开关由
+  # PATCH /admin/directory/groups 写 tuple,此处只为 fga model test)
+  - user: group:grp_editors#member
+    relation: project_deleter
     object: organization:tenant_demo
   # 移出组用例的静态编码:dave 仅具部门身份、无任何组成员 tuple → project_creator
   # 为 false(证明 project_creator 不随 department#member 扩散;真实移出组 =
@@ -351,3 +363,27 @@ tests:
         object: organization:tenant_demo
         assertions:
           project_creator: false
+
+      # ─── 组级「删除项目」权限(2026-10-10 F6)─────────────────────────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          project_deleter: true
+
+      # 非组员 ✗ / 移出组 ✗(同 project_creator 静态编码口径)
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          project_deleter: false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          project_deleter: false
+
+      # org admin 不自动蕴含 project_deleter(独立 relation;系统 admin 恒可删
+      # 由应用层守门 is_org_admin ∨ check 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          project_deleter: false

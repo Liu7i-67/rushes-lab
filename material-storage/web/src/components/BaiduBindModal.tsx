@@ -9,6 +9,7 @@ import { Check, Copy, ExternalLink } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../api/client';
 import { useBaiduAuthorizeUrl, useBaiduBind } from '../api/hooks';
+import { copyToClipboard } from '../utils/copy';
 
 interface Props {
   open: boolean;
@@ -36,13 +37,12 @@ export function BaiduBindModal({ open, onClose }: Props) {
     }
   };
 
-  const copyUrl = async () => {
-    try {
-      await navigator.clipboard.writeText(url);
+  const copyUrl = () => {
+    if (copyToClipboard(url)) {
       setCopied(true);
       message.success('授权链接已复制');
       setTimeout(() => setCopied(false), 1500);
-    } catch {
+    } else {
       message.error('复制失败,请手动选择链接复制');
     }
   };
