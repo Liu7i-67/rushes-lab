@@ -4,11 +4,13 @@
  * 加成员即时获得组权限、移出即时失去。
  * PR-2: 组级「新建项目」开关(can_create_project,tri-state PATCH — 仅在用户
  * 改动过 Switch 时才携带该字段,省略 = 不动)+ 列表「可建项目」徽标。
+ * 管理后台优化:组级「删除项目」开关(can_delete_project,同款 tri-state)+
+ * 列表「可删项目」徽标;成员弹窗限高滚动 + 组内搜索过滤(F2)。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
 } from 'antd';
-import { Pencil, Plus, Trash2, Users as UsersIcon } from 'lucide-react';
+import { Pencil, Plus, Search as SearchIcon, Trash2, Users as UsersIcon } from 'lucide-react';
 import { useState } from 'react';
 import dayjs from 'dayjs';
 import { useMe, useDirectoryGroups, useCreateGroup, useUpdateGroup,
@@ -149,6 +151,17 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
               }}>可建项目</span>
             </Tooltip>
           )}
+          {/* can_delete_project 徽标(与「可建项目」同款样式,crimson 示危险操作) */}
+          {group.can_delete_project && (
+            <Tooltip title="组内成员可删除项目(逻辑删除;可在项目列表「已删除项目」中恢复)">
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-crimson)', background: 'var(--ms-crimson)14',
+                borderRadius: 3,
+              }}>可删项目</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -198,6 +211,8 @@ function GroupFormModal({ open, onClose, group }: {
   // PR-2 tri-state:仅当用户改动过开关,PATCH 才携带 can_create_project
   // (否则省略 = None 不动 —— 防「仅改名保存」也触发 tuple 重写/静默撤权,方案 §2.2)
   const [flagTouched, setFlagTouched] = useState(false);
+  // can_delete_project 同款 tri-state(仅在编辑态展示)
+  const [deleteFlagTouched, setDeleteFlagTouched] = useState(false);
 
   const submit = async () => {
     try {
@@ -208,6 +223,7 @@ function GroupFormModal({ open, onClose, group }: {
           name: v.name?.trim(),
           description: v.description?.trim() || null,
           ...(flagTouched ? { can_create_project: v.can_create_project === true } : {}),
+          ...(deleteFlagTouched ? { can_delete_project: v.can_delete_project === true } : {}),
         });
         message.success('已保存');
       } else {
@@ -228,13 +244,16 @@ function GroupFormModal({ open, onClose, group }: {
   return (
     <Modal title={isEdit ? `编辑用户组 — ${group.name}` : '新建用户组'}
            open={open} onCancel={onClose} destroyOnClose
-           afterOpenChange={(o) => { if (!o) setFlagTouched(false); }}
+           afterOpenChange={(o) => {
+             if (!o) { setFlagTouched(false); setDeleteFlagTouched(false); }
+           }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
            onOk={submit} okText={isEdit ? '保存' : '创建'}>
       <Form key={isEdit ? group.id : 'new'} form={form} layout="vertical" preserve={false}
             initialValues={group ? {
               name: group.name, description: group.description || undefined,
               can_create_project: group.can_create_project ?? false,
+              can_delete_project: group.can_delete_project ?? false,
             } : { can_create_project: false }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
@@ -247,6 +266,13 @@ function GroupFormModal({ open, onClose, group }: {
           <Switch checkedChildren="开" unCheckedChildren="关"
                   onChange={() => setFlagTouched(true)} />
         </Form.Item>
+        {isEdit && (
+          <Form.Item name="can_delete_project" label="允许组成员删除项目" valuePropName="checked"
+                     extra="开启后组内成员可删除其可见的项目(逻辑删除,数据保留,可在「已删除项目」中恢复);系统管理员不受此开关影响">
+            <Switch checkedChildren="开" unCheckedChildren="关"
+                    onChange={() => setDeleteFlagTouched(true)} />
+          </Form.Item>
+        )}
       </Form>
     </Modal>
   );
@@ -262,6 +288,16 @@ function GroupMembersDrawer({ group, open, onClose }: {
   const { message } = App.useApp();
   const [selected, setSelected] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  // F2: 组内搜索 — 对已加成员按 username/name/email 忽略大小写子串过滤(纯前端)
+  const [memberQ, setMemberQ] = useState('');
+
+  const all = members ?? [];
+  const kw = memberQ.trim().toLowerCase();
+  const filtered = kw
+    ? all.filter(m => [m.username, m.name, m.email]
+        .some(v => (v ?? '').toLowerCase().includes(kw)))
+    : all;
+  const total = all.length || group.member_count;
 
   const doAdd = async () => {
     if (selected.length === 0) return;
@@ -289,8 +325,9 @@ function GroupMembersDrawer({ group, open, onClose }: {
   };
 
   return (
-    <Modal title={`成员 — ${group.name}(${members?.length ?? group.member_count} 人)`}
+    <Modal title={`成员 — ${group.name}(${kw ? `${filtered.length}/${total}` : total} 人)`}
            open={open} onCancel={onClose} footer={null}
+           afterOpenChange={(o) => { if (!o) setMemberQ(''); }}
            width="min(560px, calc(100vw - 16px))">
       <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
         <div style={{ flex: 1 }}>
@@ -302,18 +339,34 @@ function GroupMembersDrawer({ group, open, onClose }: {
         </div>
         <Button type="primary" onClick={doAdd} loading={busy}>添加</Button>
       </div>
+      <Input
+        value={memberQ}
+        onChange={e => setMemberQ(e.target.value)}
+        allowClear
+        prefix={<SearchIcon size={13} strokeWidth={1.8} />}
+        placeholder="在组内搜索 — 用户名 / 姓名 / 邮箱"
+        style={{ marginBottom: 12 }}
+      />
       {isLoading ? (
         <Skeleton active paragraph={{ rows: 3 }} />
-      ) : !members || members.length === 0 ? (
+      ) : all.length === 0 ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
                description={<span style={{ color: 'var(--ms-ink-subtle)' }}>暂无成员</span>} />
+      ) : filtered.length === 0 ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
+               description={<span style={{ color: 'var(--ms-ink-subtle)' }}>无匹配成员</span>} />
       ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {members.map(m => (
+        // F2.1: 限高滚动 — 成员再多弹窗也不被撑开
+        <div style={{
+          display: 'flex', flexDirection: 'column', gap: 6,
+          maxHeight: 'min(420px, 60vh)', overflowY: 'auto',
+        }}>
+          {filtered.map(m => (
             <div key={m.user_id} style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 12px', background: 'var(--ms-canvas)',
               border: '1px solid var(--ms-hairline-soft)', borderRadius: 'var(--ms-radius-sm)',
+              flexShrink: 0,
             }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <span style={{ fontSize: 13, color: 'var(--ms-ink)' }}>{m.name}</span>

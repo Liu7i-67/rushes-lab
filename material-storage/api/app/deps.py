@@ -328,3 +328,37 @@ async def require_admin_or_project_creator(
     if await perms.has_any_project_admin(user_id=str(user.id)):
         return user
     raise HTTPException(403, "admin permission required")
+
+
+async def require_project_deleter(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> CurrentUser:
+    """删/恢复项目守门 — DELETE /projects/{id}、restore、GET /projects/deleted 用(F6)。
+
+    口径:is_org_admin 或 check(organization#project_deleter)—— 系统 admin
+    恒可删(不受组 flag 影响),组开关成员经 group#member 自动展开;
+    **不要求目标项目 admin**(D2:项目 admin 不默认能删项目)。
+    default org 缺失行为对齐 require_system_admin(500);FGA 异常不上吞
+    (与 require_project_creator 同:部署顺序保证 model 先 push,见需求 §11)。
+    403 文案与 require_project_creator 区分(契约 §6)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if await perms.is_org_admin(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        return user
+    if not await perms.is_org_project_deleter(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        raise HTTPException(
+            403,
+            "project deleter permission required(仅系统管理员或被授权「可删除项目」的组成员可删除/恢复项目)",
+        )
+    return user

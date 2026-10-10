@@ -237,9 +237,10 @@ function TemplateFormModal({ open, onClose, template, me }: {
   const isEdit = !!template;
 
   // 手选用户名典(SubjectPicker 的 user 分支只回传 id,行显名用;同 key 全页共享缓存)
+  // §4: useDirectoryUsers 返回改 {items,...} 分页结构,这里只消费 items
   const { data: dirUsers } = useDirectoryUsers(open ? { limit: 200 } : null);
   const nameById = useMemo(
-    () => new Map((dirUsers ?? []).map(u => [u.id, u.name])),
+    () => new Map((dirUsers?.items ?? []).map(u => [u.id, u.name])),
     [dirUsers],
   );
   const rowName = (r: GrantRow) => r.name ?? nameById.get(r.id) ?? shortId(r.id);

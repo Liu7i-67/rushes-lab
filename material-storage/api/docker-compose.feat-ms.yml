@@ -1,0 +1,56 @@
+# feat-ms 隔离测试栈(qdev 周期 feat/admin-console-opt 专用,复用 api-ms-api 镜像不 build)
+# 容器名 feat-ms-*,端口 127.0.0.1:8210,数据落独立 named volume;测试完可整体销毁。
+# bind mount 本 worktree 的 app/(代码改动即时生效)。
+services:
+  feat-ms-db:
+    image: postgres:16-alpine
+    container_name: feat-ms-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: material_storage
+      POSTGRES_USER: msuser
+      POSTGRES_PASSWORD: mspass
+    volumes:
+      - feat-ms-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U msuser"]
+      interval: 5s
+      retries: 10
+    networks:
+      - poc-net
+
+  feat-ms-redis:
+    image: redis:7-alpine
+    container_name: feat-ms-redis
+    restart: unless-stopped
+    volumes:
+      - feat-ms-redis-data:/data
+    networks:
+      - poc-net
+
+  feat-ms-api:
+    image: api-ms-api:latest
+    container_name: feat-ms-api
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      feat-ms-db:
+        condition: service_healthy
+      feat-ms-redis:
+        condition: service_started
+    ports:
+      - "127.0.0.1:8200:8000"   # 对齐 vite proxy 写死的 8200(GUI 实测用)
+    volumes:
+      - ./app:/app/app:ro
+      - ./scripts:/app/scripts:ro
+    networks:
+      - poc-net
+
+volumes:
+  feat-ms-db-data:
+  feat-ms-redis-data:
+
+networks:
+  poc-net:
+    external: true
+    name: poc-pigsty-minio_poc-net

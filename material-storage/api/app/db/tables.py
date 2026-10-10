@@ -98,6 +98,12 @@ class Project(Base, TimestampMixin):
     #   stealth — 完全隐藏,只 admin 主动邀请(connection 知 code 输入申请)
     visibility: Mapped[str] = mapped_column(String(16), default="private", nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 逻辑删除(F6,深隐藏+可恢复):非空 = 已删除,列表/详情一律过滤;
+    # 数据 / FGA tuple / minio 桶 / 分享链接全不动,恢复 = 清空两字段
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
     organization: Mapped[Organization] = relationship(back_populates="projects")
     folders: Mapped[list["Folder"]] = relationship(back_populates="project")

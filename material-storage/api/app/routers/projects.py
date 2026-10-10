@@ -7,28 +7,36 @@
                           OpenFGA list_objects(user, can_view, project)
                           UNION project.visibility = 'public'
   GET  /projects/{id}   — check can_view + audit
+  逻辑删除(F6,深隐藏+可恢复):
+  DELETE /projects/{id}        — 守门 require_project_deleter;置 deleted_at/deleted_by
+  GET  /projects/deleted       — 已删除项目分页列表(deleted_at 倒序)
+  POST /projects/{id}/restore  — 清空 deleted_at/deleted_by(仅已删除者)
+  主列表与详情一律过滤 deleted_at 非空(含 system admin,404)。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import or_, select
+from pydantic import BaseModel
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Group, Project
+from app.db.tables import Group, Project, User
 from app.deps import (
-    get_audit,
     CurrentUser,
+    get_audit,
     get_current_user,
     get_is_system_admin,
     get_permissions,
     get_request_context,
     require_project_creator,
+    require_project_deleter,
 )
 from app.models import ProjectCreateIn, ProjectOut
 from app.services.audit import AuditService
@@ -318,7 +326,10 @@ async def list_projects(
     if is_system_admin:
         stmt = (
             select(Project)
-            .where(Project.is_archived.is_(False))
+            .where(
+                Project.is_archived.is_(False),
+                Project.deleted_at.is_(None),   # F6.4:已删除对所有人隐藏
+            )
             .order_by(Project.created_at.desc())
             .limit(limit).offset(offset)
         )
@@ -335,6 +346,7 @@ async def list_projects(
                     Project.visibility == "public",
                 ),
                 Project.is_archived.is_(False),
+                Project.deleted_at.is_(None),   # F6.4:已删除对所有人隐藏
             )
             .order_by(Project.created_at.desc())
             .limit(limit).offset(offset)
@@ -354,6 +366,136 @@ async def list_projects(
         po.my_roles = my_roles_by_pid.get(r.id, [])
         out.append(po)
     return out
+
+
+# ─── 项目逻辑删除(F6,深隐藏+可恢复)─────────────────────────────────────────
+# 本期新 schema 一律内联本文件定义(models/__init__ 由并行任务独占,不碰)
+
+
+class DeletedProjectOut(BaseModel):
+    id: uuid.UUID
+    code: str
+    name: str
+    description: str | None = None
+    visibility: str
+    deleted_at: datetime
+    deleted_by: uuid.UUID | None = None
+    # deleted_by 反查 users.name(操作人已物理删除时为 None)
+    deleted_by_name: str | None = None
+
+
+class DeletedProjectsPageOut(BaseModel):
+    items: list[DeletedProjectOut]
+    total: int
+    limit: int
+    offset: int
+
+
+@router.get("/deleted", response_model=DeletedProjectsPageOut)
+async def list_deleted_projects(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(require_project_deleter),
+    q: str | None = Query(default=None, description="code/name 不区分大小写子串"),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> DeletedProjectsPageOut:
+    """已删除项目分页列表(F6.5)— deleted_at 倒序;deleted_by_name 由 users join 取。
+
+    路由顺序敏感:必须声明在 GET /{project_id} 之前,否则字面量 "deleted"
+    会被该路由的 str 路径参数吞掉(422)。
+    """
+    conds = [Project.deleted_at.isnot(None)]
+    if q:
+        pattern = f"%{q}%"
+        conds.append(or_(Project.code.ilike(pattern), Project.name.ilike(pattern)))
+
+    total = await db.scalar(
+        select(func.count()).select_from(Project).where(*conds)
+    )
+    rows = (
+        await db.execute(
+            select(Project, User.name)
+            .outerjoin(User, Project.deleted_by == User.id)
+            .where(*conds)
+            .order_by(Project.deleted_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    items = [
+        DeletedProjectOut(
+            id=p.id, code=p.code, name=p.name, description=p.description,
+            visibility=p.visibility, deleted_at=p.deleted_at,
+            deleted_by=p.deleted_by, deleted_by_name=deleter_name,
+        )
+        for p, deleter_name in rows
+    ]
+    return DeletedProjectsPageOut(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.delete("/{project_id}")
+async def delete_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(require_project_deleter),   # 不要求目标项目 admin(D2)
+    ctx: dict = Depends(get_request_context),
+) -> dict:
+    """逻辑删除项目(F6.3 / D1 / D10)— 深隐藏+可恢复。
+
+    只置 deleted_at/deleted_by;FGA tuple / minio 桶 / 资产 / 分享链接全不动
+    (恢复 = 清空两字段,零成本)。不存在或已删除 → 404(对所有人一致)。
+    """
+    project = await db.get(Project, project_id)
+    if project is None or project.deleted_at is not None:
+        raise HTTPException(404, "project not found")
+    deleted_at = datetime.now(timezone.utc)
+    project.deleted_at = deleted_at
+    project.deleted_by = user.id
+    await db.commit()
+    await audit.write(
+        event_type="project_deleted",
+        actor_user_id=user.id,
+        target_project_id=project_id,
+        details={
+            "project_id": str(project_id),
+            "code": project.code,
+            "name": project.name,
+            "deleted_by": str(user.id),
+        },
+        **ctx,
+    )
+    return {"ok": True, "project_id": str(project_id), "deleted_at": deleted_at}
+
+
+@router.post("/{project_id}/restore")
+async def restore_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(require_project_deleter),
+    ctx: dict = Depends(get_request_context),
+) -> dict:
+    """恢复逻辑删除的项目(F6.6 / D11)— 仅作用于 deleted_at 非空者;否则 404。"""
+    project = await db.get(Project, project_id)
+    if project is None or project.deleted_at is None:
+        raise HTTPException(404, "project not found")
+    project.deleted_at = None
+    project.deleted_by = None
+    await db.commit()
+    await audit.write(
+        event_type="project_restored",
+        actor_user_id=user.id,
+        target_project_id=project_id,
+        details={
+            "project_id": str(project_id),
+            "code": project.code,
+            "name": project.name,
+            "restored_by": str(user.id),
+        },
+        **ctx,
+    )
+    return {"ok": True, "project_id": str(project_id)}
 
 
 _PROJECT_ROLES: tuple[str, ...] = ("admin", "uploader", "downloader", "viewer")
@@ -406,7 +548,8 @@ async def get_project(
 ) -> ProjectOut:
     user_id = user.id
     project = await db.get(Project, project_id)
-    if not project:
+    # F6.4:已删除项目对所有人(含 system admin 直访)一律 404(深隐藏)
+    if not project or project.deleted_at is not None:
         raise HTTPException(404, "project not found")
 
     if not is_system_admin and project.visibility != "public":

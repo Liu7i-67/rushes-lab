@@ -2,16 +2,20 @@
  * /admin/users — 本地用户管理(#150 数据源本地化)。
  * 系统 admin 创建本地账号(临时密码 + must_change_password)、停用/启用、重置密码。
  * backend 对目录接口 enforce system admin;前端仅做体验提示。
+ * 管理后台优化:新建用户可选用户组(F3.1)、行内编辑姓名/邮箱/用户组(F4.1)、
+ * 服务端分页 + 总数(F5.2)。
  */
 import {
-  Alert, App, Button, Empty, Form, Input, Modal, Select, Skeleton, Tooltip,
+  Alert, App, Button, Empty, Form, Input, Modal, Pagination, Select, Skeleton, Tooltip,
 } from 'antd';
-import { KeyRound, Power, RotateCcw, UserPlus } from 'lucide-react';
+import { KeyRound, Pencil, Power, RotateCcw, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import dayjs from 'dayjs';
-import { useMe, useCreateUser, useDisableUser, useEnableUser,
-         useDirectoryUsers, useResetUserPassword } from '../api/hooks';
+import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail, useDirectoryGroups,
+         useDisableUser, useEnableUser, useDirectoryUsers, useResetUserPassword,
+         USERS_PAGE_SIZE } from '../api/hooks';
 import { errorMessage } from '../api/client';
+import { copyToClipboard } from '../utils/copy';
 import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryUser, DirectoryUserCreateOut } from '../api/types';
 
@@ -19,7 +23,13 @@ export default function AdminUsersPage() {
   const { data: me } = useMe();
   const [q, setQ] = useState('');
   const [isActive, setIsActive] = useState<boolean | undefined>(undefined);
-  const { data, isLoading } = useDirectoryUsers({ q, is_active: isActive });
+  // F5.2: 服务端分页(pageSize 20;q/is_active 筛选变化重置回第 1 页)
+  const [page, setPage] = useState(1);
+  const { data, isLoading } = useDirectoryUsers({
+    q, is_active: isActive, limit: USERS_PAGE_SIZE, offset: (page - 1) * USERS_PAGE_SIZE,
+  });
+  const handleQ = (v: string) => { setQ(v); setPage(1); };
+  const handleIsActive = (v: boolean | undefined) => { setIsActive(v); setPage(1); };
 
   if (me && !me.is_system_admin) {
     return (
@@ -36,7 +46,8 @@ export default function AdminUsersPage() {
   return (
     <div className="ms-enter">
       <UsersHeader />
-      <FilterBar q={q} setQ={setQ} isActive={isActive} setIsActive={setIsActive} />
+      <FilterBar q={q} setQ={handleQ} isActive={isActive} setIsActive={handleIsActive}
+                 total={data?.total} />
       {isLoading ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {[0, 1, 2].map(i => (
@@ -48,14 +59,26 @@ export default function AdminUsersPage() {
             </div>
           ))}
         </div>
-      ) : !data || data.length === 0 ? (
+      ) : !data || data.items.length === 0 ? (
         <Empty image={Empty.PRESENTED_IMAGE_SIMPLE}
                description={<span style={{ color: 'var(--ms-ink-subtle)' }}>无用户</span>}
                style={{ marginTop: 60 }} />
       ) : (
         <div className="ms-enter-stagger"
              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {data.map(u => <UserRow key={u.id} user={u} />)}
+          {data.items.map(u => <UserRow key={u.id} user={u} />)}
+        </div>
+      )}
+      {data && data.total > USERS_PAGE_SIZE && (
+        <div style={{ marginTop: 16, display: 'flex', justifyContent: 'flex-end' }}>
+          <Pagination
+            current={page}
+            pageSize={USERS_PAGE_SIZE}
+            total={data.total}
+            showSizeChanger={false}
+            showTotal={(t) => `共 ${t} 名用户`}
+            onChange={setPage}
+          />
         </div>
       )}
     </div>
@@ -88,9 +111,10 @@ function UsersHeader() {
   );
 }
 
-function FilterBar({ q, setQ, isActive, setIsActive }: {
+function FilterBar({ q, setQ, isActive, setIsActive, total }: {
   q: string; setQ: (v: string) => void;
   isActive: boolean | undefined; setIsActive: (v: boolean | undefined) => void;
+  total?: number;
 }) {
   const compact = useCompactViewport();
   return (
@@ -110,6 +134,12 @@ function FilterBar({ q, setQ, isActive, setIsActive }: {
           { value: true, label: '启用' },
           { value: false, label: '停用' },
         ]} />
+      {/* F5.2: 列表头部总数 */}
+      {total !== undefined && (
+        <span style={{ marginLeft: 'auto', fontSize: 12.5, color: 'var(--ms-ink-muted)' }}>
+          共 <span className="ms-mono" style={{ color: 'var(--ms-ink)' }}>{total}</span> 名用户
+        </span>
+      )}
     </div>
   );
 }
@@ -120,6 +150,8 @@ function UserRow({ user }: { user: DirectoryUser }) {
   const enable = useEnableUser();
   const reset = useResetUserPassword();
   const [pw, setPw] = useState<string | null>(null);
+  // F4.1: 编辑姓名 / 邮箱 / 所属用户组
+  const [editOpen, setEditOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const compact = useCompactViewport();
 
@@ -183,6 +215,10 @@ function UserRow({ user }: { user: DirectoryUser }) {
         创建于 {dayjs(user.created_at).format('YYYY-MM-DD')}
       </span>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        <Button size="small" icon={<Pencil size={12} strokeWidth={2} />}
+                onClick={() => setEditOpen(true)}>
+          编辑
+        </Button>
         {user.is_active ? (
           <Button size="small" danger icon={<Power size={12} strokeWidth={2} />}
                   loading={busy} onClick={doDisable}>
@@ -200,6 +236,8 @@ function UserRow({ user }: { user: DirectoryUser }) {
         </Button>
       </div>
       <TempPasswordModal open={!!pw} password={pw} onClose={() => setPw(null)} />
+      {/* F4.1: 条件挂载 — 打开才发详情请求(编辑弹窗挂每行,常挂会 N 倍请求) */}
+      {editOpen && <EditUserModal user={user} onClose={() => setEditOpen(false)} />}
     </div>
   );
 }
@@ -234,6 +272,8 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const [created, setCreated] = useState<DirectoryUserCreateOut | null>(null);
+  // F3.1: 用户组多选(可搜索;不选可提交)
+  const { data: groups } = useDirectoryGroups('');
 
   const submit = async () => {
     try {
@@ -242,6 +282,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
         username: v.username.trim(),
         name: v.name.trim(),
         email: v.email?.trim() || undefined,
+        group_ids: (v.group_ids ?? []) as string[],
       });
       setCreated(out);
       message.success(`用户 "${out.name}" 已创建`);
@@ -272,6 +313,18 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
           <Form.Item name="email" label="邮箱(可选)">
             <Input placeholder="zhangsan@example.com" />
           </Form.Item>
+          <Form.Item name="group_ids" label="用户组(可选)"
+                     extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
+            <Select
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              allowClear
+              placeholder="选择用户组(可多选)"
+              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+              notFoundContent="无用户组"
+            />
+          </Form.Item>
           <Alert type="info" showIcon style={{ marginBottom: 8 }}
                  message="创建成功后会显示一次性临时密码,用户首次登录需改密。" />
         </Form>
@@ -283,19 +336,98 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   );
 }
 
+// ─── 编辑用户(F4.1:姓名 / 邮箱 / 所属用户组)──────────────────────────────
+/** 条件挂载(行内仅在打开时 render):detail/groups 请求只在弹窗打开时发出。*/
+function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => void }) {
+  const [form] = Form.useForm();
+  const { message } = App.useApp();
+  // 回显:GET /admin/directory/users/{id}(含 group_ids,§2)
+  const { data: detail } = useDirectoryUserDetail(user.id);
+  const { data: groups } = useDirectoryGroups('');
+  const update = useUpdateUser();
+
+  // 回显走 initialValues 数据驱动,不用 setFieldsValue:本组件按次开关条件挂载
+  // (每次打开都是新 Form 实例),缓存命中时 detail 首帧即到,useEffect 里的
+  // setFieldsValue 会先于 Form 字段注册执行 → 二次打开 name/email/组全空(P1 根治)。
+  // detail 未到时不渲染 Form(只渲染 Skeleton),字段注册时初值必然已就位。
+  // username 只读不入表单
+  const submit = async () => {
+    // 「详情未回显前保存禁用」双保险:按钮 disabled 之外这里再挡一层 ——
+    // 无 detail 提交会以空 group_ids 全量同步,把用户移出全部组
+    if (!detail) return;
+    try {
+      const v = await form.validateFields();
+      await update.mutateAsync({
+        userId: user.id,
+        body: {
+          name: v.name.trim(),
+          // D6: 留空 = 显式提交 null 清空
+          email: v.email?.trim() || null,
+          // D3: 全量同步终态(清空选择 = 移出全部组;后端 diff 加/移双写)
+          group_ids: (v.group_ids ?? []) as string[],
+        },
+      });
+      message.success(`已保存 ${user.name} 的资料`);
+      onClose();
+    } catch (e) {
+      if ((e as { errorFields?: unknown }).errorFields) return;
+      message.error(errorMessage(e, '保存失败'));
+    }
+  };
+
+  return (
+    <Modal title={`编辑用户 — ${user.name}`} open onCancel={onClose}
+           destroyOnHidden confirmLoading={update.isPending}
+           onOk={submit} okText="保存"
+           okButtonProps={{ disabled: !detail }}>
+      {!detail ? (
+        <Skeleton active paragraph={{ rows: 2 }} style={{ marginBottom: 12 }} />
+      ) : (
+        <Form form={form} layout="vertical"
+              initialValues={{
+                name: detail.name,
+                email: detail.email ?? '',
+                group_ids: detail.group_ids ?? [],
+              }}>
+          <Form.Item label="登录名" extra="创建后不可改">
+            <Input value={user.username || '—'} disabled />
+          </Form.Item>
+          <Form.Item name="name" label="姓名" rules={[{ required: true, max: 128 }]}>
+            <Input placeholder="张三" autoFocus />
+          </Form.Item>
+          <Form.Item name="email" label="邮箱"
+                     extra="留空提交 = 清空邮箱">
+            <Input placeholder="zhangsan@example.com" />
+          </Form.Item>
+          <Form.Item name="group_ids" label="所属用户组"
+                     extra="保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限">
+            <Select
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              allowClear
+              placeholder="选择用户组(可多选)"
+              loading={!groups}
+              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+              notFoundContent="无用户组"
+            />
+          </Form.Item>
+        </Form>
+      )}
+    </Modal>
+  );
+}
+
 // ─── 临时密码展示(创建 / 重置共用,只回显一次)────────────────────────────
 function TempPasswordModal({ open, password, onClose, title }: {
   open: boolean; password: string | null; onClose: () => void; title?: string;
 }) {
   const { message } = App.useApp();
-  const copy = async () => {
+  // F1: 统一复制入口 — HTTP 非安全上下文自动降级 execCommand
+  const copy = () => {
     if (!password) return;
-    try {
-      await navigator.clipboard.writeText(password);
-      message.success('已复制');
-    } catch {
-      message.error('复制失败,请手动选中');
-    }
+    if (copyToClipboard(password)) message.success('已复制');
+    else message.error('复制失败,请手动选中');
   };
   return (
     <Modal title={title || '临时密码'} open={open} onCancel={onClose}

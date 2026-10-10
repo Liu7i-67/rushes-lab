@@ -33,12 +33,17 @@ interface AuditEvent {
   details: Record<string, unknown>;
 }
 
-// 常用 event_type 预设(下拉)— 可以输自定义
+// 常用 event_type 预设(下拉)— 可以输自定义。
+// 本期新增:项目逻辑删除/恢复、本地用户 CRUD、用户组成员变更
+// (字符串与后端 audit.write 的 event_type 逐一核对过,见 api/app/routers/)
 const EVENT_TYPES = [
   '', 'upload', 'download', 'signed_url_issued',
   'approval_submitted', 'approval_state_changed', 'approval_notified',
   'access_denied',
-  'project_created', 'project_member_added', 'project_member_removed',
+  'project_created', 'project_deleted', 'project_restored',
+  'project_member_added', 'project_member_removed',
+  'user_created', 'user_updated',
+  'group_member_added', 'group_member_removed',
   'folder_created', 'sensitive_folder_invited', 'sensitive_folder_revoked',
   'invite_notified', 'share_link_created', 'share_link_accessed',
 ];

@@ -1,6 +1,7 @@
 """Pydantic API I/O models — Phase B-2 first batch。"""
 from __future__ import annotations
 
+import re
 import unicodedata
 import uuid
 from datetime import datetime
@@ -420,3 +421,118 @@ class BaiduReviveOut(BaseModel):
 
     finalized: bool = True
     status: str                                 # 复活后的目标状态(enumerating/running)
+
+
+# ─── admin directory 用户管理(2026-10-10 F3/F4/F5,B2 集中定义)────────────────
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _validate_email_format(value: str | None) -> str | None:
+    """email 轻量格式校验(D6:仅格式,不发验证邮件;不引 email-validator 新依赖)。
+
+    None 放行(未填 / 显式清空);空白串视为未填归一成 None(兼容旧客户端
+    email="" 的创建行为);其余须形如 local@domain.tld 的宽松格式。
+    """
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    if not _EMAIL_RE.fullmatch(v):
+        raise ValueError("email 格式不正确")
+    return v
+
+
+def _validate_name_format(value: str | None) -> str | None:
+    """name 轻量校验(契约「提供则须非空」,POST/PATCH 同口径)。
+
+    None 放行(PATCH 未传 = 不改);strip 后为空(空串 / 全空白)→
+    ValueError(422);其余返回去首尾空白后的值入库。
+    """
+    if value is None:
+        return None
+    v = value.strip()
+    if not v:
+        raise ValueError("name 不能为空 / 全空白")
+    return v
+
+
+class DirectoryUserOut(BaseModel):
+    """admin 目录用户条目(列表分页项 / 编辑响应基类;不泄露 password_hash)。"""
+
+    id: uuid.UUID
+    username: str | None
+    name: str
+    email: str | None
+    is_active: bool
+    must_change_password: bool
+    created_at: datetime
+    resigned_at: datetime | None
+
+
+class UserCreateIn(BaseModel):
+    """POST /admin/directory/users 入参。
+
+    username 建后即定(D7);email 轻格式校验(D6);group_ids=F3 建用户同时
+    入组(默认 [],≤50 对齐权限模板上限 D9),组存在性在路由内先全量校验
+    (任一无效 → 422,用户不创建,F3.3 原子)。
+    """
+
+    username: str = Field(..., min_length=2, max_length=64,
+                          pattern=r"^[a-zA-Z0-9._-]+$",
+                          description="登录名:拼音/工号友好,不强制邮箱格式")
+    name: str = Field(..., min_length=1, max_length=128)
+    email: str | None = Field(None, max_length=255)
+    # ≤50 上限(D9)在路由层校验:契约要求超限 422 detail 含 invalid_group_ids,
+    # Pydantic max_length 的校验错误文案不带该标识
+    group_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @field_validator("name")
+    @classmethod
+    def _name_format(cls, v: str | None) -> str | None:
+        return _validate_name_format(v)
+
+    @field_validator("email")
+    @classmethod
+    def _email_format(cls, v: str | None) -> str | None:
+        return _validate_email_format(v)
+
+
+class UserUpdateIn(BaseModel):
+    """PATCH /admin/directory/users/{id} 入参(§3):全部可选,缺省=不改。
+
+    name 提供则须非空;email 显式 null=清空(D6,路由以 model_fields_set
+    区分「未传」与「传 null」);group_ids 全量同步终态(D3,以勾选集为准
+    diff 加/移);username 不可改(D7 建后即定)。
+    """
+
+    name: str | None = Field(None, min_length=1, max_length=128)
+    email: str | None = Field(None, max_length=255)
+    # ≤50 上限(D9)同 UserCreateIn:路由层校验,422 带 invalid_group_ids 标识
+    group_ids: list[uuid.UUID] | None = Field(None)
+
+    @field_validator("name")
+    @classmethod
+    def _name_format(cls, v: str | None) -> str | None:
+        return _validate_name_format(v)
+
+    @field_validator("email")
+    @classmethod
+    def _email_format(cls, v: str | None) -> str | None:
+        return _validate_email_format(v)
+
+
+class DirectoryUserDetailOut(DirectoryUserOut):
+    """§2 用户详情 = DirectoryUserOut + 所属组(group_names 与 group_ids 同序)。"""
+
+    group_ids: list[uuid.UUID]
+    group_names: list[str]
+
+
+class DirectoryUsersPageOut(BaseModel):
+    """§4 用户列表分页(D4 破坏性改版,前端同批改);total=同条件(q/is_active)count。"""
+
+    items: list[DirectoryUserOut]
+    total: int
+    limit: int
+    offset: int

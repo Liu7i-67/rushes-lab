@@ -3,8 +3,8 @@
  *
  * 提交后展示 landing_url(可复制)+ 有效期;接收人 / 留言 / IM 推送全部移除。
  * 移动端增强(方案 §3.4):compact 结果态 = 全宽大按钮;navigator.share 可用时优先
- * (拉起系统/微信转发面板);复制用 navigator.clipboard,非 HTTPS(内网 HTTP)落
- * execCommand('copy') 兜底。
+ * (拉起系统/微信转发面板);复制统一走 utils/copy 的 copyToClipboard
+ * (内网 HTTP 非安全上下文降级用,统一入口)。
  */
 import { App, Button, Form, Input, Modal, Select, Space, Tag, Typography } from 'antd';
 import { CopyOutlined, ShareAltOutlined } from '@ant-design/icons';
@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react';
 import { useShareAsset, useShareFolder } from '../api/hooks';
 import { useCompactViewport } from '../lib/use-viewports';
 import { errorMessage } from '../api/client';
+import { copyToClipboard } from '../utils/copy';
 import type { ShareCreateOut } from '../api/types';
 
 interface Props {
@@ -27,27 +28,10 @@ const TTL_OPTIONS = [
   { label: '30 天', value: 30 * 86400 },
 ];
 
-// navigator.clipboard 仅安全上下文可用;失败(HTTP 内网)落 execCommand 兜底
+// 统一复制入口(内网 HTTP 非安全上下文降级在 utils/copy 内处理);薄壳保留
+// async 签名,兼容本文件既有 await 调用点与 boolean 返回语义
 async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.setAttribute('readonly', '');
-      ta.style.position = 'fixed';
-      ta.style.opacity = '0';
-      document.body.appendChild(ta);
-      ta.select();
-      const ok = document.execCommand('copy');
-      ta.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
+  return copyToClipboard(text);
 }
 
 export function ShareModal({ open, onClose, target }: Props) {

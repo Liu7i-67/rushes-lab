@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useCreateRequestLink, type RequestLinkCreateOut } from '../api/hooks';
 import { UserPicker } from './UserPicker';
 import { errorMessage } from '../api/client';
+import { copyToClipboard } from '../utils/copy';
 
 interface Props {
   open: boolean;
@@ -64,14 +65,13 @@ export function RequestLinkCreateModal({ open, onClose, targetType, targetId, ta
     }
   };
 
-  const copy = async () => {
+  const copy = () => {
     if (!result) return;
-    try {
-      await navigator.clipboard.writeText(result.landing_url);
+    if (copyToClipboard(result.landing_url)) {
       setCopied(true);
       message.success('链接已复制');
       setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       message.error('复制失败,请手动选中链接');
     }
   };
