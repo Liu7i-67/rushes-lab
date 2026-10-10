@@ -13,7 +13,7 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 | --- | --- | --- |
 | SSH 别名 | `hh2`（登录身份 **msdev**） | **`hh2-prod`（登录身份 huanhua）——prod 必须走这个别名** |
 | 远端目录 | `/home/msdev/ms` | `/home/huanhua/ms` |
-| 入口 | `http://192.168.110.221:8090`（外网 `http://47.108.196.211:8080`） | `http://192.168.110.221`（外网 `:18080`） |
+| 入口 | `http://192.168.110.221:8090`（外网 `http://47.108.196.211:8080`） | `http://192.168.110.221`（外网 `:18080`）；HTTPS `bucket.taoxiplan.com`（§1.1） |
 | 容器 | `ms-api-dev` / `ms-worker-dev` / `ms-db-dev` | `ms-api` / `ms-worker` / `ms-db` |
 | OpenFGA 容器 → 宿主 API 端口 | `poc-openfga-dev` → `127.0.0.1:8189` | `poc-openfga` → `127.0.0.1:8089` |
 | OpenFGA store id | 各自 `~/ms/api/.env` 的 `OPENFGA_STORE_ID`（**两环境 store 不同，别混**） | 同左 |
@@ -25,6 +25,17 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 - `.env` 与 `docker-compose.override.yml` 在目标机上从不随部署覆盖。
 - dev 的 nginx 把 `/healthz` 路由到 MinIO（既有配置），**API 存活用 `/api/v1/auth/me`（未登录 401）判断**。
 - prod 是 `ENV=production`：`X-User-Id` dev 通道**失效**，业务级实测（如 download-link 语义）需要真实账号登录；代码级核验用容器内 grep。
+
+### 1.1 prod HTTPS 入口（bucket.taoxiplan.com，2026-10-10 新增，百度网盘开放平台要求 https）
+
+- 由 `poc-nginx` 容器同进程提供：prod 的 `docker-compose.override.yml`（宿主本地文件，部署不同步）追加了 `ports: 443:443` + certs/conf 两处挂载。重建：`cd ~/ms/poc/minio && docker compose up -d poc-nginx`（prod 入口秒级 blip）。
+- **证书**（Certimate 定时续签重传，SSH 登录用户 `huanhua`——在 docker 组，已实测可执行 reload）：
+  - `/home/huanhua/ssl/certs/bucket.taoxiplan.com/fullchain.pem` + `privkey.pem`（PEM/fullchain；整目录挂载进容器 `/etc/nginx/certs:ro`，文件替换即时可见）
+  - Certimate 部署后命令：`docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s reload`
+  - 2026-10-10 落地时为自签占位证书，正式证书到达后即被覆盖。
+- **443 vhost conf** = `/home/huanhua/ssl/conf.d/bucket.taoxiplan.conf`（单文件挂载为容器内 `conf.d/zz-ssl-bucket-taoxiplan.conf`）。⚠ **它是 `poc/minio/nginx/default.conf` 中 server(80) 的镜像副本（宿主本地，rsync 部署不会同步它）——default.conf 的路由/location 变更必须手动同步到该文件并 reload**，否则 https 域名入口与 `:18080` 入口行为漂移。
+- 公网侧待办（2026-10-10 时点，均需用户/网关侧操作）：DNS A 记录 `bucket.taoxiplan.com → 47.108.196.211` 未配；公网 443（建议 80 一起）→ `192.168.110.221` 的网关映射未配（当前公网实测仅 8080/18080 通，故 Certimate 只能走 DNS-01 验证）。
+- 域名正式启用时的后续切换（勿提前做）：`api/.env` 的 `MINIO_ENDPOINT_PUBLIC`/`MINIO_THUMBNAIL_ENDPOINT_PUBLIC`/`web_app_base_url`（CORS 从它 derive）与 `poc/minio/.env` 的 `MINIO_SERVER_URL` 切到 `https://bucket.taoxiplan.com`，`.env` 变更须 `docker compose up -d --force-recreate`（坑同 §2 第 2 条）。
 
 ## 2. 部署前预检（每次都做）
 
