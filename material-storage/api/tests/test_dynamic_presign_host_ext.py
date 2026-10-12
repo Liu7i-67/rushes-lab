@@ -5,13 +5,14 @@
 helpers(import 复用,不改正文件)。结论以 docstring 标注编号,对应测试报告:
 
   P1-1  Host/XFP 字符集合法但语义非法(裸 IPv6「::1」/ 多冒号「a:b:c」/ XFP=wss)
-        → _dynamic_signer 构造 boto3 client 抛异常未捕获 → 5xx,违反 D3
-        「校验失败回落静态不报错」(xfail 用例钉住,修复后转 XPASS 提醒摘标记)
-  P2-1  _dynamic_signers 按 Host 头缓存且无上限:Host 是客户端可控输入,
-        已认证用户轮换 Host 可让单 worker 进程无限建 boto3 client(内存缓涨)
-  P2-2  缓存键未归一大小写:同入口大小写两种形态各建一份 client(纯冗余,
-        签名不受影响 —— botocore 签名时 host 小写化,容器内对真 MinIO raw
-        socket 实测:大写签 URL + 浏览器小写 Host = 404 通过)
+        → 曾让 _dynamic_signer 构造 boto3 client 抛异常 → 5xx,违反 D3。
+        修复(2026-10-12):scheme 白名单 {http,https}(wss → None 回落)+
+        _signer_for 构造失败捕获回落静态(不缓存不抛);test_ext_1(scheme)/
+        test_ext_2 / 容器级 c6 已按新契约转正
+  P2-1  _dynamic_signers 按 Host 头(客户端可控)缓存曾无上限 → 修复:常数上限
+        MAX_DYNAMIC_SIGNERS=16,超限回落静态不新建(test_ext_3 按新契约断言)
+  P2-2  缓存键曾未归一大小写(同入口两形态各建一份)→ 修复:request_base 与
+        缓存键同步 lower() 归一,同入口共用同一 client(test_ext_3 按新契约断言)
   观察  XFP 多值/大写 → uvicorn ProxyHeadersMiddleware 只认 {http,https,ws,wss}
         精确值,其余一律不改 scheme → 安全回落 http(无崩溃无畸形 URL);
         下划线 host / 逗号 host → request_base_from 返 None 回落静态。
@@ -82,58 +83,71 @@ def test_ext_1_request_base_from_rejects_comma_and_underscore_hosts() -> None:
     assert request_base_from(mk_request(host="bucket_zone.example.com")) is None
 
 
-def test_ext_1_request_base_from_scheme_not_validated_wss_passes_through() -> None:
-    """P1-1c 前置证据:scheme 取 request.url.scheme 且不校验 —— XFP=wss 被 uvicorn
-    中间件接受(http scope 也原样写 scope["scheme"]),拼出「wss://host」进
-    _dynamic_signer → botocore EndpointResolutionError → 5xx(容器级 c8 实测)。"""
+def test_ext_1_request_base_from_scheme_whitelist_rejects_wss() -> None:
+    """P1-1c 修复后契约:scheme 白名单 {http,https} —— XFP=wss 被 uvicorn 原样
+    写进 scope 时 request_base_from 返 None 回落静态(修复前拼出「wss://host」进
+    _dynamic_signer → botocore EndpointResolutionError → 5xx,容器级 c8 实锤)。"""
     req: dict[str, Any] = dict(mk_request(host="bucket.taoxiplan.com").scope)
     req["scheme"] = "wss"
-    assert request_base_from(Request(req)) == "wss://bucket.taoxiplan.com"
+    assert request_base_from(Request(req)) is None
 
 
-def test_ext_2_dynamic_signer_invalid_endpoint_raises_documented_p1_1() -> None:
-    """P1-1 单元级证据(走真 boto3,不能 monkeypatch —— ValueError 来自 botocore
-    真实 endpoint 校验):charset 合法但语义非法的 request_base(http://::1)让
-    _dynamic_signer 构造 client 抛 ValueError 未捕获 → 容器级实测 500,违反 D3
-    「校验失败回落静态不报错」。修复后本用例应改为回落断言(容器级 c6 的 xfail
-    即期望形态,修复后转 XPASS 提醒摘标记)。同时验证失败路径不污染缓存。"""
-    svc = PresignService(mk_settings())
-    with pytest.raises(ValueError, match=r"[Ii]nvalid endpoint"):
-        svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base="http://::1")
-    assert svc._dynamic_signers == {}  # 失败路径不在缓存留半成品(dict 赋值在构造成功后)
+def test_ext_2_dynamic_signer_invalid_endpoint_falls_back_to_static() -> None:
+    """P1-1 修复后契约(D3,走真 boto3 —— 异常来自 botocore 真实 endpoint 校验,
+    不能 monkeypatch):charset 合法但语义非法的 request_base 让 botocore 拒签 →
+    _signer_for 捕获后 log.warning 回落静态 signer,不报错(URL 前缀=静态
+    MINIO_ENDPOINT_PUBLIC);失败路径不污染缓存(dict 赋值在构造成功后)。
+    两种实锤形态:「http://::1」client 构造期抛 ValueError、「http://a:b:c」
+    构造成功但 generate_presigned_url 的 endpoint ruleset 解析抛
+    EndpointResolutionError(canary 签名提前暴露)。容器级 c6 为同款契约端到端。"""
+    settings = mk_settings()
+    svc = PresignService(settings)
+    for bad_base in ("http://::1", "http://a:b:c"):
+        url = svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base=bad_base)
+        assert url.startswith(settings.minio_endpoint_public + "/"), bad_base
+    assert svc._dynamic_signers == {}  # 失败路径不在缓存留半成品
 
 
-def test_ext_3_dynamic_signer_cache_unbounded_by_client_controlled_host(
+def test_ext_3_dynamic_signer_cache_capped_beyond_limit_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P2-1:_dynamic_signers 按 Host 头(客户端可控)缓存且无上限/淘汰 ——
-    已认证用户轮换 50 个合法 host 即产生 50 个 boto3 client(单进程内存缓涨,
-    重启才释放;入口数量有限的注释假设不防伪造输入)。现状按设计如此,只钉证据。"""
+    """P2-1 修复后契约:缓存有常数上限(MAX_DYNAMIC_SIGNERS=16)—— 上限内逐
+    host 正常建 client;超限不再新建,回落静态 endpoint 不报错(防已认证用户
+    轮换客户端可控 Host 刷单进程内存;超限请求只是 URL host 不跟随入口)。"""
     spy = Boto3ClientSpy()
     monkeypatch.setattr(boto3, "client", spy)
     svc = PresignService(mk_settings())
     spy.created.clear()
     spy.clients.clear()
-    for i in range(50):
-        svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base=f"http://10.0.0.{i % 256}.host{i}.example")
-    assert len(spy.created) == 50           # 每个新 host 都新建 client
-    assert len(svc._dynamic_signers) == 50  # 且永久留在缓存
+    urls = [
+        svc.sign_get_url(
+            "ms-proj", "f/a.mp4", 600,
+            request_base=f"http://10.0.0.{i % 256}.host{i}.example",
+        )
+        for i in range(20)
+    ]
+    assert len(spy.created) == 16           # 上限内逐 host 新建,达上限后不再建
+    assert len(svc._dynamic_signers) == 16
+    for u in urls[16:]:
+        assert u.startswith("http://localhost:9000/")  # 超限回落静态,不报错
 
 
-def test_ext_3_cache_key_case_sensitive_same_entry_duplicated(
+def test_ext_3_cache_key_case_normalized_same_entry_single_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """P2-2 佐证:同入口大小写两形态各占一份缓存(签名不受影响 —— botocore
-    签名时 host 小写化,大写签 URL 浏览器可用,容器内真 MinIO raw socket 已验)。
-    纯冗余:大写形态只是多一份 client,属可接受的观察项。"""
+    """P2-2 修复后契约:缓存键大小写归一 —— 同入口大小写两形态共用同一
+    client(浏览器对 host 本就小写化、botocore 签名时亦小写化,归一不改
+    签名语义,只消冗余;URL 回显同一 client_id)。"""
     spy = Boto3ClientSpy()
     monkeypatch.setattr(boto3, "client", spy)
     svc = PresignService(mk_settings())
     spy.created.clear()
     spy.clients.clear()
-    svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base="https://BUCKET.TaoxiPlan.COM")
-    svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base="https://bucket.taoxiplan.com")
-    assert len(spy.created) == 2  # 未归一:两份等价 client
+    u1 = svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base="https://BUCKET.TaoxiPlan.COM")
+    u2 = svc.sign_get_url("ms-proj", "f/a.mp4", 600, request_base="https://bucket.taoxiplan.com")
+    assert len(spy.created) == 1            # 归一后同键:仅一份 client
+    assert len(svc._dynamic_signers) == 1
+    assert u1 == u2
 
 
 def test_ext_4_dynamic_and_static_signers_interleave_cleanly(
@@ -312,14 +326,11 @@ async def test_ext_c5_xfp_invalid_values_downgrade_to_http_gracefully(client: As
 
 
 @pytest.mark.asyncio
-@pytest.mark.xfail(
-    reason="P1-1:Host/XFP 字符集合法但语义非法(::1 / a:b:c / wss)→ "
-    "动态 signer 构造抛异常 → 500,违反 D3 不报错约定;修复后转 XPASS",
-    strict=False,
-)
 async def test_ext_c6_semantically_invalid_host_or_scheme_returns_gracefully(client: AsyncClient) -> None:
     """D3 契约(容器级):裸 IPv6 / 多冒号 Host、XFP=wss 应回落静态 200 而非 500;
-    且非法请求不影响后续合法请求(无缓存污染)。"""
+    且非法请求不影响后续合法请求(无缓存污染)。P1-1 修复后转正(原 xfail 钉住
+    「动态 signer 构造抛异常 → 500」的现状,scheme 白名单 + 构造失败回落静态
+    后应直接通过)。"""
     await _skip_if_no_dev_channel(client)
     uniq = _uuid.uuid4().hex[:8]
     asset_id = ""

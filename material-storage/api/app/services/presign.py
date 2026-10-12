@@ -23,6 +23,12 @@
   传入时用按入口缓存的 signer client 签名,URL 的 scheme/host 跟随浏览器
   实际访问入口;不传回落静态 endpoint(零行为变化)。内部 client
   (create/complete/head/list/delete/copy/sts)不受影响,始终走容器内 endpoint。
+  防刷与回落(D3 可用性优先):Host 头是客户端可控输入 —— request_base_from
+  只放行 scheme∈{http,https}(XFP 透传的 wss 等一律回落)+ 字符集校验 +
+  host 小写归一(浏览器对 host 本就小写化,签名语义不变);即便如此仍可能有
+  字符集合法但语义非法的 base(如裸 IPv6「::1」)让 botocore 拒绝建 client,
+  构造失败即 log.warning 回落静态 signer,不缓存不报错;动态缓存另有常数上限
+  MAX_DYNAMIC_SIGNERS,超限回落静态,防已认证用户轮换 Host 刷单进程内存。
 """
 from __future__ import annotations
 
@@ -43,6 +49,16 @@ log = logging.getLogger(__name__)
 # 自身拿到的 URL 形态,对象访问仍要过权限 + MinIO 签名校验,无提权面)
 _HOST_PATTERN = re.compile(r"^[A-Za-z0-9.\-:\[\]]+$")
 
+# scheme 白名单:X-Forwarded-Proto 客户端可控且 uvicorn 原样透传(如 wss 直接
+# 写进 scope["scheme"]),拼进 endpoint botocore 无法解析 → 非 http/https 一律
+# 返 None 回落静态(D3 不报错)
+_VALID_SCHEMES = frozenset({"http", "https"})
+
+# 动态 signer 缓存上限:Host 头客户端可控,已认证用户轮换合法 Host 即可逐个
+# 建 boto3 client 刷单进程内存 —— 常数上限封顶,超限不再新建、回落静态
+# endpoint(签名仍可用,只是 host 不跟随入口;真实部署入口数远小于该值)
+MAX_DYNAMIC_SIGNERS = 16
+
 
 def request_base_from(request: Request) -> str | None:
     """从请求上下文取预签名 URL 的 base(f"{scheme}://{host}")。
@@ -51,12 +67,18 @@ def request_base_from(request: Request) -> str | None:
     request,与 nginx 侧 $http_host 同源;$host 会剥端口);scheme 取
     request.url.scheme(uvicorn 开 --proxy-headers,nginx 透传
     X-Forwarded-Proto 后 https 入口即 https)。Host 缺失 / 超长(>253)/
-    非法字符返回 None,调用方回落静态 endpoint。
+    非法字符、scheme 不在 {http,https} 白名单(XFP 客户端可控,uvicorn
+    原样透传 wss 等)返回 None,调用方回落静态 endpoint。host 一律
+    lower() 归一:浏览器对 host 本就小写化(DNS 大小写不敏感,botocore
+    签名时亦小写化),归一不改签名语义,且让动态缓存同键不建冗余 client。
     """
     host = request.headers.get("host") or ""
     if not host or len(host) > 253 or not _HOST_PATTERN.match(host):
         return None
-    return f"{request.url.scheme}://{host}"
+    scheme = request.url.scheme
+    if scheme not in _VALID_SCHEMES:
+        return None
+    return f"{scheme}://{host.lower()}"
 
 
 class PresignService:
@@ -103,29 +125,70 @@ class PresignService:
             config=Config(signature_version="s3v4"),
         )
         # 动态签发:按请求入口 base(scheme://host[:port])缓存的 signer client,
-        # 首见创建 —— 入口由部署拓扑决定(https 域名 / 内网 IP / 外网 IP:端口),
-        # 数量有限,缓存不会失控,无需淘汰。原片与缩略图动态模式共用同一批
-        # client:两者 host 同源(nginx 按 /ms-thumbs/ 路径分流),client 只
-        # 关心 endpoint,bucket 由签名时的 Params 决定
+        # 首见创建。Host 头客户端可控 —— 缓存键做大小写归一 + 常数上限
+        # (MAX_DYNAMIC_SIGNERS,见 _signer_for),超限回落静态防刷内存。
+        # 原片与缩略图动态模式共用同一批 client:两者 host 同源(nginx 按
+        # /ms-thumbs/ 路径分流),client 只关心 endpoint,bucket 由签名时的
+        # Params 决定
         self._dynamic_signers: dict[str, Any] = {}
+        self._dynamic_cap_warned = False  # 达上限 log.warning 只报一次,不刷日志
 
-    def _dynamic_signer(self, request_base: str) -> Any:
-        """按入口 base 取缓存的 signer client(首见创建,缓存策略见 __init__)。
+    def _signer_for(self, request_base: str | None, fallback: Any) -> Any:
+        """按 request_base 取签名 client:None 回落 fallback(静态 signer),
+        否则取/建缓存的动态 client(缓存策略见 __init__ 与 MAX_DYNAMIC_SIGNERS)。
 
         与 _s3_signer 同构,仅 endpoint 换成 request_base:S3v4 签名把
         host(:port) 算进 canonical request,换 endpoint 即换签出 URL 的
         scheme://host,凭据与签名算法不变,MinIO 侧按 URL host 校验通过。
+        防御(D3 可用性优先,2026-10-12 修复):
+          - request_base 先 lower() 归一(与 request_base_from 同步,直调方
+            传大写也同键)—— host 语义本就大小写不敏感,签名不变;
+          - botocore 拒绝语义非法 endpoint 时(「http://::1」构造期抛
+            ValueError、「http://a:b:c」签名期抛 EndpointResolutionError)
+            捕获、log.warning 并回落 fallback,不缓存半成品不抛错;
+          - 缓存达 MAX_DYNAMIC_SIGNERS 不再新建,回落 fallback(防客户端
+            轮换 Host 刷单进程内存)。
         """
-        client = self._dynamic_signers.get(request_base)
-        if client is None:
+        if not request_base:
+            return fallback
+        base = request_base.lower()
+        client = self._dynamic_signers.get(base)
+        if client is not None:
+            return client
+        if len(self._dynamic_signers) >= MAX_DYNAMIC_SIGNERS:
+            if not self._dynamic_cap_warned:
+                log.warning(
+                    "动态 signer 缓存达上限 %s,后续未知入口回落静态 endpoint"
+                    "(防客户端轮换 Host 刷内存)", MAX_DYNAMIC_SIGNERS,
+                )
+                self._dynamic_cap_warned = True
+            return fallback
+        try:
             client = boto3.client(
                 "s3",
-                endpoint_url=request_base,
+                endpoint_url=base,
                 aws_access_key_id=self._settings.minio_access_key,
                 aws_secret_access_key=self._settings.minio_secret_key,
                 config=Config(signature_version="s3v4", region_name="us-east-1"),
             )
-            self._dynamic_signers[request_base] = client
+            # 构造成功 ≠ 可签名:部分语义非法 endpoint 逃过构造期校验(如
+            # 「http://::1」构造期抛 ValueError,而「http://a:b:c」要到
+            # generate_presigned_url 的 endpoint ruleset 解析才抛
+            # EndpointResolutionError)。做一次本地 canary 签名(纯计算不触网)
+            # 提前暴露:坏 client 不进缓存、整体回落静态(D3)。
+            client.generate_presigned_url(
+                "get_object", Params={"Bucket": "canary", "Key": "canary"}, ExpiresIn=1,
+            )
+        except Exception as e:
+            # botocore 的 endpoint 校验(ValueError:Invalid endpoint)与
+            # EndpointResolutionError 等:语义非法 base 不值得让 5 个接入点
+            # 全体 500,回落静态(D3)
+            log.warning(
+                "动态 signer 构造失败(request_base=%r:%s: %s),回落静态 endpoint",
+                base, type(e).__name__, e,
+            )
+            return fallback
+        self._dynamic_signers[base] = client
         return client
 
     def sign_get_url(
@@ -147,7 +210,7 @@ class PresignService:
         params: dict[str, Any] = {"Bucket": bucket, "Key": key}
         if response_content_disposition is not None:
             params["ResponseContentDisposition"] = response_content_disposition
-        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        signer = self._signer_for(request_base, self._s3_signer)
         return signer.generate_presigned_url(
             "get_object",
             Params=params,
@@ -190,7 +253,7 @@ class PresignService:
         self, bucket: str, key: str, expires_seconds: int, request_base: str | None = None
     ) -> str:
         """签 PUT presigned URL(现无调用方;4 个签名方法参数保持一致 — D2)。"""
-        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        signer = self._signer_for(request_base, self._s3_signer)
         return signer.generate_presigned_url(
             "put_object",
             Params={"Bucket": bucket, "Key": key},
@@ -209,9 +272,7 @@ class PresignService:
         nginx 按 /ms-thumbs/ 路径分流,host 同源);MINIO_THUMBNAIL_ENDPOINT_PUBLIC
         仅作无请求上下文的回落。
         """
-        signer = (
-            self._dynamic_signer(request_base) if request_base else self._s3_thumb_signer
-        )
+        signer = self._signer_for(request_base, self._s3_thumb_signer)
         return signer.generate_presigned_url(  # type: ignore[no-any-return]
             "get_object",
             Params={
@@ -238,7 +299,7 @@ class PresignService:
         expires_seconds: int,
         request_base: str | None = None,
     ) -> str:
-        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        signer = self._signer_for(request_base, self._s3_signer)
         return signer.generate_presigned_url(
             "upload_part",
             Params={
