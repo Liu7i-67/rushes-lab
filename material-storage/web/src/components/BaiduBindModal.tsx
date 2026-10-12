@@ -92,6 +92,7 @@ export function BaiduBindModal({ open, onClose }: Props) {
       {step === 0 ? (
         <Typography.Paragraph type="secondary" style={{ fontSize: 13 }}>
           点击上方按钮生成百度 OAuth 授权链接,用于确认<b>本人</b>百度账号身份。
+          网盘授权仅用于将所选目录<b>只读备份</b>至应用侧,不做修改、删除、分享。
         </Typography.Paragraph>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

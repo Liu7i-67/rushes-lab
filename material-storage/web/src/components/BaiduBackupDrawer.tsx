@@ -143,6 +143,12 @@ function BindingHeader({ open, onBind, onNewTask }: {
           绑定已过期:进行中的任务会失败终止,请重新绑定后用「全部重试失败」继续。
         </Typography.Text>
       )}
+      {/* 百度开放平台审核要求的授权用途告知(2026-10-12),文案为审核建议原文 */}
+      <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+        网盘授权仅用于将所选目录只读备份至应用侧,不做修改、删除、分享。详见
+        <a href="/privacy" target="_blank" rel="noreferrer">《隐私政策》</a>与
+        <a href="/terms" target="_blank" rel="noreferrer">《服务条款》</a>。
+      </Typography.Text>
     </div>
   );
 }
