@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +32,7 @@ from app.deps import (
 from app.routers.assets import attachment_content_disposition
 from app.services.audit import AuditService
 from app.services.permissions import PermissionsService
-from app.services.presign import PresignService
+from app.services.presign import PresignService, request_base_from
 from app.services.share_service import create_share, resolve_share
 from app.settings import get_settings
 
@@ -162,6 +162,7 @@ async def share_folder(
 @router.get("/{token}", response_model=ShareResolveOut)
 async def resolve(
     token: str,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     presign: PresignService = Depends(get_presign),
@@ -197,10 +198,13 @@ async def resolve(
         )
         ttl = settings.presigned_normal_ttl_seconds
         # 分享下载签发同走 attachment 语义(方案 §3.5「分享下载签发同改」):
-        # 该 download_url 在前端只用于「下载」按钮,无内联预览复用,无条件 attachment
+        # 该 download_url 在前端只用于「下载」按钮,无内联预览复用,无条件 attachment。
+        # 动态签发:分享页可能从任一入口打开,直链 host 跟随请求入口,
+        # 否则 https 分享页拿到 http 直链被浏览器混合内容拦截
         url = presign.sign_get_url(
             asset.minio_bucket, asset.minio_key, ttl,
             response_content_disposition=attachment_content_disposition(asset.filename),
+            request_base=request_base_from(request),
         )
         return ShareResolveOut(
             kind="asset", target_id=target_id,

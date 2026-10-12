@@ -16,7 +16,6 @@ set -euo pipefail
 ENVNAME="${1:-}"
 RESTART="${2:-}"
 case "$ENVNAME" in
-  dev)  SSH_USER=msdev;   REMOTE_DIR=/home/msdev/ms;   ENTRY="http://192.168.110.221:8090" ;;
   # HOST 按环境分:跳板迁移(2026-09-10)后 hh2 别名身份是 msdev,对 huanhua 的
   # prod 目录无写权限且无免密 sudo —— prod 必须走 hh2-prod(huanhua);
   # huanhua 免 sudo 直管 docker,重启不需要 sudo(同日实测)。
