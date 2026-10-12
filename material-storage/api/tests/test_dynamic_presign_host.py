@@ -15,9 +15,10 @@
       --forwarded-allow-ips '*',XFP → scope scheme 的改写发生在 uvicorn 中间件层,
       ASGITransport 会绕过它,测不到动态签发的 https 分支。API 直连模拟 nginx
       转发头(Host + X-Forwarded-Proto,即 hh2 nginx 会注入的两件,文档 B 节);
-    - 栈不可达自动 skip(容器内 127.0.0.1:8000 / 宿主机映射 127.0.0.1:8200),
-      门控思路与 test_notifications_e2e 的 DB 探测同款;数据自建自清(参照
-      test_upload_complete:EVAN 系统 admin 直通 + seed_demo_data 项目)。
+    - 栈不可达 / 宿主机缺容器 env 自动 skip(容器内 127.0.0.1:8000 /
+      宿主机映射 127.0.0.1:8200),门控思路与 test_notifications_e2e 的
+      DB 探测同款;数据自建自清(参照 test_upload_complete:EVAN 系统
+      admin 直通 + seed_demo_data 项目)。
       运行:docker exec feat-ms-api pytest tests/test_dynamic_presign_host.py -v
 
 被测契约以方案「功能点明细 A」为准(4 个签名方法 request_base: str | None = None、
@@ -25,10 +26,13 @@ helper request_base_from(request)、5 处调用点接入);各用例 docstring �
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import boto3
 import pytest
@@ -144,12 +148,16 @@ def mk_request(
 
 
 def mk_asset(filename: str) -> SimpleNamespace:
+    # size_bytes / content_type:share resolve 出参 asset dict 的既有契约字段
+    # (644de17 前就在读),与本文件被测的动态 host 正交,补齐避免 AttributeError
     return SimpleNamespace(
         id=uuid.uuid4(),
         deleted_at=None,
         filename=filename,
         minio_bucket="ms-proj",
         minio_key=f"folder-a/{filename}",
+        size_bytes=1024,
+        content_type="video/mp4",
     )
 
 
@@ -249,7 +257,11 @@ def test_1_sign_get_url_dynamic_endpoint_follows_request_base(
     spy = Boto3ClientSpy()
     monkeypatch.setattr(boto3, "client", spy)
     service = PresignService(mk_settings())
-    spy.created.clear()  # 构造期 5 个静态 client 不在断言范围
+    # 构造期 5 个静态 client(4 s3 + 1 sts)不在断言范围:created 与 clients
+    # 一并清零 —— 只清 created 的话 clients[0] 仍指向从未签名的 _s3_internal,
+    # 动态 client 的 client_id 也从 6 起算(断言 client=1 会错位)
+    spy.created.clear()
+    spy.clients.clear()
 
     url = service.sign_get_url(
         "ms-proj", "folder-a/视频 A.mp4", 600,
@@ -272,6 +284,7 @@ def test_1_sign_thumbnail_url_dynamic_endpoint_same_vhost(
     monkeypatch.setattr(boto3, "client", spy)
     service = PresignService(settings)
     spy.created.clear()
+    spy.clients.clear()  # 静态 client 清出观测窗口(同 test_1 首例注释)
 
     url = service.sign_thumbnail_url(
         "thumbs/a.jpg", 1800, request_base="https://bucket.taoxiplan.com",
@@ -291,6 +304,7 @@ def test_1_sign_part_url_dynamic_endpoint_params_intact(
     monkeypatch.setattr(boto3, "client", spy)
     service = PresignService(mk_settings())
     spy.created.clear()
+    spy.clients.clear()
 
     url = service.sign_part_url(
         "ms-proj", "folder-a/a.mp4", "upload-1", 2, 600,
@@ -314,6 +328,7 @@ def test_1_sign_put_url_accepts_request_base(
     monkeypatch.setattr(boto3, "client", spy)
     service = PresignService(mk_settings())
     spy.created.clear()
+    spy.clients.clear()
 
     url = service.sign_put_url(
         "ms-proj", "folder-a/a.mp4", 600, request_base="http://192.168.110.221",
@@ -334,6 +349,7 @@ def test_2_dynamic_client_cached_per_request_base(
     monkeypatch.setattr(boto3, "client", spy)
     service = PresignService(mk_settings())
     spy.created.clear()
+    spy.clients.clear()  # 静态 client 清出去后动态 client 才从 client_id=1 起算
 
     https_base = "https://bucket.taoxiplan.com"
     wan_base = "http://47.108.196.211:18080"
@@ -532,20 +548,58 @@ async def api_base() -> str:
 
     与 test_notifications_e2e 的 DB 探测同款思路(运行环境探测而非硬编码
     skipif),离线用例不受影响;session 级对齐 pyproject 的 session loop scope。
+
+    栈可达 ≠ 能跑(宿主机侧稳健 skip,容器内路径保持):part 直传要在本进程
+    直连 MinIO 内部端点(_upload_part 走 get_settings() +
+    minio_endpoint_internal)。宿主机 cwd 无 .env 时 Settings 构造即
+    ValidationError;即便 env 凑齐,内部 endpoint 的容器网络主机名宿主机也
+    多半不可达 —— 两道自检任一不过 → skip 并指路容器内跑法。容器内
+    (docker exec feat-ms-api)env 齐备 + 内部 MinIO 可达,两道自检照常通过。
     """
     last_exc: Exception | None = None
+    reachable: str | None = None
     for base in _API_BASES:
         try:
             async with AsyncClient(base_url=base, timeout=3.0) as probe:
                 r = await probe.get("/healthz")
             if r.status_code == 200:
-                return base
+                reachable = base
+                break
         except Exception as exc:
             last_exc = exc
-    pytest.skip(
-        "feat-ms 隔离栈不可达(试过 127.0.0.1:8000 / 127.0.0.1:8200,"
-        f"last_exc={last_exc})—— 动态 Host 容器级用例跳过,离线用例照常执行"
-    )
+    if reachable is None:
+        pytest.skip(
+            "feat-ms 隔离栈不可达(试过 127.0.0.1:8000 / 127.0.0.1:8200,"
+            f"last_exc={last_exc})—— 动态 Host 容器级用例跳过,离线用例照常执行"
+        )
+
+    # 自检一:本进程能构造 Settings(容器级用例的依赖都在它身上)
+    try:
+        settings = get_settings()
+    except Exception as exc:
+        pytest.skip(
+            f"feat-ms 栈可达({reachable})但本进程缺容器 env,get_settings() 失败"
+            f"({type(exc).__name__})—— 宿主机跑容器级用例请走"
+            "docker exec feat-ms-api pytest tests/test_dynamic_presign_host.py -v;"
+            "离线用例不受影响"
+        )
+
+    # 自检二:minio_endpoint_internal 可达(_upload_part 直传 part 用)
+    internal = urlsplit(settings.minio_endpoint_internal)
+    try:
+        _reader, writer = await asyncio.open_connection(
+            internal.hostname or "", internal.port or 9000,
+        )
+    except OSError as exc:
+        pytest.skip(
+            f"feat-ms 栈可达但 minio_endpoint_internal"
+            f"({settings.minio_endpoint_internal})不可达({exc})—— part 直传无法"
+            "进行,容器级用例跳过(请在容器内跑);离线用例不受影响"
+        )
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return reachable
 
 
 @pytest.fixture(scope="session")
