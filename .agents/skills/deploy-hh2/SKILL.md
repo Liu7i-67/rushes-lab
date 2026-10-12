@@ -36,7 +36,7 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
   - 2026-10-10 落地时为自签占位，正式证书到达覆盖 + reload 即生效。
 - 公网安全组 443/80 已放行（实测 `https://47.108.196.211/` 直达 SPA）。待办：DNS `bucket.taoxiplan.com → 47.108.196.211`；**域名 ICP 备案**——大陆服务器 80/443 的域名访问阿里云会拦未备案域名，未备案则整条链路不可用，先确认。
 - 2026-10-10 当天先在 hh2 落过容器内 443 TLS，改跳板机终结后已**全部回退**（override 还原 `.bak-20261010`、`/home/huanhua/ssl` 已删、poc-nginx 回 80-only），hh2 无 443 残留，勿按旧口径找。
-- 域名正式启用时的后续切换（勿提前做）：`api/.env` 的 `MINIO_ENDPOINT_PUBLIC`/`MINIO_THUMBNAIL_ENDPOINT_PUBLIC`/`web_app_base_url`（CORS 从它 derive）与 `poc/minio/.env` 的 `MINIO_SERVER_URL` 切到 `https://bucket.taoxiplan.com`，`.env` 变更须 `docker compose up -d --force-recreate`（坑同 §2 第 2 条）。
+- 域名入口的预签名 URL **已动态化**（liuqi 239862d，dev+prod 均部署，2026-10-12）：`presign.py` 按请求 Host+X-Forwarded-Proto 签 URL，各入口（https 域名/内网/外网 IP:端口）原生可用，内网用户不再绕公网折返——**此前记录的 MINIO_* `.env` 切换清单作废，勿再执行**；`default.conf` 的 `$xfp` map 透传与 `Host $http_host`（保端口）是该行为的前提，改 nginx 路由时别回退成 `$scheme`/`$host`。`web_app_base_url`（share/request_links 链接基址）**用户拍板冻结不动**（内网优先，D5 遗留）。
 
 ## 2. 部署前预检（每次都做）
 
