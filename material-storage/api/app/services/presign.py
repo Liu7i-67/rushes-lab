@@ -13,18 +13,50 @@
   - 5-endpoint multipart(uppy)
   - issue_sts_for_prefix(7-bis.1 桌面客户端临时凭据)
   - get_object_streaming(敏感目录 FastAPI stream proxy)
+
+动态签发(dynamic presign host,2026-10-12):
+  多入口部署(https 域名跳板机 / 内网 IP / 外网 IP:端口)下,静态
+  MINIO_ENDPOINT_PUBLIC 只能签出固定 host,https 入口的页面拿到
+  http://47.108.196.211:18080/... 会被浏览器按混合内容(mixed content)
+  拦截,预览/上传全挂(prod 已实锤)。4 个签名方法因此新增可选
+  request_base(由 request_base_from 从请求上下文取 scheme://host[:port]):
+  传入时用按入口缓存的 signer client 签名,URL 的 scheme/host 跟随浏览器
+  实际访问入口;不传回落静态 endpoint(零行为变化)。内部 client
+  (create/complete/head/list/delete/copy/sts)不受影响,始终走容器内 endpoint。
 """
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import boto3
 from botocore.client import Config
+from fastapi import Request
 
 from app.settings import Settings
 
 log = logging.getLogger(__name__)
+
+# Host 头合法字符集:裸域名 / IPv4 / IPv4:port / [IPv6]:port 都在此内。
+# 超出视作伪造或异常请求 → 回落静态 endpoint(可用性优先,D3:防伪造只影响
+# 自身拿到的 URL 形态,对象访问仍要过权限 + MinIO 签名校验,无提权面)
+_HOST_PATTERN = re.compile(r"^[A-Za-z0-9.\-:\[\]]+$")
+
+
+def request_base_from(request: Request) -> str | None:
+    """从请求上下文取预签名 URL 的 base(f"{scheme}://{host}")。
+
+    host 取 Host 头(含端口 —— S3v4 签名把 host:port 算进 canonical
+    request,与 nginx 侧 $http_host 同源;$host 会剥端口);scheme 取
+    request.url.scheme(uvicorn 开 --proxy-headers,nginx 透传
+    X-Forwarded-Proto 后 https 入口即 https)。Host 缺失 / 超长(>253)/
+    非法字符返回 None,调用方回落静态 endpoint。
+    """
+    host = request.headers.get("host") or ""
+    if not host or len(host) > 253 or not _HOST_PATTERN.match(host):
+        return None
+    return f"{request.url.scheme}://{host}"
 
 
 class PresignService:
@@ -70,6 +102,31 @@ class PresignService:
             region_name="us-east-1",
             config=Config(signature_version="s3v4"),
         )
+        # 动态签发:按请求入口 base(scheme://host[:port])缓存的 signer client,
+        # 首见创建 —— 入口由部署拓扑决定(https 域名 / 内网 IP / 外网 IP:端口),
+        # 数量有限,缓存不会失控,无需淘汰。原片与缩略图动态模式共用同一批
+        # client:两者 host 同源(nginx 按 /ms-thumbs/ 路径分流),client 只
+        # 关心 endpoint,bucket 由签名时的 Params 决定
+        self._dynamic_signers: dict[str, Any] = {}
+
+    def _dynamic_signer(self, request_base: str) -> Any:
+        """按入口 base 取缓存的 signer client(首见创建,缓存策略见 __init__)。
+
+        与 _s3_signer 同构,仅 endpoint 换成 request_base:S3v4 签名把
+        host(:port) 算进 canonical request,换 endpoint 即换签出 URL 的
+        scheme://host,凭据与签名算法不变,MinIO 侧按 URL host 校验通过。
+        """
+        client = self._dynamic_signers.get(request_base)
+        if client is None:
+            client = boto3.client(
+                "s3",
+                endpoint_url=request_base,
+                aws_access_key_id=self._settings.minio_access_key,
+                aws_secret_access_key=self._settings.minio_secret_key,
+                config=Config(signature_version="s3v4", region_name="us-east-1"),
+            )
+            self._dynamic_signers[request_base] = client
+        return client
 
     def sign_get_url(
         self,
@@ -77,17 +134,21 @@ class PresignService:
         key: str,
         expires_seconds: int,
         response_content_disposition: str | None = None,
+        request_base: str | None = None,
     ) -> str:
         """签 GET presigned URL。
 
         response_content_disposition 非 None 时并入 Params(移动端下载直连的
         attachment 语义,方案 §3.5);None 时 Params 与旧版完全一致(预览路径
         inline 语义零变化)。
+        request_base 传入时 URL 的 scheme://host 跟随请求入口(动态签发,见
+        模块 docstring);None 时走静态 MINIO_ENDPOINT_PUBLIC(零行为变化)。
         """
         params: dict[str, Any] = {"Bucket": bucket, "Key": key}
         if response_content_disposition is not None:
             params["ResponseContentDisposition"] = response_content_disposition
-        return self._s3_signer.generate_presigned_url(
+        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        return signer.generate_presigned_url(
             "get_object",
             Params=params,
             ExpiresIn=expires_seconds,
@@ -125,21 +186,33 @@ class PresignService:
         """缩略图 MinIO 的 bucket 名(ADR-0008 P1;清理派生对象用)。"""
         return self._settings.minio_thumbnail_bucket
 
-    def sign_put_url(self, bucket: str, key: str, expires_seconds: int) -> str:
-        return self._s3_signer.generate_presigned_url(
+    def sign_put_url(
+        self, bucket: str, key: str, expires_seconds: int, request_base: str | None = None
+    ) -> str:
+        """签 PUT presigned URL(现无调用方;4 个签名方法参数保持一致 — D2)。"""
+        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        return signer.generate_presigned_url(
             "put_object",
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=expires_seconds,
         )
 
-    def sign_thumbnail_url(self, key: str, expires_seconds: int) -> str:
+    def sign_thumbnail_url(
+        self, key: str, expires_seconds: int, request_base: str | None = None
+    ) -> str:
         """缩略图 presigned URL(ADR-0008 P1)。
 
         走缩略图 MinIO(SSD)的公开 endpoint + 独立 bucket;不走 OpenFGA enforce
         (既有决策:1024px 模糊化)。host 绑定:P-10 坑 — endpoint 必须等于
         浏览器实际访问缩略图的 host(nginx 按 /ms-thumbs/ 路由)。
+        request_base 传入时 endpoint 整体替换为该 host(缩略图与原片同 vhost,
+        nginx 按 /ms-thumbs/ 路径分流,host 同源);MINIO_THUMBNAIL_ENDPOINT_PUBLIC
+        仅作无请求上下文的回落。
         """
-        return self._s3_thumb_signer.generate_presigned_url(  # type: ignore[no-any-return]
+        signer = (
+            self._dynamic_signer(request_base) if request_base else self._s3_thumb_signer
+        )
+        return signer.generate_presigned_url(  # type: ignore[no-any-return]
             "get_object",
             Params={
                 "Bucket": self._settings.minio_thumbnail_bucket,
@@ -157,9 +230,16 @@ class PresignService:
         return resp["UploadId"]
 
     def sign_part_url(
-        self, bucket: str, key: str, upload_id: str, part_number: int, expires_seconds: int
+        self,
+        bucket: str,
+        key: str,
+        upload_id: str,
+        part_number: int,
+        expires_seconds: int,
+        request_base: str | None = None,
     ) -> str:
-        return self._s3_signer.generate_presigned_url(
+        signer = self._dynamic_signer(request_base) if request_base else self._s3_signer
+        return signer.generate_presigned_url(
             "upload_part",
             Params={
                 "Bucket": bucket,
