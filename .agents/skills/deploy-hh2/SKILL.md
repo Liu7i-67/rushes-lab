@@ -13,7 +13,7 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 | --- | --- | --- |
 | SSH 别名 | `hh2`（登录身份 **msdev**） | **`hh2-prod`（登录身份 huanhua）——prod 必须走这个别名** |
 | 远端目录 | `/home/msdev/ms` | `/home/huanhua/ms` |
-| 入口 | `http://192.168.110.221:8090`（外网 `http://47.108.196.211:8080`） | `http://192.168.110.221`（外网 `:18080`） |
+| 入口 | `http://192.168.110.221:8090`（外网 `http://47.108.196.211:8080`） | `http://192.168.110.221`（外网 `:18080`）；HTTPS `bucket.taoxiplan.com`（跳板机 TLS 终结，§1.1） |
 | 容器 | `ms-api-dev` / `ms-worker-dev` / `ms-db-dev` | `ms-api` / `ms-worker` / `ms-db` |
 | OpenFGA 容器 → 宿主 API 端口 | `poc-openfga-dev` → `127.0.0.1:8189` | `poc-openfga` → `127.0.0.1:8089` |
 | OpenFGA store id | 各自 `~/ms/api/.env` 的 `OPENFGA_STORE_ID`（**两环境 store 不同，别混**） | 同左 |
@@ -25,6 +25,18 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 - `.env` 与 `docker-compose.override.yml` 在目标机上从不随部署覆盖。
 - dev 的 nginx 把 `/healthz` 路由到 MinIO（既有配置），**API 存活用 `/api/v1/auth/me`（未登录 401）判断**。
 - prod 是 `ENV=production`：`X-User-Id` dev 通道**失效**，业务级实测（如 download-link 语义）需要真实账号登录；代码级核验用容器内 grep。
+
+### 1.1 HTTPS 入口 bucket.taoxiplan.com（TLS 终结在阿里云跳板机，2026-10-10 定稿）
+
+- **架构**：TLS 在跳板机（`aliyun-swas`，47.108.196.211，轻量服务器 root，nginx 为本机 systemd 服务）终结：listen 443 → `proxy_pass http://127.0.0.1:18080`（反向隧道 → hh2 nginx :80）。业务路由全在 hh2 的 `poc/minio/nginx/default.conf`，跳板机不做业务路由——**改路由不用动跳板机**。
+- 跳板机配置：`/etc/nginx/conf.d/bucket-taoxiplan.conf`（含 80→443 跳转块；Host 必须 `$http_host` 透传，改写会坏 hh2 侧 MinIO presigned URL 的 S3v4 签名；上传下载零缓冲+3600s 超时+WebSocket upgrade）。
+- **证书**（Certimate 定时续签重传，部署目标=跳板机 `root@47.108.196.211:22`）：
+  - `/etc/nginx/ssl/bucket.taoxiplan.com/fullchain.pem` + `privkey.pem`（PEM/fullchain）
+  - Certimate 部署后命令：`/usr/sbin/nginx -t && /usr/sbin/nginx -s reload`（绝对路径防 PATH 差异）
+  - 2026-10-10 落地时为自签占位，正式证书到达覆盖 + reload 即生效。
+- 公网安全组 443/80 已放行（实测 `https://47.108.196.211/` 直达 SPA）。待办：DNS `bucket.taoxiplan.com → 47.108.196.211`；**域名 ICP 备案**——大陆服务器 80/443 的域名访问阿里云会拦未备案域名，未备案则整条链路不可用，先确认。
+- 2026-10-10 当天先在 hh2 落过容器内 443 TLS，改跳板机终结后已**全部回退**（override 还原 `.bak-20261010`、`/home/huanhua/ssl` 已删、poc-nginx 回 80-only），hh2 无 443 残留，勿按旧口径找。
+- 域名入口的预签名 URL **已动态化**（liuqi 239862d，dev+prod 均部署，2026-10-12）：`presign.py` 按请求 Host+X-Forwarded-Proto 签 URL，各入口（https 域名/内网/外网 IP:端口）原生可用，内网用户不再绕公网折返——**此前记录的 MINIO_* `.env` 切换清单作废，勿再执行**；`default.conf` 的 `$xfp` map 透传与 `Host $http_host`（保端口）是该行为的前提，改 nginx 路由时别回退成 `$scheme`/`$host`。`web_app_base_url`（share/request_links 链接基址）**用户拍板冻结不动**（内网优先，D5 遗留）。
 
 ## 2. 部署前预检（每次都做）
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from starlette.requests import Request
 
 from app.routers.assets import (
     DownloadLinkIn,
@@ -105,12 +106,14 @@ class StubPresign:
         key: str,
         expires_seconds: int,
         response_content_disposition: str | None = None,
+        request_base: str | None = None,
     ) -> str:
         self.calls.append({
             "bucket": bucket,
             "key": key,
             "expires_seconds": expires_seconds,
             "response_content_disposition": response_content_disposition,
+            "request_base": request_base,
         })
         return f"https://minio.example/{bucket}/{key}?X-Amz-Signature=fake"
 
@@ -125,6 +128,27 @@ def mk_asset(filename: str) -> SimpleNamespace:
     )
 
 
+def mk_request() -> Request:
+    """直构无 Host 头的 starlette Request:get_download_link 动态签发接入后
+    多了必选 request 形参(内部走 request_base_from(request)),Host 缺失 →
+    request_base=None 回落静态,与本文件 attachment 断言语义正交;动态 host
+    的正向覆盖见 test_dynamic_presign_host.py。"""
+    return Request({
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/api/v1/assets/none/download-link",
+        "raw_path": b"/api/v1/assets/none/download-link",
+        "query_string": b"",
+        "root_path": "",
+        "server": ("testserver", 80),
+        "client": ("127.0.0.1", 54321),
+        "headers": [],
+    })
+
+
 async def call_download_link(
     monkeypatch: pytest.MonkeyPatch,
     asset: SimpleNamespace,
@@ -135,6 +159,7 @@ async def call_download_link(
     monkeypatch.setattr("app.routers.assets.get_settings", lambda: mk_settings())
     return await get_download_link(
         asset.id,
+        mk_request(),
         data,
         db=StubDB(asset),
         permissions=StubPermissions(),
@@ -274,6 +299,7 @@ async def test_endpoint_as_attachment_true_still_audits(
 
     await get_download_link(
         asset.id,
+        mk_request(),
         DownloadLinkIn(as_attachment=True),
         db=StubDB(asset),
         permissions=StubPermissions(),

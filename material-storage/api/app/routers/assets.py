@@ -47,7 +47,7 @@ from app.models import (
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
 from app.services.permissions import PermissionsService
-from app.services.presign import PresignService
+from app.services.presign import PresignService, request_base_from
 from app.settings import get_settings
 
 router = APIRouter()
@@ -103,15 +103,18 @@ async def create_upload(
 async def sign_part(
     upload_id: str,
     part_number: int,
+    request: Request,
     bucket: str = Query(...),
     key: str = Query(...),
     presign: PresignService = Depends(get_presign),
     user: CurrentUser = Depends(get_current_user),  # 至少要认证;细粒度上传 check 在 create_upload 已做
 ) -> UploadPartUrlOut:
     settings = get_settings()
+    # 动态签发:分片 PUT URL 的 host 跟随浏览器入口(https 入口否则被混合内容拦)
     url = presign.sign_part_url(
         bucket, key, upload_id, part_number,
         expires_seconds=settings.presigned_normal_ttl_seconds,
+        request_base=request_base_from(request),
     )
     return UploadPartUrlOut(url=url, expires_in=settings.presigned_normal_ttl_seconds)
 
@@ -981,6 +984,7 @@ def attachment_content_disposition(filename: str) -> str:
 @router.post("/{asset_id}/download-link", response_model=DownloadLinkOut)
 async def get_download_link(
     asset_id: uuid.UUID,
+    request: Request,
     data: DownloadLinkIn | None = None,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
@@ -1027,6 +1031,7 @@ async def get_download_link(
     url = presign.sign_get_url(
         asset.minio_bucket, asset.minio_key, ttl,
         response_content_disposition=disposition,
+        request_base=request_base_from(request),
     )
 
     await audit.signed_url_issued(
@@ -1044,6 +1049,7 @@ async def get_download_link(
 @router.get("/{asset_id}/thumbnail-url")
 async def get_thumbnail_url(
     asset_id: uuid.UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     presign: PresignService = Depends(get_presign),
     user: CurrentUser = Depends(get_current_user),
@@ -1064,8 +1070,9 @@ async def get_thumbnail_url(
         raise HTTPException(404, "no thumbnail yet(可能还在生成 / 非图片)")
 
     ttl = 1800   # 30 min — 缩略图比原图 ttl 长(让浏览器缓存有效)
-    # ADR-0008 P1:缩略图走独立 bucket + 缩略图 MinIO(SSD);endpoint/bucket 由 env 控制
-    url = presign.sign_thumbnail_url(thumbnail_key, ttl)
+    # ADR-0008 P1:缩略图走独立 bucket + 缩略图 MinIO(SSD);endpoint/bucket 由 env 控制。
+    # 动态签发:request_base 传入时 host 跟随入口(缩略图与原片同 vhost 同源)
+    url = presign.sign_thumbnail_url(thumbnail_key, ttl, request_base=request_base_from(request))
     return {"url": url, "expires_in": ttl}
 
 
@@ -1199,6 +1206,7 @@ async def delete_asset(
 @router.get("/{asset_id}/live-preview-url")
 async def get_live_preview_url(
     asset_id: uuid.UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     presign: PresignService = Depends(get_presign),
@@ -1237,7 +1245,9 @@ async def get_live_preview_url(
         raise HTTPException(403, "no permission to preview(可申请审批)")
 
     ttl = 1800
-    url = presign.sign_thumbnail_url(str(live_key), ttl)
+    # 实况视频派生对象与缩略图同 bucket(缩略图 MinIO),动态签发同 sign_thumbnail_url:
+    # request_base 传入时 host 跟随浏览器入口(接近原片内容,https 入口必须 https)
+    url = presign.sign_thumbnail_url(str(live_key), ttl, request_base=request_base_from(request))
     await audit.signed_url_issued(
         actor_user_id=user_id,
         target_asset_id=asset.id,
