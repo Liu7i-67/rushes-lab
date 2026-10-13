@@ -52,8 +52,16 @@ http.interceptors.response.use(
 /** 从 axios error 抽 user-friendly message,优先取 detail。*/
 export function errorMessage(err: unknown, fallback = '请求失败'): string {
   if (axios.isAxiosError(err)) {
-    const d = err.response?.data as { detail?: string } | undefined;
-    if (d?.detail) return d.detail;
+    const d = err.response?.data as { detail?: unknown } | undefined;
+    if (typeof d?.detail === 'string' && d.detail) return d.detail;
+    // FastAPI 422(Pydantic v2)的 detail 是对象数组:取各条 msg 拼接成人话
+    // (直塞对象给 message.error 会触发 React error #31 整树白屏,返回值必须恒为 string)
+    if (Array.isArray(d?.detail)) {
+      const msgs = d.detail
+        .map((x) => (x && typeof x === 'object' && 'msg' in x ? String((x as { msg?: unknown }).msg) : ''))
+        .filter(Boolean);
+      if (msgs.length) return msgs.join('; ');
+    }
     if (err.response?.status) return `${fallback}(HTTP ${err.response.status})`;
     if (err.message) return err.message;
   }
