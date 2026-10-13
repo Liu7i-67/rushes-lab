@@ -31,6 +31,20 @@ class InitialGrantIn(BaseModel):
     roles: list[ProjectRole] = Field(..., min_length=1)
 
 
+class ArtistAccountIn(BaseModel):
+    """内嵌开通艺人账号(组长建项目同步建号,方案 §4.1)。字段约束与 UserCreateIn 同款。"""
+
+    username: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-zA-Z0-9._-]+$")
+    name: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("name")
+    @classmethod
+    def _name_format(cls, v: str | None) -> str | None:
+        # 复用 UserCreateIn 同款校验器(:482-493):strip + 拒绝全空白,
+        # 防止纯空格姓名过 422
+        return _validate_name_format(v)
+
+
 class ProjectCreateIn(BaseModel):
     code: str = Field(..., min_length=2, max_length=64, pattern=r"^[a-z0-9][a-z0-9\-]*$")
     name: str = Field(..., min_length=1, max_length=255)
@@ -46,6 +60,9 @@ class ProjectCreateIn(BaseModel):
     # 目录模板(可选;方案 §4.2):不传 / null = 现行为完全不变(零回归);
     # 传入则在建项目后把模板条目物化为 folders(模板不存在 / 跨 org → 400)
     folder_template_id: uuid.UUID | None = None
+    # 内嵌开通艺人账号(可选;艺人账号内嵌方案 §4.1):不传 / null = 纯项目创建
+    # (现状行为);传入则在项目建成后同步开通账号并入「艺人」组、授项目三角色
+    artist_account: ArtistAccountIn | None = None
 
 
 class AdminBrief(BaseModel):
@@ -67,6 +84,25 @@ class ProjectOut(ORMModel):
     # 当前 user 在本项目的有效 role 列表(单 user 可有多 role,如 admin+uploader);
     # ['admin'|'uploader'|'downloader'|'viewer'];空 = 仅靠 visibility=public 见
     my_roles: list[str] = []
+
+
+class ArtistAccountCreatedOut(BaseModel):
+    """内嵌建号一次性回显(方案 D10):temporary_password 只在 POST /projects 201
+    响应体回显,不落 audit / log(照 UserCreateOut「只回显一次」注释惯例)。"""
+
+    user_id: uuid.UUID
+    username: str
+    name: str
+    temporary_password: str
+
+
+class ProjectCreatedOut(ProjectOut):
+    """POST /projects 201 专用响应(方案 D10):与 GET 列表/详情的 ProjectOut 分离,
+    artist_account 仅创建时填充;不带 artist_account 时序列化为恒 null 键(结构兼容、
+    无功能影响;勿用 response_model_exclude_none —— 会连 description 等既有可空键
+    一并剥掉,反而改变现状响应形状)。"""
+
+    artist_account: ArtistAccountCreatedOut | None = None
 
 
 # ─── 目录模板(2026-10-10,方案 §4.1)─────────────────────────────────────────

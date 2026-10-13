@@ -51,6 +51,15 @@ USER_DIRECT_RELATIONS: tuple[tuple[str, str], ...] = (
     # §3.3,照 project_creator 先例)—— UI 只写组主体,user 直授留口未启用;
     # 未部署时同样被 continue 容错,不炸
     ("organization", "folder_template_manager"),
+    # ("organization", "artist_account_creator"):同款防御性补项(艺人账号内嵌方案
+    # §3.3,照 project_creator 先例)—— UI 只写组主体,user 直授留口未启用;
+    # 未部署时同样被 continue 容错,不炸
+    ("organization", "artist_account_creator"),
+    # ("organization", "project_deleter"):防御性补项补齐既有缺口(艺人账号内嵌方案
+    # §3.3 顺带)—— project_deleter 自 2026-10-10 上线以来一直无防御项(folder-templates
+    # 方案当时明确「不扩大范围处理」遗留至今),本次触达同一常量,一行补齐恢复
+    # 「每个组级 flag 都有防御项」不变量;未部署时同样被 continue 容错,不炸
+    ("organization", "project_deleter"),
     ("department", "member"),
     ("group", "member"),
     ("project", "admin"),
@@ -602,6 +611,22 @@ class PermissionsService:
         return await self.check(
             user_subject=f"user:{user_id}",
             relation="folder_template_manager",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_artist_account_creator(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#artist_account_creator check(组开关经 group#member 展开)。
+
+        仿 is_org_project_creator(2026-10-13 艺人账号内嵌方案 §3.3):应用层写守门
+        / /me 的完整口径 = is_org_admin 或本方法(系统 admin 恒可);POST /projects
+        端点内的组合能力校验另含 is_org_project_creator 支(§4.1 阶段 2)。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="artist_account_creator",
             object_type="organization",
             object_id=organization_tenant_key,
         )

@@ -52,8 +52,11 @@ http.interceptors.response.use(
 /** 从 axios error 抽 user-friendly message,优先取 detail。*/
 export function errorMessage(err: unknown, fallback = '请求失败'): string {
   if (axios.isAxiosError(err)) {
-    const d = err.response?.data as { detail?: string } | undefined;
-    if (d?.detail) return d.detail;
+    const d = err.response?.data as { detail?: unknown } | undefined;
+    // 非字符串 detail(如艺人账号内嵌 409 的结构化 {code,username,project_id})原样返回
+    // 会被全局 mutationCache toast 渲染 → React「Objects are not valid as a React child」
+    // 崩溃;一律回退到下方 fallback 文案(字符串 detail 行为零变化,艺人账号方案 §4.1)
+    if (typeof d?.detail === 'string' && d.detail) return d.detail;
     if (err.response?.status) return `${fallback}(HTTP ${err.response.status})`;
     if (err.message) return err.message;
   }

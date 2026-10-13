@@ -129,12 +129,15 @@ type asset
 ```fga
 type organization
   relations
-    # admin / member 见 §3;以下为组级开关三件套(同款模式:tuple 即状态,DB 无列;
+    # admin / member 见 §3;以下为组级开关四件套(同款模式:tuple 即状态,DB 无列;
     # UI 只写组主体,user 直授留口未启用;组员判定由 check 自动展开 group#member)
     define project_creator:         [user, group#member]
     define project_deleter:         [user, group#member]
     # 2026-10-10 目录模板:可维护目录模板(CRUD /api/v1/admin/folder-templates)
     define folder_template_manager: [user, group#member]
+    # 2026-10-13 艺人账号内嵌:新建项目时可同步开通艺人账号(与 can_create_project
+    # 后端正交:能力判定 = require_project_creator ∧ 本 flag 两层相与)
+    define artist_account_creator:  [user, group#member]
 ```
 
 **应用层守门口径**(deps.py;系统 admin 即 default org 的 organization#admin,由
@@ -150,6 +153,14 @@ is_org_admin 支恒直通,不另列独立支):
   读门并入项目管理员会把模板名册外溢到全部项目 admin。
 - `/me` 暴露 `is_folder_template_manager`(口径同 is_project_creator:is_org_admin ∨
   flag check,FGA 抖动回 False),前端单字段做「目录模板」入口闸门。
+- 2026-10-13 艺人账号内嵌(方案 rushes-spec/material-storage/project-artist-account-plan.md):
+  **无独立写门 dep**——POST /projects 的能力校验依赖 payload(artist_account 字段),
+  在端点内加验(is_org_admin ∨ check(artist_account_creator),default org 口径);
+  预检端点 `GET /api/v1/users/username-available` 用组合弱门
+  `require_inline_artist_creator` = is_org_admin ∨ (is_org_project_creator ∧
+  check(artist_account_creator))——与内嵌建号真实能力同构,堵「仅持 flag 无
+  project_creator 者把它当账号存在性 oracle」;`/me` 另暴露
+  `is_artist_account_creator`(内联三段式,前端弹窗区块闸门)。
 
 ---
 
@@ -243,3 +254,10 @@ PoC 自动 + D iter3 UI 配置:
   (三支弱门,**不含 has_any_project_admin**)、`/me` 增 `is_folder_template_manager`。
   §4.5 顺带补列此前未入文的 project_creator / project_deleter 两 relation。
   部署硬顺序:模型先推(`api/scripts/openfga_write_model.sh`)再上代码。
+- **2026-10-13(艺人账号内嵌)**:organization 增 relation
+  `artist_account_creator: [user, group#member]`(§4.5 第 4 个组级开关,与
+  can_create_project 后端正交);无独立写门 dep(POST /projects 端点内加验),
+  预检端点 `GET /users/username-available` 用组合弱门
+  `require_inline_artist_creator`,`/me` 增 `is_artist_account_creator`;
+  `USER_DIRECT_RELATIONS` 顺带补齐 project_deleter 防御项缺口。
+  部署硬顺序同上:模型先推再上代码(本次无 alembic 迁移)。

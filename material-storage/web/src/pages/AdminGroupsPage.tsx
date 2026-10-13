@@ -8,12 +8,17 @@
  * 列表「可删项目」徽标;成员弹窗限高滚动 + 组内搜索过滤(F2)。
  * 目录模板(方案 §4.3/F8):第 3 个组级开关「管理目录模板」(can_manage_folder_templates,
  * tri-state 同款;建组态与编辑态均展示,照 can_create_project 形态)+ 列表「可管模板」徽标。
+ * 艺人账号(方案 §4.3/F4):第 4 个组级开关「新建项目时创建艺人账号」
+ * (can_create_artist_account,tri-state 同款;仅父开关 can_create_project 开启时展示,
+ * 父开关 true→false 转变瞬间复位并显式发 false 清 tuple);全部开关的 extra 长描述
+ * 收拢进 label 旁问号图标 tooltip(文案内容不变)。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
 } from 'antd';
+import { QuestionCircleOutlined } from '@ant-design/icons';
 import { Pencil, Plus, Search as SearchIcon, Trash2, Users as UsersIcon } from 'lucide-react';
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import dayjs from 'dayjs';
 import { useMe, useDirectoryGroups, useCreateGroup, useUpdateGroup,
          useDeleteGroup, useGroupMembers, useAddGroupMember, useRemoveGroupMember } from '../api/hooks';
@@ -21,6 +26,18 @@ import { errorMessage } from '../api/client';
 import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryGroup } from '../api/types';
 import { UserPicker } from '../components/UserPicker';
+
+/** 开关 label + 问号 tooltip(艺人账号方案 D13/F4:长描述收拢进问号图标,文案内容不变)。*/
+function switchLabel(text: string, tip: string): ReactNode {
+  return (
+    <span>
+      {text}{' '}
+      <Tooltip title={tip}>
+        <QuestionCircleOutlined style={{ color: 'var(--ms-ink-subtle)' }} />
+      </Tooltip>
+    </span>
+  );
+}
 
 export default function AdminGroupsPage() {
   const { data: me } = useMe();
@@ -228,6 +245,12 @@ function GroupFormModal({ open, onClose, group }: {
   const [deleteFlagTouched, setDeleteFlagTouched] = useState(false);
   // can_manage_folder_templates 同款 tri-state(建组态与编辑态均展示,方案 §4.3)
   const [folderFlagTouched, setFolderFlagTouched] = useState(false);
+  // 艺人账号(方案 §4.3/F4):can_create_artist_account 同款 tri-state;
+  // 父开关 true→false 转变瞬间的复位也会强制置 touched(PATCH 显式发 false 清 tuple)
+  const [artistFlagTouched, setArtistFlagTouched] = useState(false);
+  // 子开关仅父开关开启时展示(建组态与编辑态均适用);数据驱动,弹窗挂载时父已 false
+  // 不做任何复位动作 —— 防「仅改名保存」静默撤权(directory.py tri-state 注释明确防范)
+  const canCreateProject = Form.useWatch('can_create_project', form) === true;
 
   const submit = async () => {
     try {
@@ -241,6 +264,8 @@ function GroupFormModal({ open, onClose, group }: {
           ...(deleteFlagTouched ? { can_delete_project: v.can_delete_project === true } : {}),
           ...(folderFlagTouched
             ? { can_manage_folder_templates: v.can_manage_folder_templates === true } : {}),
+          ...(artistFlagTouched
+            ? { can_create_artist_account: v.can_create_artist_account === true } : {}),
         });
         message.success('已保存');
       } else {
@@ -249,6 +274,7 @@ function GroupFormModal({ open, onClose, group }: {
           description: v.description?.trim(),
           can_create_project: v.can_create_project === true,
           can_manage_folder_templates: v.can_manage_folder_templates === true,
+          can_create_artist_account: v.can_create_artist_account === true,
         });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
@@ -263,7 +289,10 @@ function GroupFormModal({ open, onClose, group }: {
     <Modal title={isEdit ? `编辑用户组 — ${group.name}` : '新建用户组'}
            open={open} onCancel={onClose} destroyOnClose
            afterOpenChange={(o) => {
-             if (!o) { setFlagTouched(false); setDeleteFlagTouched(false); setFolderFlagTouched(false); }
+             if (!o) {
+               setFlagTouched(false); setDeleteFlagTouched(false);
+               setFolderFlagTouched(false); setArtistFlagTouched(false);
+             }
            }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
            onOk={submit} okText={isEdit ? '保存' : '创建'}>
@@ -273,29 +302,63 @@ function GroupFormModal({ open, onClose, group }: {
               can_create_project: group.can_create_project ?? false,
               can_delete_project: group.can_delete_project ?? false,
               can_manage_folder_templates: group.can_manage_folder_templates ?? false,
-            } : { can_create_project: false, can_manage_folder_templates: false }}>
+              can_create_artist_account: group.can_create_artist_account ?? false,
+            } : {
+              can_create_project: false,
+              can_manage_folder_templates: false,
+              can_create_artist_account: false,
+            }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
         </Form.Item>
         <Form.Item name="description" label="描述(可选)" rules={[{ max: 1024 }]}>
           <Input.TextArea rows={2} maxLength={1024} showCount />
         </Form.Item>
-        <Form.Item name="can_create_project" label="允许组成员新建项目" valuePropName="checked"
-                   extra="开启后组内成员可自行新建项目,并自动成为所建项目的管理员;系统管理员不受此开关影响">
+        <Form.Item name="can_create_project" valuePropName="checked"
+                   label={switchLabel(
+                     '允许组成员新建项目',
+                     '开启后组内成员可自行新建项目,并自动成为所建项目的管理员;系统管理员不受此开关影响',
+                   )}>
           <Switch checkedChildren="开" unCheckedChildren="关"
-                  onChange={() => setFlagTouched(true)} />
+                  onChange={(checked) => {
+                    setFlagTouched(true);
+                    // 子开关复位时机写死(艺人账号方案 F4):仅父开关 onChange 由 true→false
+                    // 的转变瞬间执行 setFieldValue(false) + 置 touched,确保该次 PATCH 显式
+                    // 发 can_create_artist_account: false 清 tuple;弹窗挂载时父已 false 不触发
+                    if (!checked) {
+                      form.setFieldValue('can_create_artist_account', false);
+                      setArtistFlagTouched(true);
+                    }
+                  }} />
         </Form.Item>
+        {/* 艺人账号第 4 开关(方案 §4.3/F4):仅父开关开启时展示(建组态与编辑态均适用);
+            复位只在父开关 onChange true→false 转变瞬间做,勿改成 watch+effect 形态 */}
+        {canCreateProject && (
+          <Form.Item name="can_create_artist_account" valuePropName="checked"
+                     label={switchLabel(
+                       '允许组成员新建项目时创建艺人账号',
+                       '开启后,组内成员新建项目时可同时填写艺人登录名与姓名,同步开通艺人账号(自动加入「艺人」用户组并获得该项目上传/下载/查看权限);系统管理员不受此开关影响',
+                     )}>
+            <Switch checkedChildren="开" unCheckedChildren="关"
+                    onChange={() => setArtistFlagTouched(true)} />
+          </Form.Item>
+        )}
         {/* 目录模板第 3 开关(建组态与编辑态均展示,照 can_create_project 形态;勿改回
             can_delete_project 的仅编辑态 {isEdit && …} 形态,方案 §6-F8) */}
-        <Form.Item name="can_manage_folder_templates" label="允许组成员管理目录模板"
-                   valuePropName="checked"
-                   extra="开启后组内成员可维护目录模板(新建 / 编辑 / 删除),并在新建项目时选用;系统管理员不受此开关影响">
+        <Form.Item name="can_manage_folder_templates" valuePropName="checked"
+                   label={switchLabel(
+                     '允许组成员管理目录模板',
+                     '开启后组内成员可维护目录模板(新建 / 编辑 / 删除),并在新建项目时选用;系统管理员不受此开关影响',
+                   )}>
           <Switch checkedChildren="开" unCheckedChildren="关"
                   onChange={() => setFolderFlagTouched(true)} />
         </Form.Item>
         {isEdit && (
-          <Form.Item name="can_delete_project" label="允许组成员删除项目" valuePropName="checked"
-                     extra="开启后组内成员可删除其可见的项目(逻辑删除,数据保留,可在「已删除项目」中恢复);系统管理员不受此开关影响">
+          <Form.Item name="can_delete_project" valuePropName="checked"
+                     label={switchLabel(
+                       '允许组成员删除项目',
+                       '开启后组内成员可删除其可见的项目(逻辑删除,数据保留,可在「已删除项目」中恢复);系统管理员不受此开关影响',
+                     )}>
             <Switch checkedChildren="开" unCheckedChildren="关"
                     onChange={() => setDeleteFlagTouched(true)} />
           </Form.Item>
