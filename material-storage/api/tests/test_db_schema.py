@@ -31,6 +31,8 @@ def test_all_tables_in_metadata() -> None:
         "notifications",
         "project_grant_templates",
         "project_grant_template_items",
+        "project_folder_templates",
+        "project_folder_template_entries",
         "baidu_bindings",
         "baidu_backup_tasks",
         "baidu_backup_task_files",

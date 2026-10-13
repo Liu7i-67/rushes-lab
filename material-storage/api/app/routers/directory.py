@@ -11,9 +11,9 @@ endpoints:
   POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit
   POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
   POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码)
-  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter flag 读回)
-  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project)
-  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project(tri-state)
+  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/folder-template flag 读回)
+  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_manage_folder_templates)
+  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_manage_folder_templates(tri-state)
   DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清)
   GET    /api/v1/admin/directory/groups/{id}/members        — 组内成员列表
   POST   /api/v1/admin/directory/groups/{id}/members        — 加成员(写 group_memberships + group#member tuple)
@@ -531,6 +531,8 @@ class DirectoryGroupOut(BaseModel):
     can_create_project: bool = False
     # F6.2:组级「删除项目」开关,语义与 can_create_project 完全一致
     can_delete_project: bool = False
+    # 目录模板方案 §4.3:组级「管理目录模板」开关(第 3 个 flag),语义同上
+    can_manage_folder_templates: bool = False
 
 
 class GroupCreateIn(BaseModel):
@@ -540,6 +542,8 @@ class GroupCreateIn(BaseModel):
     can_create_project: bool = False
     # F6.2:置位 = 写 organization#project_deleter 的 group:<gid>#member tuple
     can_delete_project: bool = False
+    # 目录模板方案 §4.3:置位 = 写 organization#folder_template_manager tuple
+    can_manage_folder_templates: bool = False
 
 
 class GroupUpdateIn(BaseModel):
@@ -551,6 +555,8 @@ class GroupUpdateIn(BaseModel):
     can_create_project: bool | None = None
     # F6.2:tri-state 同 can_create_project(None=不动 / true=写 / false=删)
     can_delete_project: bool | None = None
+    # 目录模板方案 §4.3:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
+    can_manage_folder_templates: bool | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -571,7 +577,8 @@ async def _read_flag_group_ids(
     db: AsyncSession,
     relation: str,
 ) -> set[uuid.UUID]:
-    """定向 read default org 上指定 relation(project_creator / project_deleter)置位组 id 集合。
+    """定向 read default org 上指定 relation(project_creator / project_deleter /
+    folder_template_manager)置位组 id 集合。
 
     **必须带 relation 过滤**:不带 relation 的全量 read 撞 OpenFGA read 单页上限
     (organization 上每个启用用户一条 #member tuple,百人级单页必漏);
@@ -613,9 +620,9 @@ async def _sync_group_org_flag(
 ) -> None:
     """组 flag → organization:<tenant> 上 group:<gid>#member tuple 写/删(泛化版)。
 
-    relation=project_creator(§2.2)/ project_deleter(F6.2;FGA 模型里的
-    deleter relation 由并行任务在 store.fga.yaml 添加,本路由只按既有 tuple
-    格式写入/删除)。尽力而为,不 500(先例 create_directory_user 的 org
+    relation=project_creator(§2.2)/ project_deleter(F6.2)/ folder_template_manager
+    (目录模板方案 §4.3;relation 由 store.fga.yaml model 声明,本路由只按既有
+    tuple 格式写入/删除)。尽力而为,不 500(先例 create_directory_user 的 org
     member tuple):flag 读回展示的是真实 tuple 状态,写失败仅 log.warning,
     管理员重试 PATCH 即补写。tuple 读写一律走 PermissionsService 小方法,
     路由不摸 _client。
@@ -658,7 +665,7 @@ async def list_directory_groups(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
 ) -> list[DirectoryGroupOut]:
-    """组列表(带成员数)+ creator/deleter flag 读回(定向 read,§2.2/F6.2)。
+    """组列表(带成员数)+ creator/deleter/folder-template flag 读回(定向 read,§2.2/F6.2/§4.3)。
 
     编辑弹窗数据来自列表行(无组详情路由),flag 按 FGA tuple 真实态回显;
     read 异常时尽力而为回 False,不阻塞列表。
@@ -684,12 +691,14 @@ async def list_directory_groups(
     rows = list(res.all())
     creator_ids = await _read_flag_group_ids(permissions, db, "project_creator")
     deleter_ids = await _read_flag_group_ids(permissions, db, "project_deleter")
+    folder_tmpl_ids = await _read_flag_group_ids(permissions, db, "folder_template_manager")
     return [
         DirectoryGroupOut(
             id=g.id, name=g.name, description=g.description,
             member_count=cnt, created_at=g.created_at,
             can_create_project=g.id in creator_ids,
             can_delete_project=g.id in deleter_ids,
+            can_manage_folder_templates=g.id in folder_tmpl_ids,
         )
         for g, cnt in rows
     ]
@@ -704,7 +713,7 @@ async def create_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2)。"""
+    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3)。"""
     dup = await db.execute(select(Group).where(Group.name == payload.name))
     if dup.scalar_one_or_none() is not None:
         raise HTTPException(409, f"组名已存在:{payload.name}")
@@ -722,23 +731,29 @@ async def create_directory_group(
         await _sync_group_org_flag(
             permissions, db, g.id, relation="project_deleter", enable=True,
         )
+    if payload.can_manage_folder_templates:
+        await _sync_group_org_flag(
+            permissions, db, g.id, relation="folder_template_manager", enable=True,
+        )
     await audit.write(
         event_type="group_created",
         actor_user_id=user.id,
         details={"group_id": str(g.id), "name": g.name,
                  "can_create_project": payload.can_create_project,
-                 "can_delete_project": payload.can_delete_project},
+                 "can_delete_project": payload.can_delete_project,
+                 "can_manage_folder_templates": payload.can_manage_folder_templates},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s",
+    log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s folder_tmpl=%s",
              g.id, g.name, user.id, payload.can_create_project,
-             payload.can_delete_project)
+             payload.can_delete_project, payload.can_manage_folder_templates)
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=0, created_at=g.created_at,
         can_create_project=payload.can_create_project,
         can_delete_project=payload.can_delete_project,
+        can_manage_folder_templates=payload.can_manage_folder_templates,
     )
 
 
@@ -752,7 +767,7 @@ async def update_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """改组名 / 描述;can_create_project / can_delete_project tri-state(None=不动 / true=写 / false=删)。"""
+    """改组名 / 描述;can_create_project / can_delete_project / can_manage_folder_templates tri-state(None=不动 / true=写 / false=删)。"""
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
@@ -779,12 +794,28 @@ async def update_directory_group(
             permissions, db, group_id, relation="project_deleter",
             enable=payload.can_delete_project,
         )
+    # 目录模板方案 §4.3:第 3 个 flag 同款 tri-state + 审计 {old,new}
+    folder_tmpl_old: bool | None = None
+    if payload.can_manage_folder_templates is not None:
+        folder_tmpl_old = group_id in await _read_flag_group_ids(
+            permissions, db, "folder_template_manager",
+        )
+        await _sync_group_org_flag(
+            permissions, db, group_id, relation="folder_template_manager",
+            enable=payload.can_manage_folder_templates,
+        )
     details: dict[str, object] = {"group_id": str(group_id), "name": g.name}
     if payload.can_create_project is not None:
         details["can_create_project"] = payload.can_create_project
     if payload.can_delete_project is not None and payload.can_delete_project != deleter_old:
         details["can_delete_project"] = {"old": deleter_old,
                                          "new": payload.can_delete_project}
+    if (
+        payload.can_manage_folder_templates is not None
+        and payload.can_manage_folder_templates != folder_tmpl_old
+    ):
+        details["can_manage_folder_templates"] = {"old": folder_tmpl_old,
+                                                  "new": payload.can_manage_folder_templates}
     await audit.write(
         event_type="group_updated",
         actor_user_id=user.id,
@@ -802,6 +833,12 @@ async def update_directory_group(
         out_deleter = payload.can_delete_project
     else:
         out_deleter = group_id in await _read_flag_group_ids(permissions, db, "project_deleter")
+    if payload.can_manage_folder_templates is not None:
+        out_folder_tmpl = payload.can_manage_folder_templates
+    else:
+        out_folder_tmpl = group_id in await _read_flag_group_ids(
+            permissions, db, "folder_template_manager",
+        )
     cnt = (await db.execute(
         select(func.count()).select_from(GroupMembership)
         .where(GroupMembership.group_id == group_id)
@@ -811,6 +848,7 @@ async def update_directory_group(
         member_count=cnt, created_at=g.created_at,
         can_create_project=out_creator,
         can_delete_project=out_deleter,
+        can_manage_folder_templates=out_folder_tmpl,
     )
 
 
@@ -833,15 +871,15 @@ async def delete_directory_group(
         raise HTTPException(404, f"group not found:{group_id}")
     name = g.name
 
-    # 顺手删 organization 上组级 flag tuple(project_creator / project_deleter,
-    # §2.2/F6.2;尽力而为,remove_org_relation 幂等吞 not_exists,组本就未置位
-    # 时静默 no-op)
+    # 顺手删 organization 上组级 flag tuple(project_creator / project_deleter /
+    # folder_template_manager,§2.2/F6.2/§4.3;尽力而为,remove_org_relation 幂等
+    # 吞 not_exists,组本就未置位时静默 no-op)
     try:
         org = await get_default_organization(db)
         if org:
             _, tenant_key = org
             subject = fmt_subject("group", str(group_id))
-            for relation in ("project_creator", "project_deleter"):
+            for relation in ("project_creator", "project_deleter", "folder_template_manager"):
                 await permissions.remove_org_relation(
                     organization_tenant_key=tenant_key,
                     subject=subject,

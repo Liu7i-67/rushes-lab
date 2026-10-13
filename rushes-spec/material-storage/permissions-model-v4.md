@@ -124,6 +124,33 @@ type asset
     define can_admin:    can_admin from parent
 ```
 
+### 4.5 organization(组级开关 flag)
+
+```fga
+type organization
+  relations
+    # admin / member 见 §3;以下为组级开关三件套(同款模式:tuple 即状态,DB 无列;
+    # UI 只写组主体,user 直授留口未启用;组员判定由 check 自动展开 group#member)
+    define project_creator:         [user, group#member]
+    define project_deleter:         [user, group#member]
+    # 2026-10-10 目录模板:可维护目录模板(CRUD /api/v1/admin/folder-templates)
+    define folder_template_manager: [user, group#member]
+```
+
+**应用层守门口径**(deps.py;系统 admin 即 default org 的 organization#admin,由
+is_org_admin 支恒直通,不另列独立支):
+
+- 写门 `require_folder_template_manager` = is_org_admin ∨
+  check(organization#folder_template_manager)—— POST/PATCH/DELETE
+  `/admin/folder-templates`。
+- 读门 `require_folder_templates_reader` = is_org_admin ∨ is_org_project_creator ∨
+  check(folder_template_manager)—— GET `/admin/folder-templates`。**不含**
+  has_any_project_admin:grant-templates 的读放宽(任意项目管理员可读)不可平移
+  ——那边写门是 require_system_admin,天然被读门覆盖;目录模板写门只是组级 flag,
+  读门并入项目管理员会把模板名册外溢到全部项目 admin。
+- `/me` 暴露 `is_folder_template_manager`(口径同 is_project_creator:is_org_admin ∨
+  flag check,FGA 抖动回 False),前端单字段做「目录模板」入口闸门。
+
 ---
 
 ## 5. 权限蕴含(谁包含谁)
@@ -194,6 +221,7 @@ PoC 自动 + D iter3 UI 配置:
 
 - Model:`material-storage/poc/openfga/store.fga.yaml`
 - Service:`material-storage/api/app/services/permissions.py`(`PermissionsService` + `fmt_subject()` helper)
+- 守门:`material-storage/api/app/deps.py`(`require_*` 系列守门 dependency)
 - Tests:`material-storage/api/tests/test_permissions_v4.py`(a1 iter 加)
 - Seed:`material-storage/api/scripts/seed_demo_data.py`
 - 飞书事件 handler:`material-storage/api/app/routers/webhooks.py`(a2 iter 实施)
@@ -208,3 +236,10 @@ PoC 自动 + D iter3 UI 配置:
   P4 / #154 清理);organization 轴不变。存量 tuple 由
   `material-storage/api/scripts/migrate_subjects_to_uuid.py` 重写;§3 subject 字典已改为
   现行约定,§8 飞书事件同步标注待删除。
+- **2026-10-10(目录模板)**:organization 增 relation
+  `folder_template_manager: [user, group#member]`(§4.5,与 project_creator /
+  project_deleter 同款组级开关,tuple 即状态);应用层写门
+  `require_folder_template_manager`、读门 `require_folder_templates_reader`
+  (三支弱门,**不含 has_any_project_admin**)、`/me` 增 `is_folder_template_manager`。
+  §4.5 顺带补列此前未入文的 project_creator / project_deleter 两 relation。
+  部署硬顺序:模型先推(`api/scripts/openfga_write_model.sh`)再上代码。

@@ -247,6 +247,7 @@ class AuditEvent(Base):
     #   approval_submitted / approval_state_changed
     #   admin_session_login / admin_session_logout / session_revoked_due_to_resign
     #   sidecar_task_started / sidecar_task_succeeded / sidecar_task_failed
+    #   folder_template_changed / folder_template_applied(目录模板,2026-10-10)
     event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
 
     # actor snapshot(冗余,user 删后仍可读)
@@ -415,6 +416,46 @@ class ProjectGrantTemplateItem(Base):
         UniqueConstraint(
             "template_id", "subject_kind", "subject_id", name="uq_pgt_item_subject",
         ),
+    )
+
+
+class ProjectFolderTemplate(Base, TimestampMixin):
+    """目录模板头表(方案 §2.1)— 保存的目录相对路径预设 {path}。
+
+    应用即快照(方案 §1-D2):建项目时把条目物化为 folders 行,project 不存模板
+    引用(仅 audit 记 template_id),模板事后修改/删除不影响任何已建项目。
+    同 org 内 name 唯一(uq_pft_org_name,显式命名供 IntegrityError→409 按名匹配)。
+    """
+    __tablename__ = "project_folder_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("organizations.id"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(String(1024))
+
+    __table_args__ = (
+        UniqueConstraint("organization_id", "name", name="uq_pft_org_name"),
+    )
+
+
+class ProjectFolderTemplateEntry(Base):
+    """模板条目:一条目录相对路径(如 `素材/视频/原始`,无前后 `/`,方案 §1-D1);
+    template 删除级联。(template_id, path) 唯一(uq_pft_entry_path)天然防重。"""
+    __tablename__ = "project_folder_template_entries"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    template_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_folder_templates.id", ondelete="CASCADE"), nullable=False
+    )
+    path: Mapped[str] = mapped_column(String(600), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("template_id", "path", name="uq_pft_entry_path"),
     )
 
 

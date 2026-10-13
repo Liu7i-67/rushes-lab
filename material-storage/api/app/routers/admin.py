@@ -5,6 +5,9 @@
   CRUD /api/v1/admin/grant-templates        — 项目权限模板(前端预填用预设;
                                               读放宽 system admin 或 project creator,§2.3)
   POST /api/v1/admin/grant-templates/apply-default — 存量项目补默认模板授权(§3.2)
+  CRUD /api/v1/admin/folder-templates       — 目录模板(建项目一键建目录,2026-10-10;
+                                              读弱门 org admin 或 creator 或 flag,
+                                              写门 org admin 或 flag,方案 §3.3)
 
 #154:飞书诊断 endpoint(/feishu/health、/feishu/test-card)随飞书下线删除(ADR-0007)。
 """
@@ -29,6 +32,8 @@ from app.db.tables import (
     AuditEvent,
     Group,
     Project,
+    ProjectFolderTemplate,
+    ProjectFolderTemplateEntry,
     ProjectGrantTemplate,
     ProjectGrantTemplateItem,
     User,
@@ -39,7 +44,15 @@ from app.deps import (
     get_permissions,
     get_request_context,
     require_admin_or_project_creator,
+    require_folder_template_manager,
+    require_folder_templates_reader,
     require_system_admin,
+)
+from app.models import (
+    FolderTemplateEntryIn,
+    FolderTemplateEntryOut,
+    FolderTemplateIn,
+    FolderTemplateOut,
 )
 from app.routers.projects import INITIAL_GRANTS_MAX
 from app.services.audit import AuditService
@@ -637,4 +650,331 @@ async def apply_default_grant_template(
     )
     return ApplyDefaultOut(
         results=results, total_applied=total_applied, total_skipped=total_skipped,
+    )
+
+
+# ─── 目录模板(2026-10-10,方案 §4.1)─────────────────────────────────────────
+# 模板 = 一组目录相对路径;建项目时可选用,应用即快照物化为 folders(方案 §1-D2)。
+# 落位:模板属项目建夹域,照 grant-templates 先例就近放本文件;读门组合弱门、
+# 写门组级 flag(deps.require_folder_templates_reader / require_folder_template_manager)。
+
+# 上限护栏(方案 §1-D8/§4.1 规则 5/7):条数 ≤200 在 Pydantic(max_length),其余
+# 在 _validate_entry_paths;深度为本方案新引入口径(folder_chain 仅有总长护栏无
+# 深度常量);字节限拦在保存期——600 个 CJK 字符 ≈1800 字节能过字符校验却必在
+# 应用期 key_too_long,900B 低于 1024B 留分隔符余量
+FOLDER_TEMPLATE_PATH_DEPTH_MAX = 10    # 路径深度 ≤10 段
+FOLDER_TEMPLATE_PATH_MAX_BYTES = 900   # 整条 path ≤900 UTF-8 字符校验之外的字节口径
+FOLDER_TEMPLATE_NODE_MAX = 400         # 去重后节点总数 ≤400(封顶最坏同步时延)
+
+
+class FolderTemplateUpdateIn(BaseModel):
+    """PATCH 均可选;entries 传了即全量替换(至少 1 条,§11 清空=删模板);
+    name 不传 = 不改;description 不传 = 不改、显式 null = 清空(model_fields_set)。"""
+
+    name: str | None = Field(None, min_length=1, max_length=128)
+    description: str | None = Field(None, max_length=1024)
+    entries: list[FolderTemplateEntryIn] | None = Field(None, min_length=1, max_length=200)
+
+
+def _utf8_len(s: str) -> int:
+    return len(s.encode("utf-8"))
+
+
+def _validate_entry_paths(entries: list[FolderTemplateEntryIn]) -> list[str]:
+    """POST/PATCH 共用的条目路径校验(方案 §4.1 规则 1-7;**不做静默归一化**,
+    非法即 422;strip 后的值作为唯一校验与持久化对象)。
+
+    顺序:逐条(1 首尾斜杠 → 2 段结构 → 3 段首尾空白 → 4 段长 → 5 深度/总长)
+    → 6 payload 内重复 → 7 全模板去重节点总数;错误信息指明第几条、何因。
+    返回 strip 后的路径列表(调用方以此入库,避免二次 strip 口径分叉)。
+    """
+    paths: list[str] = []
+    for i, entry in enumerate(entries, start=1):
+        # 规则 1:整条先 strip(仅首尾空白),strip 后的值即入库值;显式拒绝
+        # 首尾斜杠(归一化会与唯一键语义打架,`素材/` 与 `素材` 必须判非法而非等价)
+        path = entry.path.strip()
+        if path.startswith("/") or path.endswith("/"):
+            raise HTTPException(
+                422, f"entries 第 {i} 条路径非法(不允许以 / 开头或结尾):{entry.path!r}",
+            )
+        segments = path.split("/")
+        for seg in segments:
+            # 规则 2:空段(连续 //)/ `.` / `..` / 含反斜杠(check_segment_name 语义)
+            if not seg:
+                raise HTTPException(422, f"entries 第 {i} 条路径含空段(连续 //):{path!r}")
+            if seg in (".", "..") or "\\" in seg:
+                raise HTTPException(
+                    422, f"entries 第 {i} 条路径含非法段(. / .. / 反斜杠):{path!r}",
+                )
+            # 规则 3:段首尾含空白(拒绝而非静默 strip,报错可定位)
+            if seg != seg.strip():
+                raise HTTPException(422, f"entries 第 {i} 条路径段首尾含空白:{path!r}")
+            # 规则 4:单段 255 字符 / 255 UTF-8 字节双口径(Folder.name 列限 + MinIO 段硬限)
+            if len(seg) > 255 or _utf8_len(seg) > 255:
+                raise HTTPException(
+                    422, f"entries 第 {i} 条路径单段超长(>255 字符或 255 字节):{path!r}",
+                )
+        # 规则 5:深度 ≤10 段;总长 600 字符 / 900 UTF-8 字节双口径
+        if len(segments) > FOLDER_TEMPLATE_PATH_DEPTH_MAX:
+            raise HTTPException(
+                422,
+                f"entries 第 {i} 条路径深度超限(最多 {FOLDER_TEMPLATE_PATH_DEPTH_MAX} 段,"
+                f"实际 {len(segments)} 段):{path!r}",
+            )
+        if len(path) > 600 or _utf8_len(path) > FOLDER_TEMPLATE_PATH_MAX_BYTES:
+            raise HTTPException(
+                422,
+                f"entries 第 {i} 条路径总长超限(>600 字符或 "
+                f"{FOLDER_TEMPLATE_PATH_MAX_BYTES} 字节):{path!r}",
+            )
+        paths.append(path)
+
+    # 规则 6:payload 内 path 重复(指明重复值)
+    seen: set[str] = set()
+    for i, path in enumerate(paths, start=1):
+        if path in seen:
+            raise HTTPException(422, f"entries 第 {i} 条路径重复:{path}")
+        seen.add(path)
+
+    # 规则 7:各 path 按段展开去重的节点集 ≤400(单模板口径非跨模板合计;
+    # 封顶最坏同步时延:满额 400 节点 ≈400 次串行 commit + FGA 写)
+    nodes: set[tuple[str, ...]] = set()
+    for path in paths:
+        segs = path.split("/")
+        for depth in range(1, len(segs) + 1):
+            nodes.add(tuple(segs[:depth]))
+    if len(nodes) > FOLDER_TEMPLATE_NODE_MAX:
+        raise HTTPException(
+            422,
+            f"entries 去重后目录节点总数超限(最多 {FOLDER_TEMPLATE_NODE_MAX} 个,"
+            f"实际 {len(nodes)} 个)",
+        )
+    return paths
+
+
+def _folder_template_conflict_response(e: IntegrityError, name: str | None) -> HTTPException:
+    """并发漏检撞唯一约束的兜底映射(照 _integrity_conflict_response 先例,按约束名)。"""
+    err = str(e.orig)
+    if "uq_pft_org_name" in err:
+        return HTTPException(409, f"模板名已存在:{name}")
+    if "uq_pft_entry_path" in err:
+        return HTTPException(409, "模板条目已存在(并发写入冲突),请重试")
+    return HTTPException(409, "模板写入失败,存在唯一性冲突")
+
+
+async def _load_folder_template_entries(
+    db: AsyncSession, template_id: uuid.UUID,
+) -> list[ProjectFolderTemplateEntry]:
+    """单模板条目按 path 排序取回(列表出参与响应序列化共用)。"""
+    res = await db.execute(
+        select(ProjectFolderTemplateEntry)
+        .where(ProjectFolderTemplateEntry.template_id == template_id)
+        .order_by(ProjectFolderTemplateEntry.path)
+    )
+    return list(res.scalars().all())
+
+
+def _folder_template_out(
+    template: ProjectFolderTemplate,
+    entries: list[ProjectFolderTemplateEntry],
+) -> FolderTemplateOut:
+    return FolderTemplateOut(
+        id=template.id, name=template.name, description=template.description,
+        entry_count=len(entries),
+        entries=[FolderTemplateEntryOut(path=e.path) for e in entries],
+    )
+
+
+@router.get("/folder-templates", response_model=list[FolderTemplateOut])
+async def list_folder_templates(
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_folder_templates_reader),  # noqa: B008
+) -> list[FolderTemplateOut]:
+    """模板列表(按 name 排序,带全量 entries 供 NewProjectModal 预览;模板数量少无压力)。
+
+    读守门 = 组合弱门(org admin 或 project_creator 或 folder_template_manager,
+    方案 §3.3);organization_id 服务端取 default org 过滤,org 缺失回空列表。
+    """
+    _ = user.id
+    org = await get_default_organization(db)
+    if org is None:
+        return []
+    org_id, _tenant_key = org
+    res = await db.execute(
+        select(ProjectFolderTemplate)
+        .where(ProjectFolderTemplate.organization_id == org_id)
+        .order_by(ProjectFolderTemplate.name, ProjectFolderTemplate.id)
+    )
+    templates = list(res.scalars().all())
+    if not templates:
+        return []
+    # entries 一次批量取回(免 N+1),按 path 排序(与应用期字典序一致)
+    res_entries = await db.execute(
+        select(ProjectFolderTemplateEntry)
+        .where(ProjectFolderTemplateEntry.template_id.in_([t.id for t in templates]))
+        .order_by(ProjectFolderTemplateEntry.path)
+    )
+    entries_by_tid: dict[uuid.UUID, list[ProjectFolderTemplateEntry]] = {}
+    for e in res_entries.scalars().all():
+        entries_by_tid.setdefault(e.template_id, []).append(e)
+    return [
+        _folder_template_out(t, entries_by_tid.get(t.id, []))
+        for t in templates
+    ]
+
+
+@router.post("/folder-templates", response_model=FolderTemplateOut, status_code=201)
+async def create_folder_template(
+    payload: FolderTemplateIn,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_folder_template_manager),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> FolderTemplateOut:
+    """创建模板。organization_id 不由 body 传入:服务端取 default org(单租户)。
+
+    entries 条数(1..200)在 Pydantic 层 422;路径七条规则在 _validate_entry_paths;
+    重名 409(预检 + IntegrityError 兜底,照 grant-templates)。
+    """
+    org = await get_default_organization(db)
+    if org is None:
+        raise HTTPException(400, "默认组织不存在,无法创建目录模板")
+    org_id, _tenant_key = org
+
+    entry_paths = _validate_entry_paths(payload.entries)
+
+    dup = await db.execute(
+        select(ProjectFolderTemplate).where(
+            ProjectFolderTemplate.organization_id == org_id,
+            ProjectFolderTemplate.name == payload.name,
+        )
+    )
+    if dup.scalar_one_or_none() is not None:
+        raise HTTPException(409, f"模板名已存在:{payload.name}")
+
+    template = ProjectFolderTemplate(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        name=payload.name,
+        description=payload.description,
+    )
+    db.add(template)
+    for path in entry_paths:
+        db.add(ProjectFolderTemplateEntry(
+            id=uuid.uuid4(), template_id=template.id, path=path,
+        ))
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise _folder_template_conflict_response(e, payload.name) from e
+
+    await audit.write(
+        event_type="folder_template_changed",
+        actor_user_id=user.id,
+        details={
+            "action": "create", "template_id": str(template.id),
+            "name": template.name, "entry_count": len(entry_paths),
+        },
+        request_ip=ctx["request_ip"],
+        user_agent=ctx["user_agent"],
+    )
+    entries = await _load_folder_template_entries(db, template.id)
+    return _folder_template_out(template, entries)
+
+
+@router.patch("/folder-templates/{template_id}", response_model=FolderTemplateOut)
+async def update_folder_template(
+    template_id: uuid.UUID,
+    payload: FolderTemplateUpdateIn,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_folder_template_manager),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> FolderTemplateOut:
+    """改模板:改名/描述/条目(均可选)。
+
+    entries 未传 = 不改(对齐 grant-templates items=None 不改先例),传则全量替换
+    且至少 1 条;description 显式 null = 清空(model_fields_set 先例);改名撞同
+    org 已有 name → 409(预检排除自身);entries 校验同 POST。
+    """
+    template = await db.get(ProjectFolderTemplate, template_id)
+    if template is None:
+        raise HTTPException(404, f"folder template not found:{template_id}")
+
+    # 校验先于任何写(404/409/422 都应在无副作用阶段抛出)
+    entry_paths: list[str] | None = None
+    if payload.entries is not None:
+        entry_paths = _validate_entry_paths(payload.entries)
+    if payload.name is not None and payload.name != template.name:
+        dup = await db.execute(
+            select(ProjectFolderTemplate).where(
+                ProjectFolderTemplate.organization_id == template.organization_id,
+                ProjectFolderTemplate.name == payload.name,
+                ProjectFolderTemplate.id != template_id,   # 预检排除自身
+            )
+        )
+        if dup.scalar_one_or_none() is not None:
+            raise HTTPException(409, f"模板名已存在:{payload.name}")
+        template.name = payload.name
+    # 显式传 null = 清空(前端保存空描述时发 null);没传 = 不改 ——
+    # `is not None` 会把 null 误当「不改」,清空永远不生效
+    if "description" in payload.model_fields_set:
+        template.description = payload.description
+
+    if entry_paths is not None:
+        # 全量替换:同事务删旧插新(DB 层 uq_pft_entry_path 由 API 预检前置)
+        await db.execute(
+            delete(ProjectFolderTemplateEntry).where(
+                ProjectFolderTemplateEntry.template_id == template_id,
+            )
+        )
+        for path in entry_paths:
+            db.add(ProjectFolderTemplateEntry(
+                id=uuid.uuid4(), template_id=template_id, path=path,
+            ))
+
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise _folder_template_conflict_response(e, payload.name) from e
+
+    entries = await _load_folder_template_entries(db, template_id)
+    await audit.write(
+        event_type="folder_template_changed",
+        actor_user_id=user.id,
+        details={
+            "action": "update", "template_id": str(template_id),
+            "name": template.name, "entry_count": len(entries),
+        },
+        request_ip=ctx["request_ip"],
+        user_agent=ctx["user_agent"],
+    )
+    return _folder_template_out(template, entries)
+
+
+@router.delete("/folder-templates/{template_id}", status_code=204)
+async def delete_folder_template(
+    template_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_folder_template_manager),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> None:
+    """删模板(entries 随 FK ondelete CASCADE 级联删;应用即快照语义,
+    不影响任何已建项目,方案 §1-D2)。id 不存在 → 404;重复删 → 404(硬删)。"""
+    template = await db.get(ProjectFolderTemplate, template_id)
+    if template is None:
+        raise HTTPException(404, f"folder template not found:{template_id}")
+    name = template.name
+    await db.delete(template)
+    await db.commit()
+
+    await audit.write(
+        event_type="folder_template_changed",
+        actor_user_id=user.id,
+        details={"action": "delete", "template_id": str(template_id), "name": name},
+        request_ip=ctx["request_ip"],
+        user_agent=ctx["user_agent"],
     )

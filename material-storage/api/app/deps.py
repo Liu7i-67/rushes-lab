@@ -362,3 +362,78 @@ async def require_project_deleter(
             "project deleter permission required(仅系统管理员或被授权「可删除项目」的组成员可删除/恢复项目)",
         )
     return user
+
+
+async def require_folder_template_manager(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),  # noqa: B008  FastAPI DI,repo 全量同款
+) -> CurrentUser:
+    """目录模板写守门 — POST/PATCH/DELETE /admin/folder-templates 用(方案 §3.3)。
+
+    口径:is_org_admin 或 check(organization#folder_template_manager)—— 系统
+    admin 恒可写(is_org_admin 蕴含直通,不写第三条独立支:本仓 system admin 即
+    default org 的 organization#admin,与 require_system_admin 同源),组开关成员
+    经 group#member 自动展开。default org 缺失行为对齐 require_system_admin(500);
+    FGA 异常不上吞(部署顺序保证 model 先 push,方案 §3.2)。403 文案与
+    creator/deleter 区分(契约 §4.1)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if await perms.is_org_admin(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        return user
+    if not await perms.is_org_folder_template_manager(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        raise HTTPException(
+            403,
+            "folder template manager permission required"
+            "(仅系统管理员或被授权「管理目录模板」的组成员可维护目录模板)",
+        )
+    return user
+
+
+async def require_folder_templates_reader(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),  # noqa: B008  FastAPI DI,repo 全量同款
+) -> CurrentUser:
+    """目录模板读弱门 — GET /admin/folder-templates 用(方案 §3.3)。
+
+    组合弱门:is_org_admin 或 is_org_project_creator 或 folder_template_manager
+    check —— 零项目 creator 建项目表单要拉模板预览,仅持 flag 组员管理页要能读
+    (防「能写不能读」)。写法参照 require_admin_or_project_creator 的组合弱门
+    形态,但支线显式枚举:**不含 has_any_project_admin**(任意项目管理员不属于
+    读门,整抄会把读门外溢到全部项目 admin;grant-templates 的读放宽不可平移,
+    其写门是 system admin 天然被读门覆盖)。不新增 get_* bool 门 helper
+    (get_is_project_creator 先例全仓零调用属死代码);/me 的
+    is_folder_template_manager 直接内联计算(照 auth.py is_project_creator 先例)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if org:
+        _, tenant_key = org
+        if await perms.is_org_admin(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return user
+        if await perms.is_org_project_creator(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return user
+        if await perms.is_org_folder_template_manager(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return user
+    raise HTTPException(
+        403,
+        "folder templates reader permission required"
+        "(仅系统管理员、可新建项目者或被授权「管理目录模板」的组成员可查看目录模板)",
+    )

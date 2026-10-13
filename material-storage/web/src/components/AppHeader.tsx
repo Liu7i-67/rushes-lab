@@ -112,6 +112,11 @@ export function AppHeader({ me }: Props) {
               <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />
             </>
           )}
+          {/* 目录模板(folder-templates 方案 §3.3)— org admin / 系统管理员 / 持组 flag 成员可见;
+              口径同 NewProjectModal 入口闸门,旧后端无字段回落 is_system_admin */}
+          {(me.is_folder_template_manager ?? me.is_system_admin) && (
+            <NavChip to="/admin/folder-templates" label="目录模板" navigate={navigate} />
+          )}
         </nav>
 
         <div style={{ flex: 1 }} />

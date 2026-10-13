@@ -43,6 +43,9 @@ class ProjectCreateIn(BaseModel):
     admin_user_id: uuid.UUID = Field(..., description="项目管理员的 users.id UUID")
     # 新建项目初始授权(可选;方案 §3.1):不传 / 空 = 现行为完全不变
     initial_grants: list[InitialGrantIn] | None = None
+    # 目录模板(可选;方案 §4.2):不传 / null = 现行为完全不变(零回归);
+    # 传入则在建项目后把模板条目物化为 folders(模板不存在 / 跨 org → 400)
+    folder_template_id: uuid.UUID | None = None
 
 
 class AdminBrief(BaseModel):
@@ -64,6 +67,39 @@ class ProjectOut(ORMModel):
     # 当前 user 在本项目的有效 role 列表(单 user 可有多 role,如 admin+uploader);
     # ['admin'|'uploader'|'downloader'|'viewer'];空 = 仅靠 visibility=public 见
     my_roles: list[str] = []
+
+
+# ─── 目录模板(2026-10-10,方案 §4.1)─────────────────────────────────────────
+class FolderTemplateEntryIn(BaseModel):
+    """目录模板条目入参:一条目录相对路径,如 `素材/视频/原始`(无前后 `/`)。
+
+    结构 / 长度 / 深度校验在路由层 `_validate_entry_paths`(422 指明第几条、
+    何因);strip 后的值才是校验与持久化对象(路由层负责,Pydantic 不归一化)。
+    """
+
+    path: str = Field(..., min_length=1, max_length=600)
+
+
+class FolderTemplateIn(BaseModel):
+    """POST /admin/folder-templates 入参;entries 1..200 条(空模板无意义,§11)。"""
+
+    name: str = Field(..., min_length=1, max_length=128)
+    description: str | None = Field(None, max_length=1024)
+    entries: list[FolderTemplateEntryIn] = Field(..., min_length=1, max_length=200)
+
+
+class FolderTemplateEntryOut(BaseModel):
+    path: str
+
+
+class FolderTemplateOut(BaseModel):
+    """模板出参(列表项与单对象同形);带全量 entries 供 NewProjectModal 预览。"""
+
+    id: uuid.UUID
+    name: str
+    description: str | None
+    entry_count: int
+    entries: list[FolderTemplateEntryOut]
 
 
 # ─── assets ───────────────────────────────────────────────────────────────────
