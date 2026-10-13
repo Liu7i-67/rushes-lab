@@ -257,12 +257,14 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
                        rules={[{ required: true, max: 255 }]}>
               <Input placeholder="2026 春季婚礼策划" autoFocus />
             </Form.Item>
+            {/* rules 拆三条:antd v6 校验器一条 rule 混 pattern 时 min/max 会被静默忽略,
+                必须长度一条(无 pattern)、pattern 单独一条,各配 message 才能拦住 code="1" */}
             <Form.Item name="code" label="项目编码(URL slug,小写字母/数字/-)"
-                       rules={[{
-                         required: true, min: 2, max: 64,
-                         pattern: /^[a-z0-9][a-z0-9-]*$/,
-                         message: '小写字母/数字/-,以字母数字开头',
-                       }]}
+                       rules={[
+                         { required: true, message: '请输入项目编码' },
+                         { min: 2, max: 64, message: '长度 2-64 个字符' },
+                         { pattern: /^[a-z0-9][a-z0-9-]*$/, message: '小写字母/数字/-,以字母数字开头' },
+                       ]}
                        extra="提交后不可改;影响 MinIO 路径前缀">
               <Input placeholder="wedding-2026-spring" />
             </Form.Item>
