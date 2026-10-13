@@ -2,6 +2,10 @@
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
 
+## 2026-10-13
+
+- **目录模板 重部署 hh2 dev（dev 被主仓部署覆盖后恢复）**(feat/folder-templates merge liuqi 后 `2674442`):用户发现 dev 代码被重置——探查实锤**dev 于 10-12 被主仓 liuqi `e2ce737`(百度审核补件)的常规部署覆盖**(修改文件回旧版:auth.py 特征 grep=0;feat 新增文件/0016 迁移/DB 两表因 rsync 不带 --delete 幸存;SPA 变 index-CYgPDlRz.js)——根因即 feat 未合并 liuqi,任何主仓部署都会冲掉。**恢复方案=先 merge 再部署**(直接重推旧包会用 feat 版 App.tsx 覆盖法务页路由,两功能打架):feat worktree `git merge liuqi`(631b316,唯一冲突 changelog 2026-10-12/10-10 双节按并集解)→合并后回归=隔离栈全量 **497 过/1 基线遗留/1 跳**(预签名周期 30 新测试并入仍全绿)+web build 新指纹 `index-C8lv4fpD.js`(public/ 法务页随产物)→重部署:FGA model `01M4PVK6RRP9E6B9GC8AAFCGER` 仍在 dev store latest **免重推**→代码分片 4.2MB×9→alembic 已在 0016 幂等确认→restart ms-api-dev/ms-worker-dev(吸取断流教训独立短命令执行)→SPA 原子替换(备份 web.bak-20261013)。验证 8/8——DEPLOYED=2674442、双入口指纹一致、auth/me 401、**双功能并存实锤**(模板服务 grep+预签名 request_base grep+me 字段+`/privacy` `/terms` 200)、日志零错误;业务抽测真链路(建模板→带模板建项目 201→三夹就位→审计 applied count=3→删模板 204→归档清理)。**防再覆盖:feat 须尽快合并回 liuqi**(下次主仓部署仍会冲掉);prod 部署待拍板
+
 ## 2026-10-12
 
 - **百度开放平台审核补件:隐私政策/服务条款+应用内授权告知 已上线 dev+prod**(liuqi `e2ce737`,用户转达审核要求):①两法务静态页 `web/public/{privacy,terms}.html`(自包含 HTML 随 SPA 构建分发,内容覆盖数据收集/网盘授权只读范围/存储保护/用户权利等)+nginx default.conf 新增 `= /privacy`/`= /terms` 短路径(rewrite 到 static/web/,所有入口可用);②备份功能页授权用途告知——BaiduBackupDrawer 绑定状态区常驻一行(审核建议原文「网盘授权仅用于将所选目录只读备份至应用侧,不做修改、删除、分享」+两法务页链接)+BaiduBindModal 授权第一步同步注明;③部署=代码 deploy_lan.sh 双环境+SPA 分片推送原子替换(新指纹 index-CYgPDlRz.js,备份 web.bak-20261012-baidu(-prod))+poc-nginx(-dev) reload;验证——dev/prod 三入口(内网/外网 18080/域名 https)`/privacy` `/terms` 全 200、三入口指纹一致、告知文案 grep 在部署产物、auth/me 401。**提交百度审核的 URL:https://bucket.taoxiplan.com/privacy 与 https://bucket.taoxiplan.com/terms**;小坑:nginx reload 后首个请求可能仍走旧 worker(403=MinIO 兜底),几秒后自愈
