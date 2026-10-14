@@ -234,6 +234,7 @@ SELECT f.id, f.name,
        count(*) AS livp
 FROM folders f
 JOIN assets a ON a.folder_id = f.id AND a.deleted_at IS NULL
+  AND a.filename ILIKE '%.livp'   -- ⚠ 勿漏:漏了会把目录内全部资产数进 livp 列(dev 演练实测踩过)
 WHERE f.id IN (SELECT folder_id FROM assets WHERE filename ILIKE '%.livp' AND deleted_at IS NULL)
 GROUP BY 1, 2 ORDER BY livp DESC;
 ```
