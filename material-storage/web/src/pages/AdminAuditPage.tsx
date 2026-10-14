@@ -33,12 +33,14 @@ interface AuditEvent {
   details: Record<string, unknown>;
 }
 
-// 常用 event_type 预设(下拉)— 可以输自定义。
-// 本期新增:项目逻辑删除/恢复、本地用户 CRUD、用户组成员变更
-// (字符串与后端 audit.write 的 event_type 逐一核对过,见 api/app/routers/)
+// event_type 过滤下拉 = 后端写入全集 55 项 + 「全部」,共 56 行。
+// 注意:Select 未开 tags 模式,showSearch 只能在既有选项里搜,输不了自定义值 —
+// 后端新增 event_type 写入点时须回来补选项(后端对 event_type 是任意字符串精确匹配,无白名单)。
+// 全集核对依据:rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
+// (2026-10-14 补全 33 项;删除后端从不写入的死选项 approval_notified/invite_notified)。
 const EVENT_TYPES = [
   '', 'upload', 'download', 'signed_url_issued',
-  'approval_submitted', 'approval_state_changed', 'approval_notified',
+  'approval_submitted', 'approval_state_changed',
   'access_denied',
   'project_created', 'project_deleted', 'project_restored',
   'project_member_added', 'project_member_removed',
@@ -46,7 +48,25 @@ const EVENT_TYPES = [
   'group_member_added', 'group_member_removed',
   'folder_created', 'sensitive_folder_invited', 'sensitive_folder_revoked',
   'folder_template_changed', 'folder_template_applied',
-  'invite_notified', 'share_link_created', 'share_link_accessed',
+  'share_link_created', 'share_link_accessed',
+  // ── 以下按上游方案附录 A 分组补全(33 项)────────────────────────────────
+  // 备份类(11)
+  'baidu_bind', 'baidu_unbind', 'baidu_task_create', 'baidu_task_cancel',
+  'baidu_task_delete', 'baidu_task_retry', 'baidu_file_retry',
+  'baidu_file_overwrite', 'baidu_file_random_suffix', 'baidu_file_imported',
+  'baidu_task_auto_finalized',
+  // 文件类(8)
+  'asset_deleted', 'asset_restored', 'asset_purged',
+  'asset.tag_updated', 'asset.batch_renamed',
+  'download_denied', 'proxy_download', 'folder_deleted',
+  // 用户/组(7)
+  'user_disabled', 'user_enabled', 'user_password_reset',
+  'group_created', 'group_updated', 'group_deleted', 'password_changed',
+  // 登录/通知(3)
+  'local_login_success', 'local_login_failed', 'notification_sent',
+  // 权限模板/目录/授权(4)
+  'folder_grant_added', 'folder_grant_removed', 'grant_template_changed',
+  'grant_revoked',
 ];
 
 const PAGE_SIZE = 30;
@@ -328,6 +348,9 @@ function EventRow({
 // event_type → 颜色(粗类别)
 function eventColor(et: string): string {
   if (et.startsWith('access_denied')) return 'var(--ms-crimson)';
+  // 百度网盘备份域(baidu_* 11 项)一组色,避免落到默认灰;
+  // tokens.css 暂无第 5 个色相,复用 emerald(与 share/signed_url 同色不同组,仅粗分类)
+  if (et.startsWith('baidu_')) return 'var(--ms-emerald)';
   if (et.includes('approval')) return 'var(--ms-amber)';
   if (et.startsWith('share') || et.startsWith('signed_url')) return 'var(--ms-emerald)';
   if (et.startsWith('upload') || et.startsWith('download')) return 'var(--ms-accent)';

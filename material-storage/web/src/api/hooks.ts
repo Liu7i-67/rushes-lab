@@ -3,6 +3,10 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { useCallback } from 'react';
 import { http } from './client';
 import type {
+  AdminBaiduTask,
+  AdminBaiduTaskDetail,
+  AdminBaiduTaskFilesPage,
+  AdminBaiduTasksPage,
   Approval,
   ApprovalAction,
   ApprovalTargetType,
@@ -1126,3 +1130,72 @@ export const useBaiduFileRandomSuffix = () => {
     onSuccess: () => invalidate(),
   });
 };
+
+// ─── 管理员备份任务视图(W3;/api/v1/admin/baidu-backup,require_system_admin)──
+// 管理观测面看存量事实:不随 baidu_backup_enabled 门控;非系统 admin 后端 403
+// (全局 queryCache 对 403 静默跳过,页面自行降级为提示)。只读,无 mutation。
+export const ADMIN_BAIDU_BACKUP_BASE = '/api/v1/admin/baidu-backup';
+
+/** admin 视角活动任务 = enumerating/running(§3.1① active_only 同口径)。 */
+const adminBaiduTaskActive = (t: Pick<AdminBaiduTask, 'status'>) =>
+  t.status === 'enumerating' || t.status === 'running';
+
+/** 列表存在活动任务时 15s 轮询,无则不轮(需求 F12;节奏取用户侧 5s/15s 慢档)。 */
+const adminBaiduPollMs = (data?: AdminBaiduTasksPage) =>
+  data && data.items.some(adminBaiduTaskActive) ? 15_000 : false;
+
+/** GET /admin/baidu-backup/tasks — 全系统任务分页(status/user_id/q/active_only 服务端过滤,
+ *  排序固定 created_at DESC, id DESC)。params 传 null = 不启用。 */
+export const useAdminBaiduTasks = (
+  params: {
+    status?: string;
+    user_id?: string;
+    q?: string;
+    active_only?: boolean;
+    limit?: number;
+    offset?: number;
+  } | null = {},
+) =>
+  useQuery({
+    queryKey: ['admin-baidu-tasks', params],
+    queryFn: async () =>
+      (await http.get<AdminBaiduTasksPage>(`${ADMIN_BAIDU_BACKUP_BASE}/tasks`, {
+        params: params ?? {},
+      })).data,
+    enabled: params !== null,
+    placeholderData: keepPreviousData,
+    refetchInterval: (query) => adminBaiduPollMs(query.state.data),
+  });
+
+/** GET /admin/baidu-backup/tasks/{id} — 任务详情(含绑定快照/当前绑定/取消原因/调度观测;
+ *  活动任务 15s 轮询)。 */
+export const useAdminBaiduTask = (taskId: string | undefined) =>
+  useQuery({
+    queryKey: ['admin-baidu-task', taskId],
+    queryFn: async () =>
+      (await http.get<AdminBaiduTaskDetail>(`${ADMIN_BAIDU_BACKUP_BASE}/tasks/${taskId}`)).data,
+    enabled: !!taskId,
+    refetchInterval: (query) =>
+      query.state.data && adminBaiduTaskActive(query.state.data) ? 15_000 : false,
+  });
+
+/** GET /admin/baidu-backup/tasks/{id}/files — 文件明细分页(status 白名单服务端过滤,
+ *  排序 rel_path, id;活动任务 15s 轮询)。 */
+export const useAdminBaiduTaskFiles = (
+  taskId: string | undefined,
+  status: string | undefined,
+  limit: number,
+  offset: number,
+  active = false,
+) =>
+  useQuery({
+    queryKey: ['admin-baidu-task-files', taskId, status ?? 'all', limit, offset],
+    queryFn: async () =>
+      (await http.get<AdminBaiduTaskFilesPage>(
+        `${ADMIN_BAIDU_BACKUP_BASE}/tasks/${taskId}/files`,
+        { params: { ...(status ? { status } : {}), limit, offset } },
+      )).data,
+    enabled: !!taskId,
+    placeholderData: keepPreviousData,
+    refetchInterval: active ? 15_000 : false,
+  });

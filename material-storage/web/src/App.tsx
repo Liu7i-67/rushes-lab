@@ -30,6 +30,7 @@ const AdminUsersPage = lazy(() => import('./pages/AdminUsersPage'));
 const AdminGroupsPage = lazy(() => import('./pages/AdminGroupsPage'));
 const AdminGrantTemplatesPage = lazy(() => import('./pages/AdminGrantTemplatesPage'));
 const AdminFolderTemplatesPage = lazy(() => import('./pages/AdminFolderTemplatesPage'));
+const AdminBaiduTasksPage = lazy(() => import('./pages/AdminBaiduTasksPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
@@ -71,6 +72,8 @@ const RouterRoutes = () => (
       <Route path="/admin/groups" element={<AdminGroupsPage />} />
       <Route path="/admin/grant-templates" element={<AdminGrantTemplatesPage />} />
       <Route path="/admin/folder-templates" element={<AdminFolderTemplatesPage />} />
+      {/* W3: 管理员备份任务观测(仅系统管理员;后端 require_system_admin 拦 403) */}
+      <Route path="/admin/baidu-tasks" element={<AdminBaiduTasksPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/s/:token" element={<ShareLandingPage />} />
       <Route path="/r/:token" element={<RequestLinkLandingPage />} />

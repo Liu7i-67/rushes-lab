@@ -478,3 +478,92 @@ export interface BaiduReviveOut {
   finalized: boolean;                    // true=已直接复位派发,false=交 worker 消费
   status: string;                        // 复活后的目标任务状态(enumerating/running)
 }
+
+// ─── 管理员备份任务视图(W3;/api/v1/admin/baidu-backup)───────────────────────
+// 管理观测面看存量事实:不随 baidu_backup_enabled 门控;require_system_admin。
+// 后端契约见 docs/qdev/2026-10-14-baidu-admin-observability.md 接口定义①②③。
+
+/** 任务归属用户(join users;username 可空 —— 飞书账号无本地用户名,name NOT NULL)。 */
+export interface AdminBaiduTaskUser {
+  id: string;
+  username: string | null;
+  name: string;
+}
+
+/** 任务归属项目(join projects;FK RESTRICT,项目行总在)。 */
+export interface AdminBaiduTaskProject {
+  id: string;
+  name: string;
+}
+
+/** 目标文件夹(夹已删 → null,target_folder_id SET NULL)。 */
+export interface AdminBaiduTaskFolder {
+  id: string;
+  name: string;
+}
+
+/** GET /admin/baidu-backup/tasks 列表项(聚合列 NULL 序列化 0 兜底;fail_reason 截 200)。 */
+export interface AdminBaiduTask {
+  id: string;
+  user: AdminBaiduTaskUser;
+  status: BaiduTaskStatus;
+  source_dir: string;
+  project: AdminBaiduTaskProject;
+  target_folder: AdminBaiduTaskFolder | null;
+  total_files: number;
+  done_files: number;
+  failed_files: number;
+  skipped_files: number;
+  cancelled_files: number;
+  total_bytes: number;
+  done_bytes: number;
+  created_at: string;
+  updated_at: string;
+  fail_reason: string | null;
+  cancel_requested: boolean;
+}
+
+export interface AdminBaiduTasksPage {
+  items: AdminBaiduTask[];
+  total: number;
+}
+
+/** 详情里的当前绑定行(baidu_bindings;baidu_uid 为该表列名)。 */
+export interface AdminBaiduTaskBinding {
+  id: string;
+  baidu_uid: string;
+  status: BaiduBindingStatus;
+}
+
+/** GET /admin/baidu-backup/tasks/{id} = TaskItem + 绑定快照/当前绑定/取消原因/调度观测。 */
+export interface AdminBaiduTaskDetail extends AdminBaiduTask {
+  bound_baidu_uid: string | null;      // 创建时从 binding 快照(换绑甄别锚点)
+  binding: AdminBaiduTaskBinding | null;
+  cancel_reason: string | null;        // user_cancel / binding_replaced
+  // ── 调度观测字段(BaiduBackupTask 列,均可空)──
+  retry_count: number;                 // 复活次数
+  enum_done: boolean;                  // 枚举完成标记(复活时复位 false 重枚举)
+  dispatched_at: string | null;        // 最近派发时刻(NULL=从未派发)
+  round_started_at: string | null;     // 轮起点(两次复活之间;48h 判停依据)
+  lease_until: string | null;          // 租约到期(即心跳)
+  runner_id: string | null;
+}
+
+/** GET /admin/baidu-backup/tasks/{id}/files 文件明细行(last_error 截 200)。 */
+export interface AdminBaiduTaskFile {
+  id: string;
+  source_path: string;                   // 原网盘绝对路径
+  rel_path: string;                      // 相对 source_dir
+  status: BaiduFileStatus;
+  bytes_done: number;
+  attempts: number;
+  non_retryable: boolean;
+  last_error: string | null;
+  asset_id: string | null;
+  updated_at: string;
+}
+
+export interface AdminBaiduTaskFilesPage {
+  items: AdminBaiduTaskFile[];
+  total: number;
+}
