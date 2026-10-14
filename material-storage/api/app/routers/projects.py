@@ -39,17 +39,28 @@ from app.deps import (
     require_project_creator,
     require_project_deleter,
 )
-from app.models import ProjectCreateIn, ProjectOut
+from app.models import (
+    ArtistAccountCreatedOut,
+    ProjectCreatedOut,
+    ProjectCreateIn,
+    ProjectOut,
+)
 from app.services.audit import AuditService
 from app.services.default_grants import apply_default_template_grants
 from app.services.folder_templates import apply_folder_template
 from app.services.permissions import (
     PermissionsService,
+    ProjectRole,
     fmt_subject,
     is_already_exists_error,
     is_not_exists_error,
 )
 from app.services.subject_names import resolve_subject_names
+from app.services.user_provisioning import (
+    ARTIST_GROUP_NAME,
+    SOURCE_ARTIST_INLINE,
+    provision_local_user,
+)
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -62,8 +73,12 @@ INITIAL_GRANTS_MAX = 50
 # 指到任意 bucket,后续 presign 全走它
 DEFAULT_MINIO_BUCKET = "ms-dev"
 
+# 内嵌艺人账号的固定项目角色(艺人账号内嵌方案 D8:上传/下载/查看,不走
+# SubjectPicker、不接受入参指定;admin 不在列 —— 组长无角色分配决策需求)
+ARTIST_PROJECT_ROLES: tuple[ProjectRole, ...] = ("uploader", "downloader", "viewer")
 
-@router.post("", response_model=ProjectOut, status_code=201)
+
+@router.post("", response_model=ProjectCreatedOut, status_code=201)
 async def create_project(
     payload: ProjectCreateIn,
     db: AsyncSession = Depends(get_db),
@@ -72,13 +87,15 @@ async def create_project(
     user: CurrentUser = Depends(require_project_creator),   # 系统 admin 或 组级 project_creator
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
-) -> ProjectOut:
+) -> ProjectCreatedOut:
     """创建 project — 系统 admin 或 组级 project_creator(方案 §2.3);必须 payload
     明确指派项目 admin(可以指自己,UI 默认填创建者)。
 
     organization_id 解析顺序:payload > user.organization_id > settings.default_organization_id;
     **非系统 admin 的创建者强制忽略 payload.organization_id 与 minio_bucket**
     (提权口收口,见下方注释)。
+    payload.artist_account 存在时追加内嵌开通艺人账号(艺人账号内嵌方案 §4.1):
+    能力校验 → 用户名预检 → 既有建项目流程原样 → 艺人段(建组/建号/授角色)。
     """
     user_id = user.id
     from app.db.tables import Organization, User
@@ -123,6 +140,34 @@ async def create_project(
     if org is None:
         raise HTTPException(400, f"organization {org_id} not found")
     tenant_key = org.feishu_tenant_key or str(org_id)
+
+    # ── 内嵌开通艺人账号:能力校验(艺人账号内嵌方案 §4.1 阶段 2)─────────────────
+    # artist_account 存在时端点内加验(依赖 payload 内容,无法用声明式 dep);check
+    # 打在 default org 上(get_default_organization 口径,与 require_project_creator
+    # deps.py:256-264 及全部既有组 flag 门同构 —— org flag tuple 只写在 default org,
+    # 用项目 org 会使非 default org 的存量用户在 dep 通过后被此处误吃 403;项目 org
+    # 仅用于建项目本身)。排序理由:权限拒绝优先于下方 DB 前置深校验,403 尽早抛
+    # (与阶段 3「既有 400/422 优先于 409」口径不同属有意为之);守门 403 不写 audit
+    # (照 deps 惯例)。
+    artist_account_in = payload.artist_account
+    if artist_account_in is not None:
+        from app.services.org import get_default_organization
+        default_org = await get_default_organization(db)
+        if default_org is None:
+            raise HTTPException(500, "no default organization configured")
+        _, default_tenant_key = default_org
+        artist_allowed = await permissions.is_org_admin(
+            user_id=str(user_id), organization_tenant_key=default_tenant_key,
+        )
+        if not artist_allowed:
+            artist_allowed = await permissions.is_org_artist_account_creator(
+                user_id=str(user_id), organization_tenant_key=default_tenant_key,
+            )
+        if not artist_allowed:
+            raise HTTPException(
+                403,
+                "artist account creation not allowed(无内嵌创建艺人账号权限)",
+            )
 
     # ── initial_grants 前置校验(方案 §3.1:全部在建项目行之前,原子无半吊子)──
     # 顺序:条数(422)→ payload 内 (kind,id) 重复(400)→ 存在性(400);
@@ -184,6 +229,25 @@ async def create_project(
             .order_by(ProjectFolderTemplateEntry.path)
         )
         template_entry_paths = [row[0] for row in res_paths.all()]
+
+    # ── 用户名预检(艺人账号内嵌方案 §4.1 阶段 3)────────────────────────────────
+    # 最常见的失败(登录名冲突)挡在零副作用阶段(项目未建)。锚点:既有
+    # initial_grants / 目录模板前置校验段之后、Project 构造之前 —— 使既有 400/422
+    # 校验优先于 409,与现状错误优先级最接近。lower 匹配与登录口径对齐
+    # (local_auth.find_user_by_username);消费用 limit(1)+.first() —— 多行命中一律
+    # 视为已占用 409(勿 scalar_one_or_none:存量 evan/Evan 大小写共存对会
+    # MultipleResultsFound 500)。
+    if artist_account_in is not None:
+        res_dup = await db.execute(
+            select(User)
+            .where(func.lower(User.username) == artist_account_in.username.lower())
+            .limit(1)
+        )
+        if res_dup.first() is not None:
+            raise HTTPException(
+                409,
+                detail={"code": "username_taken", "username": artist_account_in.username},
+            )
 
     project = Project(
         id=uuid.uuid4(),
@@ -304,8 +368,169 @@ async def create_project(
         **ctx,
     )
 
+    # ── 艺人段(艺人账号内嵌方案 §4.1 阶段 5-7;D4:账号只在项目建成后创建,
+    # 宁留「项目在、成员缺」也不留孤儿账号)───────────────────────────────────────
+    # ⚠ 本段存在 rollback 路径(组名 unique 回查是继续执行、建号竞态是失败),
+    # rollback 会过期 identity_map 中全部 ORM 对象(session.py 只豁免 commit)——
+    # 艺人段所有 FGA 写与 audit 的 project_id 一律用物化局部 project_id_v(:261
+    # 同雷物化惯例),禁读 project ORM 属性,否则竞态续行后即 MissingGreenlet 500。
+    created_artist: ArtistAccountCreatedOut | None = None
+    if artist_account_in is not None:
+        # 阶段 5:确保「艺人」组(方案 D5 get-or-create)。撞 name unique(并发自建
+        # 竞态)→ rollback → 回查复用;回查路径不写审计不警告(赢家请求同链路刚建
+        # 并已写审计)。
+        artist_group = (await db.execute(
+            select(Group).where(Group.name == ARTIST_GROUP_NAME)
+        )).scalar_one_or_none()
+        if artist_group is None:
+            artist_group = Group(
+                name=ARTIST_GROUP_NAME,
+                description="系统自动创建：新建项目时内嵌开通的艺人账号默认归入此组",  # noqa: RUF001  全角冒号为方案 §1-D5 钉死字面量,测试断言全角
+            )
+            db.add(artist_group)
+            try:
+                await db.commit()
+                await db.refresh(artist_group)
+            except IntegrityError as e:
+                await db.rollback()
+                artist_group = (await db.execute(
+                    select(Group).where(Group.name == ARTIST_GROUP_NAME)
+                )).scalar_one_or_none()
+                if artist_group is None:
+                    raise HTTPException(500, "艺人组创建失败") from e
+            else:
+                # group_created(含 source)仅在实际新建组成功时写(方案 D5/D7);
+                # 命中既有组 / 竞态回查复用一律不写
+                await audit.write(
+                    event_type="group_created",
+                    actor_user_id=user_id,
+                    details={"group_id": str(artist_group.id),
+                             "name": ARTIST_GROUP_NAME,
+                             "source": SOURCE_ARTIST_INLINE},
+                    **ctx,
+                )
+        else:
+            # 命中既有同名组:读该组四个 org flag 置位状态并分级记日志(方案 D5)
+            # —— 全空 log.info(常规复用,防 WARNING 常态噪音)/ 任一置位
+            # log.warning(真风险才告警,把静默风险变成可观测)。定向读四次
+            # read_all_tuples(object_id 为必填参数,传 default org 的 tenant_key,
+            # 与阶段 2 口径一致;勿搬 directory.py 私有的 _read_flag_group_ids,
+            # 路由私有跨层 import 方向反了)。
+            artist_flag_state: dict[str, bool] = {}
+            try:
+                for _rel in ("project_creator", "project_deleter",
+                             "folder_template_manager", "artist_account_creator"):
+                    _tuples = await permissions.read_all_tuples(
+                        object_type="organization",
+                        object_id=default_tenant_key, relation=_rel,
+                    )
+                    artist_flag_state[_rel] = any(
+                        t_user == fmt_subject("group", str(artist_group.id))
+                        for t_user, _t_rel, _t_obj in _tuples
+                    )
+            except Exception as e:
+                log.warning("read artist group org flags fail group=%s err=%s",
+                            artist_group.id, e)
+                artist_flag_state = {}
+            if any(artist_flag_state.values()):
+                log.warning(
+                    "inline artist account: reuse existing group %r id=%s with org "
+                    "flags %s —— 该组可能带权限面,勿将其他组改名/预建为「艺人」",
+                    ARTIST_GROUP_NAME, artist_group.id, artist_flag_state,
+                )
+            else:
+                log.info(
+                    "inline artist account: reuse existing group %r id=%s "
+                    "(zero org flags)", ARTIST_GROUP_NAME, artist_group.id,
+                )
+
+        # 阶段 6:开通艺人账号(source 与 membership_source 统一 project_artist_inline,
+        # 方案 D7)。竞态兜底:provision 内部预检 409 或 insert 撞 username unique
+        # **两类都捕获** —— 先 rollback 再重抛结构化 409 带 project_id 供前端引导
+        # (照 :198-204 先例;残留态=项目已建+艺人未建,可恢复)。
+        try:
+            new_user, artist_temp_pw = await provision_local_user(
+                db, permissions, audit,
+                username=artist_account_in.username,
+                name=artist_account_in.name,
+                email=None,
+                groups=[artist_group],
+                actor_user_id=user_id,
+                ctx=ctx,
+                source=SOURCE_ARTIST_INLINE,
+                membership_source=SOURCE_ARTIST_INLINE,
+            )
+        except HTTPException as e:
+            # provision 内部预检是纯文本 detail,按文案收窄识别,勿裸捕一切 409
+            if e.status_code == 409 and str(e.detail).startswith("登录名已存在"):
+                await db.rollback()
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "username_taken",
+                        "username": artist_account_in.username,
+                        "project_id": str(project_id_v),
+                    },
+                ) from e
+            raise
+        except IntegrityError as e:
+            # 按约束名收窄:users.username 走显式命名约束 uq_users_username(迁移
+            # 0009),与上方 projects_code_key 的 PG 自动命名机制不同 —— provision
+            # 内多次 commit(用户行 + 逐组 GroupMembership),不收窄会把其他唯一
+            # 冲突误报成「登录名占用」
+            await db.rollback()
+            if "uq_users_username" in str(e.orig):
+                raise HTTPException(
+                    409,
+                    detail={
+                        "code": "username_taken",
+                        "username": artist_account_in.username,
+                        "project_id": str(project_id_v),
+                    },
+                ) from e
+            raise
+
+        # 阶段 7:授项目角色 —— 固定 uploader/downloader/viewer(方案 D8),照
+        # initial_grants 同款逐角色循环:幂等跳过 is_already_exists_error,每角色
+        # 一条 project_member_added,detail 形状与既有 via:"initial_grants" 路径
+        # 逐点对齐(via:"artist_inline" 供运维按 via 过滤,合计覆盖整条内嵌链路)。
+        # add_project_subject 的 project_id 形参注解为 str,直传 UUID 撞 mypy ——
+        # 一律 str(project_id_v)。
+        artist_user_id_v = new_user.id
+        artist_subject = fmt_subject("user", str(artist_user_id_v))
+        for role in ARTIST_PROJECT_ROLES:
+            try:
+                await permissions.add_project_subject(
+                    project_id=str(project_id_v), subject=artist_subject, role=role,
+                )
+            except Exception as e:
+                if not is_already_exists_error(e):
+                    raise
+                continue
+            await audit.write(
+                event_type="project_member_added",
+                actor_user_id=user_id,
+                target_project_id=project_id_v,
+                details={
+                    "subject": artist_subject, "role": role, "kind": "user",
+                    "via": "artist_inline",
+                },
+                **ctx,
+            )
+
+        created_artist = ArtistAccountCreatedOut(
+            user_id=artist_user_id_v,
+            username=artist_account_in.username,
+            name=artist_account_in.name,
+            temporary_password=artist_temp_pw,   # 一次性回显,不落 audit / log(D10)
+        )
+
+    # db.refresh 仅作响应构造前的兜底(艺人段 rollback 路径会过期 ORM 对象;
+    # 失败路径直接 raise,不触碰 ORM 属性,天然安全)
     await db.refresh(project)
-    return ProjectOut.model_validate(project)
+    out = ProjectCreatedOut.model_validate(project)
+    out.artist_account = created_artist
+    return out
 
 
 async def _fill_project_admins(

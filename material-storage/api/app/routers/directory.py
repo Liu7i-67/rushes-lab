@@ -5,15 +5,15 @@ remove_user_from_group 直接同步 OpenFGA tuple(不再经过飞书通讯录)�
 
 endpoints:
   GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active)
-  POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组)
+  POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning)
   GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序)
   PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3)
   POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit
   POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
   POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码)
-  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/folder-template flag 读回)
-  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_manage_folder_templates)
-  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_manage_folder_templates(tri-state)
+  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/folder-template/artist-account flag 读回)
+  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_manage_folder_templates / can_create_artist_account)
+  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_manage_folder_templates / can_create_artist_account(tri-state)
   DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清)
   GET    /api/v1/admin/directory/groups/{id}/members        — 组内成员列表
   POST   /api/v1/admin/directory/groups/{id}/members        — 加成员(写 group_memberships + group#member tuple)
@@ -33,7 +33,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
 from app.db.tables import Group, GroupMembership, User
-from app.deps import CurrentUser, get_audit, get_permissions, require_system_admin
+from app.deps import (
+    CurrentUser,
+    get_audit,
+    get_permissions,
+    get_request_context,
+    require_system_admin,
+)
 from app.models import (
     DirectoryUserDetailOut,
     DirectoryUserOut,
@@ -49,6 +55,7 @@ from app.services.permissions import (
     fmt_subject,
     is_already_exists_error,
 )
+from app.services.user_provisioning import add_user_to_group_audited, provision_local_user
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -66,40 +73,11 @@ class UserResetPasswordOut(BaseModel):
 
 
 # ─── 组成员双写共享助手(F3 建用户入组 / F4 编辑用户同步,与组员接口完全一致)──────
-async def _add_membership(
-    *,
-    db: AsyncSession,
-    permissions: PermissionsService,
-    audit: AuditService,
-    request: Request,
-    actor_user_id: uuid.UUID,
-    group: Group,
-    user: User,
-    source: str | None = None,
-) -> None:
-    """加成员双写 + 审计:先 DB group_memberships 行提交,再 group#member tuple。
-
-    与 POST groups/{id}/members 的写入段完全一致(tuple 失败随异常上抛);
-    source 非空时审计 details 增 source(如 user_create)。
-    """
-    db.add(GroupMembership(group_id=group.id, user_id=user.id))
-    await db.commit()
-    await permissions.add_user_to_group(group_id=str(group.id), user_id=str(user.id))
-    details: dict[str, object] = {
-        "group_id": str(group.id), "group_name": group.name,
-        "user_id": str(user.id), "username": user.username,
-    }
-    if source:
-        details["source"] = source
-    await audit.write(
-        event_type="group_member_added",
-        actor_user_id=actor_user_id,
-        details=details,
-        request_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-    )
-
-
+# 加成员侧已平移为公共服务 services/user_provisioning.add_user_to_group_audited
+# (艺人账号内嵌方案 B4,逻辑逐行不变;ip/ua 取法 ctx 化)—— 本文件三调用点改
+# import,端点机械补 ctx: dict = Depends(get_request_context) 注入。
+# _remove_membership 不在平移范围(方案 B4:remove 侧未平移,勿对称统一),
+# 保持 request: Request 形态原地不动。
 async def _remove_membership(
     *,
     db: AsyncSession,
@@ -205,66 +183,47 @@ async def create_directory_user(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
+    ctx: dict = Depends(get_request_context),  # type: ignore[type-arg]  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> UserCreateOut:
     """创建本地用户:生成临时密码 + must_change_password=true(P1 首登强制改密)。
 
     临时密码只在响应里回显一次,不写 audit / log。
     F3:group_ids 先全量校验(任一无效 422,用户不创建,F3.3 原子),创建成功后
     逐组走与 POST groups/{id}/members 完全一致的双写 + 审计(source=user_create)。
+    薄壳化(艺人账号内嵌方案 B7):建号/入组/审计主体逻辑在
+    services/user_provisioning.provision_local_user;壳内先保留原重名预检(409,
+    保序 —— 重名 409 优先于组校验 422 的现状顺序不变),再加载组,再调服务。
+    admin 链路 source="admin_create" 落 user_created;membership_source 取默认
+    "user_create",入组审计 source 原值不变。除 user_created 增补 source 键与
+    lower 预检修复(case 变体从 201 变 409,方案 §4.1 阶段 3)外行为与错误码
+    零变化;壳内预检与 provision 内部预检双查无害(竞态兜底)。
     """
     _ = request, user.id
-    dup = await db.execute(select(User).where(User.username == payload.username))
-    if dup.scalar_one_or_none() is not None:
+    # 壳内前置预检:lower 匹配 + limit(1)+first(与登录口径/服务内预检同款;
+    # 勿 scalar_one_or_none —— 存量 evan/Evan 大小写共存对会 MultipleResultsFound 500)
+    dup = (
+        await db.execute(
+            select(User)
+            .where(func.lower(User.username) == payload.username.lower())
+            .limit(1)
+        )
+    ).first()
+    if dup is not None:
         raise HTTPException(409, f"登录名已存在:{payload.username}")
 
-    # F3.3 原子性:用户落库前先全量校验组存在
+    # F3.3 原子性:用户落库前先全量校验组存在(组加载留在路由层,方案 B4)
     want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
 
-    # 新用户绑默认组织(老飞书用户 organization_id 的等价物)
-    org = await get_default_organization(db)
-    org_id = org[0] if org else None
-
-    temp_pw = generate_temp_password()
-    new_user = User(
+    new_user, temp_pw = await provision_local_user(
+        db, permissions, audit,
         username=payload.username,
         name=payload.name,
-        email=payload.email or None,
-        password_hash=hash_password(temp_pw),
-        must_change_password=True,
-        is_active=True,
-        organization_id=org_id,
-    )
-    db.add(new_user)
-    await db.commit()
-    await db.refresh(new_user)
-
-    if org:
-        _, tenant_key = org
-        try:
-            await permissions.add_user_to_organization(
-                organization_tenant_key=tenant_key, user_id=str(new_user.id),
-            )
-        except Exception as e:
-            log.warning("create user org member tuple fail user=%s err=%s", new_user.id, e)
-
-    # F3:逐组入组(按入参顺序;每组各自审计 group_member_added)
-    for gid in want_ids:
-        await _add_membership(
-            db=db, permissions=permissions, audit=audit, request=request,
-            actor_user_id=user.id, group=groups[gid], user=new_user,
-            source="user_create",
-        )
-
-    await audit.write(
-        event_type="user_created",
+        email=payload.email,
+        groups=[groups[gid] for gid in want_ids],
         actor_user_id=user.id,
-        details={"user_id": str(new_user.id), "username": payload.username,
-                 "name": payload.name, "group_ids": [str(g) for g in want_ids]},
-        request_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
+        ctx=ctx,
+        source="admin_create",
     )
-    log.info("user created id=%s username=%s by admin=%s groups=%d",
-             new_user.id, payload.username, user.id, len(want_ids))
     return UserCreateOut(
         id=new_user.id, username=new_user.username, name=new_user.name,
         email=new_user.email, is_active=True, must_change_password=True,
@@ -310,6 +269,7 @@ async def update_directory_user(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
+    ctx: dict = Depends(get_request_context),  # type: ignore[type-arg]  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUserOut:
     """编辑用户(§3/D3):name / email 原值更新 + group_ids 全量同步 diff。
 
@@ -351,9 +311,9 @@ async def update_directory_user(
         for gid in want_ids:
             if gid in current:
                 continue
-            await _add_membership(
-                db=db, permissions=permissions, audit=audit, request=request,
-                actor_user_id=user.id, group=groups[gid], user=target,
+            await add_user_to_group_audited(
+                db=db, permissions=permissions, audit=audit,
+                actor_user_id=user.id, group=groups[gid], user=target, ctx=ctx,
             )
             groups_added.append({"group_id": str(gid), "group_name": groups[gid].name})
         for gid, g in current.items():
@@ -533,6 +493,9 @@ class DirectoryGroupOut(BaseModel):
     can_delete_project: bool = False
     # 目录模板方案 §4.3:组级「管理目录模板」开关(第 3 个 flag),语义同上
     can_manage_folder_templates: bool = False
+    # 艺人账号内嵌方案 §4.3:组级「新建项目时创建艺人账号」开关(第 4 个 flag),
+    # 语义同上;与 can_create_project 后端正交(方案 D2)
+    can_create_artist_account: bool = False
 
 
 class GroupCreateIn(BaseModel):
@@ -544,6 +507,8 @@ class GroupCreateIn(BaseModel):
     can_delete_project: bool = False
     # 目录模板方案 §4.3:置位 = 写 organization#folder_template_manager tuple
     can_manage_folder_templates: bool = False
+    # 艺人账号内嵌方案 §4.3:置位 = 写 organization#artist_account_creator tuple
+    can_create_artist_account: bool = False
 
 
 class GroupUpdateIn(BaseModel):
@@ -557,6 +522,8 @@ class GroupUpdateIn(BaseModel):
     can_delete_project: bool | None = None
     # 目录模板方案 §4.3:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
     can_manage_folder_templates: bool | None = None
+    # 艺人账号内嵌方案 §4.3:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
+    can_create_artist_account: bool | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -621,11 +588,11 @@ async def _sync_group_org_flag(
     """组 flag → organization:<tenant> 上 group:<gid>#member tuple 写/删(泛化版)。
 
     relation=project_creator(§2.2)/ project_deleter(F6.2)/ folder_template_manager
-    (目录模板方案 §4.3;relation 由 store.fga.yaml model 声明,本路由只按既有
-    tuple 格式写入/删除)。尽力而为,不 500(先例 create_directory_user 的 org
-    member tuple):flag 读回展示的是真实 tuple 状态,写失败仅 log.warning,
-    管理员重试 PATCH 即补写。tuple 读写一律走 PermissionsService 小方法,
-    路由不摸 _client。
+    (目录模板方案 §4.3)/ artist_account_creator(艺人账号内嵌方案 §4.3;relation
+    由 store.fga.yaml model 声明,本路由只按既有 tuple 格式写入/删除)。尽力而为,
+    不 500(先例 create_directory_user 的 org member tuple):flag 读回展示的是真实
+    tuple 状态,写失败仅 log.warning,管理员重试 PATCH 即补写。tuple 读写一律走
+    PermissionsService 小方法,路由不摸 _client。
     """
     org = await get_default_organization(db)
     if org is None:
@@ -665,7 +632,8 @@ async def list_directory_groups(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
 ) -> list[DirectoryGroupOut]:
-    """组列表(带成员数)+ creator/deleter/folder-template flag 读回(定向 read,§2.2/F6.2/§4.3)。
+    """组列表(带成员数)+ creator/deleter/folder-template/artist-account flag 读回
+    (定向 read,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3)。
 
     编辑弹窗数据来自列表行(无组详情路由),flag 按 FGA tuple 真实态回显;
     read 异常时尽力而为回 False,不阻塞列表。
@@ -692,6 +660,7 @@ async def list_directory_groups(
     creator_ids = await _read_flag_group_ids(permissions, db, "project_creator")
     deleter_ids = await _read_flag_group_ids(permissions, db, "project_deleter")
     folder_tmpl_ids = await _read_flag_group_ids(permissions, db, "folder_template_manager")
+    artist_ids = await _read_flag_group_ids(permissions, db, "artist_account_creator")
     return [
         DirectoryGroupOut(
             id=g.id, name=g.name, description=g.description,
@@ -699,6 +668,7 @@ async def list_directory_groups(
             can_create_project=g.id in creator_ids,
             can_delete_project=g.id in deleter_ids,
             can_manage_folder_templates=g.id in folder_tmpl_ids,
+            can_create_artist_account=g.id in artist_ids,
         )
         for g, cnt in rows
     ]
@@ -713,7 +683,7 @@ async def create_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3)。"""
+    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3)。"""
     dup = await db.execute(select(Group).where(Group.name == payload.name))
     if dup.scalar_one_or_none() is not None:
         raise HTTPException(409, f"组名已存在:{payload.name}")
@@ -735,25 +705,32 @@ async def create_directory_group(
         await _sync_group_org_flag(
             permissions, db, g.id, relation="folder_template_manager", enable=True,
         )
+    if payload.can_create_artist_account:
+        await _sync_group_org_flag(
+            permissions, db, g.id, relation="artist_account_creator", enable=True,
+        )
     await audit.write(
         event_type="group_created",
         actor_user_id=user.id,
         details={"group_id": str(g.id), "name": g.name,
                  "can_create_project": payload.can_create_project,
                  "can_delete_project": payload.can_delete_project,
-                 "can_manage_folder_templates": payload.can_manage_folder_templates},
+                 "can_manage_folder_templates": payload.can_manage_folder_templates,
+                 "can_create_artist_account": payload.can_create_artist_account},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s folder_tmpl=%s",
+    log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s folder_tmpl=%s artist=%s",
              g.id, g.name, user.id, payload.can_create_project,
-             payload.can_delete_project, payload.can_manage_folder_templates)
+             payload.can_delete_project, payload.can_manage_folder_templates,
+             payload.can_create_artist_account)
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=0, created_at=g.created_at,
         can_create_project=payload.can_create_project,
         can_delete_project=payload.can_delete_project,
         can_manage_folder_templates=payload.can_manage_folder_templates,
+        can_create_artist_account=payload.can_create_artist_account,
     )
 
 
@@ -767,7 +744,7 @@ async def update_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """改组名 / 描述;can_create_project / can_delete_project / can_manage_folder_templates tri-state(None=不动 / true=写 / false=删)。"""
+    """改组名 / 描述;can_create_project / can_delete_project / can_manage_folder_templates / can_create_artist_account tri-state(None=不动 / true=写 / false=删)。"""
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
@@ -804,6 +781,16 @@ async def update_directory_group(
             permissions, db, group_id, relation="folder_template_manager",
             enable=payload.can_manage_folder_templates,
         )
+    # 艺人账号内嵌方案 §4.3:第 4 个 flag 同款 tri-state + 审计 {old,new}
+    artist_old: bool | None = None
+    if payload.can_create_artist_account is not None:
+        artist_old = group_id in await _read_flag_group_ids(
+            permissions, db, "artist_account_creator",
+        )
+        await _sync_group_org_flag(
+            permissions, db, group_id, relation="artist_account_creator",
+            enable=payload.can_create_artist_account,
+        )
     details: dict[str, object] = {"group_id": str(group_id), "name": g.name}
     if payload.can_create_project is not None:
         details["can_create_project"] = payload.can_create_project
@@ -816,6 +803,12 @@ async def update_directory_group(
     ):
         details["can_manage_folder_templates"] = {"old": folder_tmpl_old,
                                                   "new": payload.can_manage_folder_templates}
+    if (
+        payload.can_create_artist_account is not None
+        and payload.can_create_artist_account != artist_old
+    ):
+        details["can_create_artist_account"] = {"old": artist_old,
+                                                "new": payload.can_create_artist_account}
     await audit.write(
         event_type="group_updated",
         actor_user_id=user.id,
@@ -839,6 +832,12 @@ async def update_directory_group(
         out_folder_tmpl = group_id in await _read_flag_group_ids(
             permissions, db, "folder_template_manager",
         )
+    if payload.can_create_artist_account is not None:
+        out_artist = payload.can_create_artist_account
+    else:
+        out_artist = group_id in await _read_flag_group_ids(
+            permissions, db, "artist_account_creator",
+        )
     cnt = (await db.execute(
         select(func.count()).select_from(GroupMembership)
         .where(GroupMembership.group_id == group_id)
@@ -849,6 +848,7 @@ async def update_directory_group(
         can_create_project=out_creator,
         can_delete_project=out_deleter,
         can_manage_folder_templates=out_folder_tmpl,
+        can_create_artist_account=out_artist,
     )
 
 
@@ -872,14 +872,16 @@ async def delete_directory_group(
     name = g.name
 
     # 顺手删 organization 上组级 flag tuple(project_creator / project_deleter /
-    # folder_template_manager,§2.2/F6.2/§4.3;尽力而为,remove_org_relation 幂等
-    # 吞 not_exists,组本就未置位时静默 no-op)
+    # folder_template_manager / artist_account_creator,§2.2/F6.2/§4.3/艺人账号
+    # 内嵌方案 §4.3;尽力而为,remove_org_relation 幂等吞 not_exists,组本就
+    # 未置位时静默 no-op)
     try:
         org = await get_default_organization(db)
         if org:
             _, tenant_key = org
             subject = fmt_subject("group", str(group_id))
-            for relation in ("project_creator", "project_deleter", "folder_template_manager"):
+            for relation in ("project_creator", "project_deleter",
+                             "folder_template_manager", "artist_account_creator"):
                 await permissions.remove_org_relation(
                     organization_tenant_key=tenant_key,
                     subject=subject,
@@ -953,6 +955,7 @@ async def add_group_member(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
+    ctx: dict = Depends(get_request_context),  # type: ignore[type-arg]  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> GroupMemberOut:
     """加成员:写 group_memberships 行 + group:<id>#member tuple(立即生效)。"""
     g = await db.get(Group, group_id)
@@ -973,9 +976,9 @@ async def add_group_member(
     if exists.scalar_one_or_none() is not None:
         raise HTTPException(409, "用户已在组中")
 
-    await _add_membership(
-        db=db, permissions=permissions, audit=audit, request=request,
-        actor_user_id=user.id, group=g, user=target,
+    await add_user_to_group_audited(
+        db=db, permissions=permissions, audit=audit,
+        actor_user_id=user.id, group=g, user=target, ctx=ctx,
     )
     log.info("group member added group=%s user=%s by admin=%s",
              group_id, payload.user_id, user.id)

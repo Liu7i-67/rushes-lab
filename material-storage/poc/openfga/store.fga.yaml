@@ -29,6 +29,7 @@ name: material-storage-poc
 #   8. 2026-10-10(目录模板):organization 增 folder_template_manager: [user, group#member]
 #      —— 组级「管理目录模板」开关,与 project_creator/project_deleter 同款模式
 #      (不改既有 relation;改后须重推 model,见 api/scripts/openfga_write_model.sh)
+#   9. 2026-10-13(艺人账号内嵌):organization 增 artist_account_creator: [user, group#member]——组级「新建项目时创建艺人账号」开关,与 project_creator 同款模式;改后须重推 model
 
 model: |
   model
@@ -63,6 +64,11 @@ model: |
       # = is_org_admin ∨ check(folder_template_manager),读门另含 project_creator
       # 支(require_folder_templates_reader,方案 §3.3;系统 admin 恒可管)
       define folder_template_manager: [user, group#member]
+      # 组级「新建项目时创建艺人账号」权限(2026-10-13 艺人账号内嵌方案 §3.1):同
+      # project_creator 模式 —— UI 只写组主体,组员判定由 check 自动展开
+      # group#member;应用层写守门 = is_org_admin ∨ check(artist_account_creator)
+      # (系统 admin 恒可;与 can_create_project 后端正交,方案 D2)
+      define artist_account_creator: [user, group#member]
 
   type project
     relations
@@ -175,6 +181,11 @@ tuples:
   # 开关由 PATCH /admin/directory/groups 写 tuple,此处只为 fga model test)
   - user: group:grp_editors#member
     relation: folder_template_manager
+    object: organization:tenant_demo
+  # 组级「新建项目时创建艺人账号」权限(2026-10-13 艺人账号内嵌):测试用例同样挂
+  # 剪辑师组(生产开关由 PATCH /admin/directory/groups 写 tuple,此处只为 fga model test)
+  - user: group:grp_editors#member
+    relation: artist_account_creator
     object: organization:tenant_demo
   # 移出组用例的静态编码:dave 仅具部门身份、无任何组成员 tuple → project_creator
   # 为 false(证明 project_creator 不随 department#member 扩散;真实移出组 =
@@ -424,3 +435,28 @@ tests:
         object: organization:tenant_demo
         assertions:
           folder_template_manager: false
+
+      # ─── 组级「新建项目时创建艺人账号」权限(2026-10-13 艺人账号内嵌)─────────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          artist_account_creator: true
+
+      # 非组员 ✗ / 仅部门身份 ✗(同 project_creator 静态编码口径:dave 在 editing
+      # 部门但不在剪辑师组,钉住 artist_account_creator 不随 department#member 扩散)
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          artist_account_creator: false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          artist_account_creator: false
+
+      # org admin 不自动蕴含 artist_account_creator(独立 relation;系统 admin 恒可
+      # 由应用层守门 is_org_admin ∨ check 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          artist_account_creator: false

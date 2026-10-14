@@ -136,6 +136,7 @@ async def me(
     is_project_creator = False
     is_project_deleter = False
     is_folder_template_manager = False
+    is_artist_account_creator = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -179,6 +180,18 @@ async def me(
             except Exception:
                 pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
 
+        # 组级「新建项目时创建艺人账号」权限(艺人账号内嵌方案 §3.3/§4.4):与写守门
+        # 同口径(is_org_admin 或 organization#artist_account_creator,组开关经
+        # group#member 展开);POST /projects 的端点内组合校验另含 project_creator 支
+        is_artist_account_creator = bool(is_system_admin)
+        if not is_system_admin:
+            try:  # noqa: SIM105  与上方三个 flag 块同款 try/except 形状(不换 contextlib.suppress)
+                is_artist_account_creator = await perms.is_org_artist_account_creator(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )
+            except Exception:
+                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
+
     return {
         "id": str(user.id),
         # #154:open_id/union_id 保留只读(历史对照),不再参与登录与权限
@@ -195,6 +208,9 @@ async def me(
         "is_project_deleter": is_project_deleter,
         # 组级「管理目录模板」权限(目录模板方案 §3.3):与守门同口径;前端闸门用
         "is_folder_template_manager": is_folder_template_manager,
+        # 组级「新建项目时创建艺人账号」权限(艺人账号内嵌方案 §4.4):与守门同口径;
+        # 前端闸门用(前端回落 is_artist_account_creator ?? is_system_admin)
+        "is_artist_account_creator": is_artist_account_creator,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

@@ -62,6 +62,9 @@ export function errorMessage(err: unknown, fallback = '请求失败'): string {
         .filter(Boolean);
       if (msgs.length) return msgs.join('; ');
     }
+    // 其余非字符串/非数组 detail(如艺人账号内嵌 409 的结构化 {code,username,project_id})
+    // 原样返回会被全局 mutationCache toast 渲染 → React「Objects are not valid as a
+    // React child」崩溃;一律落到下方 fallback 文案(艺人账号方案 §4.1)
     if (err.response?.status) return `${fallback}(HTTP ${err.response.status})`;
     if (err.message) return err.message;
   }

@@ -18,6 +18,10 @@ export interface Me {
   // 目录模板(方案 §3.3):可管理目录模板(口径 = is_org_admin ∨ 用户组 folder_template_manager,
   // 含系统 admin)。可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落。
   is_folder_template_manager?: boolean;
+  // 艺人账号内嵌(方案 §4.4):新建项目弹窗「艺人账号」区闸门(口径 = is_org_admin ∨
+  // 用户组 artist_account_creator,含系统 admin)。可选 —— 旧后端无此字段,消费侧用
+  // `?? is_system_admin` 回落(照 is_project_creator 惯例)。
+  is_artist_account_creator?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -80,6 +84,8 @@ export interface DirectoryGroup {
   can_delete_project?: boolean;
   // 目录模板(方案 §4.3):组级「管理目录模板」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
   can_manage_folder_templates?: boolean;
+  // 艺人账号(方案 §4.3):组级「新建项目时创建艺人账号」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
+  can_create_artist_account?: boolean;
 }
 
 export interface DirectoryGroupMember {
@@ -102,6 +108,41 @@ export interface Project {
   created_at: string;
   admins: AdminBrief[];
   my_roles: ('admin' | 'uploader' | 'downloader' | 'viewer')[];
+}
+
+// ─── 艺人账号内嵌(方案 §4.1:POST /api/v1/projects 扩展)──────────────────────
+/** 内嵌开通艺人账号入参(镜像 ArtistAccountIn;字段约束与 UserCreateIn 同款,服务端复检)。*/
+export interface ArtistAccount {
+  username: string;
+  name: string;
+}
+
+/** 一次性回显的艺人账号创建结果(照 UserCreateOut「只回显一次」语义;不落 audit/log)。*/
+export interface ArtistAccountCreated {
+  user_id: string;
+  username: string;
+  name: string;
+  temporary_password: string;
+}
+
+/** POST /projects 创建响应 = Project + artist_account(GET 列表/详情仍为 Project,不带该字段)。*/
+export interface ProjectCreated extends Project {
+  // 不带 artist_account 提交时后端序列化为 null(结构兼容键)
+  artist_account?: ArtistAccountCreated | null;
+}
+
+/** POST /api/v1/projects 请求体(原 useCreateProject 内匿名内联类型,本次提名导出)。*/
+export interface CreateProjectBody {
+  code: string;
+  name: string;
+  description?: string;
+  organization_id?: string;
+  minio_bucket: string;
+  admin_user_id: string;   // 必填:指派项目 admin(可以是自己;users.id UUID)
+  initial_grants?: GrantEntry[];   // 可选:创建时同时授权(方案 §3;不传/空 = 现行为)
+  folder_template_id?: string;     // 目录模板(方案 §4.2):可选;不选不传 = 与现状一致
+  // 艺人账号内嵌(方案 §4.1):可选;不传 = 纯项目创建(现状行为)
+  artist_account?: ArtistAccount;
 }
 
 // ─── 项目逻辑删除(§7:GET /api/v1/projects/deleted)──────────────────────────

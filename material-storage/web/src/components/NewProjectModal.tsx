@@ -7,14 +7,26 @@
  * 改由后端创建时直通合并(有默认模板时提交区明示)。
  * 「目录模板(可选)」(folder-templates 方案 §6-F6,初始权限区之后):选中模板提交
  * folder_template_id,目录树由后端创建流程自动建立;不选不传字段,行为与现状一致。
+ * 「艺人账号」区(艺人账号方案 §6-F3,基本信息区之后、右栏权限区之前):闸门
+ * is_artist_account_creator ?? is_system_admin,关闭者不渲染(零回归);登录名+姓名
+ * 两项全空 = 纯项目创建,登录名停顿预检冲突即时提示;创建成功一次性展示初始密码。
  */
-import { Alert, App, Button, Form, Input, Modal, Select, Tooltip, Tree } from 'antd';
+import { Alert, App, Button, Form, Input, Modal, Select, Tooltip, Tree, Typography } from 'antd';
+import axios from 'axios';
 import { Folder, ShieldCheck, Trash2, Users as UsersIcon } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useAllUsers, useCreateProject, useFolderTemplates, useGrantTemplates } from '../api/hooks';
+import { useAllUsers, useCreateProject, useFolderTemplates, useGrantTemplates,
+         useUsernameAvailable, USERNAME_PATTERN } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { useCompactViewport } from '../lib/use-viewports';
-import type { FolderTemplate, GrantEntry, GrantTemplate, Me, ProjectRole } from '../api/types';
+import type {
+  ArtistAccountCreated,
+  FolderTemplate,
+  GrantEntry,
+  GrantTemplate,
+  Me,
+  ProjectRole,
+} from '../api/types';
 import { UserPicker } from './UserPicker';
 import { SubjectPicker, type Subject } from './SubjectPicker';
 import { RoleChipGroup } from './RoleChipGroup';
@@ -63,6 +75,36 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
   // 目录模板(folder-templates §6-F6):'' = 不使用模板(默认);其余 = 模板 id
   const [folderTemplateId, setFolderTemplateId] = useState<string>('');
 
+  // ─── 艺人账号区(艺人账号方案 §6-F3)────────────────────────────────────────
+  // 闸门照 is_project_creator 回落惯例;关闭者不渲染整块(零回归)
+  const artistGate = me.is_artist_account_creator ?? me.is_system_admin;
+  // 项目名是否被手动编辑过:手动编辑后与「艺人姓名」联动脱钩
+  const [projectNameManual, setProjectNameManual] = useState(false);
+  // 登录名停顿 ~500ms 后的预检输入(useWatch 取表单值,不复制状态)
+  const [debouncedUsername, setDebouncedUsername] = useState('');
+  // 创建成功且带 artist_account 时的一次性结果(替代 message.success 路径);独立结果 Modal 展示
+  const [artistCreated, setArtistCreated] = useState<{
+    projectId: string; projectName: string; projectCode: string; artist: ArtistAccountCreated;
+  } | null>(null);
+  const artistUsername = Form.useWatch('artist_username', form) as string | undefined;
+
+  // 登录名输入停顿 500ms 才预检(方案 F3-①);弹窗关闭期间不触发
+  useEffect(() => {
+    if (!open) return;
+    const t = setTimeout(() => setDebouncedUsername((artistUsername ?? '').trim()), 500);
+    return () => clearTimeout(t);
+  }, [artistUsername, open]);
+
+  // 预检(enabled 由 hook 内做正则+长度前置,防半截非法值打 422);闸门关闭/弹窗关闭不发
+  const { data: usernameAvail } = useUsernameAvailable(
+    open && artistGate ? debouncedUsername || null : null,
+  );
+  // 冲突提示仅在「当前输入与已预检值一致」时显示 —— 用户继续输入即隐藏,等下一轮预检
+  const usernameConflict = !!artistGate
+    && debouncedUsername.length > 0
+    && (artistUsername ?? '').trim() === debouncedUsername
+    && usernameAvail?.available === false;
+
   // 模板列表;手选用户名典(SubjectPicker 的 user 分支只回传 id,行显名用)。
   // nameById 走已放宽的 GET /api/v1/users(offset 分页拉全;原 directory 端点
   // require_system_admin 未放宽,零项目组长会 403)。
@@ -89,6 +131,9 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       setRows([]);
       setTemplateId('');
       setFolderTemplateId('');
+      setProjectNameManual(false);
+      setDebouncedUsername('');
+      setArtistCreated(null);
     }
   }, [open, form, me.id]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -121,6 +166,8 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
   };
 
   const submit = async () => {
+    // 艺人账号 body(try 内赋值;catch 失败特判按「本次是否带 artist_account」收窄)
+    let artist_account: { username: string; name: string } | undefined;
     try {
       const v = await form.validateFields();
       if (!adminUserId) {
@@ -133,6 +180,13 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
       }
       const initial_grants: GrantEntry[] =
         rows.map(r => ({ kind: r.kind, id: r.id, roles: r.roles }));
+      // 艺人账号(方案 F3-①):两项全空 = 不创建(提交不带字段);填一项则两项都必填
+      // (rules 联动校验已拦,此处 trim 兜底)
+      const artistUsername = (v.artist_username as string | undefined)?.trim() ?? '';
+      const artistName = (v.artist_name as string | undefined)?.trim() ?? '';
+      artist_account = artistUsername && artistName
+        ? { username: artistUsername, name: artistName }
+        : undefined;
       const p = await create.mutateAsync({
         code: v.code.trim(),
         name: v.name.trim(),
@@ -143,7 +197,17 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         ...(initial_grants.length > 0 ? { initial_grants } : {}),
         // 目录模板:不选不传字段,与不选模板的现状行为完全一致(方案 §4.2)
         ...(folderTemplateId ? { folder_template_id: folderTemplateId } : {}),
+        // 艺人账号内嵌:两项都有值才带字段(方案 §4.1)
+        ...(artist_account ? { artist_account } : {}),
       });
+      // 成功且有 artist_account → 一次性结果 Modal 替代 message.success(密码只展示这一次,
+      // 方案 F3-②);主弹窗保持打开,结果 Modal 叠其上,确认后统一 onCreated + onClose
+      if (p.artist_account) {
+        setArtistCreated({
+          projectId: p.id, projectName: p.name, projectCode: p.code, artist: p.artist_account,
+        });
+        return;
+      }
       message.success(initial_grants.length > 0
         ? `项目 "${p.name}" 已创建,已为 ${initial_grants.length} 个主体授予初始权限`
         : `项目 "${p.name}" 已创建`);
@@ -156,8 +220,37 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         form.scrollToField(err.errorFields[0].name);
         return;
       }
+      // 失败特判(方案 F3-③,仅带艺人账号的提交):全局 mutationCache toast 与本地 catch
+      // 同时触发,errorMessage 的对象 detail 兜底保证全局通道不炸,这里给精确引导文案
+      if (artist_account && axios.isAxiosError(e)) {
+        const detail = (
+          e.response?.data as { detail?: { code?: string; project_id?: string } } | undefined
+        )?.detail;
+        // 结构化 409(登录名冲突):按 detail.project_id 区分「预检阶段项目未建」与
+        // 「竞态阶段项目已建、艺人未建」两种残留态
+        if (e.response?.status === 409 && detail?.code === 'username_taken') {
+          message.error(detail.project_id
+            ? '项目已创建，但艺人账号未能建立（登录名刚被占用）；可联系管理员在后台开通账号后在项目成员中添加；或由管理员删除该项目后用新登录名重建'
+            : '登录名已被占用；若该艺人此前已开通请勿重复开通（可联系管理员将其加入本项目成员），否则请更换登录名重试');
+          return;
+        }
+        // 500(艺人段或既有项目段异常,密码未返回):中性引导,不指向性提"密码未生成"
+        if (e.response?.status === 500) {
+          message.error('创建过程中出现异常，请到项目列表确认项目是否已创建；若已创建，联系管理员确认艺人账号状态或重置密码');
+          return;
+        }
+      }
       message.error(errorMessage(e, '创建失败'));
     }
+  };
+
+  // 结果 Modal 唯一按钮(方案 F3-②):「我已保存,进入项目」→ onCreated + onClose
+  const finishArtistCreated = () => {
+    if (!artistCreated) return;
+    const { projectId } = artistCreated;
+    setArtistCreated(null);
+    onCreated?.(projectId);
+    onClose();
   };
 
   // 无新建权限 → 禁用并提示(口径 = is_org_admin ∨ 用户组 project_creator;
@@ -233,7 +326,9 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
     })),
   ];
 
+  // 主弹窗 + 艺人账号一次性结果 Modal(兄弟节点;fragment 包裹,缩进沿用原主弹窗层级)
   return (
+    <>
     <Modal
       title="新建项目"
       open={open}
@@ -255,7 +350,8 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
           <div>
             <Form.Item name="name" label="项目名称"
                        rules={[{ required: true, max: 255 }]}>
-              <Input placeholder="2026 春季婚礼策划" autoFocus />
+              <Input placeholder="2026 春季婚礼策划" autoFocus
+                     onChange={() => setProjectNameManual(true)} />
             </Form.Item>
             {/* rules 拆三条:antd v6 校验器一条 rule 混 pattern 时 min/max 会被静默忽略,
                 必须长度一条(无 pattern)、pattern 单独一条,各配 message 才能拦住 code="1" */}
@@ -301,6 +397,67 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
                 { label: 'ms-dev(开发环境)', value: 'ms-dev' },
               ]} />
             </Form.Item>
+
+            {/* 艺人账号区(艺人账号方案 §6-F3-①):基本信息区之后、右栏权限区之前;
+                闸门关闭者整块不渲染(零回归)。两项全空 = 纯项目创建(现状行为);
+                填一项则两项都必填(dependencies 联动校验)。登录名停顿 500ms 预检,
+                冲突经 validateStatus/help 数据驱动展示(勿走 setFieldsValue 注错) */}
+            {artistGate && (
+              <>
+                <Form.Item
+                  name="artist_username"
+                  label="艺人登录名"
+                  dependencies={['artist_name']}
+                  extra="同步开通艺人账号并加入本项目(上传/下载/查看);与艺人姓名都留空 = 仅创建项目"
+                  validateStatus={usernameConflict ? 'error' : undefined}
+                  help={usernameConflict
+                    ? '该登录名已被占用；若属于该艺人本人（此前已开通），请勿重复开通，可联系管理员将其加入本项目成员'
+                    : undefined}
+                  rules={[
+                    ({ getFieldValue }) => ({
+                      validator: async (_, value: string | undefined) => {
+                        const self = (value ?? '').trim();
+                        const other = ((getFieldValue('artist_name') as string | undefined) ?? '').trim();
+                        if (!self && !other) return;      // 两项全空 = 不创建,免填
+                        if (!self) throw new Error('已填写艺人姓名,登录名为必填');
+                        if (self.length < 2 || self.length > 64 || !USERNAME_PATTERN.test(self)) {
+                          throw new Error('登录名仅限字母/数字与 . _ -,长度 2-64');
+                        }
+                      },
+                    }),
+                  ]}
+                >
+                  <Input
+                    placeholder="如 chenming(字母/数字/._-,2-64 位)"
+                    autoComplete="off"
+                  />
+                </Form.Item>
+                <Form.Item
+                  name="artist_name"
+                  label="艺人姓名"
+                  dependencies={['artist_username']}
+                  rules={[
+                    ({ getFieldValue }) => ({
+                      validator: async (_, value: string | undefined) => {
+                        const self = (value ?? '').trim();
+                        const other = ((getFieldValue('artist_username') as string | undefined) ?? '').trim();
+                        if (!self && !other) return;      // 两项全空 = 不创建,免填
+                        if (!self) throw new Error('已填写登录名,艺人姓名为必填(不能全为空白)');
+                      },
+                    }),
+                  ]}
+                >
+                  <Input
+                    placeholder="1-128 字;填写后自动带入项目名称(手改后脱钩)"
+                    maxLength={128}
+                    onChange={(e) => {
+                      // 项目名联动(方案 F3-①):项目名未被手动编辑过时跟随艺人姓名
+                      if (!projectNameManual) form.setFieldValue('name', e.target.value);
+                    }}
+                  />
+                </Form.Item>
+              </>
+            )}
           </div>
 
           {/* 右栏:「权限(可选)」组 — 模板 Select 从顶部移入,初始权限区在其下 */}
@@ -373,6 +530,56 @@ export function NewProjectModal({ open, onClose, onCreated, me }: Props) {
         )}
       </Form>
     </Modal>
+
+    {/* 艺人账号一次性结果(艺人账号方案 §6-F3-②):替代 message.success 路径。
+          三重防误关(closable/maskClosable/keyboard 全 false),密码只展示这一次;
+          独立 Modal 不套 Form(antd v6 忌 Modal 内 setFieldsValue 回显) */}
+      <Modal
+        title="项目与艺人账号已创建"
+        open={!!artistCreated}
+        closable={false}
+        maskClosable={false}
+        keyboard={false}
+        width={compact ? 'min(560px, calc(100vw - 16px))' : 560}
+        footer={(
+          <Button type="primary" onClick={finishArtistCreated}>我已保存，进入项目</Button>
+        )}
+      >
+        {artistCreated && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <div style={{ fontSize: 14, color: 'var(--ms-ink)' }}>
+              项目「{artistCreated.projectName}（{artistCreated.projectCode}）」创建成功
+            </div>
+            <div style={{
+              display: 'flex', flexDirection: 'column', gap: 8, padding: '12px 16px',
+              background: 'var(--ms-surface)', border: '1px solid var(--ms-hairline)',
+              borderRadius: 'var(--ms-radius-md)',
+            }}>
+              <div style={{ fontSize: 13, color: 'var(--ms-ink)' }}>
+                艺人姓名:{artistCreated.artist.name}
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--ms-ink)' }}>
+                登录名:
+                <Typography.Text copyable style={{ marginLeft: 4 }}>
+                  {artistCreated.artist.username}
+                </Typography.Text>
+              </div>
+              <div style={{ fontSize: 13, color: 'var(--ms-ink)' }}>
+                初始密码:
+                <Typography.Text copyable style={{ marginLeft: 4 }}>
+                  {artistCreated.artist.temporary_password}
+                </Typography.Text>
+              </div>
+            </div>
+            <Alert
+              type="warning"
+              showIcon
+              message="密码仅展示这一次，关闭后无法再查；请复制并转交艺人，首次登录将要求修改密码"
+            />
+          </div>
+        )}
+      </Modal>
+    </>
   );
 }
 

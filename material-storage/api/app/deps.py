@@ -437,3 +437,44 @@ async def require_folder_templates_reader(
         "folder templates reader permission required"
         "(仅系统管理员、可新建项目者或被授权「管理目录模板」的组成员可查看目录模板)",
     )
+
+
+async def require_inline_artist_creator(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),  # noqa: B008  FastAPI DI,repo 全量同款
+) -> CurrentUser:
+    """内嵌建号组合弱门 — GET /users/username-available 用(艺人账号内嵌方案 §3.3/§4.2)。
+
+    组合弱门:is_org_admin 或(is_org_project_creator 且 artist_account_creator)
+    —— 与 POST /projects 内嵌建号的真实能力判定同构(§4.1 阶段 2):合取堵住
+    「仅有 artist flag、无 project_creator」持有者把 availability 端点当纯账号
+    存在性 oracle 用(此类用户提交 POST /projects 会在 require_project_creator
+    先吃 403,永远到不了提交期 409)。写法照 require_folder_templates_reader 的
+    组合门形态。**不另建零挂载的单 flag dep**:POST /projects 的能力校验依赖
+    payload 只能端点内加验,/me 走内联计算,单 flag 形态的
+    require_artist_account_creator 全方案无消费点(照「不新增零调用 helper」惯例
+    砍掉)。default org 缺失行为对齐 require_project_creator(500);FGA 异常不上吞
+    (部署顺序保证 model 先 push,方案 §3.2)。守门 403 不写 audit(deps 惯例)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if await perms.is_org_admin(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        return user
+    if await perms.is_org_project_creator(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ) and await perms.is_org_artist_account_creator(
+        user_id=str(user.id), organization_tenant_key=tenant_key,
+    ):
+        return user
+    raise HTTPException(
+        403,
+        "inline artist creator permission required"
+        "(仅系统管理员或被授权「新建项目时创建艺人账号」的可建项目组成员可查询登录名占用)",
+    )

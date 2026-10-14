@@ -17,6 +17,7 @@ import type {
   BaiduReviveOut,
   BaiduTaskFilesPage,
   BaiduTasksPage,
+  CreateProjectBody,
   DirectoryGroup,
   DirectoryGroupMember,
   DirectoryUser,
@@ -34,6 +35,7 @@ import type {
   Me,
   NotificationsList,
   Project,
+  ProjectCreated,
   SearchResult,
   ShareCreateOut,
   ShareResolve,
@@ -125,6 +127,27 @@ export const useProject = (id: string | undefined) =>
     enabled: !!id,
   });
 
+// ─── 艺人账号内嵌(方案 §4.2/F2)──────────────────────────────────────────────
+/** 登录名字符集(与后端 UserCreateIn / username-available Query 同款);输入 rules 共用。*/
+export const USERNAME_PATTERN = /^[a-zA-Z0-9._-]+$/;
+
+/** 登录名可用性预检(GET /api/v1/users/username-available)。username 传 null = 不启用;
+ * enabled 已前置正则+长度约束(与输入 rules 同款)—— 防停顿在半截非法值时打 422;
+ * 停顿 debounce 由调用侧控制。静默口径如实声明:react-query v5 已无 per-query onError,
+ * 全局 queryCache.onError(App.tsx)本就跳过 401/403,其余错误(网络/422)全局 toast 兜底
+ * —— 预检只是尽力挡,不影响提交期 409 兜底。*/
+export const useUsernameAvailable = (username: string | null) =>
+  useQuery({
+    queryKey: ['username-available', username],
+    queryFn: async () =>
+      (await http.get<{ available: boolean }>('/api/v1/users/username-available', {
+        params: { username },
+      })).data,
+    enabled: !!username
+      && username.length >= 2 && username.length <= 64
+      && USERNAME_PATTERN.test(username),
+  });
+
 // ─── 项目逻辑删除(§6-§8:深隐藏+可恢复)────────────────────────────────────
 // §7:已删除项目分页(q 过 code/name;deleted_at 倒序,带 deleted_by_name)
 export const DELETED_PROJECTS_PAGE_SIZE = 20;
@@ -180,24 +203,19 @@ export const useRestoreProject = () => {
 export const useCreateProject = () => {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (body: {
-      code: string;
-      name: string;
-      description?: string;
-      organization_id?: string;
-      minio_bucket: string;
-      admin_user_id: string;   // 必填:指派项目 admin(可以是自己;users.id UUID)
-      initial_grants?: GrantEntry[];   // 可选:创建时同时授权(方案 §3;不传/空 = 现行为)
-      folder_template_id?: string;     // 目录模板(方案 §4.2):可选;不选不传 = 与现状一致
-    }) => {
-      const { organization_id, initial_grants, folder_template_id, ...rest } = body;
+    // 请求体类型提名导出为 CreateProjectBody(types.ts;艺人账号方案 F1),
+    // 响应泛型用 ProjectCreated —— 含一次性 artist_account 回显,GET 列表/详情仍是 Project
+    mutationFn: async (body: CreateProjectBody) => {
+      const { organization_id, initial_grants, folder_template_id, artist_account, ...rest } = body;
       const payload = {
         ...rest,
         ...(organization_id ? { organization_id } : {}),
         ...(initial_grants && initial_grants.length > 0 ? { initial_grants } : {}),
         ...(folder_template_id ? { folder_template_id } : {}),
+        // 艺人账号内嵌(方案 §4.1):不传/undefined 省略字段 = 纯项目创建(现状行为)
+        ...(artist_account ? { artist_account } : {}),
       };
-      return (await http.post<Project>('/api/v1/projects', payload)).data;
+      return (await http.post<ProjectCreated>('/api/v1/projects', payload)).data;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['projects'] }),
   });
@@ -659,6 +677,8 @@ export const useCreateGroup = () => {
       can_create_project?: boolean;
       // 目录模板(方案 §4.3):组级「管理目录模板」开关(同款 Create bool)
       can_manage_folder_templates?: boolean;
+      // 艺人账号(方案 §4.3):组级「新建项目时创建艺人账号」开关(同款 Create bool)
+      can_create_artist_account?: boolean;
     }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
@@ -679,6 +699,8 @@ export const useUpdateGroup = () => {
       can_delete_project?: boolean;
       // 目录模板(方案 §4.3):can_manage_folder_templates 同款 tri-state
       can_manage_folder_templates?: boolean;
+      // 艺人账号(方案 §4.3):can_create_artist_account 同款 tri-state
+      can_create_artist_account?: boolean;
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;
