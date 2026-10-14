@@ -230,13 +230,40 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
         </div>
       )}
       {!loading && kind === 'livp' && content === null && (
-        <div style={{
-          padding: 40, textAlign: 'center',
-          color: 'var(--ms-ink-muted)', fontSize: 13, lineHeight: 1.7,
-        }}>
-          实况照片预览还在生成(或生成失败),请稍后刷新重试。<br/>
-          也可直接下载原片查看。
-        </div>
+        asset.tags?.thumbnail_failed ? (
+          // 缩略图已明确失败(fail 标记随 AssetOut.tags 下发,见 workers/main.py 失败路径)
+          // → 显示失败卡,不再误导「稍后刷新重试」(W1-B);样式对齐 iOS PDF 降级卡
+          <div style={{
+            padding: 32, textAlign: 'center',
+            border: '1px dashed var(--ms-hairline)',
+            borderRadius: 'var(--ms-radius-sm)',
+            background: 'var(--ms-hairline-soft)',
+          }}>
+            <ImageIcon size={28} strokeWidth={1.5}
+                       style={{ color: 'var(--ms-ink-subtle)', marginBottom: 12 }} />
+            <div style={{
+              fontSize: 13, color: 'var(--ms-ink-muted)', lineHeight: 1.7,
+              marginBottom: 16,
+            }}>
+              预览生成失败(原因标记:{asset.tags.thumbnail_failed}),<br />
+              可下载原片查看,恢复请联系管理员。
+            </div>
+            <Button type="primary" size={compact ? 'large' : 'middle'}
+                    icon={<Download size={15} strokeWidth={1.8} />}
+                    loading={dlLink.isPending}
+                    onClick={() => void handleDownload()}>
+              下载原片
+            </Button>
+          </div>
+        ) : (
+          <div style={{
+            padding: 40, textAlign: 'center',
+            color: 'var(--ms-ink-muted)', fontSize: 13, lineHeight: 1.7,
+          }}>
+            实况照片预览还在生成(或生成失败),请稍后刷新重试。<br/>
+            也可直接下载原片查看。
+          </div>
+        )
       )}
       {!loading && kind === 'livp' && content !== null && (
         <div>

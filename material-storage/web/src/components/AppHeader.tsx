@@ -110,6 +110,8 @@ export function AppHeader({ me }: Props) {
               <NavChip to="/admin/groups" label="用户组" navigate={navigate} />
               {/* 权限模板(方案 §4.4)— 仅系统管理员可见 */}
               <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />
+              {/* W3: 管理员备份任务观测 — 仅系统管理员可见 */}
+              <NavChip to="/admin/baidu-tasks" label="备份任务" navigate={navigate} />
             </>
           )}
           {/* 目录模板(folder-templates 方案 §3.3)— org admin / 系统管理员 / 持组 flag 成员可见;

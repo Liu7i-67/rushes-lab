@@ -6,12 +6,14 @@
  * - 缺 key 时直接返回 raw token 不报错 — 兼容后端新增 event_type 没同步加 label 的情况
  * - keep mono 字体不变(advisor 决策:跟现有视觉一致性 > 中文渲染纯净)
  *
- * 后端 event_type 全集来自 `grep event_type= ... | sort -u`(2026-05-18),共 22 种
+ * 后端 event_type 写入点全集共 55 种(2026-10-14 核对,全集清单见
+ * rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A;
+ * 旧口径「grep 全集 22 种 2026-05-18」已过时,勿按它裁剪映射)
  */
 
 export const EVENT_TYPE_LABEL: Record<string, string> = {
   access_denied: '访问被拒',
-  approval_card_updated: '审批卡片已更新',
+  approval_card_updated: '审批卡片已更新',  // 后端不产出该键(展示兼容保留;勿加进 EVENT_TYPES 下拉)
   approval_notified: '审批通知已发送',
   approval_state_changed: '审批状态变更',
   approval_submitted: '审批申请已提交',

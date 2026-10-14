@@ -8,6 +8,10 @@
   CRUD /api/v1/admin/folder-templates       — 目录模板(建项目一键建目录,2026-10-10;
                                               读弱门 org admin 或 creator 或 flag,
                                               写门 org admin 或 flag,方案 §3.3)
+  GET  /api/v1/admin/baidu-backup/tasks            — 百度备份任务全系统列表(2026-10-14,
+                                              W3 观测面,方案 §3.1①)
+  GET  /api/v1/admin/baidu-backup/tasks/{id}    — 任务详情(+调度观测字段/绑定行,§3.1②)
+  GET  /api/v1/admin/baidu-backup/tasks/{id}/files — 文件明细(manifest 分页,§3.1③)
 
 #154:飞书诊断 endpoint(/feishu/health、/feishu/test-card)随飞书下线删除(ADR-0007)。
 """
@@ -23,13 +27,18 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.session import get_db
 from app.db.tables import (
     AuditEvent,
+    BaiduBackupTask,
+    BaiduBackupTaskFile,
+    BaiduBinding,
+    Folder,
     Group,
     Project,
     ProjectFolderTemplate,
@@ -56,6 +65,7 @@ from app.models import (
 )
 from app.routers.projects import INITIAL_GRANTS_MAX
 from app.services.audit import AuditService
+from app.services.baidu_backup import ACTIVE_STATUSES, FILE_STATUSES, TERMINAL_STATUSES
 from app.services.default_grants import apply_default_template_grants
 from app.services.org import get_default_organization
 from app.services.permissions import PermissionsService, ProjectRole, fmt_subject
@@ -977,4 +987,308 @@ async def delete_folder_template(
         details={"action": "delete", "template_id": str(template_id), "name": name},
         request_ip=ctx["request_ip"],
         user_agent=ctx["user_agent"],
+    )
+
+
+# ─── 管理员备份任务视图(2026-10-14,W3,方案 §3.1)────────────────────────────
+# 只读观测面:全系统百度备份任务对 system admin 可见(跨用户)。三条**刻意不随
+# settings.baidu_backup_enabled 门控**(与用户侧 routers/baidu_backup.py 的
+# _ensure_enabled() 语义不同,上游方案 §6 D2):管理观测面看的是存量事实(含
+# 功能下线后的遗留任务),不受功能开关影响。只读端点不写审计(对齐本文件
+# /audit 只读先例)。无 DB 迁移、无 FGA model 变更(权限复用 require_system_admin
+# = OpenFGA organization#admin)。
+
+# 任务状态白名单 = 活动态 + 终态(§3.1①;取值域引用服务层 §4 常量,防拼写漂移)
+_BAIDU_TASK_STATUSES = (*ACTIVE_STATUSES, *TERMINAL_STATUSES)
+
+
+def _trunc_200(s: str | None) -> str | None:
+    """fail_reason / last_error 序列化前截 200 字符(§3.1,与 tags 同款脱敏口径)。"""
+    if s is None or len(s) <= 200:
+        return s
+    return s[:200]
+
+
+class AdminBaiduTaskUserOut(BaseModel):
+    """任务所属用户(username 可空:飞书老账号无本地用户名;展示与 q 匹配须容忍)。"""
+
+    id: uuid.UUID
+    username: str | None = None
+    name: str
+
+
+class AdminBaiduTaskRefOut(BaseModel):
+    """项目 / 目标文件夹引用(target_folder 夹已删 → 整个为 null)。"""
+
+    id: uuid.UUID
+    name: str
+
+
+class AdminBaiduTaskOut(BaseModel):
+    """admin 任务条目(§3.1①)。聚合列 enumerating 阶段为 NULL(tables.py:546-550,
+    仅 done_bytes NOT NULL)→ 序列化统一 0 兜底;fail_reason 截 200。"""
+
+    id: uuid.UUID
+    user: AdminBaiduTaskUserOut
+    status: str                                 # enumerating/running/completed/cancelled/failed
+    source_dir: str
+    project: AdminBaiduTaskRefOut               # 项目行总在(FK RESTRICT)
+    target_folder: AdminBaiduTaskRefOut | None = None
+    total_files: int = 0
+    done_files: int = 0
+    failed_files: int = 0
+    skipped_files: int = 0
+    cancelled_files: int = 0
+    total_bytes: int = 0
+    done_bytes: int = 0
+    created_at: datetime
+    updated_at: datetime
+    fail_reason: str | None = None              # 截 200 字符
+    cancel_requested: bool = False
+
+
+class AdminBaiduTasksPage(BaseModel):
+    """任务分页(排序固定 created_at DESC, id DESC 稳定排序防翻页抖动,§3.1①)。"""
+
+    items: list[AdminBaiduTaskOut]
+    total: int
+
+
+class AdminBaiduTaskBindingOut(BaseModel):
+    """任务关联绑定行(baidu_uid 是 BaiduBinding 列名,tables.py:481)。"""
+
+    id: uuid.UUID
+    baidu_uid: str
+    status: str
+
+
+class AdminBaiduTaskDetailOut(AdminBaiduTaskOut):
+    """admin 任务详情(§3.1②)= 列表条目 + 创建时快照/绑定行/取消原因/调度观测字段。"""
+
+    bound_baidu_uid: str | None = None          # 创建时从 binding 快照,可 null
+    binding: AdminBaiduTaskBindingOut | None = None
+    cancel_reason: str | None = None            # user_cancel / binding_replaced(§4)
+    retry_count: int = 0                        # 复活次数
+    enum_done: bool = False                     # 枚举完成标记(复活时复位)
+    dispatched_at: datetime | None = None       # 最近派发时刻(NULL=从未派发)
+    round_started_at: datetime | None = None    # 轮起点(48h 判停依据)
+    lease_until: datetime | None = None         # 租约/心跳(NULL=未认领)
+    runner_id: str | None = None
+
+
+class AdminBaiduTaskFileOut(BaseModel):
+    """admin 文件明细条目(§3.1③;last_error 截 200,与 tags 同款脱敏口径)。"""
+
+    id: uuid.UUID
+    source_path: str
+    rel_path: str
+    status: str                                 # pending/skipped_exists/importing/success/failed/cancelled
+    bytes_done: int = 0
+    attempts: int = 0
+    non_retryable: bool = False
+    last_error: str | None = None               # 截 200 字符
+    asset_id: uuid.UUID | None = None
+    updated_at: datetime
+
+
+class AdminBaiduTaskFilesPage(BaseModel):
+    """文件明细分页(排序固定 rel_path, id,对齐用户侧 routers/baidu_backup.py:900)。"""
+
+    items: list[AdminBaiduTaskFileOut]
+    total: int
+
+
+async def _serialize_admin_baidu_tasks(
+    db: AsyncSession, tasks: list[BaiduBackupTask],
+) -> list[AdminBaiduTaskOut]:
+    """任务 → 出参:user / project / target_folder 批量取回(免 N+1,照用户侧
+    routers/baidu_backup.py:_build_task_outs 惯例);聚合列 NULL 兜 0、fail_reason
+    截 200(§3.1)。project 行总在(FK RESTRICT);target_folder 夹已删 → None
+    (FK SET NULL,列即 NULL,不存在的 id 防御性同样回落 None)。"""
+    if not tasks:
+        return []
+    users: dict[uuid.UUID, AdminBaiduTaskUserOut] = {}
+    res = await db.execute(
+        select(User.id, User.username, User.name)
+        .where(User.id.in_({t.user_id for t in tasks}))
+    )
+    for row in res.all():
+        users[row.id] = AdminBaiduTaskUserOut(id=row.id, username=row.username, name=row.name)
+    res = await db.execute(
+        select(Project.id, Project.name).where(Project.id.in_({t.project_id for t in tasks}))
+    )
+    project_names: dict[uuid.UUID, str] = {row.id: row.name for row in res}
+    folder_names: dict[uuid.UUID, str] = {}
+    fids = {t.target_folder_id for t in tasks if t.target_folder_id}
+    if fids:
+        res = await db.execute(select(Folder.id, Folder.name).where(Folder.id.in_(fids)))
+        folder_names = {row.id: row.name for row in res}
+
+    outs: list[AdminBaiduTaskOut] = []
+    for t in tasks:
+        target_folder: AdminBaiduTaskRefOut | None = None
+        if t.target_folder_id is not None and t.target_folder_id in folder_names:
+            target_folder = AdminBaiduTaskRefOut(
+                id=t.target_folder_id, name=folder_names[t.target_folder_id],
+            )
+        outs.append(AdminBaiduTaskOut(
+            id=t.id,
+            user=users[t.user_id],
+            status=t.status,
+            source_dir=t.source_dir,
+            project=AdminBaiduTaskRefOut(id=t.project_id, name=project_names[t.project_id]),
+            target_folder=target_folder,
+            total_files=t.total_files or 0,
+            done_files=t.done_files or 0,
+            failed_files=t.failed_files or 0,
+            skipped_files=t.skipped_files or 0,
+            cancelled_files=t.cancelled_files or 0,
+            total_bytes=t.total_bytes or 0,
+            done_bytes=t.done_bytes,
+            created_at=t.created_at,
+            updated_at=t.updated_at,
+            fail_reason=_trunc_200(t.fail_reason),
+            cancel_requested=t.cancel_requested,
+        ))
+    return outs
+
+
+@router.get("/baidu-backup/tasks", response_model=AdminBaiduTasksPage)
+async def list_admin_baidu_tasks(
+    status: str | None = Query(
+        None, description="按任务状态过滤(enumerating/running/completed/cancelled/failed)",
+    ),
+    user_id: uuid.UUID | None = Query(None, description="按任务所属用户过滤"),  # noqa: B008  FastAPI DI,repo 全量同款
+    q: str | None = Query(None, description="模糊匹配用户名/姓名/源目录(ilike)"),
+    active_only: bool = Query(False, description="仅活动任务(enumerating/running)"),
+    limit: int = Query(20, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+) -> AdminBaiduTasksPage:
+    """全系统百度备份任务列表(仅 system admin;跨用户可见,§3.1①)。
+
+    排序固定 created_at DESC, id DESC(稳定排序防同秒任务翻页抖动,对齐用户侧
+    routers/baidu_backup.py:854);status 非白名单 400(与 ③ files 口径一致);
+    users 内连接(FK NOT NULL)同时服务 q 的 username/name 两路模糊。
+    """
+    _ = user.id
+    conditions: list[ColumnElement[bool]] = []
+    if status is not None:
+        if status not in _BAIDU_TASK_STATUSES:
+            raise HTTPException(400, f"status 取值须为 {_BAIDU_TASK_STATUSES}")
+        conditions.append(BaiduBackupTask.status == status)
+    if active_only:
+        conditions.append(BaiduBackupTask.status.in_(ACTIVE_STATUSES))
+    if user_id is not None:
+        conditions.append(BaiduBackupTask.user_id == user_id)
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"  # users.py search_users 同款;不转义通配符属既有口径
+        conditions.append(or_(
+            User.username.ilike(like),
+            User.name.ilike(like),
+            BaiduBackupTask.source_dir.ilike(like),
+        ))
+    total = await db.scalar(
+        select(func.count())
+        .select_from(BaiduBackupTask)
+        .join(User, BaiduBackupTask.user_id == User.id)
+        .where(*conditions)
+    )
+    rows = await db.execute(
+        select(BaiduBackupTask)
+        .join(User, BaiduBackupTask.user_id == User.id)
+        .where(*conditions)
+        .order_by(BaiduBackupTask.created_at.desc(), BaiduBackupTask.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    items = await _serialize_admin_baidu_tasks(db, list(rows.scalars().all()))
+    return AdminBaiduTasksPage(items=items, total=total or 0)
+
+
+@router.get("/baidu-backup/tasks/{task_id}", response_model=AdminBaiduTaskDetailOut)
+async def get_admin_baidu_task(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+) -> AdminBaiduTaskDetailOut:
+    """任务详情(§3.1②;admin 视角无归属隐藏需求,404 不区分存在性语义)。"""
+    _ = user.id
+    task = await db.get(BaiduBackupTask, task_id)
+    if task is None:
+        raise HTTPException(404, f"task not found:{task_id}")
+    (base,) = await _serialize_admin_baidu_tasks(db, [task])
+    # binding 行总在(FK RESTRICT);防御 None 回落 null(与契约 binding|null 一致)
+    binding_out: AdminBaiduTaskBindingOut | None = None
+    binding = await db.get(BaiduBinding, task.binding_id)
+    if binding is not None:
+        binding_out = AdminBaiduTaskBindingOut(
+            id=binding.id, baidu_uid=binding.baidu_uid, status=binding.status,
+        )
+    return AdminBaiduTaskDetailOut(
+        **base.model_dump(),
+        bound_baidu_uid=task.bound_baidu_uid,
+        binding=binding_out,
+        cancel_reason=task.cancel_reason,
+        retry_count=task.retry_count,
+        enum_done=task.enum_done,
+        dispatched_at=task.dispatched_at,
+        round_started_at=task.round_started_at,
+        lease_until=task.lease_until,
+        runner_id=task.runner_id,
+    )
+
+
+@router.get("/baidu-backup/tasks/{task_id}/files", response_model=AdminBaiduTaskFilesPage)
+async def list_admin_baidu_task_files(
+    task_id: uuid.UUID,
+    status: str | None = Query(None, description="按行状态筛选(pending/skipped_exists/importing/success/failed/cancelled)"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+) -> AdminBaiduTaskFilesPage:
+    """任务文件明细(manifest 分页,§3.1③;不校验任务归属 —— admin 跨用户观测)。
+
+    status 白名单/文案与排序(rel_path, id)均对齐用户侧
+    routers/baidu_backup.py:891-900 口径;last_error 截 200(§3.1)。
+    """
+    _ = user.id
+    task = await db.get(BaiduBackupTask, task_id)
+    if task is None:
+        raise HTTPException(404, f"task not found:{task_id}")
+    conditions = [BaiduBackupTaskFile.task_id == task.id]
+    if status is not None:
+        if status not in FILE_STATUSES:
+            raise HTTPException(400, f"status 取值须为 {FILE_STATUSES}")
+        conditions.append(BaiduBackupTaskFile.status == status)
+    total = await db.scalar(
+        select(func.count()).select_from(BaiduBackupTaskFile).where(*conditions)
+    )
+    rows = await db.execute(
+        select(BaiduBackupTaskFile)
+        .where(*conditions)
+        .order_by(BaiduBackupTaskFile.rel_path, BaiduBackupTaskFile.id)
+        .limit(limit)
+        .offset(offset)
+    )
+    return AdminBaiduTaskFilesPage(
+        items=[
+            AdminBaiduTaskFileOut(
+                id=f.id,
+                source_path=f.source_path,
+                rel_path=f.rel_path,
+                status=f.status,
+                bytes_done=f.bytes_done,
+                attempts=f.attempts,
+                non_retryable=f.non_retryable,
+                last_error=_trunc_200(f.last_error),
+                asset_id=f.asset_id,
+                updated_at=f.updated_at,
+            )
+            for f in rows.scalars().all()
+        ],
+        total=total or 0,
     )
