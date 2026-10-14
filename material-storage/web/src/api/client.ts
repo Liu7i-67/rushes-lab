@@ -53,10 +53,18 @@ http.interceptors.response.use(
 export function errorMessage(err: unknown, fallback = '请求失败'): string {
   if (axios.isAxiosError(err)) {
     const d = err.response?.data as { detail?: unknown } | undefined;
-    // 非字符串 detail(如艺人账号内嵌 409 的结构化 {code,username,project_id})原样返回
-    // 会被全局 mutationCache toast 渲染 → React「Objects are not valid as a React child」
-    // 崩溃;一律回退到下方 fallback 文案(字符串 detail 行为零变化,艺人账号方案 §4.1)
     if (typeof d?.detail === 'string' && d.detail) return d.detail;
+    // FastAPI 422(Pydantic v2)的 detail 是对象数组:取各条 msg 拼接成人话
+    // (直塞对象给 message.error 会触发 React error #31 整树白屏,返回值必须恒为 string)
+    if (Array.isArray(d?.detail)) {
+      const msgs = d.detail
+        .map((x) => (x && typeof x === 'object' && 'msg' in x ? String((x as { msg?: unknown }).msg) : ''))
+        .filter(Boolean);
+      if (msgs.length) return msgs.join('; ');
+    }
+    // 其余非字符串/非数组 detail(如艺人账号内嵌 409 的结构化 {code,username,project_id})
+    // 原样返回会被全局 mutationCache toast 渲染 → React「Objects are not valid as a
+    // React child」崩溃;一律落到下方 fallback 文案(艺人账号方案 §4.1)
     if (err.response?.status) return `${fallback}(HTTP ${err.response.status})`;
     if (err.message) return err.message;
   }
