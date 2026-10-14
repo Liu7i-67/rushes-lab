@@ -1,3 +1,7 @@
+## 2026-10-14
+
+- **艺人账号内嵌 合并 liuqi + hh2 dev 部署**(feat/project-artist-account `b49159b`,用户两指令一次完成):①**合并**——feat merge liuqi `7d44832`(编码白屏修复 f75c543/cce8239),两处冲突手工解:client.ts errorMessage **双语义合并**(liuqi 数组 detail 拼 msg + 我方对象 detail 回落 fallback,互补不丢)+changelog 同日双条目并集;合并后 build 绿新指纹 `index-RLagfovo.js`。②**dev 部署**(分片通道,deploy_lan.sh tar 流断流坑未再踩):**FGA model 先行**(yaml→cli 转 JSON→单流推送→POST dev store `01M111MGGR3XK60K4ZGW8D222C`,新 model `01M4VX3N4D53CGC3XF0E0TA550` 含 artist_account_creator,latest 即生效)→代码 4.2MB×8 片 md5 全对→rsync --inplace+DEPLOYED.md=`b49159b`→restart ms-api-dev/ms-worker-dev(**本次无 alembic 迁移**)→SPA 1.4MB×3 片原子替换(备份 web.bak-20261014 保留)。验证 5/5——DEPLOYED=b49159b、双入口(内网 :8090/外网 :8080)指纹一致 index-RLagfovo.js、auth/me 401、容器新代码 grep(user_provisioning.py+me 字段×5)、日志零错误;**业务抽测真链路**(X-User-Id dev 通道):建组双 flag→组长 /me 三字段正交(is_project_creator=true+is_artist_account_creator=true+is_system_admin=false)→预检 available:true→**组长建项目带艺人账号 201**(响应回显登录名+12 位初始密码)→重复提交预检 409 零副作用+**大写变体 lower 匹配 available:false**→落位核验全对(「艺人」组全角描述+成员、艺人行 must_change_password=true、审计 source=project_artist_inline×3+via=artist_inline×3、FGA 三角色 true×3)→抽测清理(项目归档/组删除/测试号禁用,艺人组常驻保留)。**prod 未部署;合并回 liuqi 待拍板**(防主仓部署覆盖,同 folder-templates 教训);回滚 dev=换回 web.bak-20261014+代码切旧 commit 重走分片通道(model 不需回滚)
+
 # 更新日志
 
 > 以天为单位记一节,二级标题为日期(`## YYYY-MM-DD`),最新的天在最前;每天内用列表记每一项更新,一句话说清 + commit hash 可溯。
