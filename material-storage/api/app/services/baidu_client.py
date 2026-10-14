@@ -11,9 +11,22 @@
 
 统一错误对象 BaiduApiError:六类分类(§5.3 矩阵,纯函数 classify_baidu_failure);
 错误对象/日志一律剥 URL query(access_token 脱敏)。
+
+下载传输层语义(传输容错方案 baidu-import-transport-retry-plan.md §3.1):建连
+(send)与正文读取(aiter_bytes)的 `httpx.TransportError` 家族(ConnectTimeout/
+ConnectError/ReadTimeout/ReadError/WriteError/CloseError…)统一包装为
+`BaiduTransportError`(继承 BaiduApiError,调用方按可重试未知错误处置)上抛;
+捕获范围仅 TransportError —— `DecodingError`/`TooManyRedirects` 等 TransportError
+之外的 RequestError 子类不包装(罕见,仍杀轮交 sweeper)。取舍注明:TransportError
+家族含 `UnsupportedProtocol` 等确定性错误(如 302 Location 带非 http scheme ——
+宿主白名单只校验 host 不校验 scheme),会被当可重试走满预算后
+failed('network_transport'):有界、仅失败标签可能误导,接受。
+带 Range 的请求遇服务端忽略(回 200 全量)或 206 Content-Range 起点错位 →
+`BaiduRangeIgnored` 上抛(worker 废弃 multipart 会话从 0 重拉,防错位续拼)。
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -85,6 +98,27 @@ class BaiduApiError(Exception):
 
 
 @dataclass(frozen=True)
+class BaiduTransportError(BaiduApiError):
+    """下载传输层中断(建连/正文读的 httpx.TransportError 家族,§3.1)。
+
+    继承 BaiduApiError 是关键:现有「按 category 分派(errno 仅透传)」的调用方
+    默认把它当可重试未知错误,改动面最小;kind/bytes_read 仅日志用。
+    """
+
+    kind: str = "unknown"       # httpx 异常类名(ReadTimeout/ReadError/…),仅日志用
+    bytes_read: int = 0         # 本次流消费已读字节(尽力值,可 0,仅日志用)
+
+
+@dataclass(frozen=True)
+class BaiduRangeIgnored(BaiduApiError):
+    """服务端忽略 Range:带 Range 请求回 200 全量,或 206 Content-Range 起点错位。
+
+    category=CATEGORY_UNKNOWN(沿用既有 4xx 分类风格);worker _download_parts
+    捕获后废弃当前 multipart 会话从 0 重拉,防全量内容错位续拼(§3.2)。
+    """
+
+
+@dataclass(frozen=True)
 class BaiduTokenPair:
     """exchange_code / refresh_token 的归一返回(原子覆盖落库的载体)。"""
 
@@ -136,6 +170,19 @@ def host_allowed(host: str | None) -> bool:
         lowered == suffix or lowered.endswith("." + suffix)
         for suffix in _ALLOWED_DL_HOST_SUFFIXES
     )
+
+
+_CONTENT_RANGE_START_RE = re.compile(r"bytes\s*=?\s*(\d+)\s*-", re.IGNORECASE)
+_RANGE_REQ_START_RE = re.compile(r"bytes\s*=\s*(\d+)\s*-")
+
+
+def _parse_content_range_start(content_range: str) -> int | None:
+    """解析 Content-Range 起点字节("bytes 100-199/1234" → 100)。
+
+    无头/格式不可解析 → None(调用方放行,勿把解析失败当异常,§3.2)。
+    """
+    m = _CONTENT_RANGE_START_RE.match(content_range.strip())
+    return int(m.group(1)) if m else None
 
 
 def classify_baidu_failure(*, http_status: int | None, errno: int | None = None) -> str:
@@ -419,8 +466,12 @@ class BaiduNetdiskClient:
         - 每一跳(含首跳)宿主做 *.pcs.baidu.com/*.baidupcs.com 后缀白名单校验
           (dlink 来自外部 API 响应字段,一行代码量级的 SSRF 防御)
         - Range 断点续传由调用方传 range_header(如 "bytes=1048576-");服务端
-          忽略 Range 返回 200 全量属其自由(调研实测),调用方按实际读到的字节记账
-        - read timeout ≤15s;错误统一 BaiduApiError(HTTP 状态 + body errno 分类)
+          忽略 Range 回 200 全量、或 206 Content-Range 起点与请求起点不一致 →
+          抛 BaiduRangeIgnored(续传重试禁止错位续拼,§3.2);206 无
+          Content-Range/不可解析 → 放行;不带 Range 的 200 照常放行
+        - read timeout ≤15s;HTTP 语义错误统一 BaiduApiError(状态 + errno 分类);
+          建连/正文传输中断(httpx.TransportError 家族)统一 BaiduTransportError
+          (§3.1,worker 流内重试入口)
         """
         if not dlink:
             raise BaiduApiError(CATEGORY_UNKNOWN, "dlink 为空,无法下载")
@@ -443,6 +494,16 @@ class BaiduNetdiskClient:
             req = self._http.build_request("GET", url, headers=headers)
             try:
                 resp = await self._http.send(req, stream=True)
+            except httpx.TransportError as e:
+                # 建连段(ConnectTimeout/ConnectError 等,子类必须列于 HTTPError
+                # 之前先匹配):与读流中断同源(链路抖动常相伴),统一进流内
+                # 重试 + 退避 + 落码分叉,消除「unknown 无退避、耗尽误标
+                # rate_limited」盲区(§3.1)
+                raise BaiduTransportError(
+                    CATEGORY_UNKNOWN,
+                    sanitize_message(f"下载建连中断:{type(e).__name__}"),
+                    kind=type(e).__name__,
+                ) from e
             except httpx.HTTPError as e:
                 raise BaiduApiError(
                     CATEGORY_UNKNOWN,
@@ -484,8 +545,46 @@ class BaiduNetdiskClient:
                 errno=body_errno,
                 http_status=resp.status_code,
             )
+        if range_header and resp.status_code == 200:
+            # 服务端忽略 Range 回 200 全量:把全量内容接在已传分片之后会错位续拼
+            # (现状唯一兜底=落库前 size 门)。续传重试必须显式感知 → 抛专用异常,
+            # worker 废弃会话从 0 重拉(§3.2);raise 前先 aclose(对齐非 200/206
+            # 分支口径)。拦截落在本单点,既有跨轮续传路径(pos>0 重进)自动同享防护
+            await resp.aclose()
+            raise BaiduRangeIgnored(
+                CATEGORY_UNKNOWN,
+                f"服务端忽略 Range 请求返回 200 全量:url={strip_url_query(url)}",
+            )
+        if range_header and resp.status_code == 206:
+            req_m = _RANGE_REQ_START_RE.match(range_header.strip())
+            cr_start = _parse_content_range_start(resp.headers.get("Content-Range", ""))
+            if req_m is not None and cr_start is not None and cr_start != int(req_m.group(1)):
+                # 206 但起点错位(病态服务端恰好回显正确总长):把残余错位面收敛
+                # 为零,尺寸门不再参与兜底(§3.2)
+                await resp.aclose()
+                raise BaiduRangeIgnored(
+                    CATEGORY_UNKNOWN,
+                    f"206 Content-Range 起点 {cr_start} 与请求起点 "
+                    f"{int(req_m.group(1))} 不一致:url={strip_url_query(url)}",
+                )
+            # 206 无 Content-Range 或格式不可解析 → 放行(维持现状行为,勿把
+            # 解析失败当异常抛,§3.2)
+        read = 0
         try:
             async for chunk in resp.aiter_bytes(chunk_size):
+                read += len(chunk)
                 yield chunk
+        except httpx.TransportError as e:
+            # 正文读取中断(ReadTimeout/ReadError/WriteError/CloseError 等):包装
+            # 上抛进 worker 流内重试(§3.1);message 经 sanitize_message(httpx
+            # 异常文本可能带 URL,token 脱敏口径不变)
+            raise BaiduTransportError(
+                CATEGORY_UNKNOWN,
+                sanitize_message(f"下载流中断:{type(e).__name__}"),
+                kind=type(e).__name__,
+                bytes_read=read,
+            ) from e
         finally:
-            await resp.aclose()
+            with contextlib.suppress(Exception):
+                # 坏流上 aclose 可能再抛,防掩盖在途 BaiduTransportError(§3.1)
+                await resp.aclose()

@@ -134,11 +134,28 @@ class Settings(BaseSettings):
     baidu_lease_s: int = 60               # runner 租约(心跳)时长;≥ 2x 检查点周期
     baidu_sweep_throttle_s: int = 600     # sweeper 接管节流(dispatched_at 超此时长才可派发)
     baidu_part_size_bytes: int = 16 * 1024 * 1024  # multipart 分片(下限 5MiB,见校验)
+    # ── 下载传输层容错(方案 baidu-import-transport-retry-plan.md §3.4;生产默认,
+    # 单测/集成注入秒级值,勿吃真退避档)──
+    baidu_stream_retry_max: int = 3       # 单次文件级尝试内传输中断+Range 被忽略共享的重试上限
+    baidu_stream_retry_backoff_s: str = "2,5,15"  # 重试退避档(逗号分隔正整数;档位不足以末档延续)
+    baidu_max_row_attempts: int = 10      # 行级 attempts 熔断阈值(bytes_done==0 零进展才熔断,§3.3)
     # ── API 端点(默认生产端点;集成测试/调试可注入本地 mock 桩,如 kill -9/SIGTERM
     # 故障注入把 openapi/pan 指向本地服务器;下载 CDN 白名单 *.pcs.baidu.com/
     # *.baidupcs.com 不受此影响,仍按宿主后缀硬校验)
     baidu_openapi_base_url: str = "https://openapi.baidu.com"  # OAuth authorize/token
     baidu_pan_base_url: str = "https://pan.baidu.com"          # xpan file/multimedia/nas
+
+    def baidu_stream_backoff_steps(self) -> list[int]:
+        """解析 BAIDU_STREAM_RETRY_BACKOFF_S 逗号串为 0 基退避档位列表(秒)。
+
+        调用方索引一律钳位末档:steps[min(n, len(steps)) - 1](首次重试取档 0,
+        档位不足时以最后一档延续);逐项为正整数由 validate_baidu_settings 断言。
+        """
+        return [
+            int(part.strip())
+            for part in self.baidu_stream_retry_backoff_s.split(",")
+            if part.strip()
+        ]
 
     def validate_baidu_settings(self) -> None:
         """百度备份配置的启动断言(方案 §6)——配置关系错误宁可启动失败,不带病运行。
@@ -146,6 +163,8 @@ class Settings(BaseSettings):
         - RELAY_AFTER_S + 300 ≤ 3600:接力必须能在 arq job timeout(3600s)内触发;
           违反则接力永不触发、任务每小时被硬断退化到 sweeper 接管,噪音无告警
         - PART_SIZE_BYTES ≥ 5MiB:S3/MinIO complete 强制除末片外每片 ≥5MiB(EntityTooSmall)
+        - STREAM_RETRY_BACKOFF_S:非空逗号分隔正整数串(流内重试退避档,§3.4);
+          STREAM_RETRY_MAX / MAX_ROW_ATTEMPTS ≥ 1(并入下方正数校验组)
         """
         assert self.baidu_relay_after_s + 300 <= 3600, (
             f"BAIDU_RELAY_AFTER_S={self.baidu_relay_after_s} 必须满足 +300 ≤ 3600"
@@ -157,7 +176,18 @@ class Settings(BaseSettings):
         )
         assert min(
             self.baidu_round_timeout_s, self.baidu_lease_s, self.baidu_sweep_throttle_s,
-        ) > 0, "百度备份时延常量(ROUND_TIMEOUT/LEASE/SWEEP_THROTTLE)必须为正数"
+            self.baidu_stream_retry_max, self.baidu_max_row_attempts,
+        ) > 0, "百度备份时延常量(ROUND_TIMEOUT/LEASE/SWEEP_THROTTLE/STREAM_RETRY_MAX/MAX_ROW_ATTEMPTS)必须为正数"
+        raw_backoff = self.baidu_stream_retry_backoff_s.strip()
+        assert raw_backoff, (
+            "BAIDU_STREAM_RETRY_BACKOFF_S 不能为空"
+            "(流内重试退避档,逗号分隔正整数串,如 2,5,15;见方案 §3.4)"
+        )
+        items = [part.strip() for part in raw_backoff.split(",")]
+        assert all(part.isdigit() and int(part) > 0 for part in items), (
+            f"BAIDU_STREAM_RETRY_BACKOFF_S={raw_backoff!r} 必须为逗号分隔的"
+            "正整数串(如 2,5,15;逐项 >0,见方案 §3.4)"
+        )
 
 
 # 单例(import 时 lazy 创建)

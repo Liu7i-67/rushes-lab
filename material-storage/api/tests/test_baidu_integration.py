@@ -188,9 +188,11 @@ from app.services.baidu_backup import (
 )
 from app.services.baidu_client import (
     CATEGORY_RATE_LIMITED,
+    CATEGORY_UNKNOWN,
     BaiduApiError,
     BaiduListResult,
     BaiduTokenPair,
+    BaiduTransportError,
     BaiduUserInfo,
 )
 from app.services.permissions import PermissionsService
@@ -676,12 +678,23 @@ class BaiduScript:
     stream_download(access_token, dlink, *, range_header=...)/
     filemetas_batch(access_token, fsids, *, dlink)/
     list_dir(access_token, dir_path, *, folders_only=False, max_pages=10)。
+
+    下载故障注入(传输层容错用例,方案 §4 桩同步):
+    - fail_first[fs_id] = [exc, ...]:流前抛,支持 BaiduTransportError /
+      BaiduRangeIgnored 等新异常类型;
+    - fail_after_bytes[fs_id] = n:产出 n 字节(足够触发 ≥1 次 _flush 上传)后
+      中途抛 BaiduTransportError(一次性)——「中断发生在已传 N 字节后」载体;
+    注入均不建模状态码(200/206 语义归 client 层 MockTransport 直测)。
     """
 
     def __init__(self) -> None:
         self.bodies: dict[int, bytes] = {}
         self.tail_only: dict[int, tuple[int, bytes]] = {}   # fs_id → (total_size, tail_bytes)
-        self.fail_first: dict[int, list[Exception]] = {}   # fs_id → 前置错误队列
+        self.fail_first: dict[int, list[Exception]] = {}   # fs_id → 前置错误队列(流前抛;
+        #   支持传输层新异常类型 BaiduTransportError/BaiduRangeIgnored 等任意 Exception)
+        self.fail_after_bytes: dict[int, int] = {}   # fs_id → 产出该字节数后中途抛
+        #   BaiduTransportError(一次性;「按字节数中途失败」注入,值须 ≥1 个 part_size
+        #   才能保证中断前触发 ≥1 次 _flush 上传 —— 传输层容错的 T1/T2 类用例依赖)
         self.download_calls: list[tuple[int, int | None]] = []  # (fs_id, range_start)
         self.filemetas_calls = 0
         self.listing: list[dict[str, Any]] = []            # list_dir 输出(fs_id/path/size/isdir)
@@ -702,6 +715,12 @@ class BaiduScript:
         self.download_calls.append((fs_id, start))
         if self.fail_first.get(fs_id):
             raise self.fail_first[fs_id].pop(0)
+        limit = self.fail_after_bytes.pop(fs_id, None)
+        if limit is not None and limit <= 0:
+            raise BaiduTransportError(
+                CATEGORY_UNKNOWN, "下载流中断:ReadTimeout(桩注入,0 字节)",
+                kind="ReadTimeout", bytes_read=0,
+            )
         if fs_id in self.tail_only:
             total, tail = self.tail_only[fs_id]
             if start != total - len(tail):
@@ -710,6 +729,24 @@ class BaiduScript:
             return
         body = self.bodies.get(fs_id, b"")
         chunk = 64 * 1024
+        if limit is not None:
+            # 中途失败注入:按限额截断产出(触发 ≥1 次 _flush 后),抛传输层异常
+            produced = 0
+            for off in range(start, len(body), chunk):
+                piece = body[off:off + chunk]
+                if produced + len(piece) > limit:
+                    piece = piece[:limit - produced]
+                if self.chunk_delay:
+                    await asyncio.sleep(self.chunk_delay)
+                yield piece
+                produced += len(piece)
+                if produced >= limit:
+                    raise BaiduTransportError(
+                        CATEGORY_UNKNOWN,
+                        f"下载流中断:ReadTimeout(桩注入 fs_id={fs_id} produced={produced})",
+                        kind="ReadTimeout", bytes_read=produced,
+                    )
+            return
         for off in range(start, len(body), chunk):
             if self.chunk_delay:
                 await asyncio.sleep(self.chunk_delay)

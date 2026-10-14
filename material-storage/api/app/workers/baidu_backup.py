@@ -93,6 +93,8 @@ from app.services.baidu_client import (
     CATEGORY_RATE_LIMITED,
     BaiduApiError,
     BaiduNetdiskClient,
+    BaiduRangeIgnored,
+    BaiduTransportError,
 )
 from app.services.baidu_storage import AsyncObjectStore, is_no_such_upload_error
 from app.services.folder_chain import (
@@ -658,7 +660,12 @@ async def _next_pending_row(db: AsyncSession, task_id: uuid.UUID) -> TaskFile | 
 
 async def _import_loop(db: AsyncSession, runner: Runner) -> str:
     """导入循环:每轮仅选取 status='pending' 的 manifest 行(§6;单文件 retry 不得
-    触碰其他 failed 行);循环结束(无 pending/importing 行)时按三分支判定终态。"""
+    触碰其他 failed 行);循环结束(无 pending/importing 行)时按三分支判定终态。
+
+    认领前熔断(传输容错方案 §3.3):attempts ≥ baidu_max_row_attempts 且
+    bytes_done == 0(零进展豁免:跨界续传的大文件每轮有进展,不熔)的行直接
+    failed('attempts_exhausted')跳过,防崩溃-接管循环把队头文件死循环到 48h。
+    """
     while True:
         outcome = await checkpoint(db, runner)
         if outcome is not None:
@@ -666,6 +673,16 @@ async def _import_loop(db: AsyncSession, runner: Runner) -> str:
         row = await _next_pending_row(db, runner.task_id)
         if row is None:
             break
+        if row.attempts >= runner.settings.baidu_max_row_attempts and row.bytes_done == 0:
+            # 熔断落码复用 _fail_row(自带所有权谓词 + 聚合重算 + commit,勿裸 UPDATE);
+            # non_retryable=False(D1):retry-failed 可复活且 attempts 归零
+            res = await _fail_row(
+                db, runner, row, "attempts_exhausted",
+                message="认领次数超上限且无进展",
+            )
+            if res == "lost":
+                return res   # 所有权已失,向上传播交 sweeper
+            continue          # "ok" → 跳过该行,继续取下一行(不杀任务)
         await db.execute(
             update(TaskFile)
             .where(TaskFile.id == row.id)
@@ -870,7 +887,11 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
 
     # ── 步骤 3-4:dlink 懒取 + multipart 断点续传(含单文件自动重试 ≤5 次)────
     attempt = 1
+    # 末次错误类别(传输容错方案 §3.3 落码分叉):每轮重置,仅当本轮末次错误为
+    # 传输族(BaiduTransportError/BaiduRangeIgnored)才为 True,耗尽落 network_transport
+    last_err_transport = False
     while attempt <= MAX_FILE_ATTEMPTS:
+        last_err_transport = False
         outcome = await checkpoint(db, runner)
         if outcome is not None:
             return await consume_outcome(db, runner, outcome)
@@ -902,6 +923,18 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
             continue
         except BaiduTaskError:
             return await _finalize_binding_expired(db, runner)
+        except (BaiduTransportError, BaiduRangeIgnored) as e:
+            # 传输层中断/Range 被忽略(方案 §3.3):计入 attempt + 与 rate_limited
+            # 同款退避;专属子句必须列于 except BaiduApiError 之前(两者均为其子类,
+            # 否则按序匹配先落通用分支,整个流内重试循环成为死代码)
+            last_err_transport = True
+            backoff = min(2.0 ** attempt, FILE_BACKOFF_CAP_S)
+            log.warning("baidu file transport error task=%s file=%s kind=%s attempt=%d backoff=%.1f",
+                        runner.task_id, row.id, type(e).__name__, attempt, backoff)
+            slp = await _sharded_backoff(db, runner, backoff)
+            if slp is not None:
+                return await consume_outcome(db, runner, slp)
+            attempt += 1
         except BaiduApiError as e:
             if e.category == CATEGORY_RATE_LIMITED:
                 # 403 甄别(§5.3):dlink_fetched_at 早于 token_rotated_at → 旧账号
@@ -918,7 +951,14 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
                 if handled is not None:
                     return handled
             attempt += 1
-    # 退避耗尽 → 行 failed('rate_limited') 交手动重试(手动复活时 attempts 归零,§5.3)
+    # 退避耗尽 → 行 failed 交手动重试(手动复活时 attempts 归零,§5.3);
+    # 落码按循环末次错误类别分叉(方案 §3.3):传输族 → network_transport
+    # (网络类失败不定性为永久,non_retryable=False);其余保持 rate_limited 文案
+    if last_err_transport:
+        return await _fail_row(
+            db, runner, row, "network_transport",
+            message="传输中断重试耗尽",
+        )
     return await _fail_row(
         db, runner, row, "rate_limited",
         message="下载重试上限(百度账号级限速),请稍后手动重试",
@@ -1264,12 +1304,18 @@ async def _overwrite_precheck_and_purge(
 @dataclass
 class _DownloadResult:
     """下载结果:outcome 非 None = 检查点要求中止(结果已消费/需传播);
-    否则 parts/next_part 为可 complete 的最终态。"""
+    否则 parts/next_part 为可 complete 的最终态。
+
+    upload_id:完成时的 multipart 会话 id —— 流内 RangeIgnored 重建会话后与进入
+    时的值不同,complete 必须以回传值为准,否则对已 abort 会话 complete →
+    NoSuchUpload 白烧一次文件级 attempt(传输容错方案 §3.2)。
+    """
 
     outcome: str | None
     parts: list[dict[str, Any]] = field(default_factory=list)
     pos: int = 0
     next_part: int = 1
+    upload_id: str = ""
 
 
 async def _resume_or_create_session(
@@ -1329,7 +1375,7 @@ async def _resume_or_create_session(
 async def _download_parts(
     db: AsyncSession, runner: Runner, row: TaskFile, dlink: str, *, bucket: str,
     key: str, upload_id: str, parts: list[dict[str, Any]], offset: int,
-    next_part: int, part_size: int,
+    next_part: int, part_size: int, content_type: str,
 ) -> _DownloadResult:
     """流式下载按 part 边界 upload_part(parts 严格按序号串行上传,§6 硬约束)。
 
@@ -1338,13 +1384,19 @@ async def _download_parts(
       中止路径仅停写,不修改行状态/计数)
     - 每 part 成功后更新 bytes_done + 任务 done_bytes 快速通道(单个大文件下载
       期间字节进度与 ETA 不静止)
+    - 流内重试(传输容错方案 §3.2):BaiduTransportError(建连/正文中断)会话
+      保留,从当前已传分片边界 Range 续传;BaiduRangeIgnored(服务端忽略 Range)
+      废弃当前 multipart 会话从 0 重拉;两类异常共享 stream_retry 预算,耗尽
+      raise 升级到文件级重试循环
     """
     collected = list(parts)
     pos = offset
     pending = bytearray()
     last_ckpt = time.monotonic()
     token = await _current_token(db, runner)
-    range_header = f"bytes={pos}-" if pos > 0 else None
+    size = row.source_size                    # 卫语句与越界判定口径(§3.2)
+    backoff = runner.settings.baidu_stream_backoff_steps()
+    stream_retry = 0
 
     async def _flush(final: bool) -> str | None:
         nonlocal pos, next_part, last_ckpt
@@ -1376,36 +1428,127 @@ async def _download_parts(
             await db.commit()
         return None
 
-    try:
-        async for chunk in runner.client.stream_download(
-            token, dlink, range_header=range_header,
-        ):
-            pending += chunk
-            if time.monotonic() - last_ckpt >= RENEW_INTERVAL_S:
-                outcome = await checkpoint(db, runner)
-                last_ckpt = time.monotonic()
-                if outcome is not None:
-                    return _DownloadResult(outcome=outcome)
-            stop = await _flush(final=False)
+    async def _abort_empty_session_or_log() -> None:
+        """空会话(collected 空 = 0 parts)预算耗尽 raise 前补 abort:防空会话走
+        _resume_or_create_session 的死会话清零路径时不 abort 而留永久孤儿;abort
+        失败的孤儿会话已无 DB 引用、30d sweeper 扫不到,兜底 = bucket lifecycle
+        (§3.2,口径对齐 _abort_sessions_async)。collected 非空时勿 abort(保留
+        跨轮续传价值)。"""
+        if collected:
+            return
+        try:
+            await runner.store.abort_multipart_upload(bucket, key, upload_id)
+        except Exception as e:
+            log.warning(
+                "baidu abort empty session fail task=%s file=%s bucket=%s key=%s "
+                "upload_id=%s err=%s(孤儿交 bucket lifecycle)",
+                runner.task_id, row.id, bucket, key, upload_id, e,
+            )
+
+    while True:
+        if pos >= size:
+            # 卫语句(§3.2):全部分片已传(如 size%part==0 且中断落在「末片已刷、
+            # 等 EOF」窗口,或接管时恰已传完全部分片)→ 直接落收尾 complete,
+            # 勿发 bytes={size}- 越界 Range(416→unknown→耗尽误标 network_transport)
+            break
+        range_header = f"bytes={pos}-" if pos > 0 else None
+        try:
+            async for chunk in runner.client.stream_download(
+                token, dlink, range_header=range_header,
+            ):
+                pending += chunk
+                if time.monotonic() - last_ckpt >= RENEW_INTERVAL_S:
+                    outcome = await checkpoint(db, runner)
+                    last_ckpt = time.monotonic()
+                    if outcome is not None:
+                        return _DownloadResult(outcome=outcome)
+                stop = await _flush(final=False)
+                if stop is not None:
+                    return _DownloadResult(outcome=stop)
+            stop = await _flush(final=True)
             if stop is not None:
                 return _DownloadResult(outcome=stop)
-        stop = await _flush(final=True)
-        if stop is not None:
-            return _DownloadResult(outcome=stop)
-    except BaiduApiError as e:
-        if e.category == CATEGORY_LINK_EXPIRED:
-            # dlink 过期:清缓存,交上层重新 filemetas 后重试(§5.3)
+            break   # 流自然结束 = 成功
+        except BaiduRangeIgnored:
+            # Range 被忽略(200 全量 / 206 起点错位,§3.2):退避后废弃当前会话,
+            # 清三元组从 0 重拉(计一次 stream_retry;与 transport 分支共享预算)
+            log.warning(
+                "baidu download range ignored task=%s file=%s range_ignored=true "
+                "pos=%d stream_retry=%d",
+                runner.task_id, row.id, pos, stream_retry,
+            )
+            stream_retry += 1
+            if stream_retry > runner.settings.baidu_stream_retry_max:
+                await _abort_empty_session_or_log()
+                raise   # 升级到文件级重试循环(全量重拉昂贵,同样受预算约束)
+            slp = await _sharded_backoff(
+                db, runner, backoff[min(stream_retry, len(backoff)) - 1],
+            )
+            if slp is not None:
+                # 退避中检查点要求中止:仅停写 —— 不 abort 不清三元组不再写
+                # (所有权已失,留待下次认领经 _resume_or_create_session 收敛),
+                # 与 transport 分支对称
+                return _DownloadResult(outcome=slp)
+            try:
+                await runner.store.abort_multipart_upload(bucket, key, upload_id)
+            except Exception as e:
+                log.warning(
+                    "baidu abort session fail task=%s file=%s bucket=%s key=%s "
+                    "upload_id=%s err=%s(孤儿交 bucket lifecycle)",
+                    runner.task_id, row.id, bucket, key, upload_id, e,
+                )
+            # 死会话清零(复用 _resume_or_create_session 同款清零语句)+ 显式同步
+            # 内存 row.minio_upload_id=None(不依赖 UPDATE 回填口径,防 _resume_
+            # or_create_session 读旧值命中存活旧会话返回 offset>0 与从 0 重拉冲突)
             await db.execute(
                 update(TaskFile).where(TaskFile.id == row.id)
-                .values(dlink=None, dlink_expires_at=None)
+                .values(minio_upload_id=None, minio_bucket=None, minio_key=None,
+                        bytes_done=0)
             )
             await db.commit()
-            raise _LinkRefreshNeeded from e
-        raise
+            row.minio_upload_id = None
+            # 必走重创分支;五件套(collected/next_part/upload_id/pos/pending)全量
+            # 以实际返回值为准重置(_flush 闭包捕获 + 缓冲残留,必须同步清)
+            collected, upload_id, pos, next_part = await _resume_or_create_session(
+                db, runner, row, bucket=bucket, key=key, content_type=content_type,
+            )
+            pending.clear()
+            continue
+        except BaiduTransportError as e:
+            # 建连/正文传输中断(§3.2):会话保留,清中断前缓冲后从当前分片边界
+            # Range 续传(重试间不重建会话,压低孤儿会话产生速率)
+            log.warning(
+                "baidu download stream broken task=%s file=%s kind=%s pos=%d "
+                "stream_retry=%d",
+                runner.task_id, row.id, e.kind, pos, stream_retry,
+            )
+            pending.clear()   # 残留 [pos,pos+k) 字节与新流从 pos 重发的字节会错位续拼
+            stream_retry += 1
+            if stream_retry > runner.settings.baidu_stream_retry_max:
+                await _abort_empty_session_or_log()
+                raise   # 升级到文件级重试循环(§3.3 入口);collected 非空勿 abort
+            slp = await _sharded_backoff(
+                db, runner, backoff[min(stream_retry, len(backoff)) - 1],
+            )
+            if slp is not None:
+                return _DownloadResult(outcome=slp)   # 退避中中止,交上层消费
+            # 会话保留,下一轮从 pos 续传(dlink 流内复用不刷新:过期按既有
+            # link_expired 分支清缓存走文件级重取,§3.2)
+        except BaiduApiError as e:
+            if e.category == CATEGORY_LINK_EXPIRED:
+                # dlink 过期:清缓存,交上层重新 filemetas 后重试(§5.3)
+                await db.execute(
+                    update(TaskFile).where(TaskFile.id == row.id)
+                    .values(dlink=None, dlink_expires_at=None)
+                )
+                await db.commit()
+                raise _LinkRefreshNeeded from e
+            raise
     # 断言:parts 恒为连续前缀(并行化会让断点偏移算法静默失真,§6)
     assert all(p["PartNumber"] == i + 1 for i, p in enumerate(collected)), \
         "multipart parts 必须按序号连续(串行上传约束)"
-    return _DownloadResult(outcome=None, parts=collected, pos=pos, next_part=next_part)
+    return _DownloadResult(outcome=None, parts=collected, pos=pos, next_part=next_part,
+                           upload_id=upload_id)
 
 
 async def _transfer_and_finalize(
@@ -1475,6 +1618,7 @@ async def _transfer_and_finalize(
             dl = await _download_parts(
                 db, runner, row, dlink, bucket=bucket, key=key, upload_id=upload_id,
                 parts=parts, offset=offset, next_part=next_part, part_size=part_size,
+                content_type=content_type,
             )
             if dl.outcome is not None:
                 return dl.outcome
@@ -1490,7 +1634,10 @@ async def _transfer_and_finalize(
                     message=format_key_conflict_message(key, _holder_names(holders)),
                 )
             try:
-                await runner.store.complete_multipart_upload(bucket, key, upload_id, dl.parts)
+                # complete 用 dl.upload_id(非进入时的局部 upload_id):流内
+                # RangeIgnored 重建会话后两者不同,对已 abort 会话 complete →
+                # NoSuchUpload 白烧一次文件级 attempt(传输容错方案 §3.2)
+                await runner.store.complete_multipart_upload(bucket, key, dl.upload_id, dl.parts)
             except Exception as e:
                 if is_no_such_upload_error(e):
                     # 会话在传输窗口内死亡 → 行保持 importing,下一轮重试从 0 重传
