@@ -14,6 +14,9 @@ tasks:
     最大超时计算;55min 接力模式续跑)
   - sweep_stalled_baidu_tasks:cron 扫无租约/派发超时的百度任务(per-cron timeout=300),
     急停 flag/cancel_requested/48h 感知 + 接管派发 + 30d 孤儿清理
+
+启动钩子:on_startup 校验百度备份配置(validate_baidu_settings;worker 不跑 api
+lifespan,不校验则非法配置带病运行到首次使用才炸)
 """
 from __future__ import annotations
 
@@ -661,6 +664,17 @@ _CRON_JOBS = [
 ]
 
 
+async def _validate_baidu_settings_on_startup(ctx: dict[str, Any]) -> None:
+    """worker 启动钩子(arq on_startup):百度备份配置启动断言(传输容错方案 §3.4)。
+
+    worker 进程不跑 api lifespan,现状 validate_baidu_settings 仅 api 启动时调用
+    —— 本方案的部署形态恰是 worker-only 重启,不补校验则非法配置带病运行到首次
+    使用才炸。on_startup 时点晚于模块导入(worker settings 单例已实例化)、早于
+    首个 job,校验失败 arq 启动即报错,满足「不带病运行」。
+    """
+    get_settings().validate_baidu_settings()
+
+
 class WorkerSettings:
     functions = [
         generate_thumbnail,
@@ -672,6 +686,7 @@ class WorkerSettings:
         func(baidu_backup_run, timeout=3600, max_tries=1),
     ]
     cron_jobs = _CRON_JOBS
+    on_startup = _validate_baidu_settings_on_startup
     redis_settings = _build_redis_settings()
     max_jobs = 4
     job_timeout = 60
