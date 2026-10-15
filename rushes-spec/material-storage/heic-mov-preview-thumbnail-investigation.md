@@ -87,6 +87,34 @@ ORDER BY created_at DESC LIMIT 20;
 - **路径 2 的根治 = 派发条件加扩展名兜底**：`complete_upload` 与百度导入 `_enqueue_thumbnail`（`workers/baidu_backup.py:1775`）两处同步补「`video/*` 或扩展名 ∈ {.mov,.mp4,.webm,.m4v}」。注意 worker 内 `skip_non_video` 的 content_type 判定也要同步放宽，否则派发了还是被 skip。
 - 存量补生成：两个路径都没跑过任务，修完后需要一次性回补脚本（对 `content_type LIKE 'video/%' OR filename LIKE '%.mov'` 且无 `thumbnail_key` 的行重新 enqueue；可复用百度侧 `_enqueue_thumbnail` 口径）。
 
+### 2.4 大文件视频封面方案深化（2026-10-15 追加：回应「取消 50MB 限制 + 流读前几秒抽帧」设想）
+
+**先澄清两个前提**：
+
+1. **「流读取前几秒抽帧」已经是现状**。worker 第一阶段就是 Range 流式拉头部 10MB（`workers/main.py:510` `Range: bytes=0-10485759`）喂给 ffmpeg 抽 1s 帧——不管原文件多大，这条路径只传 10MB。50MB cap 护的不是这条路，而是**兜底路径**：头部抽帧失败（典型=moov box 在文件尾部，iOS 录制/屏录/ffmpeg 默认输出皆如此，代码注释 `#135` 自证）时，worker 会**全量下载整个文件**再重试（`workers/main.py:526`）。cap 把这个「最坏情况全量拉」的代价封顶在 50MB。
+2. **不动代码无法取消 cap**。`_VIDEO_THUMBNAIL_MAX_BYTES` 是硬编码常量（`workers/main.py:187`），无 env/配置开关。
+
+**只取消 cap（一行改动）会发生什么**：
+
+- **moov 在头部的 >50MB 视频**（faststart 的 MP4/MOV，剪辑导出/网络素材常见）：直接受益——头部 10MB 抽帧成功，全程只传 10MB，这正是设想想要的效果。
+- **moov 在尾部的 >50MB 视频**（iPhone 相机录制，即本次问题的主要素材）：头部 10MB 里没有解码索引，ffmpeg 拆包失败 → 走全量下载兜底 → 两个雷：
+  - **60s 任务超时被杀**：`WorkerSettings.job_timeout=60`（`workers/main.py:692`），2GB 文件在百兆内网全量拉也要 2 分钟+，arq 直接取消任务，带宽白耗、封面仍然没有；
+  - **worker 事件循环被阻塞**：`s3.download_file` 是同步 boto3 调用直接写在 async 函数里，下载期间**整个 worker 事件循环卡死**——`max_jobs=4` 名义并发全部停摆，连 `mark_expired_approvals` cron、百度备份任务也一起被拖住。50MB cap 客观上一直在给这个阻塞时长封顶。
+
+**真正符合「只读必要字节」直觉的解法：ffmpeg 直接读 presigned URL（Range 自寻址）**——
+
+worker 用容器内凭据给原对象签一个内部 presigned GET URL，然后 `ffmpeg -ss 1 -i "<url>" -frames:v 1 -vf scale=1024:-2 out.jpg`。ffmpeg 的 HTTP demuxer 自己发 Range 请求：先 seek 到文件尾把 moov 索引读下来（通常几百 KB~几 MB），再精确定位 1s 处关键帧所在字节段拉取解码。**moov 在头在尾都能处理，全程实际传输量只有几 MB，与文件总大小基本无关**。cap 可彻底取消（或留 2GB 级防御值）。
+
+配套改动（均必要）：
+
+- 该任务 per-function 超时提额：`func(generate_video_thumbnail, timeout=180)`（百度任务 `timeout=3600` 已有同款先例，`workers/main.py:686`）；ffmpeg subprocess 超时同步提到 60~90s。
+- 旧路径保留为 fallback（presigned URL 通道异常时退回「头部 10MB + 全量」老逻辑），且全量下载段补 `asyncio.to_thread` 包裹防事件循环阻塞。
+- 验证点：容器内 Debian ffmpeg 的 HTTP 协议支持（标准构建默认启用，仍需实测一次）；presigned URL 过期时间覆盖任务时长（签 10min 足够）；worker 出网仅到 MinIO 内部 endpoint，无新增外联面。
+
+**低成本替代（如果不想引入 ffmpeg HTTP 输入）**：cap 提到 500MB + per-function timeout=300s + 全量下载段 `asyncio.to_thread`。覆盖大部分真实素材（iPhone 短片多在 500MB 内），但 moov-at-end 文件仍是全量拉，治标。
+
+**两个方案都绕不开的收尾**：派发盲区同步修（§2.3 扩展名兜底，两处派发点）+ 存量已跳过文件回补脚本 + 两条静默 skip 路径补标记。另注意百度导入侧与网页上传侧共用同一 worker 函数，改动对两条来源同时生效。
+
 ## 3. 疑问：为什么「点预览」会记一条【临时链接签发】审计
 
 ### 3.1 机制（不是 bug）
