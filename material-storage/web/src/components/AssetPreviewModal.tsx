@@ -2,6 +2,7 @@
  * AssetPreviewModal — md / txt inline 预览(一期)。
  * 后续二期可加 docx (mammoth) + xlsx (sheetjs)。
  * livp(iOS Live Photo):静态图走缩略图,实况短片走 live-preview-url(可播放)。
+ * heic/heif:浏览器(除 Safari)不解码原图,大图预览走服务端转码的缩略图。
  */
 import { App, Button, Modal, Spin } from 'antd';
 import { Download, FileText, Image as ImageIcon, Play } from 'lucide-react';
@@ -21,7 +22,7 @@ interface Props {
   onClose: () => void;
 }
 
-type Kind = 'markdown' | 'text' | 'image' | 'pdf' | 'video' | 'livp' | 'unsupported';
+type Kind = 'markdown' | 'text' | 'image' | 'pdf' | 'video' | 'livp' | 'heic' | 'unsupported';
 
 const IMAGE_EXT = new Set([
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.avif', '.ico',
@@ -37,6 +38,11 @@ function detectKind(a: Asset): Kind {
   if (name.endsWith('.md') || ct.startsWith('text/markdown')) return 'markdown';
   if (name.endsWith('.txt') || ct === 'text/plain') return 'text';
   if (name.endsWith('.pdf') || ct === 'application/pdf') return 'pdf';
+  // HEIC/HEIF 必须先于 image/* 前缀判:否则落入 image kind 走原图 <img>,
+  // 而 Windows Chrome/Edge/Firefox 不解码 HEIC(黑图)。此 kind 预览走缩略图。
+  // 注意 IMAGE_EXT 白名单刻意不加 .heic/.heif — 那条路同样是原图直塞。
+  if (name.endsWith('.heic') || name.endsWith('.heif')
+      || ct === 'image/heic' || ct === 'image/heif') return 'heic';
   if (ct.startsWith('image/')) return 'image';
   if (ct.startsWith('video/')) return 'video';
   const dot = name.lastIndexOf('.');
@@ -96,6 +102,20 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
           ]);
           if (thumb.status === 'fulfilled') setContent(thumb.value.data.url);
           if (live.status === 'fulfilled') setLiveUrl(live.value.data.url);
+          return;
+        }
+        if (kind === 'heic') {
+          // 浏览器不解码 HEIC 原图:大图预览走服务端 pillow-heif 转码的 JPEG 缩略图
+          // (≤1024px,与列表缩略图同源)。404 = 还没生成/派发未命中 → content 保持
+          // null,下方渲染「生成中/失败」卡(与 livp 同口径)
+          try {
+            const { data } = await http.get<{ url: string }>(
+              `/api/v1/assets/${asset.id}/thumbnail-url`,
+            );
+            if (!cancelled) setContent(data.url);
+          } catch {
+            // 404 落到卡片分支
+          }
           return;
         }
         const { data } = await http.post<{ url: string }>(
@@ -164,17 +184,27 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
         </div>
       )}
-      {!loading && kind === 'image' && content !== null && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          background: 'var(--ms-hairline-soft)',
-          borderRadius: 'var(--ms-radius-sm)',
-          minHeight: 200,
-        }}>
-          <img src={content} alt={asset.filename} style={{
-            maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
-            objectFit: 'contain', display: 'block',
-          }} />
+      {!loading && (kind === 'image' || kind === 'heic') && content !== null && (
+        <div>
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'var(--ms-hairline-soft)',
+            borderRadius: 'var(--ms-radius-sm)',
+            minHeight: 200,
+          }}>
+            <img src={content} alt={asset.filename} style={{
+              maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
+              objectFit: 'contain', display: 'block',
+            }} />
+          </div>
+          {kind === 'heic' && (
+            <div style={{
+              textAlign: 'center', marginTop: 8,
+              fontSize: 12, color: 'var(--ms-ink-subtle)',
+            }}>
+              HEIC 预览为服务端压缩图(≤1024px),下载可获取原片。
+            </div>
+          )}
         </div>
       )}
       {!loading && kind === 'pdf' && content !== null && isIOS() && (
@@ -228,6 +258,41 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
             }}
           />
         </div>
+      )}
+      {!loading && kind === 'heic' && content === null && (
+        asset.tags?.thumbnail_failed ? (
+          // 与 livp 失败卡同款:缩略图明确失败 → 给下载出口,不再误导「稍后重试」
+          <div style={{
+            padding: 32, textAlign: 'center',
+            border: '1px dashed var(--ms-hairline)',
+            borderRadius: 'var(--ms-radius-sm)',
+            background: 'var(--ms-hairline-soft)',
+          }}>
+            <ImageIcon size={28} strokeWidth={1.5}
+                       style={{ color: 'var(--ms-ink-subtle)', marginBottom: 12 }} />
+            <div style={{
+              fontSize: 13, color: 'var(--ms-ink-muted)', lineHeight: 1.7,
+              marginBottom: 16,
+            }}>
+              预览图生成失败(原因标记:{asset.tags.thumbnail_failed}),<br />
+              可下载原片查看,恢复请联系管理员。
+            </div>
+            <Button type="primary" size={compact ? 'large' : 'middle'}
+                    icon={<Download size={15} strokeWidth={1.8} />}
+                    loading={dlLink.isPending}
+                    onClick={() => void handleDownload()}>
+              下载原片
+            </Button>
+          </div>
+        ) : (
+          <div style={{
+            padding: 40, textAlign: 'center',
+            color: 'var(--ms-ink-muted)', fontSize: 13, lineHeight: 1.7,
+          }}>
+            HEIC 预览图还在生成(或生成失败),请稍后刷新重试。<br/>
+            也可直接下载原片查看。
+          </div>
+        )
       )}
       {!loading && kind === 'livp' && content === null && (
         asset.tags?.thumbnail_failed ? (
