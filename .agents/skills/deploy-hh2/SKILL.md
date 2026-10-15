@@ -45,6 +45,7 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 3. 有没有新 migration？→ 有则**restart 之前**先 `docker exec <ms-api 容器> alembic upgrade head`（2026-10-10 起修正旧口径"重启后再跑"：`.py`/迁移脚本都是 bind mount，旧进程 + 新迁移脚本 = 加列零窗口；先 restart 后迁移会有几秒「新代码打旧库」窗口，新代码 SELECT 新列直接炸）；没有就**别跑**。
 4. `.py` 是 bind mount 但容器无 `--reload` → **后端有改动就必须 restart**；仅 SPA 改动不用重启。
 5. `poc/openfga/store.fga.yaml` 有 diff 吗？→ `git diff <目标机当前commit>..HEAD --stat -- poc/openfga/store.fga.yaml` 非空 = 本次涉及 FGA 模型变更，**必须先走 §2.5 推模型再发代码**（顺序反了，新代码的权限 check 打旧模型会 403/500）。
+6. `api/pyproject.toml` 或 `api/constraints.txt` 有 diff 吗？→ 有 = **依赖变更**：bind mount 只带代码不带依赖，`restart` 不够，必须 `cd <目标机>/ms/api && docker compose build ms-api ms-worker` 重建镜像 + `docker compose up -d ms-api ms-worker` recreate 才生效（2026-10-15 pillow-heif 踩坑根治：镜像停在 08-27，日常部署从不 rebuild，容器缺 livp 解码依赖达月余）。**新增依赖必须同步在 constraints.txt 加 pin**（constraints 只约束不强制：缺条目装最新不会构建失败，但会漂版本）；升级=改 pin → build → 一次性容器跑离线套件（`docker run --rm -v ~/ms/api/tests:/app/tests --entrypoint sh <新镜像> -c "pip install -q pytest pytest-asyncio aiosqlite freezegun && cd /app && python -m pytest tests/ -q"`，2026-10-15 验证法）→ recreate dev 验证 → prod。镜像无 lock，rebuild 会整体重解析依赖——constraints 就是防这个的（2026-10-15 漂移实录：SQLAlchemy 2.0.52→2.1.4、fastapi 0.141→0.143）。
 
 ## 2.5 FGA 模型变更（store.fga.yaml 有 diff 时必读，2026-10-10 双环境实战）
 
