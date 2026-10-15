@@ -18,8 +18,10 @@ RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sou
 ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+COPY pyproject.toml constraints.txt ./
+# -c constraints.txt:依赖闭包钉死(见 constraints.txt 头注),防 rebuild 无 lock 漂版本;
+# constraints 只约束不强制,pyproject 新增依赖无条目仍可解析安装
+RUN pip install --no-cache-dir -c constraints.txt .
 
 COPY app /app/app
 COPY alembic.ini /app/alembic.ini
