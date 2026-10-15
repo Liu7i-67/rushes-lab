@@ -203,7 +203,58 @@ async def list_folders(
             ),
         ).order_by(Folder.minio_prefix)
     res = await db.execute(stmt)
-    return [FolderOut.model_validate(r) for r in res.scalars().all()]
+    folders = res.scalars().all()
+
+    # ── 子树活跃文件计数(「子树含文件」标记,2026-10-15)────────────────────
+    # 口径:沿 parent_folder_id 结构链回累,禁用 minio_prefix 前缀匹配
+    # (prefix 可客户端自拟、name 未禁「/」,非结构真源;badge 方案 §2)。
+    # 先一条 GROUP BY 聚合各夹直接活跃文件数(权限过滤之后的可见夹集合),
+    # 再 Python 侧自真根两段式迭代回累(显式栈,不受链深限制;badge 方案 §3.2/§3.3)。
+    direct: dict[uuid.UUID, int] = {}
+    if folders:
+        rows = await db.execute(
+            select(Asset.folder_id, func.count())
+            .where(
+                Asset.folder_id.in_([f.id for f in folders]),
+                Asset.deleted_at.is_(None),                    # 软删不计
+            )
+            .group_by(Asset.folder_id)
+        )
+        direct = {fid: cnt for fid, cnt in rows.all()}
+
+    children: dict[uuid.UUID | None, list[Folder]] = {}
+    for f in folders:
+        children.setdefault(f.parent_folder_id, []).append(f)
+    subtree: dict[uuid.UUID, int] = {}
+    seen: set[uuid.UUID] = set()           # 防御环(FK 自引用正常无环,兜底即可)
+
+    # 两段式显式栈迭代回累(P2-1:递归版链深 >~960 即 RecursionError → 500,
+    # API 无建夹深度限制,用户可自造深链;迭代版无此上限,语义与递归严格一致):
+    # ① 自真根 DFS 收集可达序(入栈即计 seen 防环;父必先于子出现在可达序);
+    # ② 逆序自底向上累加 —— 任一节点计算时其全部后代已入 subtree。
+    reachable: list[uuid.UUID] = []
+    stack: list[uuid.UUID] = [f.id for f in children.get(None, [])]  # 真根起(普通根 + 可见 sensitive 根)
+    while stack:
+        fid = stack.pop()
+        if fid in seen:
+            continue
+        seen.add(fid)
+        reachable.append(fid)
+        stack.extend(c.id for c in children.get(fid, []))
+    for fid in reversed(reachable):        # 逆可达序 = 子先于父(递归后序的等价展开)
+        subtree[fid] = direct.get(fid, 0) + sum(
+            subtree.get(c.id, 0) for c in children.get(fid, [])
+        )
+
+    # 孤儿行(敏感父对当前用户不可见被过滤后的普通子夹及其后代,不在真根遍历
+    # 可达集上)刻意不回填、按默认 0 输出 —— 受众信任边界口径(badge 方案
+    # §3.3/§6.3/§6.4);缺键=刻意 0 非漏算,禁止改回 subtree[f.id]
+    out: list[FolderOut] = []
+    for r in folders:
+        item = FolderOut.model_validate(r)
+        item.subtree_file_count = subtree.get(r.id, 0)
+        out.append(item)
+    return out
 
 
 @router.get("/{folder_id}", response_model=FolderOut)

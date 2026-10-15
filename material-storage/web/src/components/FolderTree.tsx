@@ -53,6 +53,9 @@ function buildTree(folders: Folder[], disabledSet: Set<string>): TreeNode[] {
       // 整棵子树级联禁选:命中集合的节点其后代全部 disabled
       const disabled = ancestorDisabled || disabledSet.has(f.id);
       const sub = build(f.id, disabled);
+      // 子树含活跃文件(subtree_file_count>0,软删不计)→ 图标实心填充;空夹保持空心。
+      // D1 定档:仅图标区分,无数字、无 tooltip。lucide 透传 fill 覆盖默认 fill="none"(已核实 v1.16.0 Icon 源码)。
+      const hasFiles = (f.subtree_file_count ?? 0) > 0;
       return {
         key: f.id,
         disabled: disabled || undefined,
@@ -93,11 +96,14 @@ function buildTree(folders: Folder[], disabledSet: Set<string>): TreeNode[] {
         ),
         icon: f.is_sensitive
           ? <FolderIcon size={14} strokeWidth={1.7}
+                        fill={hasFiles ? 'currentColor' : 'none'}
                         style={{ color: 'var(--ms-sensitive)' }} />
           : sub.length > 0
             ? <FolderOpen size={14} strokeWidth={1.7}
+                          fill={hasFiles ? 'currentColor' : 'none'}
                           style={{ color: 'var(--ms-ink-muted)' }} />
             : <FolderIcon size={14} strokeWidth={1.7}
+                          fill={hasFiles ? 'currentColor' : 'none'}
                           style={{ color: 'var(--ms-ink-muted)' }} />,
         children: sub.length > 0 ? sub : undefined,
       };

@@ -303,6 +303,11 @@ class FolderOut(ORMModel):
     minio_prefix: str
     is_sensitive: bool
     created_at: datetime
+    # 整棵子树(含本夹直接)活跃文件数(deleted_at IS NULL;软删不计)——
+    # 仅 list_folders 端点回填,create/get 单条响应均为默认 0,单条消费方勿依赖
+    # (folder-subtree-file-badge 方案 §3.1/§3.4;口径走 parent_folder_id 结构链,
+    # 禁 minio_prefix 前缀匹配 §2)
+    subtree_file_count: int = 0
     # 当前 user 对本 folder 的有效权限(派生 can_*)— get_folder 时填充
     my_can_view: bool = False
     my_can_download: bool = False
