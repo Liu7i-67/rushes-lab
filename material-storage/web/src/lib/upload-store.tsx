@@ -136,6 +136,8 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       refreshTimers.current.set(folderId, setTimeout(() => {
         refreshTimers.current.delete(folderId);
         qc.invalidateQueries({ queryKey: ['assets', folderId] });
+        // 侧栏「子树含文件」实心标记随 ['folders'] 走(前缀匹配,免透传 projectId)
+        qc.invalidateQueries({ queryKey: ['folders'] });
       }, 2000));
       setVersion(v => v + 1);
     });
@@ -150,6 +152,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       if (t) clearTimeout(t);
       refreshTimers.current.delete(folderId);
       qc.invalidateQueries({ queryKey: ['assets', folderId] });
+      qc.invalidateQueries({ queryKey: ['folders'] });
       setVersion(v => v + 1);
     });
 

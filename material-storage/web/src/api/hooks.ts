@@ -350,10 +350,12 @@ export const useDeleteAsset = () => {
     mutationFn: async (assetId: string) => {
       await http.delete(`/api/v1/assets/${assetId}`);
     },
-    // 软删也进回收站:角标计数(assets-trash)必须一起失效,否则「回收站 N」不更新
+    // 软删也进回收站:角标计数(assets-trash)必须一起失效,否则「回收站 N」不更新;
+    // 侧栏「子树含文件」实心标记随 ['folders'] 走,软删后活跃计数减,一并失效
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets'] });
       qc.invalidateQueries({ queryKey: ['assets-trash'] });
+      qc.invalidateQueries({ queryKey: ['folders'] });
     },
   });
 };
@@ -374,9 +376,11 @@ export const useRestoreAsset = () => {
     mutationFn: async (assetId: string) => {
       await http.post(`/api/v1/assets/${assetId}/restore`);
     },
+    // 恢复后活跃计数增,侧栏「子树含文件」实心标记随 ['folders'] 走,一并失效
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets-trash'] });
       qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['folders'] });
     },
   });
 };

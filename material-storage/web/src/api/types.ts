@@ -244,6 +244,10 @@ export interface Folder {
   my_can_download?: boolean;
   my_can_upload?: boolean;
   my_can_admin?: boolean;
+  // 子树活跃文件计数(整棵子树含本夹直接,deleted_at IS NULL):仅 GET /folders 列表端点
+  // 回填,create/get 单条响应恒 0。>0 → 侧栏文件夹图标实心。可选 —— 旧后端无此字段,
+  // 消费侧用 `?? 0` 回落。
+  subtree_file_count?: number;
 }
 
 export interface Asset {
