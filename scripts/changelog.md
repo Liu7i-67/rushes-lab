@@ -1,5 +1,7 @@
 ## 2026-10-16
 
+- **盲搜定位方案合并 liuqi + 周期清理**(用户指令"你来处理合并,将方案合并到liuqi分支";liuqi `3550a6a` no-ff 合并 qplan/search-jump-locate-plan(339afa9),增量 3 文件=实施方案+调研报告+changelog,纯文档零代码;合并前核验主仓未提交调研报告与分支内定稿逐字节一致、changelog 分支侧仅多定稿记账一行后,丢弃主仓两处未提交副本防 add/add;qplan worktree 与分支已全清,git worktree list 仅剩主仓;**方案实施(后端 locate 参数+前端 A/B)仍待用户指令,dev/prod 均未部署本增量;liuqi 未 push**)
+
 - **盲搜跳转定位 A+B 实施方案定稿(qplan 4 轮盲审通过)**(用户指令"$qplan 基于调研报告方案A+B给出可实施方案";分支 `qplan/search-jump-locate-plan`+worktree,方案=`rushes-spec/material-storage/search-jump-locate-plan.md`:后端 GET /assets 加 `locate` 参数回 `locate_index`(与列表同 (created_at,id) 元组 count,无新权限面);前端 A=搜索结果 URL 驱动(`?focus=`)原地开详情 Drawer(复用 AssetSummaryPanel+键盘视口收缩);B=落点页 `?asset=` 深链 locate→跳页→useEffect 滚动高亮→自动开 Drawer(consumedAsset/highlightId/consumeOutcome 三态拆分,render 期只 setState);4 轮盲审修掉 db.scalar 多列 500/undefined==null 误弹/render 期 message/畸形参数选择器注入/keepPreviousData 竞态等 7 P1+22 P2;同分支含调研报告;未动代码,实施等用户指令)
 
 - **盲搜跳转落点调研**(用户指令"不动代码,纯调研";报告=`rushes-spec/material-storage/search-jump-locate-investigation.md`:⌘K/SearchPage 点击命中只带 folder_id 裸跳 `/folders/:id`,落点页恒第 1 页、列表固定 created_at DESC 30/页,大夹老文件沉深页且全链路无定位基建(无 URL 参数消费/scrollIntoView/单文件 GET/locate 序号接口);方案 A=搜索结果原地开详情 Drawer 纯前端 / B=locate 服务端定位页码+`?asset=` 深链高亮(推荐 A+B 组合)/ C=folder 内筛选;顺带记录 ⌘K 命中数 50 截断不提示、PC Table sorter 仅排当前页;未动代码,实施等用户指令)
