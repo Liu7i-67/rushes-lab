@@ -9,7 +9,8 @@ endpoints:
   GET    /api/v1/folders/{id}                     — 单条(can_view)
   DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删;无子夹、
                                                     无活跃文件、回收站已清空;
-                                                    普通夹 can_upload / sensitive 夹 can_admin)
+                                                    普通夹 can_upload 或 组级
+                                                    file_deleter且can_view / sensitive 夹 can_admin)
   POST   /api/v1/folders/{id}/invite              — sensitive_folder 邀请(can_admin only)
   DELETE /api/v1/folders/{id}/invite/user/{uid}   — 撤销(can_admin only)
 """
@@ -38,6 +39,7 @@ from app.deps import (
 from app.models import FolderCreateIn, FolderInviteIn, FolderOut
 from app.services.audit import AuditService
 from app.services.notifications import run_notify_folder_invite_bg
+from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService, is_already_exists_error
 from app.services.subject_names import resolve_subject_names
 
@@ -272,6 +274,10 @@ async def get_folder(
 
     if is_system_admin:
         can_view = can_download = can_upload = can_admin = True
+        # my_delete_grant 不含系统管理员直通(F8 口径):系统 admin 的删除入口由
+        # my_can_admin 闸门表达,本字段只反映组级开关授权(两半都 False,不依赖
+        # and 短路兜未定义变量)
+        is_file_deleter = grant_can_view = False
     else:
         # public 项目非敏感 folder:组织内可浏览(「公开」语义,与 assets 列表 /
         # thumbnail-url 的"信任组织内可见性"一致);下载/上传/删除仍走各自权限
@@ -287,8 +293,40 @@ async def get_folder(
                 user_subject=user.subject, relation=rel,
                 object_type=obj_type, object_id=str(folder.id),
             )
-        can_view, can_download, can_upload, can_admin = await asyncio.gather(
-            _c("can_view"), _c("can_download"), _c("can_upload"), _c("can_admin"),
+
+        async def _delete_grant_parts() -> tuple[bool, bool]:
+            """my_delete_grant 的两半(决策 #9):返回 (file_deleter, 裸 FGA can_view)。
+
+            can_view 必须取**裸 FGA check**—— 与 assets(软删/hard/restore/trash)
+            与 folders(删夹)四处删除守门的组开关分支完全同口径;上方 _c("can_view")
+            的 public_browse 浏览直通只供 my_can_view 展示字段(FGA model 无 public
+            传播,靠浏览直通拿到的 can_view 不代表删除守门会放行,亮灯必 403 口径
+            分裂已由验收裁决封死,2026-10-16 决策 #9)。sensitive 夹恒 (False, False),
+            零 FGA 调用;flag 为 false 的非组员同样跳过 can_view check(与守门短路序
+            一致,不多打)。
+            注意:本闭包是 gather 里唯一摸 AsyncSession 的任务(get_default_organization
+            的 org 主键查),其余四个 check 纯 OpenFGA HTTP —— 单任务持有 session,
+            不违反 AsyncSession「同一时刻仅一个协程使用」约束;若往 gather 里再加
+            DB 触达分支,须先把 org 解析提到 gather 外
+            """
+            if folder.is_sensitive:
+                return False, False
+            is_file_deleter = await user_is_org_file_deleter(
+                permissions, db, user_id=str(user.id),
+            )
+            if not is_file_deleter:
+                return False, False
+            raw_can_view = await permissions.check(
+                user_subject=user.subject, relation="can_view",
+                object_type=obj_type, object_id=str(folder.id),
+            )
+            return True, raw_can_view
+
+        can_view, can_download, can_upload, can_admin, (is_file_deleter, grant_can_view) = (
+            await asyncio.gather(
+                _c("can_view"), _c("can_download"), _c("can_upload"),
+                _c("can_admin"), _delete_grant_parts(),
+            )
         )
 
     if not can_view:
@@ -298,6 +336,10 @@ async def get_folder(
     out.my_can_download = can_download
     out.my_can_upload = can_upload
     out.my_can_admin = can_admin
+    # F8(2026-10-16 组删除授权):组级「删除文件/文件夹」开关生效态 =
+    # 组开关 且 裸 FGA can_view(不含 public 浏览直通,决策 #9)且非 sensitive;
+    # 不含系统管理员直通(见上)
+    out.my_delete_grant = bool(is_file_deleter and grant_can_view)
     return out
 
 
@@ -321,9 +363,10 @@ async def delete_folder(
     彻底清空(tester 定档:删除文件夹不做隐性连带清除,防"顺手删夹"把回收站
     里本可恢复的东西一并抹掉)。
     权限:普通 folder 用 can_upload(与创建对称,uploader 自主管理目录结构,
-    model 里 uploader 隐含建子目录);sensitive folder 维持 can_admin ——
-    sensitive 的 can_upload 实为 downloader 级(model v4),拿它当删除门槛太宽,
-    且邀请配置价值高。系统 admin 直通。
+    model 里 uploader 隐含建子目录),2026-10-16 组删除授权再并一支组级
+    file_deleter 且 can_view(F7;授权且可见);sensitive folder 维持 can_admin
+    —— sensitive 的 can_upload 实为 downloader 级(model v4),拿它当删除门槛太宽,
+    且邀请配置价值高,组织开关分支不穿透 sensitive。系统 admin 直通。
 
     并发安全(#177):判空后先 `SELECT … FOR UPDATE` 锁 folder 行再删,
     同窗口内并发的子夹 / 资产 INSERT 因 FK 取父行 key-share 锁会被阻塞到
@@ -345,6 +388,18 @@ async def delete_folder(
         user_subject=user.subject, relation=del_relation,
         object_type=obj_type, object_id=str(folder_id),
     )
+    # 组级「删除文件/文件夹」开关分支(F7,2026-10-16):普通夹 = 授权且可见
+    # (can_view);短路在 can_upload 失败之后,常规路径不多打 org 解析与 check
+    # (and 短路序同嵌套 if)。sensitive 夹不适用(上方 can_admin 单门,开关不穿透)
+    if (
+        not allowed
+        and not folder.is_sensitive
+        and await user_is_org_file_deleter(permissions, db, user_id=str(user_id))
+    ):
+        allowed = await permissions.check(
+            user_subject=user.subject, relation="can_view",
+            object_type="folder", object_id=str(folder_id),
+        )
     if not allowed:
         await audit.write(
             event_type="access_denied",

@@ -22,6 +22,11 @@ export interface Me {
   // 用户组 artist_account_creator,含系统 admin)。可选 —— 旧后端无此字段,消费侧用
   // `?? is_system_admin` 回落(照 is_project_creator 惯例)。
   is_artist_account_creator?: boolean;
+  // 删除文件/文件夹权限可授予用户组(2026-10-16):可删除文件与文件夹(口径 =
+  // is_system_admin ∨ 用户组 file_deleter,不含 org admin 直通)。可选 —— 旧后端无
+  // 此字段,消费侧用 `?? false` 回落(与 is_project_* 不同:旧后端本就无组级删除
+  // 授权能力,回落 false 而非 is_system_admin;当前删除闸门实际走 Folder.my_delete_grant)。
+  is_file_deleter?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -86,6 +91,9 @@ export interface DirectoryGroup {
   can_manage_folder_templates?: boolean;
   // 艺人账号(方案 §4.3):组级「新建项目时创建艺人账号」权限回显(仿 can_create_project;旧后端无此字段 → undefined 视为 false)
   can_create_artist_account?: boolean;
+  // 删除文件/文件夹权限可授予用户组(2026-10-16):组级「删除文件与文件夹」权限回显
+  // (仿 can_delete_project,真实态存 OpenFGA file_deleter tuple;旧后端无此字段 → undefined 视为 false)
+  can_delete_files?: boolean;
 }
 
 export interface DirectoryGroupMember {
@@ -244,6 +252,11 @@ export interface Folder {
   my_can_download?: boolean;
   my_can_upload?: boolean;
   my_can_admin?: boolean;
+  // 删除文件/文件夹权限可授予用户组(2026-10-16):组织级 file_deleter 开关对当前用户
+  // 生效态(口径 = is_org_file_deleter ∧ folder#can_view ∧ 非 sensitive,不含系统
+  // admin 直通)。删除文件/删除文件夹/回收站闸门用它与 my_can_admin 取或;可选 ——
+  // 旧后端无此字段,消费侧用 `?? false` 回落。
+  my_delete_grant?: boolean;
   // 子树活跃文件计数(整棵子树含本夹直接,deleted_at IS NULL):仅 GET /folders 列表端点
   // 回填,create/get 单条响应恒 0。>0 → 侧栏文件夹图标实心。可选 —— 旧后端无此字段,
   // 消费侧用 `?? 0` 回落。

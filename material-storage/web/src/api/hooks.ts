@@ -712,6 +712,9 @@ export const useCreateGroup = () => {
       can_manage_folder_templates?: boolean;
       // 艺人账号(方案 §4.3):组级「新建项目时创建艺人账号」开关(同款 Create bool)
       can_create_artist_account?: boolean;
+      // 删除文件/文件夹权限可授予用户组(2026-10-16):组级「删除文件与文件夹」开关
+      // (同款 Create bool,缺省 false 服务端兜底;true 时写 file_deleter tuple)
+      can_delete_files?: boolean;
     }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
@@ -734,6 +737,8 @@ export const useUpdateGroup = () => {
       can_manage_folder_templates?: boolean;
       // 艺人账号(方案 §4.3):can_create_artist_account 同款 tri-state
       can_create_artist_account?: boolean;
+      // 删除文件/文件夹权限可授予用户组(2026-10-16):can_delete_files 同款 tri-state
+      can_delete_files?: boolean;
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;
