@@ -31,10 +31,13 @@ interface Props {
   onToggle?: (id: string) => void;
   loading?: boolean;
   emptyText?: React.ReactNode;
+  /** 盲搜跳转定位(方案 §4.3):命中卡片描边高亮;缺省不传 = 现状零变化
+   *  (ProjectDetailPage 等其他调用方不感知)。 */
+  highlightId?: string;
 }
 
 export function AssetCardList({
-  assets, onOpen, selectable, selectedIds, onToggle, loading, emptyText,
+  assets, onOpen, selectable, selectedIds, onToggle, loading, emptyText, highlightId,
 }: Props) {
   const { message } = App.useApp();
   const dlLink = useDownloadLink();
@@ -68,15 +71,19 @@ export function AssetCardList({
     <div>
       {assets.map((a, i) => {
         const labels = a.user_labels ?? [];
+        // 盲搜跳转定位(方案 §4.3):命中卡片描边高亮,风格对齐 SearchPage 命中高亮
+        const hit = a.id === highlightId;
         return (
           <div
             key={a.id}
+            data-asset-id={a.id}
             onClick={() => onOpen(i)}
             style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '8px 8px 8px 4px', marginBottom: 8,
               background: 'var(--ms-surface)',
-              border: '1px solid var(--ms-hairline)',
+              border: hit ? '1px solid var(--ms-accent)' : '1px solid var(--ms-hairline)',
+              boxShadow: hit ? '0 0 0 3px var(--ms-accent-soft)' : undefined,
               borderRadius: 'var(--ms-radius-lg)',
               cursor: 'pointer',
             }}

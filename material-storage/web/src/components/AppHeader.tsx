@@ -331,7 +331,8 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
     const opts: { value: string; label: React.ReactNode; key: string; action: () => void }[] = [];
     const term = q.trim().toLowerCase();
 
-    // #151: 盲搜 — 输入即搜,命中文件直达所在 folder
+    // #151: 盲搜 — 输入即搜;命中文件一步直达 /search?focus= 单文件详情 Drawer,
+    // 同时把完整结果列表留在背后供继续浏览(盲搜跳转定位方案 §3.2)
     if (debounced) {
       opts.push({
         key: 's-go',
@@ -362,7 +363,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
               ))}
             </div>
           ),
-          action: () => navigate(`/folders/${r.folder_id}`),
+          action: () => navigate(`/search?q=${encodeURIComponent(debounced)}&focus=${r.id}`),
         });
       });
     }
@@ -438,8 +439,10 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
           value={q}
           onChange={setQ}
           options={options.map(o => ({ value: o.value, label: o.label, key: o.key }))}
-          onSelect={(v) => {
-            const opt = options.find(o => o.value === v);
+          onSelect={(_, option) => {
+            // 反查按 opt.key 匹配(方案 §3.2 存量缺陷修复):文件项 value =
+            // 「文件 文件名」,同名文件多条时撞串,按 value 回车永远命中第一条
+            const opt = options.find(o => o.key === option.key);
             opt?.action();
             onClose();
           }}

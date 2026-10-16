@@ -225,10 +225,14 @@ class AssetListOut(BaseModel):
 
     服务端分页:此前固定 limit=100 且前端不翻页,folder 超 100 后旧文件在
     列表里静默消失(数据仍在);total 独立返回让分页器展示真实规模。
+    带 locate 查询参数时返回 locate_index = 目标在与列表同排序
+    (created_at DESC, id DESC,未软删,本夹)下的 0 基全量序号;
+    locate 缺省 / 目标不存在 / 已软删 / 他夹 → null(不区分原因)。
     """
 
     items: list[AssetOut]
     total: int
+    locate_index: int | None = None
 
 
 # ─── upload presigned ─────────────────────────────────────────────────────────
