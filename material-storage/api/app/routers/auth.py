@@ -137,6 +137,7 @@ async def me(
     is_project_deleter = False
     is_folder_template_manager = False
     is_artist_account_creator = False
+    is_file_deleter = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -192,6 +193,20 @@ async def me(
             except Exception:
                 pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
 
+        # 组级「删除文件/文件夹」权限(2026-10-16 组删除授权 F9):口径 =
+        # is_system_admin 或 organization#file_deleter(组开关经 group#member 展开)。
+        # **不含** org admin 直通 —— org admin 删文件走既有对象级权限,现状即如此,
+        # 不借本需求扩大;对资产的完整删除守门另需对象 can_view 且非 sensitive
+        # (见 assets.py / folders.py),本字段只是前端闸门的开关半边
+        is_file_deleter = bool(is_system_admin)
+        if not is_system_admin:
+            try:  # noqa: SIM105  与上方四个 flag 块同款 try/except 形状(不换 contextlib.suppress)
+                is_file_deleter = await perms.is_org_file_deleter(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )
+            except Exception:
+                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
+
     return {
         "id": str(user.id),
         # #154:open_id/union_id 保留只读(历史对照),不再参与登录与权限
@@ -211,6 +226,10 @@ async def me(
         # 组级「新建项目时创建艺人账号」权限(艺人账号内嵌方案 §4.4):与守门同口径;
         # 前端闸门用(前端回落 is_artist_account_creator ?? is_system_admin)
         "is_artist_account_creator": is_artist_account_creator,
+        # 组级「删除文件/文件夹」权限(2026-10-16 F9):与守门开关半边同口径
+        # (is_system_admin or organization#file_deleter,不含 org admin 直通);
+        # 前端闸门用
+        "is_file_deleter": is_file_deleter,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

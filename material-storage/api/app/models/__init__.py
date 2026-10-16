@@ -317,6 +317,12 @@ class FolderOut(ORMModel):
     my_can_download: bool = False
     my_can_upload: bool = False
     my_can_admin: bool = False
+    # 组级「删除文件/文件夹」开关生效态(2026-10-16 F8)= is_org_file_deleter(当前
+    # user)且 folder#can_view(**裸 FGA check,不含 public 浏览直通,决策 #9**,
+    # 与四个删除守门的组开关分支同口径)且非 sensitive;**不含**系统管理员直通
+    # (系统 admin 的删除入口由 my_can_admin 闸门表达,本字段只反映组开关授权)。
+    # 仅 get_folder 端点回填(与 my_can_* 同惯例),列表/创建响应为默认 False
+    my_delete_grant: bool = False
 
 
 class FolderInviteIn(BaseModel):

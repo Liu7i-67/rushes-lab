@@ -141,6 +141,16 @@ export default function ProjectDetailPage() {
   const { message, modal } = App.useApp();
   // 同 PR-2 回落口径:is_project_deleter 已含系统 admin,旧后端无字段回落 is_system_admin
   const canDeleteProject = !!me && (me.is_project_deleter ?? me.is_system_admin);
+  // 删除文件闸门(2026-10-16/F12):对象级管理员(my_can_admin)∨ 组织级「删除文件与
+  // 文件夹」组授权(my_delete_grant)任一即放行;旧后端无 my_delete_grant → undefined
+  // 视为 false。sensitive 的差异口径不在此收口,见回收站/删夹各使用点
+  const canDeleteFiles = !!(folder?.my_can_admin || folder?.my_delete_grant);
+  // 删除文件夹闸门(F12):普通夹 = can_upload(与创建对称)∨ my_delete_grant;
+  // sensitive 夹维持仅对象级管理员 can_admin(组织开关不穿透 sensitive)
+  const canDeleteThisFolder = !!folder
+    && (folder.is_sensitive
+      ? !!folder.my_can_admin
+      : !!(folder.my_can_upload || folder.my_delete_grant));
 
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
   const [applySensitive, setApplySensitive] = useState(false);
@@ -150,11 +160,12 @@ export default function ProjectDetailPage() {
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   // #129: folder admin 才显"申请链接"按钮 — folder 级精细化授权入口
   const [linkOpen, setLinkOpen] = useState(false);
-  // 回收站:普通夹 folder admin 可管理;sensitive 夹仅系统 admin(后端同规则 —
-  // 敏感目录 can_view 不含项目 admin,回收站不能成为其窥探文件名的侧信道)
+  // 回收站:普通夹 folder admin 或持组织级删除授权(my_delete_grant)者可管理;
+  // sensitive 夹仅系统 admin(后端同规则 — 敏感目录 can_view 不含项目 admin,
+  // 回收站不能成为其窥探文件名的侧信道)
   const [trashOpen, setTrashOpen] = useState(false);
-  const canSeeTrash = !!folder?.my_can_admin
-    && (!folder.is_sensitive || !!me?.is_system_admin);
+  const canSeeTrash = canDeleteFiles
+    && (!folder?.is_sensitive || !!me?.is_system_admin);
   const { data: trash } = useTrashAssets(activeFolderId ?? undefined, canSeeTrash);
   const trashCount = trash?.total ?? 0;
 
@@ -582,7 +593,7 @@ export default function ProjectDetailPage() {
                 </Button>
               </Tooltip>
             )}
-            {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
+            {canDeleteThisFolder && (
               <Popconfirm
                 title={`删除文件夹「${folder.name}」?`}
                 description={trashCount > 0
@@ -661,7 +672,7 @@ export default function ProjectDetailPage() {
                       disabled={!folder?.my_can_upload}
                       onClick={() => activeFolderId && upload.open(activeFolderId)}>上传</Button>
             </Tooltip>
-            {/* 回收站:普通夹 folder admin;sensitive 夹仅系统 admin */}
+            {/* 回收站:普通夹 folder admin 或删除授权者;sensitive 夹仅系统 admin */}
             {canSeeTrash && (
               <Button size="small" icon={<Archive size={13} strokeWidth={2} />}
                       onClick={() => setTrashOpen(true)}>
@@ -751,11 +762,11 @@ export default function ProjectDetailPage() {
               title={`删除 ${selectedIds.length} 个文件?`}
               description="软删除;管理员可在回收站恢复或彻底清除"
               okText="删除" okButtonProps={{ danger: true }}
-              disabled={!folder?.my_can_admin}
+              disabled={!canDeleteFiles}
               onConfirm={confirmBulkDelete}
             >
               <Button danger style={{ height: 44 }} icon={<Trash2 size={14} strokeWidth={2} />}
-                      disabled={!folder?.my_can_admin} loading={del.isPending}>
+                      disabled={!canDeleteFiles} loading={del.isPending}>
                 删除
               </Button>
             </Popconfirm>
@@ -914,8 +925,9 @@ export default function ProjectDetailPage() {
               </Tooltip>
             )}
             {/* 删除文件夹:须空夹 + 回收站已清空(硬删,不可恢复)。普通夹需
-                can_upload(与创建对称);sensitive 夹需 can_admin —— 后端同规则 enforce */}
-            {folder && (folder.is_sensitive ? folder.my_can_admin : folder.my_can_upload) && (
+                can_upload(与创建对称)或组织级删除授权 my_delete_grant;sensitive
+                夹需 can_admin(组织开关不穿透 sensitive)—— 后端同规则 enforce */}
+            {canDeleteThisFolder && (
               <Popconfirm
                 title={`删除文件夹「${folder.name}」?`}
                 description={trashCount > 0
@@ -988,8 +1000,9 @@ export default function ProjectDetailPage() {
           </span>
           <div style={{ flex: 1 }} />
           <Space size={6}>
-            {/* 上传/打标需 folder can_upload(uploader),删除需 can_admin —— 后端
-                对每个操作都强制;这里禁用按钮避免无权限用户选完文件才被 403 */}
+            {/* 上传/打标需 folder can_upload(uploader),删除需 can_admin 或组织级
+                删除授权(my_delete_grant)—— 后端对每个操作都强制;这里禁用按钮
+                避免无权限用户选完文件才被 403 */}
             <Tooltip title={folder?.my_can_upload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
               <Button type="primary" size="small"
                       icon={<Upload size={13} strokeWidth={2} />}
@@ -1016,7 +1029,7 @@ export default function ProjectDetailPage() {
                     disabled={!hasSelection} onClick={confirmBulkDownload}>
               下载{hasSelection ? ` ${selectedIds.length}` : ''}
             </Button>
-            {/* 回收站:普通夹 folder admin;sensitive 夹仅系统 admin(后端同规则 enforce) */}
+            {/* 回收站:普通夹 folder admin 或删除授权者;sensitive 夹仅系统 admin(后端同规则 enforce) */}
             {canSeeTrash && (
               <Button size="small" icon={<Archive size={13} strokeWidth={2} />}
                       onClick={() => setTrashOpen(true)}>
@@ -1027,12 +1040,12 @@ export default function ProjectDetailPage() {
               title={`删除 ${selectedIds.length} 个文件?`}
               description="软删除;管理员可在回收站恢复或彻底清除"
               okText="删除" okButtonProps={{ danger: true }}
-              disabled={!hasSelection || !folder?.my_can_admin}
+              disabled={!hasSelection || !canDeleteFiles}
               onConfirm={confirmBulkDelete}
             >
-              <Tooltip title={!hasSelection ? '' : folder?.my_can_admin ? '' : '无删除权限(需管理员角色)'}>
+              <Tooltip title={!hasSelection ? '' : canDeleteFiles ? '' : '无删除权限(需管理员角色或删除授权)'}>
                 <Button size="small" danger icon={<Trash2 size={13} strokeWidth={2} />}
-                        disabled={!hasSelection || !folder?.my_can_admin} loading={del.isPending}>
+                        disabled={!hasSelection || !canDeleteFiles} loading={del.isPending}>
                   删除{hasSelection ? ` ${selectedIds.length}` : ''}
                 </Button>
               </Tooltip>

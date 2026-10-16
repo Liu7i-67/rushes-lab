@@ -12,6 +12,9 @@
  * (can_create_artist_account,tri-state 同款;仅父开关 can_create_project 开启时展示,
  * 父开关 true→false 转变瞬间复位并显式发 false 清 tuple);全部开关的 extra 长描述
  * 收拢进 label 旁问号图标 tooltip(文案内容不变)。
+ * 删除文件/文件夹权限可授予用户组(2026-10-16/F11):第 5 个组级开关「允许组成员删除
+ * 文件与文件夹」(can_delete_files,tri-state 同款;建组态与编辑态均展示,建组态直接
+ * 随表单提交)+ 列表「可删文件」徽标。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
@@ -192,6 +195,17 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
               }}>可管模板</span>
             </Tooltip>
           )}
+          {/* can_delete_files 徽标(删除文件/文件夹组授权;与「可删项目」同款 crimson 示危险操作) */}
+          {group.can_delete_files && (
+            <Tooltip title="组内成员可删除其可见文件夹中的文件与文件夹(软删除,可在回收站恢复或彻底删除;敏感目录不在此列)">
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-crimson)', background: 'var(--ms-crimson)14',
+                borderRadius: 3,
+              }}>可删文件</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -248,6 +262,8 @@ function GroupFormModal({ open, onClose, group }: {
   // 艺人账号(方案 §4.3/F4):can_create_artist_account 同款 tri-state;
   // 父开关 true→false 转变瞬间的复位也会强制置 touched(PATCH 显式发 false 清 tuple)
   const [artistFlagTouched, setArtistFlagTouched] = useState(false);
+  // 删除文件/文件夹组授权(2026-10-16/F11):can_delete_files 同款 tri-state
+  const [filesFlagTouched, setFilesFlagTouched] = useState(false);
   // 子开关仅父开关开启时展示(建组态与编辑态均适用);数据驱动,弹窗挂载时父已 false
   // 不做任何复位动作 —— 防「仅改名保存」静默撤权(directory.py tri-state 注释明确防范)
   const canCreateProject = Form.useWatch('can_create_project', form) === true;
@@ -266,6 +282,7 @@ function GroupFormModal({ open, onClose, group }: {
             ? { can_manage_folder_templates: v.can_manage_folder_templates === true } : {}),
           ...(artistFlagTouched
             ? { can_create_artist_account: v.can_create_artist_account === true } : {}),
+          ...(filesFlagTouched ? { can_delete_files: v.can_delete_files === true } : {}),
         });
         message.success('已保存');
       } else {
@@ -275,6 +292,7 @@ function GroupFormModal({ open, onClose, group }: {
           can_create_project: v.can_create_project === true,
           can_manage_folder_templates: v.can_manage_folder_templates === true,
           can_create_artist_account: v.can_create_artist_account === true,
+          can_delete_files: v.can_delete_files === true,
         });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
@@ -292,6 +310,7 @@ function GroupFormModal({ open, onClose, group }: {
              if (!o) {
                setFlagTouched(false); setDeleteFlagTouched(false);
                setFolderFlagTouched(false); setArtistFlagTouched(false);
+               setFilesFlagTouched(false);
              }
            }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
@@ -303,10 +322,12 @@ function GroupFormModal({ open, onClose, group }: {
               can_delete_project: group.can_delete_project ?? false,
               can_manage_folder_templates: group.can_manage_folder_templates ?? false,
               can_create_artist_account: group.can_create_artist_account ?? false,
+              can_delete_files: group.can_delete_files ?? false,
             } : {
               can_create_project: false,
               can_manage_folder_templates: false,
               can_create_artist_account: false,
+              can_delete_files: false,
             }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
@@ -363,6 +384,16 @@ function GroupFormModal({ open, onClose, group }: {
                     onChange={() => setDeleteFlagTouched(true)} />
           </Form.Item>
         )}
+        {/* 删除文件/文件夹第 5 开关(2026-10-16/F11):建组态与编辑态均展示(后端
+            POST 同样接受 can_delete_files);编辑态 tri-state 仅在用户改动过时才携带 */}
+        <Form.Item name="can_delete_files" valuePropName="checked"
+                   label={switchLabel(
+                     '允许组成员删除文件与文件夹',
+                     '开启后组内成员可删除其可见文件夹中的文件与文件夹(软删除,可在回收站恢复或彻底删除;敏感目录不在此列,维持原有权限);系统管理员不受此开关影响',
+                   )}>
+          <Switch checkedChildren="开" unCheckedChildren="关"
+                  onChange={() => setFilesFlagTouched(true)} />
+        </Form.Item>
       </Form>
     </Modal>
   );

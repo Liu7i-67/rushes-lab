@@ -1,6 +1,11 @@
 /**
  * FolderTrashModal — 当前文件夹的回收站(软删文件列表)。
- * 对 folder admin 开放:恢复(回到文件列表)/ 彻底删除(硬删,不可恢复)/ 一键清空。
+ * 恢复(回到文件列表)/ 彻底删除(硬删,不可恢复)/ 一键清空。
+ * 可达性由入口闸门保证(ProjectDetailPage canSeeTrash):普通夹 = folder admin 或
+ * 持组织级删除授权(my_delete_grant)者;sensitive 夹仅系统 admin。资产敏感级随
+ * 所属文件夹,弹窗内可达者对其全部条目的恢复/彻底删除均被后端放行 —— 行内按钮
+ * 无需再按权限显隐(2026-10-16/F13 核实结论,与新守门口径天然对齐;若未来本弹窗
+ * 被其他无闸门入口复用,须先补按钮级显隐)。
  */
 import { App, Button, Empty, Modal, Popconfirm, Table, Tooltip } from 'antd';
 import { RotateCcw, Trash2 } from 'lucide-react';
