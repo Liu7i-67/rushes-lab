@@ -1,6 +1,9 @@
 # 六项优化调研方案:管理员解锁登录锁定 / 审计真实 IP 与项目名 / 移动端备份入口 / 目录改名 / 目录拖拽层级 / 文件批量移动
 
 > 2026-10-16 调研定稿,同日经 13 轮独立盲审修订定稿(末轮无 P0/P1)。调研全程未动代码;
+> **行号引用为 e792be0 基线快照**——此后 liuqi 已并入并行会话增量(组级删除授权/百度频控放宽等,
+> assets/folders/auth/directory/permissions 等 18 文件 +1784 行,相关文件行号已漂移),
+> 实施时一律按符号名/端点名 + grep 定位,勿按行号盲跳(W2b 的写入面清单本就以此为对账口径)。
 > 代码/配置文本层面的论断
 > (nginx conf、Redis key、MobileTabBar、Dockerfile 等)均已逐一亲验,但**网络运行时行为
 > (poc-nginx 容器实际看到的隧道流量源 IP)无法在调研期实测,已列为实施前第一步必测项(§2.2②)**。
@@ -393,8 +396,11 @@ baidu_backup.py:571/:851)。另有资产摘要 Key 面板(AssetSummaryPanel.tsx:
 ### 5.2 实施方案
 
 **端点**:`PATCH /api/v1/folders/{id}`,body `{name?, parent_folder_id?}`(改名与移动同端点;
-前端两个入口:重命名弹窗 / 拖拽或「移动到」)。权限对齐删除先例(folders.py:342-347):
-普通夹 `can_upload`、sensitive 夹 `can_admin`。
+前端两个入口:重命名弹窗 / 拖拽或「移动到」)。权限:普通夹 `can_upload`(与创建对称,
+uploader 自主管理目录结构;**注意删除门槛已于 2026-10-16 组级删除授权周期改走
+`file_deleter∧can_view` 闸门——移动是重组不是删除,不复用该闸门,是否复用属新增拍板项,
+决策点 19**)、sensitive 夹 `can_admin`(删除侧同款理由仍在,folders.py:367-368
+「sensitive 的 can_upload 实为 downloader 级…邀请配置价值高」)。
 
 **校验清单**:
 
@@ -555,7 +561,8 @@ old/new minio_prefix;labels.ts + AdminAuditPage EVENT_TYPES 两处回填。
   残留成第二父,旧敏感夹受邀者仍可达该资产(OpenFGA 删不存在的 tuple 会报 is_not_exists,
   directory.py:610-611 有吞错先例——吞错+错形态 = 静默残留授权);
 - 权限:逐源夹 `can_upload` + 目标夹 `can_upload`(batch-prefix 同款分组 check);
-  **sensitive 源/目标一律 `can_admin`**(删除先例:敏感夹 can_upload 实为 downloader 级,folders.py:324-325);
+  **sensitive 源/目标一律 `can_admin`**(删除侧同款理由仍在:敏感夹 can_upload 实为 downloader 级,
+  folders.py:367-368);
   目标=敏感夹本身 → 允许(资产本就可存于敏感夹,上传 bootstrap 即 parent_type=sensitive_folder,
   assets.py:203-207),门槛 can_admin;目标=敏感夹后代的普通子夹(孤儿位,badge 方案 §6.3)→ 一律禁;
 - 软删行不迁(batch-prefix 先例,assets.py:715);
@@ -644,6 +651,7 @@ old/new minio_prefix;labels.ts + AdminAuditPage EVENT_TYPES 两处回填。
 | 16 | W2a 公网 18080 裸隧道入口处置 | **a:hh2 侧 jump-tunnel 的 -R 改绑 127.0.0.1,公网收敛为 nginx 443 唯一通道**(18080 本是 fallback 临时通道;改时取消 tunnel-rollback 定时器) |
 | 17 | W2a dev 环境口径(:8080 裸隧道 + dev 网关是否入信任源 + **dev 外网入口是否保留**) | 随 16 选 a:dev :8080 同款收敛 + conf 双写两网关,**但 dev 外网入口因此关闭须显式确认**(如需保留须为 dev 新增跳板机反代 vhost);或选 b 明确 dev 暂不修(只写 prod 网关)。禁止半修(加 dev 网关不收敛 8080)。**退化依赖:若 ⓪ 实测两环境共享网桥(网关同 IP),conf 又是单文件双环境同步,b 物理上不可行**(写 prod 网关即同时信任 dev 隧道)→ 只能选 a 或整体缓行 |
 | 18 | W6 二期单对象 >5GiB(超 CopyObject 上限)处置 | multipart copy(UploadPartCopy/compose)或显式 skip 计入 skipped_reasons;推荐 MVP 先显式 skip + 提示,大对象迁移按需再开 multipart |
+| 19 | W4/W5 目录移动门槛是否复用组级删除授权闸门(file_deleter∧can_view) | MVP 不复用,仍按 can_upload(移动是重组不是删除,与创建对称);复用与否留待组级授权语义稳定后再议 |
 
 ## 8. 通用硬约定(实施时勿踩)
 
