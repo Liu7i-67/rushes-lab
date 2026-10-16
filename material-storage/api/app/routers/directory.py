@@ -4,7 +4,7 @@
 remove_user_from_group 直接同步 OpenFGA tuple(不再经过飞书通讯录)。
 
 endpoints:
-  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active / login_locked[W1,仅 user 维度])
+  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active 筛选;login_locked[W1,仅 user 维度]仅作响应回显,非筛选参数)
   POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning)
   GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序)
   PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3)

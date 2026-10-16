@@ -1328,6 +1328,15 @@ async def batch_move_assets(
                 if not asset_ok:
                     fga_pending.append(asset_id)
 
+        # 对账恒等式(契约 §3.6):成功 + skipped + fga_pending = 提交数,其中
+        # 「成功」= DB+FGA 都落定 —— FGA 交换最终失败(重试与单条降级都失败)
+        # 的资产从 moved 桶移入 fga_pending 桶,否则双计。入桶路径只有读失败 /
+        # 批失败后单条降级两处,来源均 ⊆ moved_ids:集合过滤与 moved 桶互斥
+        # 完备,不会卷入 skipped;fga_pending 语义不变(DB 已在新夹、FGA 待同步)。
+        if fga_pending:
+            pending_set = set(fga_pending)
+            moved_ids = [a for a in moved_ids if a not in pending_set]
+
     skipped_by_reason: dict[str, int] = dict(Counter(s.reason for s in skipped))
     await audit.write(
         event_type="asset_batch_moved",
