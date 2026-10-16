@@ -15,7 +15,8 @@
     审计 user_login_unlocked(details 记形态与 IP 集)
   - DirectoryUserOut 增 login_locked: bool(列表端点批量 MGET 三形态 user 锁 key;
     只反映 user 维度,IP 维度锁不在内)
-  - reset-password 顺带调同一清理逻辑
+  - reset-password 顺带清三形态 user 维度锁与失败计数(与 unlock 共用
+    clear_locks;IP 维度不在此连带清,由 unlock 连带清或等 TTL)
   - 第 5 次失败触发锁时补写审计 local_login_locked(details: username/维度)
   - 一切 key 必须 lower()
 
@@ -41,6 +42,8 @@ from app.db.session import get_sessionmaker
 from app.db.tables import AuditEvent, User
 from app.main import create_app
 from app.services.local_auth import (
+    _FAIL_IP_KEY,
+    _LOCK_IP_KEY,
     _LOCK_USER_KEY,
     LocalAuthService,
 )
@@ -315,8 +318,12 @@ async def test_unlock_clears_all_three_login_forms(
     client: AsyncClient, make_user,
 ) -> None:
     """三形态 key 清理:用 email 形态连错 5 次(计数/锁落在 email lower key 上),
-    unlock 后 cleared_user_forms 应覆盖 username/email/name 三形态,且
-    username / name 形态登录立即可用、失败计数也归零(再错一次是 401 非 429)。"""
+    unlock 后 email 形态入 cleared_user_forms,且三形态锁/计数 key 全部不在位
+    (DEL 全覆盖,漏形态 = 静默清空)、username / name 形态登录立即可用、
+    失败计数也归零(再错一次是 401 非 429)。
+
+    清单口径:cleared_user_forms 记「实际清到 key 的形态」,本就无 key 的
+    形态不入清单 —— 三形态全覆盖以 Redis 终态为准做行为断言。"""
     uname = _uname("tri")
     u, _ = await make_user(username=uname, name=f"Tri User {uname}",
                            email=f"{uname}@example.com")
@@ -329,7 +336,12 @@ async def test_unlock_clears_all_three_login_forms(
     r = await client.post(UNLOCK_URL.format(user_id=u.id), headers=_h(EVAN_ID))
     assert r.status_code == 200, r.text
     forms = {f.lower() for f in r.json()["cleared_user_forms"]}
-    assert {uname.lower(), f"{uname}@example.com", f"tri user {uname}"} <= forms, r.text
+    # 本次失败落在 email 形态 → 该形态必须入清单
+    assert f"{uname}@example.com" in forms, r.text
+    # 行为断言:三形态锁 key 全部清空(DEL 覆盖 username/email/name)
+    for form in (uname.lower(), f"{uname}@example.com", f"tri user {uname}"):
+        assert await _redis_lock_key_exists(form) is False, (
+            f"form={form!r} 的锁 key 应被清")
 
     # 其余形态立即能登(锁与计数全清;IP 维度也已被连带清,否则这里 429)
     for login_name in (uname, f"tri user {uname}"):
@@ -353,10 +365,14 @@ async def test_unlock_not_locked_user_still_200(client: AsyncClient, make_user) 
     assert r.json()["was_locked"] is False
 
 
-# ─── reset-password 顺带解锁(决策 2)───────────────────────────────────────────
+# ─── reset-password 顺带解锁(决策 2:清三形态 user 维度,IP 维度不连带)─────────
 @pytest.mark.asyncio
 async def test_reset_password_clears_lock(client: AsyncClient, make_user) -> None:
-    """连错 5 次 → 429;admin reset-password 后,临时密码立即能登录(顺带解锁)。"""
+    """连错 5 次 → 429;admin reset-password 后,临时密码立即能登录(顺带解锁)。
+
+    契约口径:reset-password 只清三形态 user 维度锁与失败计数(IP 维度不在
+    连带清范围,由 unlock 端点连带清或等 TTL)—— 故本用例在 reset 后、登录
+    断言前自行清掉 ASGI 同源 IP 锁,隔离出 user 维度的解锁行为。"""
     u, uname = await make_user()
     await _fail_n_times(client, uname, 5)
     r = await client.post(LOGIN_URL, json={"username": uname, "password": PASS_OK})
@@ -366,12 +382,21 @@ async def test_reset_password_clears_lock(client: AsyncClient, make_user) -> Non
     assert r.status_code == 200, r.text
     temp_pw = r.json()["temporary_password"]
 
+    # user 维度锁/计数已随 reset 清除
+    assert await _redis_lock_key_exists(uname) is False
+    # 测试侧清掉同源 IP 维度(不在契约断言面内),隔离 user 维度行为
+    redis = from_url(str(get_settings().redis_url), decode_responses=True)
+    try:
+        await redis.delete(*[
+            k.format(ip=ip) for ip in ASGI_IPS
+            for k in (_FAIL_IP_KEY, _LOCK_IP_KEY)
+        ])
+    finally:
+        await redis.aclose()
+
     r2 = await client.post(LOGIN_URL, json={"username": uname, "password": temp_pw})
     assert r2.status_code == 200, f"reset-password 应顺带解锁:{r2.text}"
     client.cookies.clear()
-
-    # user 维度锁 key 已清
-    assert await _redis_lock_key_exists(uname) is False
 
 
 # ─── 用户列表 login_locked:只反映 user 维度(§3.1 DirectoryUserOut)────────────
