@@ -46,6 +46,7 @@ from app.models import (
 )
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
+from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService
 from app.services.presign import PresignService, request_base_from
 from app.settings import get_settings
@@ -340,9 +341,12 @@ async def list_trash(
     limit: int = Query(500, ge=1, le=500),
     offset: int = Query(0, ge=0),
 ) -> TrashOut:
-    """列 folder 内已软删的文件(回收站)。普通 folder 需 can_admin。
+    """列 folder 内已软删的文件(回收站)。普通 folder 需 can_admin,或组级
+    file_deleter 且 can_view(2026-10-16 组删除授权 F5:软删→清空回收站闭环
+    对组员放开;授权且可见)。
 
-    **sensitive folder 仅系统 admin**:敏感目录 can_view 不含项目 admin(受邀制),
+    **sensitive folder 仅系统 admin**(组织开关分支不穿透 sensitive,现状不变):
+    敏感目录 can_view 不含项目 admin(受邀制),
     项目 admin 虽有 can_admin(可删/清文件)但不能把回收站当成窥探文件名/标签/
     备注的侧信道(「活的看不见、删掉的反而看得见」);sensitive 回收站的恢复/
     彻底清空同理由系统 admin 兜底。
@@ -363,6 +367,17 @@ async def list_trash(
             object_type="folder",
             object_id=str(folder.id),
         )
+        # 组级「删除文件/文件夹」开关分支(F5):授权且可见;短路在 can_admin
+        # 失败之后,常规路径不多打 org 解析与 check
+        if not allowed and await user_is_org_file_deleter(
+            permissions, db, user_id=str(user.id),
+        ):
+            allowed = await permissions.check(
+                user_subject=user.subject,
+                relation="can_view",
+                object_type="folder",
+                object_id=str(folder.id),
+            )
     if not allowed:
         raise HTTPException(403, "no admin permission on this folder")
 
@@ -392,20 +407,38 @@ async def restore_asset(
     is_system_admin: bool = Depends(get_is_system_admin),
     ctx: dict = Depends(get_request_context),
 ) -> None:
-    """恢复软删文件(deleted_at 置回 NULL)。需 asset.can_admin / 系统 admin。
+    """恢复软删文件(deleted_at 置回 NULL)。需 asset.can_admin / 系统 admin,
+    或组级 file_deleter 且 asset.can_view(2026-10-16 组删除授权 F6,仅非
+    sensitive 资产)。
 
     软删不动 OpenFGA tuple 与 MinIO 对象,恢复即回到删除前的权限/内容状态。
     sensitive 资产仅系统 admin:项目 admin 从父项目继承 can_admin 但无 can_view
-    (受邀制),不能对看不见的敏感内容做恢复(F1,与 list_trash 收口同口径)。"""
+    (受邀制),不能对看不见的敏感内容做恢复(F1,与 list_trash 收口同口径);
+    组织开关分支同样不穿透 sensitive(F6 红线)。"""
     user_id = user.id
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
 
+    # sensitive 判定与 delete/list_trash 特判同源:随所属 folder.is_sensitive
+    folder = await db.get(Folder, asset.folder_id)
+    is_sensitive = folder is not None and folder.is_sensitive
+
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
         object_type="asset", object_id=str(asset_id),
     )
+    # 组级「删除文件/文件夹」开关分支(F6):授权且可见;短路在 can_admin 失败
+    # 之后,常规路径不多打 org 解析与 check(and 短路序同嵌套 if)
+    if (
+        not allowed
+        and not is_sensitive
+        and await user_is_org_file_deleter(permissions, db, user_id=str(user_id))
+    ):
+        allowed = await permissions.check(
+            user_subject=user.subject, relation="can_view",
+            object_type="asset", object_id=str(asset_id),
+        )
     if not allowed:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
@@ -417,8 +450,7 @@ async def restore_asset(
 
     # sensitive 门在 can_admin 之后:零权限探测者只见上面的通用 403,不借文案
     # 得知"该资产是否敏感"(分类元数据);到这里的只有项目 admin / 系统 admin
-    folder = await db.get(Folder, asset.folder_id)
-    if folder is not None and folder.is_sensitive and not is_system_admin:
+    if is_sensitive and not is_system_admin:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
             target_asset_id=asset_id, target_minio_key=asset.minio_key,
@@ -1120,19 +1152,37 @@ async def delete_asset(
     """删除文件。默认软删:置 deleted_at,MinIO 对象保留,可在回收站恢复。
 
     hard=true 为彻底删除:删 DB 行 + MinIO 原对象 + 缩略图派生对象 + OpenFGA
-    tuple,不可恢复 —— 须先软删(两步制,防误操作一击穿底)。权限均为
-    asset.can_admin;系统 admin 直通。**hard 分支对 sensitive 资产仅系统 admin**
-    (F1):项目 admin 继承 can_admin 但无 can_view,不能对受邀制内容做不可逆
-    销毁(与 list_trash / restore 收口同口径;软删为存量能力,维持不变)。
+    tuple,不可恢复 —— 须先软删(两步制,防误操作一击穿底)。权限 =
+    is_system_admin 或 asset.can_admin 或 (组级 file_deleter 且 asset.can_view 且
+    非 sensitive)(软删 F3 / hard F4,2026-10-16 组删除授权;两步制约束不变)。
+    **hard 分支对 sensitive 资产仅系统 admin**(F1):项目 admin 继承 can_admin
+    但无 can_view,不能对受邀制内容做不可逆销毁(与 list_trash / restore 收口
+    同口径);组织开关分支同样不穿透 sensitive(下方统一排除)。
     """
     asset = await db.get(Asset, asset_id)
     if not asset:
         raise HTTPException(404, "asset not found")
 
+    # sensitive 判定与 trash/restore 特判同源:随所属 folder.is_sensitive;
+    # 组织开关分支是否适用、hard 敏感门都靠它
+    folder = await db.get(Folder, asset.folder_id)
+    is_sensitive = folder is not None and folder.is_sensitive
+
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
         object_type="asset", object_id=str(asset_id),
     )
+    # 组级「删除文件/文件夹」开关分支(F3/F4):仅非 sensitive 资产,授权且可见;
+    # 短路在 can_admin 失败之后,常规路径不多打 org 解析与 check(and 短路序同嵌套 if)
+    if (
+        not allowed
+        and not is_sensitive
+        and await user_is_org_file_deleter(permissions, db, user_id=str(user_id))
+    ):
+        allowed = await permissions.check(
+            user_subject=user.subject, relation="can_view",
+            object_type="asset", object_id=str(asset_id),
+        )
     if not allowed:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
@@ -1143,18 +1193,16 @@ async def delete_asset(
         raise HTTPException(403, "no delete permission")
 
     # sensitive 门在 can_admin 之后(同 restore:零权限者只见通用 403,不借文案
-    # 得知资产敏感分类);仅 hard 分支 —— 软删为存量语义维持不变
-    if hard:
-        folder = await db.get(Folder, asset.folder_id)
-        if folder is not None and folder.is_sensitive and not is_system_admin:
-            await audit.write(
-                event_type="access_denied", actor_user_id=user_id,
-                target_asset_id=asset_id, target_minio_key=asset.minio_key,
-                details={"action": "delete_asset",
-                         "reason": "sensitive non-system-admin (hard)"},
-                **ctx,
-            )
-            raise HTTPException(403, "sensitive 资产的彻底删除仅系统 admin 可操作")
+    # 得知资产敏感分类);仅 hard 分支 —— 软删 sensitive 维持 can_admin 现状
+    if hard and is_sensitive and not is_system_admin:
+        await audit.write(
+            event_type="access_denied", actor_user_id=user_id,
+            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            details={"action": "delete_asset",
+                     "reason": "sensitive non-system-admin (hard)"},
+            **ctx,
+        )
+        raise HTTPException(403, "sensitive 资产的彻底删除仅系统 admin 可操作")
 
     if hard:
         if asset.deleted_at is None:

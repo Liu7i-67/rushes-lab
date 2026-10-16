@@ -60,6 +60,10 @@ USER_DIRECT_RELATIONS: tuple[tuple[str, str], ...] = (
     # 方案当时明确「不扩大范围处理」遗留至今),本次触达同一常量,一行补齐恢复
     # 「每个组级 flag 都有防御项」不变量;未部署时同样被 continue 容错,不炸
     ("organization", "project_deleter"),
+    # ("organization", "file_deleter"):组级「删除文件/文件夹」开关防御项(2026-10-16
+    # 组删除授权,照 project_deleter 先例维持「每个组级 flag 都有防御项」不变量);
+    # 未部署时同样被 continue 容错,不炸
+    ("organization", "file_deleter"),
     ("department", "member"),
     ("group", "member"),
     ("project", "admin"),
@@ -595,6 +599,24 @@ class PermissionsService:
         return await self.check(
             user_subject=f"user:{user_id}",
             relation="project_deleter",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_file_deleter(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#file_deleter check(组开关经 group#member 展开)。
+
+        仿 is_org_project_deleter(2026-10-16 删除文件/文件夹权限授予用户组):
+        本方法只是 check 半边 —— 应用层守门完整口径 = is_system_admin 或 对象级
+        can_admin 或 (本方法 且 对象 can_view 且非 sensitive),即「授权且可见」
+        (需求决策 #2),组织开关分支一律不穿透 sensitive(决策 #3);/me 回显
+        口径 = is_system_admin 或本方法(不含 org admin 直通,F9)。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="file_deleter",
             object_type="organization",
             object_id=organization_tenant_key,
         )
