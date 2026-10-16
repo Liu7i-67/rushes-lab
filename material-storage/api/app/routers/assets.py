@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
-from sqlalchemy import ColumnElement, func, literal_column, or_, select, true, update
+from sqlalchemy import ColumnElement, and_, func, literal_column, or_, select, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -255,6 +255,7 @@ async def abort_upload(
 @router.get("", response_model=AssetListOut)
 async def list_assets(
     folder_id: uuid.UUID = Query(...),
+    locate: uuid.UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     user: CurrentUser = Depends(get_current_user),
@@ -286,6 +287,31 @@ async def list_assets(
 
     where = (Asset.folder_id == folder_id, Asset.deleted_at.is_(None))
     total = await db.scalar(select(func.count()).select_from(Asset).where(*where))
+    locate_index: int | None = None
+    if locate is not None:
+        # 单列 scalar:db.scalar 只回首行第一列(多列 select 是 Row,取 .created_at 必炸)
+        target_created = await db.scalar(
+            select(Asset.created_at).where(
+                Asset.id == locate,
+                Asset.folder_id == folder_id,
+                Asset.deleted_at.is_(None),
+            )
+        )
+        if target_created is not None:
+            # 与列表同元组 (created_at DESC, id DESC):严格"更靠前"的行数 = 0 基序号。
+            # id tiebreaker 不能省:批量上传 created_at 全并列,只比 created_at 会漂位;
+            # target id 就是入参 locate 本身,无需回查。
+            newer = await db.scalar(
+                select(func.count()).select_from(Asset).where(
+                    Asset.folder_id == folder_id,
+                    Asset.deleted_at.is_(None),
+                    or_(
+                        Asset.created_at > target_created,
+                        and_(Asset.created_at == target_created, Asset.id > locate),
+                    ),
+                )
+            )
+            locate_index = newer or 0
     stmt = (
         select(Asset)
         .where(*where)
@@ -299,6 +325,7 @@ async def list_assets(
     return AssetListOut(
         items=[AssetOut.model_validate(r) for r in res.scalars().all()],
         total=total or 0,
+        locate_index=locate_index,
     )
 
 

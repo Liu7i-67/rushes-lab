@@ -1,16 +1,19 @@
 /**
  * #151 盲搜结果页 — /search?q=…
  * 后端已按 can_view 过滤(敏感素材零泄露);此处只做展示:
- * tag chips + 命中词高亮(文件名 / 备注 / 标签),点击跳转所在 folder。
+ * tag chips + 命中词高亮(文件名 / 备注 / 标签)。
+ * 盲搜跳转定位方案 A(§3.1):行点击 = 原地开单文件详情 Drawer,URL ?focus= 驱动
+ * (刷新/回退/分享可重放);Drawer 内「在文件夹中查看」跳 /folders/:id?asset= 深链。
  */
-import { App, Button, Empty, Input, Skeleton, Tag } from 'antd';
+import { App, Button, Drawer, Empty, Input, Skeleton, Tag } from 'antd';
 import { FolderOpen, Search as SearchIcon, Tag as TagIcon } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { useSearchAssets } from '../api/hooks';
+import { useFolder, useMe, useSearchAssets } from '../api/hooks';
 import { useCompactViewport } from '../lib/use-viewports';
+import { useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
-import type { SearchResult } from '../api/types';
+import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 
 /** 把 text 里命中 q(忽略大小写)的子串用高亮 span 包起来。*/
 function Highlight({ text, q }: { text: string; q: string }) {
@@ -55,9 +58,19 @@ export default function SearchPage() {
 
   const { data: results, isLoading, isFetching } = useSearchAssets(debounced.trim() || null);
 
-  const goFolder = (r: SearchResult) => {
-    navigate(`/folders/${r.folder_id}`);
-  };
+  // 方案 A(§3.1):Drawer 开关 URL 驱动。focus 目标不在结果窗口(分享链接 /
+  // 数据变化 / 50 截断)→ focused 未命中,Drawer 静默不开(§5 边界)。
+  const focusId = sp.get('focus');
+  const focused = results?.find(r => r.id === focusId);
+  // AppShell 已取过 me,react-query 缓存命中零额外请求;focusFolder 为 Drawer 提供
+  // my_can_download 等 gating(hook 顶层无条件调用,enabled 由 id 存在与否自然控制)
+  const { data: me } = useMe();
+  const { data: focusFolder } = useFolder(focused?.folder_id);
+  // 抽屉形态 = FolderDetailPage 底部抽屉同款(§3.1):键盘弹起收缩为
+  // kbViewportHeight - 顶栏(56),否则 min(72vh, 72dvh) —— 只写静态高度会被
+  // 移动端软键盘盖住,compact 验收过不了
+  const kbViewportHeight = useKeyboardViewportHeight();
+  const drawerHeight = kbViewportHeight != null ? kbViewportHeight - 56 : 'min(72vh, 72dvh)';
 
   return (
     <div className="ms-enter" style={{ maxWidth: 900, margin: '0 auto' }}>
@@ -130,7 +143,7 @@ export default function SearchPage() {
             return (
               <div
                 key={r.id}
-                onClick={() => goFolder(r)}
+                onClick={() => setSearchParams({ q, focus: r.id })}
                 style={{
                   background: 'var(--ms-surface)',
                   border: '1px solid var(--ms-hairline)',
@@ -219,6 +232,38 @@ export default function SearchPage() {
           </div>
         </div>
       )}
+
+      {/* 方案 A:命中行原地开单文件详情。单文件态不做 ‹ n/N › 跨结果切换(二期可选);
+          onClose 只移除 focus 保留 q(replace —— 回退/刷新不再莫名重开);改搜索词
+          沿用整表替换丢 focus(有意:新搜索语境,旧 focus 失效,§5) */}
+      <Drawer
+        placement="bottom"
+        open={focused != null}
+        onClose={() => setSearchParams({ q }, { replace: true })}
+        height={drawerHeight}
+        styles={{ body: { padding: 0, overflowY: 'auto' } }}
+        title={
+          <span style={{
+            fontSize: 13, color: 'var(--ms-ink-muted)', minWidth: 0,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{focused?.filename}</span>
+        }
+        extra={
+          focused && (
+            <Button
+              type="text" size="small"
+              icon={<FolderOpen size={14} strokeWidth={1.8} />}
+              onClick={() => navigate(`/folders/${focused.folder_id}?asset=${focused.id}`)}
+            >
+              在文件夹中查看
+            </Button>
+          )
+        }
+      >
+        {focused && (
+          <AssetSummaryPanel selected={[focused]} me={me} folder={focusFolder} />
+        )}
+      </Drawer>
     </div>
   );
 }

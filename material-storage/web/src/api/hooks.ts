@@ -333,6 +333,24 @@ export const useAssets = (
     placeholderData: keepPreviousData,
   });
 
+// 盲搜跳转定位(方案 §4.1):UUID 格式门禁共用常量。URL ?asset= 是任意原文 ——
+// 畸形串直接打后端是注定 422 的调用(还会触发全局错误 toast);FolderDetailPage
+// 的滚动选择器拼接也靠它挡 querySelector SyntaxError。本页与 hook 两处共用。
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// 定位探测独立 hook,不复用 useAssets:limit=1 的探测结果混进
+// ['assets', folderId, page, pageSize] 页缓存会把「目标页」误当「第 1 页」。
+export const useLocateAsset = (folderId?: string, assetId?: string | null) =>
+  useQuery({
+    queryKey: ['assets-locate', folderId, assetId],
+    queryFn: async () =>
+      (await http.get<AssetList>('/api/v1/assets', {
+        params: { folder_id: folderId, locate: assetId, limit: 1 },
+      })).data,
+    // UUID 格式前置校验:手工改坏的链接不发起请求,走 FolderDetailPage §4.2 失败兜底
+    enabled: !!folderId && !!assetId && UUID_RE.test(assetId),
+  });
+
 // §3.5:可选 as_attachment —— 移动端直连系统下载器时签 attachment 头(后端可选 body,
 // 响应结构不变)。传 assetId 字符串(既有调用)或不传 as_attachment,语义均为内联,零影响。
 export const useDownloadLink = () =>
@@ -351,11 +369,14 @@ export const useDeleteAsset = () => {
       await http.delete(`/api/v1/assets/${assetId}`);
     },
     // 软删也进回收站:角标计数(assets-trash)必须一起失效,否则「回收站 N」不更新;
-    // 侧栏「子树含文件」实心标记随 ['folders'] 走,软删后活跃计数减,一并失效
+    // 侧栏「子树含文件」实心标记随 ['folders'] 走,软删后活跃计数减,一并失效;
+    // 定位缓存(['assets-locate'])一并失效:目标被删后 locate_index 不得再定位成功
+    // (方案 §4.1,缓存不过夜)
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets'] });
       qc.invalidateQueries({ queryKey: ['assets-trash'] });
       qc.invalidateQueries({ queryKey: ['folders'] });
+      qc.invalidateQueries({ queryKey: ['assets-locate'] });
     },
   });
 };
@@ -376,11 +397,13 @@ export const useRestoreAsset = () => {
     mutationFn: async (assetId: string) => {
       await http.post(`/api/v1/assets/${assetId}/restore`);
     },
-    // 恢复后活跃计数增,侧栏「子树含文件」实心标记随 ['folders'] 走,一并失效
+    // 恢复后活跃计数增,侧栏「子树含文件」实心标记随 ['folders'] 走,一并失效;
+    // 恢复会改同夹排序窗口,['assets-locate'] 一并失效(方案 §4.1)
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets-trash'] });
       qc.invalidateQueries({ queryKey: ['assets'] });
       qc.invalidateQueries({ queryKey: ['folders'] });
+      qc.invalidateQueries({ queryKey: ['assets-locate'] });
     },
   });
 };
@@ -392,9 +415,11 @@ export const usePurgeAsset = () => {
     mutationFn: async (assetId: string) => {
       await http.delete(`/api/v1/assets/${assetId}`, { params: { hard: true } });
     },
+    // 彻底删除同样让定位目标消失,['assets-locate'] 一并失效(方案 §4.1)
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['assets-trash'] });
       qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['assets-locate'] });
     },
   });
 };

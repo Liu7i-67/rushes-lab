@@ -311,6 +311,11 @@ export interface AssetBatchPrefixResult {
 export interface AssetList {
   items: Asset[];
   total: number;
+  // 盲搜跳转定位(方案 §2.1):locate 目标在与列表同排序(created_at DESC, id DESC)
+  // 下的 0 基全量序号,不受 limit/offset 窗口影响。locate 缺省 / 目标不存在、已软删、
+  // 他夹 → null(不区分原因)。可选 —— 旧后端无此键,消费侧按「键存在且为 number」
+  // 判读(FolderDetailPage 失败守卫②,兼容混合部署窗口)。
+  locate_index?: number | null;
 }
 
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired';
