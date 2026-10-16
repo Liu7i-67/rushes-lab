@@ -1,5 +1,8 @@
 ## 2026-10-16
 
+- **盲搜跳转定位 A+B 实施方案定稿(qplan 4 轮盲审通过)**(用户指令"$qplan 基于调研报告方案A+B给出可实施方案";分支 `qplan/search-jump-locate-plan`+worktree,方案=`rushes-spec/material-storage/search-jump-locate-plan.md`:后端 GET /assets 加 `locate` 参数回 `locate_index`(与列表同 (created_at,id) 元组 count,无新权限面);前端 A=搜索结果 URL 驱动(`?focus=`)原地开详情 Drawer(复用 AssetSummaryPanel+键盘视口收缩);B=落点页 `?asset=` 深链 locate→跳页→useEffect 滚动高亮→自动开 Drawer(consumedAsset/highlightId/consumeOutcome 三态拆分,render 期只 setState);4 轮盲审修掉 db.scalar 多列 500/undefined==null 误弹/render 期 message/畸形参数选择器注入/keepPreviousData 竞态等 7 P1+22 P2;同分支含调研报告;未动代码,实施等用户指令)
+
+- **盲搜跳转落点调研**(用户指令"不动代码,纯调研";报告=`rushes-spec/material-storage/search-jump-locate-investigation.md`:⌘K/SearchPage 点击命中只带 folder_id 裸跳 `/folders/:id`,落点页恒第 1 页、列表固定 created_at DESC 30/页,大夹老文件沉深页且全链路无定位基建(无 URL 参数消费/scrollIntoView/单文件 GET/locate 序号接口);方案 A=搜索结果原地开详情 Drawer 纯前端 / B=locate 服务端定位页码+`?asset=` 深链高亮(推荐 A+B 组合)/ C=folder 内筛选;顺带记录 ⌘K 命中数 50 截断不提示、PC Table sorter 仅排当前页;未动代码,实施等用户指令)
 - **HEIC 预览合并 liuqi + 周期清理 + push fork**(用户指令"合并➕清理➕push";liuqi `e089b84` no-ff 合并 feat/heic-preview-thumb,增量 3 文件=AssetPreviewModal+调研报告+changelog;**自此 prod 运行内容(3b9e480)完全等于 liuqi 主线**,dev 落后一个 HEIC 增量待下次部署自然对齐;feat/heic-preview-thumb 分支已删,worktree 仅剩主仓无残留;**liuqi 已 push fork**(fork/liuqi 快进至 e089b84);昨日 prod 部署条目中"并行会话已提交上 liuqi"系当时误标,实际 HEIC 提交在 feat 分支上、当日才随本合并进 liuqi,DEPLOYED.md 分支标注此前已如实修正;全周期至此终局:子树标记+HEIC 双功能 dev/prod 均上线)
 
 ## 2026-10-15
