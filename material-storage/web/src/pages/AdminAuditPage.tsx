@@ -60,6 +60,8 @@ const EVENT_TYPES = [
   // ── 六项优化(2026-10-17)逐包回填(硬约定:本数组 + labels.ts EVENT_TYPE_LABEL 两处同步)──
   // W1 登录锁定(本包);folder_renamed/folder_moved/asset_batch_moved 归 W4/W5/W6 包自行补,勿代填
   'user_login_unlocked', 'local_login_locked',
+  // W4/W5/W6 目录改名/移动 + 批量移动资产(前端2 包回填)
+  'folder_renamed', 'folder_moved', 'asset_batch_moved',
 ];
 
 const PAGE_SIZE = 30;
