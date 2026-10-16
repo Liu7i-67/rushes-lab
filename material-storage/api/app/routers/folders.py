@@ -7,6 +7,10 @@ endpoints:
                                                     (普通 folder by project member +
                                                      sensitive_folder by list_objects can_view)
   GET    /api/v1/folders/{id}                     — 单条(can_view)
+  PATCH  /api/v1/folders/{id}                     — 改名 / 移动(W4/W5;普通夹 can_upload、
+                                                    sensitive 夹 can_admin;reparent 额外
+                                                    要求目标侧 can_upload;D1-B 子树 prefix
+                                                    重算 + FGA parent tuple 原子交换)
   DELETE /api/v1/folders/{id}                     — 删除空 folder(硬删;无子夹、
                                                     无活跃文件、回收站已清空;
                                                     普通夹 can_upload 或 组级
@@ -19,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func, or_, select
@@ -36,8 +40,13 @@ from app.deps import (
     get_permissions,
     get_request_context,
 )
-from app.models import FolderCreateIn, FolderInviteIn, FolderOut
+from app.models import FolderCreateIn, FolderInviteIn, FolderOut, FolderUpdateIn
 from app.services.audit import AuditService
+from app.services.folder_chain import (
+    FolderChainError,
+    check_prefix_budget,
+    check_segment_name,
+)
 from app.services.notifications import run_notify_folder_invite_bg
 from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService, is_already_exists_error
@@ -163,6 +172,345 @@ async def create_folder(
     )
     log.info("folder created id=%s name=%s sensitive=%s",
              folder.id, folder.name, folder.is_sensitive)
+
+    await db.refresh(folder)
+    return FolderOut.model_validate(folder)
+
+
+@router.patch("/{folder_id}", response_model=FolderOut)
+async def update_folder(
+    folder_id: uuid.UUID,
+    payload: FolderUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    audit: AuditService = Depends(get_audit),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+    # dict[str, Any](非裸 dict):**ctx 解包进 audit.write 需值域为 Any,否则
+    # mypy 严格模式按 keyword 逐参核对 str|None 会撞 arg-type
+    ctx: dict[str, Any] = Depends(get_request_context),
+) -> FolderOut:
+    """改名 / 移动(重挂父级)— W4/W5(需求 §3.5,方案 §5)。
+
+    权限:普通夹 can_upload(与创建对称,uploader 自主管理目录结构)、sensitive 夹
+    can_admin(其 can_upload 实为 downloader 级,门槛太宽);系统 admin 直通;
+    reparent 额外要求目标侧 can_upload(目标夹 / 移为一级时 project,与 create 对称)。
+
+    校验(方案 §5.2 清单):段名(禁 / \\ . ..、≤255 字节)+ 拒首尾空白 422;同父同名
+    409;子树新 prefix 逐夹过 check_prefix_budget 400;目标须同项目 400;防环 = 源+目标
+    按 uuid 定序双行 FOR UPDATE 后显式栈迭代后代检测(禁递归);sensitive 三句式;
+    带 explicit grant 的一级夹禁 reparent 409;重算终态与无结构关系的存量自拟 prefix
+    相撞 409 预检。
+
+    D1-B:整棵子树 minio_prefix 两段式重算(先挂临时前缀再落目标,防逐行更新途中
+    瞬时撞 uq_folder_project_prefix),拓扑序自根向叶;不动物理对象、不动
+    assets.minio_key(全部功能按 DB 行计算,方案 §5.1)。
+
+    FGA:单次 WriteRequest(writes=[新 parent], deletes=[旧 parent]) 原子交换,DB
+    commit 成功之后执行(删除先例同序),失败重试并记入 folder_moved 审计 details。
+    """
+    user_id = user.id
+    folder = await db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "folder not found")
+
+    # ── 0) 意图解析:「是否传了」以 model_fields_set 判定(缺省 ≠ 显式 null)────
+    provided = payload.model_fields_set
+    if "name" not in provided and "parent_folder_id" not in provided:
+        raise HTTPException(400, "name 与 parent_folder_id 至少传一")
+    if "name" in provided and payload.name is None:
+        raise HTTPException(422, "name 不能为 null(不改名请省略该字段)")
+    rename_requested = "name" in provided
+    reparent_requested = "parent_folder_id" in provided
+    # 显式 null 已在上方 422 拦下,此处 payload.name 收窄为 str
+    if rename_requested and payload.name is not None:
+        final_name: str = payload.name
+    else:
+        final_name = folder.name
+    renamed = final_name != folder.name
+    moved = reparent_requested and payload.parent_folder_id != folder.parent_folder_id
+
+    # ── 1) 权限守门 ────────────────────────────────────────────────────────────
+    obj_type = "sensitive_folder" if folder.is_sensitive else "folder"
+    gate_relation = "can_admin" if folder.is_sensitive else "can_upload"
+    allowed = is_system_admin or await permissions.check(
+        user_subject=user.subject, relation=gate_relation,
+        object_type=obj_type, object_id=str(folder_id),
+    )
+    if not allowed:
+        await audit.write(
+            event_type="access_denied",
+            actor_user_id=user_id,
+            target_project_id=folder.project_id,
+            details={"action": "update_folder", "folder_id": str(folder_id),
+                     "reason": f"openfga {gate_relation} false"},
+            **ctx,
+        )
+        raise HTTPException(403, "no permission to update this folder")
+
+    if not renamed and not moved:
+        # 显式 no-op(name/parent 与现值一致):直接返回现状,不重算不写审计
+        return FolderOut.model_validate(folder)
+
+    # ── 2) 改名段名校验(对齐目录模板口径:拒绝而非静默 strip,admin.py 模板
+    #      入库校验同款;「 foo 」这类模板建链永不允许的段名在此拦下)────────────
+    if renamed:
+        if final_name != final_name.strip():
+            raise HTTPException(422, "名称首尾不能包含空白字符")
+        try:
+            check_segment_name(final_name)
+        except FolderChainError as e:
+            raise HTTPException(422, str(e)) from e
+
+    # ── 3) reparent 校验:sensitive 三句式 + 目标存在且同项目 + 目标侧 can_upload ──
+    target: Folder | None = None
+    new_parent_id: uuid.UUID | None = None
+    if moved:
+        new_parent_id = payload.parent_folder_id
+        # 三句式 ①:sensitive 夹必挂 project 一级(FGA parent: [project]),禁移动;
+        # sensitive 夹改名(一级内,无结构变化)仍允许(上方 renamed 分支已放行)
+        if folder.is_sensitive:
+            raise HTTPException(400, "sensitive folder 只能直挂 project 一级,不支持移动")
+        if new_parent_id is not None:
+            if new_parent_id == folder.id:
+                raise HTTPException(409, "不能将文件夹移动到其自身内")
+            target = await db.get(Folder, new_parent_id)
+            if target is None or target.project_id != folder.project_id:
+                # 跨项目移动 MVP 不做(决策:目录移动限同项目)
+                raise HTTPException(400, "target_folder invalid for this project")
+            # 三句式 ②:目标为 sensitive 夹或其子树 → 禁(敏感父下的普通子夹是 FGA
+            # 断链孤儿,除系统 admin 外恒不可见,移入 = 批量制造不可见资产);
+            # 三句式 ③(普通夹移出敏感子树 → 允许,修复性操作)不设检查即放行
+            if target.is_sensitive:
+                raise HTTPException(400, "不支持移动到该目标文件夹内")
+            cur_ancestor_id = target.parent_folder_id
+            while cur_ancestor_id is not None:
+                ancestor = await db.get(Folder, cur_ancestor_id)
+                if ancestor is None:
+                    break  # 防御:链上并发被删(sensitive 标记不可变,陈旧读无害)
+                if ancestor.is_sensitive:
+                    raise HTTPException(400, "不支持移动到该目标文件夹内")
+                cur_ancestor_id = ancestor.parent_folder_id
+        # 目标侧 can_upload(移为一级 → project:can_upload,与 create_folder 对称);
+        # 系统 admin 直通。缺此门:仅对某子树有 can_upload 者可把子树嫁接到项目内
+        # 任意位置,改变其他成员可见结构
+        target_check_type = "project" if new_parent_id is None else "folder"
+        target_check_id = str(folder.project_id) if new_parent_id is None else str(new_parent_id)
+        target_allowed = is_system_admin or await permissions.check(
+            user_subject=user.subject, relation="can_upload",
+            object_type=target_check_type, object_id=target_check_id,
+        )
+        if not target_allowed:
+            await audit.write(
+                event_type="access_denied",
+                actor_user_id=user_id,
+                target_project_id=folder.project_id,
+                details={"action": "update_folder", "folder_id": str(folder_id),
+                         "reason": "openfga target can_upload false"},
+                **ctx,
+            )
+            raise HTTPException(403, "no permission to move folder to this location")
+        # 带 explicit grant 的一级夹禁 reparent(MVP,防 grant 管理能力语义漂移:
+        # grants API 仅覆盖一级夹(_enforce_level1_folder),移深后授权失去管理入口;
+        # 判据 = folder 对象上存在 explicit_* tuple,含审批临时 explicit_downloader)
+        if folder.parent_folder_id is None:
+            tuples = await permissions.read_all_tuples(
+                object_type="folder", object_id=str(folder_id),
+            )
+            if any(rel.startswith("explicit_") for _, rel, _ in tuples):
+                raise HTTPException(
+                    409, "该文件夹带有关联授权,不支持移动;请先撤销相关授权后重试",
+                )
+
+    # ── 4) 行锁:reparent 时源+目标两行按 uuid 定序逐行 FOR UPDATE ────────────────
+    # 对向并发 reparent(T1 移 A 入 B、T2 移 B 入 A)若各自只锁被移动夹,后代检测
+    # 读到的是对方提交前快照,双双通过后成环(A.parent=B 且 B.parent=A;DB 层拦不住,
+    # 前端 FolderTree defaultExpanded 上溯会挂死)。FGA 检查已在上面完成,不让锁跨
+    # HTTP 调用(删除先例同序)
+    lock_ids: list[uuid.UUID] = [folder_id]
+    if moved and target is not None and new_parent_id is not None:
+        lock_ids = sorted([folder_id, new_parent_id])
+    for fid in lock_ids:
+        locked = (
+            await db.execute(select(Folder).where(Folder.id == fid).with_for_update())
+        ).scalar_one_or_none()
+        if locked is None:
+            # 锁等待窗口内被并发删除
+            raise HTTPException(404, "folder not found")
+    await db.refresh(folder)   # 拿锁后取当前值(父链/前缀可能被并发 D1-B 改写)
+    if target is not None:
+        await db.refresh(target)
+
+    # 旧值快照(供审计 / FGA 交换 / no-op 判定;expire_on_commit=False,提交后仍可读)
+    old_parent_id = folder.parent_folder_id
+    old_name = folder.name
+    old_prefix = folder.minio_prefix
+    effective_parent_id = new_parent_id if moved else old_parent_id
+
+    # ── 5) 显式栈迭代:防环后代检测 + 子树收集(层序 = 自根向叶拓扑序)────────────
+    # 禁递归:链深 >~960 即 RecursionError(API 无建夹深度限制,本仓有前科);
+    # seen 兜底防结构性脏环(FK 自引用正常无环)
+    subtree: list[Folder] = [folder]
+    seen: set[uuid.UUID] = {folder.id}
+    frontier: list[uuid.UUID] = [folder.id]
+    while frontier:
+        child_rows = (
+            await db.execute(
+                select(Folder).where(Folder.parent_folder_id.in_(frontier))
+            )
+        ).scalars().all()
+        nxt: list[Folder] = []
+        for r in child_rows:
+            if r.id in seen:
+                continue
+            seen.add(r.id)
+            nxt.append(r)
+            subtree.append(r)
+        if target is not None and target.id in seen:
+            raise HTTPException(409, "不能将文件夹移动到其自身或其子文件夹内")
+        frontier = [r.id for r in nxt]
+
+    # ── 6) 同父同名 409(uq 语义,文案照 create_folder 撞 uq 分支)────────────────
+    dup_id = await db.scalar(
+        select(Folder.id).where(
+            Folder.project_id == folder.project_id,
+            Folder.name == final_name,
+            Folder.id != folder.id,
+            Folder.parent_folder_id.is_(None) if effective_parent_id is None
+            else Folder.parent_folder_id == effective_parent_id,
+        ).limit(1)
+    )
+    if dup_id is not None:
+        raise HTTPException(409, "该项目下已存在同名文件夹")
+
+    # ── 7) 计算子树新 prefix(跟随规则式重算:自拟形态视为历史遗留,重算后统一;
+    #      层序保证父先于子)────────────────────────────────────────────────────
+    if moved:
+        if new_parent_id is None:
+            new_source_prefix = f"{final_name}/"
+        else:
+            assert target is not None
+            new_source_prefix = f"{target.minio_prefix.rstrip('/')}/{final_name}/"
+    else:
+        if old_parent_id is None:
+            new_source_prefix = f"{final_name}/"
+        else:
+            parent_row = await db.get(Folder, old_parent_id)
+            if parent_row is None:
+                # 防御:父夹并发被删(有子夹时删除被 RESTRICT 挡住,理论不可达)
+                raise HTTPException(404, "folder not found")
+            await db.refresh(parent_row)  # 取当前 prefix(父链可能被并发 D1-B 改写)
+            new_source_prefix = f"{parent_row.minio_prefix.rstrip('/')}/{final_name}/"
+    new_prefix_by_id: dict[uuid.UUID, str] = {folder.id: new_source_prefix}
+    for row in subtree[1:]:
+        parent_key = row.parent_folder_id
+        assert parent_key is not None  # 层序遍历:父必已入映射(结构性防御)
+        parent_new = new_prefix_by_id[parent_key]
+        new_prefix_by_id[row.id] = f"{parent_new.rstrip('/')}/{row.name}/"
+
+    # 预算:逐夹 >1024 字符/字节 → 400(超 String(1024) 列宽直接落库是 PG DataError)
+    for row in subtree:
+        try:
+            check_prefix_budget(new_prefix_by_id[row.id])
+        except FolderChainError as e:
+            raise HTTPException(400, str(e)) from e
+    # 冲突预检:重算终态若与无结构关系的存量自拟 prefix 相撞,不是瞬时撞 uq 而是
+    # 持久冲突 → 明确 409 文案(与 check_prefix_budget 同批做,方案 §5.2 D1-B ②)
+    finals = [new_prefix_by_id[r.id] for r in subtree]
+    if len(set(finals)) != len(finals):
+        raise HTTPException(409, "子树内存在同名文件夹,重算后将产生重复存储路径,无法完成该操作")
+    existed = (
+        await db.execute(
+            select(Folder.id, Folder.minio_prefix).where(
+                Folder.project_id == folder.project_id,
+                Folder.minio_prefix.in_(finals),
+            )
+        )
+    ).all()
+    for rid, pfx in existed:
+        if rid not in new_prefix_by_id:
+            raise HTTPException(
+                409, f"目标路径与现有文件夹的存储前缀冲突:{pfx}"
+                "(同项目下已存在使用该前缀的自定义路径文件夹)",
+            )
+
+    # ── 8) D1-B 两段式 UPDATE:先全子树改挂临时前缀再自根向叶落目标 ────────────────
+    # uq_folder_project_prefix 逐行即时校验(非 DEFERRABLE),逐行更新途中新值与
+    # 未更新行的旧值相撞即炸;先全部改挂随机 token 临时前缀(互异且不与存量行相撞),
+    # flush 后终态互异(上方预检已保证)再落目标。不动物理对象、不动 assets.minio_key
+    changed = [
+        (row, new_prefix_by_id[row.id]) for row in subtree
+        if new_prefix_by_id[row.id] != row.minio_prefix
+    ]
+    try:
+        op_token = f"__d1b_{uuid.uuid4().hex[:8]}__"  # 16 字符;存量段名不可能形成该形态
+        for row, _new in changed:
+            if len(row.minio_prefix) + len(op_token) <= 1024:
+                row.minio_prefix = op_token + row.minio_prefix
+            # 超长行(>1008 字符)容不下 token:留待终态直改;极端自拟形态若仍撞
+            # 唯一约束由下方 IntegrityError 兜底 409(常规冲突已被预检排除)
+        await db.flush()
+        for row, new_p in changed:  # changed 保持层序 = 自根向叶
+            row.minio_prefix = new_p
+        if renamed:
+            folder.name = final_name
+        if moved:
+            folder.parent_folder_id = new_parent_id
+        await db.flush()
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(
+            409, "文件夹结构刚发生变化(可能新增了同名文件夹),请刷新后重试",
+        ) from e
+
+    # ── 9) FGA parent tuple 原子交换(DB commit 成功之后;删除先例同序)────────────
+    fga_status: str = "not_needed"
+    if moved:
+        fga_status = await permissions.swap_folder_parent_tuple(
+            folder_id=str(folder.id),
+            project_id=str(folder.project_id),
+            old_parent_folder_id=str(old_parent_id) if old_parent_id is not None else None,
+            new_parent_folder_id=str(new_parent_id) if new_parent_id is not None else None,
+        )
+
+    # ── 10) 审计(audit.write 自带独立 commit)────────────────────────────────────
+    common_details = {
+        "folder_id": str(folder.id),
+        "old_minio_prefix": old_prefix,
+        "new_minio_prefix": new_source_prefix,
+    }
+    if renamed:
+        await audit.write(
+            event_type="folder_renamed",
+            actor_user_id=user_id,
+            target_project_id=folder.project_id,
+            details={
+                **common_details,
+                "old_name": old_name,
+                "new_name": final_name,
+                "parent_folder_id": str(effective_parent_id) if effective_parent_id else None,
+            },
+            **ctx,
+        )
+    if moved:
+        await audit.write(
+            event_type="folder_moved",
+            actor_user_id=user_id,
+            target_project_id=folder.project_id,
+            details={
+                **common_details,
+                "name": final_name,
+                "old_parent_folder_id": str(old_parent_id) if old_parent_id else None,
+                "new_parent_folder_id": str(new_parent_id) if new_parent_id else None,
+                "fga_swap": fga_status,
+            },
+            **ctx,
+        )
+    log.info(
+        "folder updated id=%s renamed=%s moved=%s prefix %s -> %s fga=%s",
+        folder_id, renamed, moved, old_prefix, new_source_prefix, fga_status,
+    )
 
     await db.refresh(folder)
     return FolderOut.model_validate(folder)
