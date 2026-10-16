@@ -21,7 +21,7 @@ from typing import Any
 from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.tables import Asset
+from app.db.tables import Asset, Folder
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService
 from app.services.permissions import PermissionsService
@@ -123,12 +123,16 @@ async def purge_active_asset(
     if asset is None:
         return None
     # commit 前快照:delete 后实例属性过期不可读(assets.py:774 同款)
+    # W2b:target_project_id 同帧取好 —— purge 后行已删,但该列是独立 FK、
+    # 可带值写审计(与 assets.py 硬删分支同口径)
+    folder = await db.get(Folder, asset.folder_id)
     snapshot: dict[str, Any] = {
         "bucket": asset.minio_bucket,
         "key": asset.minio_key,
         "filename": asset.filename,
         "tags": dict(asset.tags or {}),
     }
+    purge_project_id = folder.project_id if folder is not None else None
     await db.delete(asset)
     await db.commit()
 
@@ -137,7 +141,8 @@ async def purge_active_asset(
         presign, bucket=str(snapshot["bucket"]), key=str(snapshot["key"]), tags=snapshot["tags"],
     )
     await cleanup_asset_tuples(permissions, asset_id)
-    # audit 不带 target_asset_id(行已删,FK 会 violation;循 assets.py:814-822 口径)
+    # audit 不带 target_asset_id(行已删,FK 会 violation);target_project_id 是
+    # 独立 FK,删行前取好的值照常带(W2b)
     details = {
         "asset_id": str(asset_id),
         "filename": snapshot["filename"],
@@ -149,6 +154,7 @@ async def purge_active_asset(
     await audit.write(
         event_type="asset_purged",
         actor_user_id=actor_user_id,
+        target_project_id=purge_project_id,
         target_minio_key=str(snapshot["key"]),
         details=details,
     )

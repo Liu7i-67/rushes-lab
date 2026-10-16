@@ -83,6 +83,9 @@ async def share_asset(
     if asset is None or asset.deleted_at is not None:
         raise HTTPException(404, "asset not found")
 
+    # W2b:审计补 target_project_id(folder 并发删的竞速窗口回 None,不炸)
+    folder = await db.get(Folder, asset.folder_id)
+
     # 分享者必须 can_download 该 asset;系统 admin 直通
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_download",
@@ -92,13 +95,14 @@ async def share_asset(
         await audit.write(
             event_type="access_denied",
             actor_user_id=user_id, target_asset_id=asset_id,
+            target_project_id=folder.project_id if folder is not None else None,
             details={"action": "share_asset", "reason": "openfga can_download false"},
             **ctx,
         )
         raise HTTPException(403, "no permission to share(需 can_download)")
 
     info = await create_share(
-        audit=audit, kind="asset", target_id=asset_id,
+        audit=audit, db=db, kind="asset", target_id=asset_id,
         sharer_user_id=user_id,
         expires_in_seconds=payload.expires_in_seconds,
         requires_login=payload.requires_login,
@@ -145,7 +149,7 @@ async def share_folder(
         raise HTTPException(403, "no permission to share(需 can_view)")
 
     info = await create_share(
-        audit=audit, kind="folder", target_id=folder_id,
+        audit=audit, db=db, kind="folder", target_id=folder_id,
         sharer_user_id=user_id,
         expires_in_seconds=payload.expires_in_seconds,
         requires_login=payload.requires_login,
@@ -188,11 +192,15 @@ async def resolve(
         if asset is None or asset.deleted_at is not None:
             raise HTTPException(404, "asset deleted")
 
+        # W2b:审计补 target_project_id(folder 并发删的竞速窗口回 None,不炸)
+        folder = await db.get(Folder, asset.folder_id)
+
         # 短链豁免 enforce — share owner 已 verified can_download;
         # 但落 audit 记录每次访问(谁、什么时间)
         await audit.write(
             event_type="share_link_accessed",
             actor_user_id=user_id, target_asset_id=target_id,
+            target_project_id=folder.project_id if folder is not None else None,
             details={"token": token[:6] + "…", "kind": "asset"},
             **ctx,
         )
@@ -224,6 +232,8 @@ async def resolve(
     await audit.write(
         event_type="share_link_accessed",
         actor_user_id=user_id,
+        # W2b:folder 分支同样补 target_project_id(project_id 就在手边)
+        target_project_id=folder.project_id,
         details={"token": token[:6] + "…", "kind": "folder",
                  "folder_id": str(target_id)},
         **ctx,

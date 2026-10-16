@@ -37,19 +37,35 @@ ShareKind = Literal["asset", "folder"]
 async def create_share(
     *,
     audit: AuditService,
+    db: AsyncSession,
     kind: ShareKind,
     target_id: uuid.UUID,
     sharer_user_id: uuid.UUID,
     expires_in_seconds: int,
     requires_login: bool = True,
 ) -> dict[str, Any]:
-    """生成短链 token + 写 audit;不查 target 存在性(调用方 router 自己 enforce)。"""
+    """生成短链 token + 写 audit;不查 target 存在性(调用方 router 自己 enforce)。
+
+    W2b:audit 补 target_project_id —— asset 分支按 asset→folder 链取,folder
+    分支取 folder.project_id(取法照 target_resolve.resolve_target_name_and_project
+    的分派;目标行被并发删的竞速窗口回 None,不炸)。
+    """
     token = secrets.token_urlsafe(24)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
+    target_project_id: uuid.UUID | None = None
+    if kind == "asset":
+        asset = await db.get(Asset, target_id)
+        if asset is not None:
+            folder = await db.get(Folder, asset.folder_id)
+            target_project_id = folder.project_id if folder is not None else None
+    else:
+        folder = await db.get(Folder, target_id)
+        target_project_id = folder.project_id if folder is not None else None
     await audit.write(
         event_type="share_link_created",
         actor_user_id=sharer_user_id,
         target_asset_id=target_id if kind == "asset" else None,
+        target_project_id=target_project_id,
         details={
             "kind": kind,
             "target_id": str(target_id),

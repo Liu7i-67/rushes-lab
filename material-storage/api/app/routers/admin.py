@@ -34,6 +34,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from app.db.session import get_db
 from app.db.tables import (
+    Asset,
     AuditEvent,
     BaiduBackupTask,
     BaiduBackupTaskFile,
@@ -84,10 +85,35 @@ class AuditOut(BaseModel):
     actor_name: str | None
     actor_open_id: str | None
     target_asset_id: str | None
+    # W2b:批量反查的人类可读名(纯展示派生列,不入库);purge 后 asset 行已删
+    # → 回 null,前端回落显示 key
+    target_asset_filename: str | None = None
     target_project_id: str | None
+    target_project_name: str | None = None
     target_minio_key: str | None
     request_ip: str | None
     details: dict
+
+
+async def _resolve_audit_target_names(
+    db: AsyncSession, asset_ids: set[uuid.UUID],
+) -> dict[uuid.UUID, tuple[str, str]]:
+    """W2b:按 target_asset_id 集合一次批量反查 (filename, project_name)。
+
+    assets JOIN folders JOIN projects 的独立 IN 查询(**勿在 audit 主列表查询上
+    JOIN**,方案 §3.2);purge 后 asset 行已删 → 不在返回 dict,调用方按 id 取
+    不到即回 null(差集回填口径,事件行本身不受影响:target_asset_id 是
+    ondelete SET NULL)。folder/project 行总在(FK 约束),INNER JOIN 够用。
+    """
+    if not asset_ids:
+        return {}
+    res = await db.execute(
+        select(Asset.id, Asset.filename, Project.name)
+        .join(Folder, Asset.folder_id == Folder.id)
+        .join(Project, Folder.project_id == Project.id)
+        .where(Asset.id.in_(asset_ids))
+    )
+    return {row[0]: (row[1], row[2]) for row in res.all()}
 
 
 def _build_audit_query(
@@ -134,8 +160,15 @@ async def list_audit(
         actor_user_id, actor_open_id, event_type, project_id, from_time, to_time,
     ).order_by(AuditEvent.event_time.desc()).limit(limit).offset(offset)
     res = await db.execute(stmt)
-    return [
-        AuditOut(
+    events = res.scalars().all()
+    # W2b:页内 target_asset_id 集合一次批量反查名字(无 N+1,勿在主查询上 JOIN)
+    names = await _resolve_audit_target_names(
+        db, {e.target_asset_id for e in events if e.target_asset_id},
+    )
+    out: list[AuditOut] = []
+    for e in events:
+        pair = names.get(e.target_asset_id) if e.target_asset_id else None
+        out.append(AuditOut(
             id=str(e.id),
             event_type=e.event_type,
             event_time=e.event_time,
@@ -143,13 +176,14 @@ async def list_audit(
             actor_name=e.actor_name_snapshot,
             actor_open_id=e.actor_open_id_snapshot,
             target_asset_id=str(e.target_asset_id) if e.target_asset_id else None,
+            target_asset_filename=pair[0] if pair else None,
             target_project_id=str(e.target_project_id) if e.target_project_id else None,
+            target_project_name=pair[1] if pair else None,
             target_minio_key=e.target_minio_key,
             request_ip=e.request_ip,
             details=e.details or {},
-        )
-        for e in res.scalars().all()
-    ]
+        ))
+    return out
 
 
 @router.get("/audit/export.csv")
@@ -176,7 +210,8 @@ async def export_audit_csv(
         yield "﻿".encode()
         writer.writerow([
             "time", "event_type", "actor_name", "actor_open_id",
-            "target_project_id", "target_asset_id", "target_minio_key",
+            "target_project_id", "target_project_name",
+            "target_asset_id", "target_asset_filename", "target_minio_key",
             "request_ip", "details_json",
         ])
         yield buf.getvalue().encode()
@@ -184,21 +219,33 @@ async def export_audit_csv(
 
         import json as _json
         res = await db.execute(stmt)
-        for e in res.scalars().all():
-            writer.writerow([
-                e.event_time.isoformat() if e.event_time else "",
-                e.event_type,
-                e.actor_name_snapshot or "",
-                e.actor_open_id_snapshot or "",
-                str(e.target_project_id) if e.target_project_id else "",
-                str(e.target_asset_id) if e.target_asset_id else "",
-                e.target_minio_key or "",
-                e.request_ip or "",
-                _json.dumps(e.details or {}, ensure_ascii=False),
-            ])
-            chunk = buf.getvalue().encode()
-            if chunk:
-                yield chunk
+        events = res.scalars().all()
+        # W2b:与列表端点同口径补名;单次 limit 50000 不能照搬一条大 IN,
+        # 按 1000 一批分批反查拼装(方案 §3.2)
+        batch_size = 1000
+        for i in range(0, len(events), batch_size):
+            chunk = events[i:i + batch_size]
+            names = await _resolve_audit_target_names(
+                db, {e.target_asset_id for e in chunk if e.target_asset_id},
+            )
+            for e in chunk:
+                pair = names.get(e.target_asset_id) if e.target_asset_id else None
+                writer.writerow([
+                    e.event_time.isoformat() if e.event_time else "",
+                    e.event_type,
+                    e.actor_name_snapshot or "",
+                    e.actor_open_id_snapshot or "",
+                    str(e.target_project_id) if e.target_project_id else "",
+                    pair[1] if pair else "",
+                    str(e.target_asset_id) if e.target_asset_id else "",
+                    pair[0] if pair else "",
+                    e.target_minio_key or "",
+                    e.request_ip or "",
+                    _json.dumps(e.details or {}, ensure_ascii=False),
+                ])
+            chunk_out = buf.getvalue().encode()
+            if chunk_out:
+                yield chunk_out
                 buf.seek(0); buf.truncate()
 
     filename = f"audit-{datetime.now().strftime('%Y%m%d-%H%M%S')}.csv"

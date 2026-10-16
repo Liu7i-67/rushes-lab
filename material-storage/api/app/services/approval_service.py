@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.tables import ApprovalRequest, User
 from app.services.audit import AuditService
 from app.services.permissions import PermissionsService
+from app.services.target_resolve import resolve_target_name_and_project
 
 log = logging.getLogger(__name__)
 
@@ -167,10 +168,18 @@ async def decide(
     await db.commit()
     await db.refresh(approval)
 
+    # W2b:审计补 target_project_id —— 按 target_type 分派取法(folder/
+    # sensitive_folder→folder.project_id、asset→所属 folder 的 project_id、
+    # project→自身),复用 target_resolve 的分派 helper;目标行被并发删的
+    # 竞速窗口回 None,不炸
+    _, audit_project_id = await resolve_target_name_and_project(
+        db, approval.target_type, approval.target_id,
+    )
     await audit.write(
         event_type="approval_state_changed",
         actor_user_id=decider_user_id,
         target_asset_id=approval.target_id if approval.target_type == "asset" else None,
+        target_project_id=audit_project_id,
         details={
             "approval_id": str(approval.id),
             "new_status": approval.status,

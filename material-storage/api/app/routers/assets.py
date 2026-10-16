@@ -8,6 +8,7 @@ import asyncio
 import logging
 import unicodedata
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, cast
 from urllib.parse import quote
@@ -32,6 +33,9 @@ from app.deps import (
     get_request_context,
 )
 from app.models import (
+    AssetBatchMoveIn,
+    AssetBatchMoveOut,
+    AssetBatchMoveSkipOut,
     AssetBatchPrefixIn,
     AssetListOut,
     AssetMetaUpdateIn,
@@ -47,7 +51,7 @@ from app.models import (
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
 from app.services.org import user_is_org_file_deleter
-from app.services.permissions import PermissionsService
+from app.services.permissions import PermissionsService, is_already_exists_error
 from app.services.presign import PresignService, request_base_from
 from app.settings import get_settings
 
@@ -93,6 +97,22 @@ async def create_upload(
     # filename 带 "/" 会把 key 拼到 folder 前缀之外(complete 的前缀校验必 400),create 期拦掉
     if "/" in payload.filename:
         raise HTTPException(400, "filename 不能包含路径分隔符")
+
+    # 同夹同名查重(D1-B 前置,决策 14):系统此前靠「一夹一名」的 key 唯一间接
+    # 保证同名互斥;目录树重组(D1-B:物理对象不动、DB 重算 prefix)后该不变量
+    # 失去物理支撑,上传侧补应用层查重 —— 与百度导入 (folder_id, filename) 查重
+    # 同口径(baidu_backup.py,排除软删行,回收站恢复后不误拦)。在 create 期
+    # (签 multipart 之前)失败,不产生 MinIO 半成品。
+    dup = await db.scalar(
+        select(func.count()).select_from(Asset).where(
+            Asset.folder_id == payload.folder_id,
+            Asset.filename == payload.filename,
+            Asset.deleted_at.is_(None),
+        )
+    )
+    if dup:
+        raise HTTPException(409, "该文件夹已存在同名文件,请重命名后重新上传")
+
     key = f"{folder.minio_prefix.rstrip('/')}/{payload.filename}"
     bucket = await _project_bucket(db, folder.project_id)
 
@@ -423,6 +443,8 @@ async def restore_asset(
     # sensitive 判定与 delete/list_trash 特判同源:随所属 folder.is_sensitive
     folder = await db.get(Folder, asset.folder_id)
     is_sensitive = folder is not None and folder.is_sensitive
+    # W2b:审计补 target_project_id(folder 行被并发删的竞速窗口回 None,不炸)
+    project_id = folder.project_id if folder is not None else None
 
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
@@ -442,7 +464,8 @@ async def restore_asset(
     if not allowed:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            target_asset_id=asset_id, target_project_id=project_id,
+            target_minio_key=asset.minio_key,
             details={"action": "restore_asset", "reason": "openfga can_admin false"},
             **ctx,
         )
@@ -453,7 +476,8 @@ async def restore_asset(
     if is_sensitive and not is_system_admin:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            target_asset_id=asset_id, target_project_id=project_id,
+            target_minio_key=asset.minio_key,
             details={"action": "restore_asset", "reason": "sensitive non-system-admin"},
             **ctx,
         )
@@ -473,7 +497,8 @@ async def restore_asset(
 
     await audit.write(
         event_type="asset_restored", actor_user_id=user_id,
-        target_asset_id=asset_id, target_minio_key=asset.minio_key,
+        target_asset_id=asset_id, target_project_id=project_id,
+        target_minio_key=asset.minio_key,
         details={"filename": asset.filename},
         **ctx,
     )
@@ -993,6 +1018,344 @@ async def batch_prefix(
     )
 
 
+# ─── 批量移动(W6 一期:项目内移动,方案 §6.2)─────────────────────────────────
+# 单次 OpenFGA write 的 tuple 操作余量上限(服务端默认 100/请求,留 10 余量);
+# 每资产占 1 写 + N 删(通常 2)→ 约 40-50 资产/批,与方案「约 50 资产/批」对齐
+_FGA_MOVE_BATCH_OPS = 90
+_FGA_MOVE_ATTEMPTS = 3  # 单批 / 降级单资产的写尝试次数(含首次)
+
+
+async def _assert_target_not_sensitive_descendant(db: AsyncSession, target: Folder) -> None:
+    """目标夹 = sensitive 夹本身允许(门槛 can_admin 在权限段);目标夹是
+    「sensitive 后代的普通子夹」(孤儿位,badge 方案 §6.3)一律拒绝 —— 含系统
+    admin。沿 parent 链上行判敏感(sensitive 是子树级语义);seen 集合防脏数据
+    成环死循环(W4/W5 的防环是写入侧防线,这里是读取侧兜底)。"""
+    if target.is_sensitive:
+        return
+    seen: set[uuid.UUID] = {target.id}
+    parent_id = target.parent_folder_id
+    while parent_id is not None and parent_id not in seen:
+        seen.add(parent_id)
+        parent = await db.get(Folder, parent_id)
+        if parent is None:
+            break  # 父链断(并发删):继续上行无意义,按可判定的部分放行
+        if parent.is_sensitive:
+            raise HTTPException(400, "目标文件夹位于敏感目录之下,不允许作为移动目标")
+        parent_id = parent.parent_folder_id
+
+
+@router.post("/batch-move", response_model=AssetBatchMoveOut)
+async def batch_move_assets(
+    payload: AssetBatchMoveIn,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  # FastAPI DI,repo 全量同款
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  # FastAPI DI,repo 全量同款
+    audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(get_current_user),  # noqa: B008  # FastAPI DI,repo 全量同款
+    is_system_admin: bool = Depends(get_is_system_admin),
+    ctx: dict[str, Any] = Depends(get_request_context),  # noqa: B008  # FastAPI DI,repo 全量同款
+) -> AssetBatchMoveOut:
+    """项目内批量移动文件(方案 §6.2 一期):object_key 不动,只 UPDATE folder_id
+    + OpenFGA parent tuple 删旧写新(每资产一对放同一 WriteRequest 原子交换)。
+
+    校验链:目标夹存在(404);整批恰属一个项目(跨项目混批 400,project_ids
+    归集照 batch-prefix 先例);target_folder.project_id == 批次项目(不等 400,
+    防止「项目内」端点成为事实跨项目入口);目标夹为 sensitive 后代的普通子夹
+    (孤儿位)一律 400。软删行/不存在 → skip=deleted;已在目标夹 →
+    skip=duplicate_location;目标夹已有同名未软删资产(或同批先到者)→
+    skip=duplicate_filename(决策 15,与百度导入 (folder_id, filename) 查重同
+    口径,排除软删)。
+
+    权限(batch-prefix 分组逐组 check 同款):源夹 sensitive → can_admin(
+    sensitive 夹 can_upload 实为 downloader 级,删除侧同款理由),普通 →
+    can_upload;目标夹 sensitive → can_admin,普通 → can_upload;系统 admin
+    直通;任一组无权限 → 403 整批不执行,文案笼统不带 folder 名(反探测)。
+
+    实现四步:① 去重 + SELECT 快照(batch-prefix ① 同款);② Python 端分桶
+    (skip 三类 / 可迁);③ Core 语句逐 id UPDATE 单事务(不用 ORM flush,
+    StaleDataError 先例;rowcount=0 补查归因保证严格对账),commit 后 ④ FGA:
+    逐资产 read 现有 parent tuple 取精确 user 形态(read-then-delete,assets.py
+    硬删分支先例 —— 历史导入侧有一律按 folder: 拼的行,按源夹敏感性拼旧形态会
+    删空残留第二父),分批写(失败重试 → 降级单资产 → 仍败进 fga_pending,
+    DB 已 commit 不以 500 掩盖;is_already_exists 视作成功 —— OpenFGA write
+    整请求原子,重试撞 already exists 说明前一次实际已生效)。恒等式:
+    moved_count + len(skipped) + len(fga_pending) = 去重后提交数。
+    """
+    user_id = user.id
+
+    # ① 去重(dict.fromkeys 保序,防重复 id 双计)+ 快照(软删行查不到 → deleted)
+    unique_ids = list(dict.fromkeys(payload.asset_ids))
+    rows = (
+        await db.execute(
+            select(
+                Asset.id, Asset.filename, Asset.folder_id,
+                Folder.project_id, Folder.is_sensitive,
+            )
+            .join(Folder, Asset.folder_id == Folder.id)
+            .where(Asset.id.in_(unique_ids), Asset.deleted_at.is_(None))
+        )
+    ).all()
+    snap: dict[uuid.UUID, tuple[str, uuid.UUID]] = {}  # asset_id -> (filename, 源夹)
+    folder_groups: dict[uuid.UUID, bool] = {}  # folder_id -> is_sensitive
+    project_ids: set[uuid.UUID] = set()
+    for asset_id, filename, folder_id, project_id, is_sensitive in rows:
+        snap[asset_id] = (filename, folder_id)
+        folder_groups.setdefault(folder_id, is_sensitive)
+        project_ids.add(project_id)
+    batch_project = next(iter(project_ids)) if len(project_ids) == 1 else None
+
+    target = await db.get(Folder, payload.target_folder_id)
+    if not target:
+        raise HTTPException(404, "target folder not found")
+    # 一期项目内硬校验:混批 / 跨项目目标都在写库前拦下(空批=全软删,无源项目,
+    # 不走此闸,照常返回全 skip)
+    if len(project_ids) > 1:
+        raise HTTPException(400, "所选文件属于多个项目,一期仅支持同一项目内批量移动")
+    if batch_project is not None and target.project_id != batch_project:
+        raise HTTPException(400, "目标文件夹与所选文件不属于同一个项目")
+    await _assert_target_not_sensitive_descendant(db, target)
+
+    # ② 权限:源夹逐组 + 目标夹(batch-prefix 同款分组 check;sensitive 一律 can_admin)
+    denied_folders: list[uuid.UUID] = []
+    for folder_id, is_sensitive in folder_groups.items():
+        if is_system_admin:
+            continue  # 系统 admin 直通
+        allowed = await permissions.check(
+            user_subject=user.subject,
+            relation="can_admin" if is_sensitive else "can_upload",
+            object_type="sensitive_folder" if is_sensitive else "folder",
+            object_id=str(folder_id),
+        )
+        if not allowed:
+            denied_folders.append(folder_id)
+    target_allowed = True
+    if not is_system_admin:
+        target_allowed = await permissions.check(
+            user_subject=user.subject,
+            relation="can_admin" if target.is_sensitive else "can_upload",
+            object_type="sensitive_folder" if target.is_sensitive else "folder",
+            object_id=str(target.id),
+        )
+    if denied_folders or not target_allowed:
+        # HTTP 文案笼统不带 folder 名(反探测);audit 略详(folder_id)供溯源
+        await audit.write(
+            event_type="access_denied",
+            actor_user_id=user_id,
+            target_project_id=batch_project,
+            details={
+                "action": "batch_move",
+                "reason": "openfga check false",
+                "denied_folder_ids": [str(f) for f in denied_folders],
+                "target_folder_id": str(target.id),
+                "target_folder_denied": not target_allowed,
+            },
+            **ctx,
+        )
+        raise HTTPException(403, "所选部分或全部文件无操作权限")
+
+    # ②b Python 端分桶:deleted(快照查不到)/ duplicate_location / duplicate_filename
+    skipped: list[AssetBatchMoveSkipOut] = []
+    for asset_id in unique_ids:
+        if asset_id not in snap:
+            skipped.append(AssetBatchMoveSkipOut(asset_id=asset_id, reason="deleted"))
+    # 目标夹同名未软删占用名(一次 IN 预检,排除软删 —— 与百度导入口径对齐)
+    occupied_names: set[str] = set()
+    candidate_names = {row[0] for row in snap.values()}
+    if candidate_names:
+        occupied_rows = await db.execute(
+            select(Asset.filename).where(
+                Asset.folder_id == target.id,
+                Asset.deleted_at.is_(None),
+                Asset.filename.in_(candidate_names),
+            )
+        )
+        occupied_names = {r[0] for r in occupied_rows.all()}
+    movable: list[uuid.UUID] = []
+    seen_names: set[str] = set()  # 批内同名互斥:同批两个同名文件只迁先到者
+    for asset_id in unique_ids:
+        row = snap.get(asset_id)
+        if row is None:
+            continue  # 已计 deleted
+        filename, folder_id = row
+        if folder_id == target.id:
+            skipped.append(
+                AssetBatchMoveSkipOut(asset_id=asset_id, reason="duplicate_location")
+            )
+            continue
+        if filename in occupied_names or filename in seen_names:
+            skipped.append(
+                AssetBatchMoveSkipOut(asset_id=asset_id, reason="duplicate_filename")
+            )
+            continue
+        seen_names.add(filename)
+        movable.append(asset_id)
+
+    # ③ 逐 id UPDATE(单事务;rowcount=0 = SELECT 与 UPDATE 之间并发软删/hard
+    # purge,补查归因保证对账闭合 —— batch-prefix ③/④ 同款)
+    moved_ids: list[uuid.UUID] = []
+    raced_ids: list[uuid.UUID] = []
+    for asset_id in movable:
+        result = await db.execute(
+            update(Asset)
+            .where(Asset.id == asset_id, Asset.deleted_at.is_(None))
+            .values(folder_id=payload.target_folder_id)
+        )
+        # asyncpg DML 实际返回 CursorResult(带 rowcount);基类 Result 的类型
+        # 标注未声明该属性,cast 仅为过 mypy strict,运行时行为不变
+        if cast("CursorResult[Any]", result).rowcount == 1:
+            moved_ids.append(asset_id)
+        else:
+            raced_ids.append(asset_id)
+    for asset_id in raced_ids:
+        cur = (
+            await db.execute(select(Asset.deleted_at).where(Asset.id == asset_id))
+        ).first()
+        if cur is None or cur[0] is not None:
+            skipped.append(AssetBatchMoveSkipOut(asset_id=asset_id, reason="deleted"))
+        else:
+            # 理论不可达(UPDATE 谓词只有软删条件);留桶兜底保证对账闭合,不 500
+            log.warning(
+                "batch_move reconcile fallback asset=%s target_folder=%s",
+                asset_id, payload.target_folder_id,
+            )
+            skipped.append(AssetBatchMoveSkipOut(asset_id=asset_id, reason="deleted"))
+
+    # 目标夹被并发删除的窗口:FK RESTRICT 在 commit 时撞 assets_folder_id_fkey
+    # (整批回滚,与 complete_upload / batch-prefix 的 IntegrityError→409 同语义)
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        await db.rollback()
+        raise HTTPException(409, "目标文件夹已被并发删除,请刷新后重试") from e
+
+    # ④ FGA parent tuple 交换 —— DB commit 成功之后(folders.py 删除先例时序;
+    # §8 红线:FGA 改写一律在 DB commit 后)。失败分叉不回滚 DB、不 500:重试
+    # → 降级单资产 → 仍败进 fga_pending(该资产 DB 已在新夹、FGA parent 仍指
+    # 旧夹,后台幂等巡检兜底属二期增强)。
+    fga_pending: list[uuid.UUID] = []
+    if moved_ids:
+        from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
+
+        new_parent_user = (
+            f"sensitive_folder:{target.id}" if target.is_sensitive else f"folder:{target.id}"
+        )
+        plans: list[tuple[uuid.UUID, list[ClientTuple], list[ClientTuple]]] = []
+        for asset_id in moved_ids:
+            try:
+                tuples = await permissions.read_all_tuples(
+                    object_type="asset", object_id=str(asset_id), relation="parent",
+                )
+            except Exception as e:  # 读不到 = tuple 态未知,只能进 pending
+                log.warning(
+                    "batch_move parent tuple read fail asset=%s err=%s", asset_id, e,
+                )
+                fga_pending.append(asset_id)
+                continue
+            plans.append((
+                asset_id,
+                [ClientTuple(user=u, relation=r, object=o) for (u, r, o) in tuples],
+                [ClientTuple(
+                    user=new_parent_user, relation="parent", object=f"asset:{asset_id}",
+                )],
+            ))
+
+        def _ops_within(ops: int, plan: tuple[Any, list[ClientTuple], list[ClientTuple]]) -> int:
+            return ops + len(plan[1]) + len(plan[2])
+
+        # 按 tuple 操作数分批(单请求 ≤_FGA_MOVE_BATCH_OPS;病理单资产独占一批)
+        batches: list[list[int]] = []
+        cur_batch: list[int] = []
+        cur_ops = 0
+        for idx, plan in enumerate(plans):
+            plan_ops = len(plan[1]) + len(plan[2])
+            if plan_ops >= _FGA_MOVE_BATCH_OPS:
+                batches.append([idx])
+                continue
+            if _ops_within(cur_ops, plan) > _FGA_MOVE_BATCH_OPS:
+                batches.append(cur_batch)
+                cur_batch, cur_ops = [], 0
+            cur_batch.append(idx)
+            cur_ops = _ops_within(cur_ops, plan)
+        if cur_batch:
+            batches.append(cur_batch)
+
+        async def _write_tuples(
+            writes: list[ClientTuple], deletes: list[ClientTuple],
+        ) -> None:
+            """单次 OpenFGA write;writes 恒非空(每资产恰 1 写)。is_already_exists
+            视作成功:write 整请求原子,重试撞 already exists = 前一次已生效。"""
+            try:
+                await permissions._client.write(
+                    ClientWriteRequest(writes=writes, deletes=deletes or None)
+                )
+            except Exception as e:
+                if is_already_exists_error(e):
+                    return
+                raise
+
+        for batch in batches:
+            writes = [t for idx in batch for t in plans[idx][2]]
+            deletes = [t for idx in batch for t in plans[idx][1]]
+            batch_ok = False
+            for attempt in range(1, _FGA_MOVE_ATTEMPTS + 1):
+                try:
+                    await _write_tuples(writes, deletes)
+                    batch_ok = True
+                    break
+                except Exception as e:  # 网络/校验类都重试后降级
+                    log.warning(
+                        "batch_move fga batch write fail attempt=%d assets=%d err=%s",
+                        attempt, len(batch), e,
+                    )
+                    await asyncio.sleep(0.2 * attempt)
+            if batch_ok:
+                continue
+            # 批失败降级逐资产(default_grants 降级先例):一条坏 tuple 会原子
+            # 拖垮整批,逐资产隔离后仍败的才进 fga_pending
+            for idx in batch:
+                asset_id, olds, news = plans[idx]
+                asset_ok = False
+                for attempt in range(1, _FGA_MOVE_ATTEMPTS + 1):
+                    try:
+                        await _write_tuples(news, olds)
+                        asset_ok = True
+                        break
+                    except Exception as e:
+                        log.warning(
+                            "batch_move fga tuple write fail attempt=%d asset=%s err=%s",
+                            attempt, asset_id, e,
+                        )
+                        await asyncio.sleep(0.2 * attempt)
+                if not asset_ok:
+                    fga_pending.append(asset_id)
+
+    skipped_by_reason: dict[str, int] = dict(Counter(s.reason for s in skipped))
+    await audit.write(
+        event_type="asset_batch_moved",
+        actor_user_id=user_id,
+        # 批次项目(混批已在前面 400 拦下,这里必为单项目或空批的全 deleted)
+        target_project_id=batch_project if batch_project is not None else target.project_id,
+        details={
+            "from_folder_ids": [str(f) for f in folder_groups],
+            "to_folder_id": str(target.id),
+            "moved": len(moved_ids),
+            "skipped_total": len(skipped),
+            "skipped_by_reason": skipped_by_reason,
+            "skipped_sample": [
+                {"asset_id": str(s.asset_id), "reason": s.reason} for s in skipped[:50]
+            ],
+            "moved_sample": [str(a) for a in moved_ids[:50]],
+            "fga_pending_count": len(fga_pending),
+            "fga_pending_sample": [str(a) for a in fga_pending[:50]],
+        },
+        **ctx,
+    )
+    return AssetBatchMoveOut(
+        moved_count=len(moved_ids),
+        skipped=skipped,
+        fga_pending=fga_pending,
+    )
+
+
 # ─── download link ────────────────────────────────────────────────────────────
 class DownloadLinkIn(BaseModel):
     """download-link 可选请求体(移动端下载直连,方案 §3.5)。
@@ -1061,6 +1424,10 @@ async def get_download_link(
     if not asset or asset.deleted_at is not None:
         raise HTTPException(404, "asset not found")
 
+    # W2b:审计补 target_project_id(folder 并发删的竞速窗口回 None,不炸)
+    folder = await db.get(Folder, asset.folder_id)
+    project_id = folder.project_id if folder is not None else None
+
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject,
         relation="can_download",
@@ -1072,6 +1439,7 @@ async def get_download_link(
             event_type="download_denied",
             actor_user_id=user_id,
             target_asset_id=asset_id,
+            target_project_id=project_id,
             target_minio_key=asset.minio_key,
             details={"reason": "openfga can_download false"},
             **ctx,
@@ -1096,6 +1464,7 @@ async def get_download_link(
     await audit.signed_url_issued(
         actor_user_id=user_id,
         target_asset_id=asset.id,
+        target_project_id=project_id,
         target_minio_key=asset.minio_key,
         details={"expires_in_seconds": ttl},
         **ctx,
@@ -1167,6 +1536,9 @@ async def delete_asset(
     # 组织开关分支是否适用、hard 敏感门都靠它
     folder = await db.get(Folder, asset.folder_id)
     is_sensitive = folder is not None and folder.is_sensitive
+    # W2b:审计补 target_project_id;purge(hard)是物理删,target_project_id
+    # 不带 FK、可在删行后照常写入(folder 并发删的竞速窗口回 None,不炸)
+    project_id = folder.project_id if folder is not None else None
 
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject, relation="can_admin",
@@ -1186,7 +1558,8 @@ async def delete_asset(
     if not allowed:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            target_asset_id=asset_id, target_project_id=project_id,
+            target_minio_key=asset.minio_key,
             details={"action": "delete_asset", "reason": "openfga can_admin false"},
             **ctx,
         )
@@ -1197,7 +1570,8 @@ async def delete_asset(
     if hard and is_sensitive and not is_system_admin:
         await audit.write(
             event_type="access_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            target_asset_id=asset_id, target_project_id=project_id,
+            target_minio_key=asset.minio_key,
             details={"action": "delete_asset",
                      "reason": "sensitive non-system-admin (hard)"},
             **ctx,
@@ -1248,9 +1622,11 @@ async def delete_asset(
             log.warning("purge asset tuple cleanup fail asset=%s err=%s", asset_id, e)
 
         # audit 落库:不能带 target_asset_id —— 行已删,audit_events.target_asset_id
-        # 的 FK 会 violations;溯源用 target_minio_key(无 FK)+ details.asset_id
+        # 的 FK 会 violations;溯源用 target_minio_key(无 FK)+ details.asset_id;
+        # target_project_id 同为无 FK 依赖的独立列,行删后照常带(W2b)
         await audit.write(
             event_type="asset_purged", actor_user_id=user_id,
+            target_project_id=project_id,
             target_minio_key=snapshot["key"],
             details={"asset_id": str(asset_id), "filename": snapshot["filename"],
                      "hard": True},
@@ -1271,7 +1647,8 @@ async def delete_asset(
 
     await audit.write(
         event_type="asset_deleted", actor_user_id=user_id,
-        target_asset_id=asset_id, target_minio_key=asset.minio_key,
+        target_asset_id=asset_id, target_project_id=project_id,
+        target_minio_key=asset.minio_key,
         details={"filename": asset.filename, "soft": True},
         **ctx,
     )
@@ -1304,6 +1681,10 @@ async def get_live_preview_url(
     if not live_key:
         raise HTTPException(404, "no live preview(非 livp 或实况转码未生成)")
 
+    # W2b:审计补 target_project_id(folder 并发删的竞速窗口回 None,不炸)
+    folder = await db.get(Folder, asset.folder_id)
+    project_id = folder.project_id if folder is not None else None
+
     allowed = is_system_admin or await permissions.check(
         user_subject=user.subject,
         relation="can_download",
@@ -1313,7 +1694,8 @@ async def get_live_preview_url(
     if not allowed:
         await audit.write(
             event_type="download_denied", actor_user_id=user_id,
-            target_asset_id=asset_id, target_minio_key=asset.minio_key,
+            target_asset_id=asset_id, target_project_id=project_id,
+            target_minio_key=asset.minio_key,
             details={"reason": "openfga can_download false", "kind": "live_preview"},
             **ctx,
         )
@@ -1326,6 +1708,7 @@ async def get_live_preview_url(
     await audit.signed_url_issued(
         actor_user_id=user_id,
         target_asset_id=asset.id,
+        target_project_id=project_id,
         target_minio_key=asset.minio_key,
         details={"kind": "live_preview", "expires_in_seconds": ttl},
         **ctx,

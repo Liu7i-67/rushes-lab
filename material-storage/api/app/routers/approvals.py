@@ -45,6 +45,7 @@ from app.services.notifications import (
 )
 from app.services.audit import AuditService
 from app.services.permissions import PermissionsService
+from app.services.target_resolve import resolve_target_name_and_project
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -56,7 +57,6 @@ async def _enrich_out(db: AsyncSession, approval: ApprovalRequest) -> ApprovalOu
     另补审批人视角需要的信息:申请人姓名(requester_name)+ asset 目标的
     folder_id(审批行跳转到所在文件夹用)。
     """
-    from app.services.target_resolve import resolve_target_name_and_project
     out = ApprovalOut.model_validate(approval)
     name, ppid = await resolve_target_name_and_project(
         db, approval.target_type, approval.target_id,
@@ -147,10 +147,17 @@ async def create_approval(
     await db.commit()
     await db.refresh(approval)
 
+    # W2b:审计补 target_project_id —— 按 target_type 分派取法(folder/sensitive_
+    # folder→folder.project_id、asset→所属 folder 的 project_id、project→自身),
+    # 复用 target_resolve 的分派 helper;目标行被并发删的竞速窗口回 None,不炸
+    _, audit_project_id = await resolve_target_name_and_project(
+        db, payload.target_type, payload.target_id,
+    )
     await audit.write(
         event_type="approval_submitted",
         actor_user_id=user_id,
         target_asset_id=payload.target_id if payload.target_type == "asset" else None,
+        target_project_id=audit_project_id,
         details={
             "approval_id": str(approval.id),
             "target_type": payload.target_type,
