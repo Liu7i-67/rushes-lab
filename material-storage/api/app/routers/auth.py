@@ -11,6 +11,7 @@ endpoints:
 from __future__ import annotations
 
 import logging
+import uuid
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -251,6 +252,29 @@ async def logout() -> JSONResponse:
 # ─── 本地账号密码登录(#149)— #154 后为纯本地主路径 ──────────────────────────
 
 
+async def _audit_login_locked(
+    audit: AuditService,
+    *,
+    user_id: uuid.UUID | None,
+    ip: str,
+    ctx: dict[str, str | None],
+    username: str,
+    dimensions: list[str],
+) -> None:
+    """触发登录锁的审计事件(W1:锁定期间零审计盲区补齐)。
+
+    调用形态照既有 local_login_failed(request_ip 是独立审计列,
+    details 只放 username / 命中维度);audit.write 自带 commit。
+    """
+    await audit.write(
+        event_type="local_login_locked",
+        actor_user_id=user_id,
+        request_ip=ip,
+        user_agent=ctx.get("user_agent"),
+        details={"username": username, "dimensions": dimensions},
+    )
+
+
 @router.post("/local/login")
 async def local_login(
     body: LocalLoginIn,
@@ -285,7 +309,7 @@ async def local_login(
         and local_auth.verify_password(body.password, user.password_hash)
     )
     if not ok:
-        await local_auth.record_failure(ip, username)
+        locked_dims = await local_auth.record_failure(ip, username)
         await audit.write(
             event_type="local_login_failed",
             actor_user_id=user.id if user else None,
@@ -293,11 +317,17 @@ async def local_login(
             user_agent=ctx.get("user_agent"),
             details={"username": username, "reason": "bad_credentials"},
         )
+        if locked_dims:
+            # W1:触发锁瞬间补审计(此前锁定期 429 不写任何审计,存在盲区)
+            await _audit_login_locked(
+                audit, user_id=user.id if user else None, ip=ip, ctx=ctx,
+                username=username, dimensions=locked_dims,
+            )
         raise HTTPException(401, "用户名或密码错误")
 
     assert user is not None  # ok=True 蕴含 user 存在
     if not user.is_active:
-        await local_auth.record_failure(ip, username)
+        locked_dims = await local_auth.record_failure(ip, username)
         await audit.write(
             event_type="local_login_failed",
             actor_user_id=user.id,
@@ -305,6 +335,11 @@ async def local_login(
             user_agent=ctx.get("user_agent"),
             details={"username": username, "reason": "inactive"},
         )
+        if locked_dims:
+            await _audit_login_locked(
+                audit, user_id=user.id, ip=ip, ctx=ctx,
+                username=username, dimensions=locked_dims,
+            )
         raise HTTPException(403, "用户已离职 / 被禁用,请联系管理员")
 
     await local_auth.reset_failures(ip, username)

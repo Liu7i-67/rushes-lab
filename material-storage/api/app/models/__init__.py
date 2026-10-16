@@ -555,6 +555,10 @@ class DirectoryUserOut(BaseModel):
     must_change_password: bool
     created_at: datetime
     resigned_at: datetime | None
+    # W1:登录锁定状态,**只反映 user 维度**(IP 维度命中时登录照样 429 但不在此
+    # 显示,前端 pill 文案需标注「用户名维度」);列表端点批量 pipeline MGET 三形态
+    # 锁 key,详情/建号/编辑响应单查真实值;锁定状态以实时查 Redis 为准,不从审计推断
+    login_locked: bool = False
 
 
 class UserCreateIn(BaseModel):

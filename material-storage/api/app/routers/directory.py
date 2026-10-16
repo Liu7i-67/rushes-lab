@@ -4,13 +4,14 @@
 remove_user_from_group 直接同步 OpenFGA tuple(不再经过飞书通讯录)。
 
 endpoints:
-  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active)
+  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active / login_locked[W1,仅 user 维度])
   POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning)
   GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序)
   PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3)
   POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit
   POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
-  POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码)
+  POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码;顺带清登录锁 W1)
+  POST   /api/v1/admin/directory/users/{id}/unlock          — 重置登录锁定(user 维度 + 审计反查 IP 连带清,W1)
   GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account flag 读回)
   POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account)
   PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account(tri-state)
@@ -23,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
@@ -32,10 +33,11 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Group, GroupMembership, User
+from app.db.tables import AuditEvent, Group, GroupMembership, User
 from app.deps import (
     CurrentUser,
     get_audit,
+    get_local_auth,
     get_permissions,
     get_request_context,
     require_system_admin,
@@ -48,6 +50,7 @@ from app.models import (
     UserUpdateIn,
 )
 from app.services.audit import AuditService
+from app.services.local_auth import LocalAuthService
 from app.services.org import get_default_organization
 from app.services.passwords import generate_temp_password, hash_password
 from app.services.permissions import (
@@ -140,8 +143,13 @@ async def list_directory_users(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUsersPageOut:
-    """用户列表分页(F5/D4/D5):total=同条件(q/is_active)count,不含 limit/offset。"""
+    """用户列表分页(F5/D4/D5):total=同条件(q/is_active)count,不含 limit/offset。
+
+    W1:当页用户批量回显 login_locked(pipeline 一次往返 MGET 三形态锁 key;
+    **只反映 user 维度**,IP 维度命中时登录照样 429 但不在此显示)。
+    """
     _ = user.id
     term = q.strip()
     conds = []
@@ -162,14 +170,17 @@ async def list_directory_users(
     total = (await db.execute(count_stmt)).scalar_one()
     stmt = stmt.order_by(User.created_at.desc()).limit(limit).offset(offset)
     res = await db.execute(stmt)
+    users = list(res.scalars().all())
+    locked_map = await local_auth.users_login_locked(users)
     return DirectoryUsersPageOut(
         items=[
             DirectoryUserOut(
                 id=u.id, username=u.username, name=u.name, email=u.email,
                 is_active=u.is_active, must_change_password=u.must_change_password,
                 created_at=u.created_at, resigned_at=u.resigned_at,
+                login_locked=locked_map.get(u.id, False),
             )
-            for u in res.scalars().all()
+            for u in users
         ],
         total=total, limit=limit, offset=offset,
     )
@@ -183,6 +194,7 @@ async def create_directory_user(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
     ctx: dict = Depends(get_request_context),  # type: ignore[type-arg]  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> UserCreateOut:
     """创建本地用户:生成临时密码 + must_change_password=true(P1 首登强制改密)。
@@ -228,6 +240,8 @@ async def create_directory_user(
         id=new_user.id, username=new_user.username, name=new_user.name,
         email=new_user.email, is_active=True, must_change_password=True,
         created_at=new_user.created_at, resigned_at=None,
+        # W1:真实态单查(新号一般未锁,但 name 形态 key 跨同名用户共享,可能带出)
+        login_locked=(await local_auth.users_login_locked([new_user]))[new_user.id],
         temporary_password=temp_pw,
     )
 
@@ -237,8 +251,9 @@ async def get_directory_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUserDetailOut:
-    """用户详情(§2):基础字段 + 所属组(group_names 与 group_ids 同序,按组名排序)。"""
+    """用户详情(§2):基础字段 + 所属组(group_names 与 group_ids 同序,按组名排序)+ W1 登录锁定态。"""
     _ = user.id
     target = await db.get(User, user_id)
     if target is None:
@@ -255,6 +270,7 @@ async def get_directory_user(
         email=target.email, is_active=target.is_active,
         must_change_password=target.must_change_password,
         created_at=target.created_at, resigned_at=target.resigned_at,
+        login_locked=(await local_auth.users_login_locked([target]))[target.id],
         group_ids=[g.id for _gm, g in rows],
         group_names=[g.name for _gm, g in rows],
     )
@@ -269,6 +285,7 @@ async def update_directory_user(
     user: CurrentUser = Depends(require_system_admin),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
     ctx: dict = Depends(get_request_context),  # type: ignore[type-arg]  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUserOut:
     """编辑用户(§3/D3):name / email 原值更新 + group_ids 全量同步 diff。
@@ -341,6 +358,7 @@ async def update_directory_user(
         email=target.email, is_active=target.is_active,
         must_change_password=target.must_change_password,
         created_at=target.created_at, resigned_at=target.resigned_at,
+        login_locked=(await local_auth.users_login_locked([target]))[target.id],
     )
 
 
@@ -460,23 +478,99 @@ async def reset_directory_user_password(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
     audit: AuditService = Depends(get_audit),
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> UserResetPasswordOut:
-    """admin 重置密码:新临时密码 + must_change_password=true(不留改密能力给普通流程)。"""
+    """admin 重置密码:新临时密码 + must_change_password=true(不留改密能力给普通流程)。
+
+    W1(决策 2):重置密码语义上伴随解锁 —— 顺带清三形态 user 维度登录锁与
+    失败计数(与 unlock 端点共用 clear_locks;IP 维度不在此连带清)。
+    """
     target = await _get_active_user(db, user_id, "reset")
     temp_pw = generate_temp_password()
     target.password_hash = hash_password(temp_pw)
     target.must_change_password = True
     await db.commit()
 
+    cleared = await local_auth.clear_locks(target)
     await audit.write(
         event_type="user_password_reset",
         actor_user_id=user.id,
-        details={"user_id": str(user_id), "username": target.username, "name": target.name},
+        details={"user_id": str(user_id), "username": target.username, "name": target.name,
+                 "login_locks_cleared_forms": cleared.forms},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("password reset user=%s by admin=%s", user_id, user.id)
+    log.info("password reset user=%s by admin=%s locks_cleared=%s",
+             user_id, user.id, cleared.forms)
     return UserResetPasswordOut(temporary_password=temp_pw)
+
+
+@router.post("/users/{user_id}/unlock")
+async def unlock_directory_user(
+    user_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008  FastAPI DI,repo 全量同款
+    audit: AuditService = Depends(get_audit),  # noqa: B008  FastAPI DI,repo 全量同款
+    local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
+) -> dict[str, object]:
+    """管理员重置登录锁定(W1,方案 §1.2;与 reset-password 同构的行操作)。
+
+    - user 维度:对 {username,email,name} 三形态逐一 DEL auth:lock:user:{u} +
+      auth:fail:user:{u},u 取非空去重 lower()(登录三级匹配会把失败散落三种
+      key,漏形态 = 静默清空);
+    - **IP 维度连带清**(方案决策 1):is_locked 任一维度命中即 429,只解 user
+      维度时同 IP 锁仍拦(W2a 落地前公网入口更是全员共用一个 IP 桶,不连带清
+      解锁大概率无效)—— 反查近 24h local_login_failed(details.username 存的
+      是原始输入未 lower,比对须按 lower 口径,精确匹配会静默漏清)的
+      request_ip 去重集,一并 DEL auth:lock:ip / auth:fail:ip。连带清会短暂
+      削弱对该 IP 的暴力破解防护(15 分钟窗口),系统 admin 门槛下可接受;
+    - 审计 user_login_unlocked(details 记实际清除的形态与 IP 集;name 形态
+      key 跨显示名相同的用户共享,清单供事后解释)。
+    """
+    target = await db.get(User, user_id)
+    if target is None:
+        raise HTTPException(404, f"user not found:{user_id}")
+
+    cleared = await local_auth.clear_locks(target)
+
+    # IP 连带清:近 24h 该用户名三形态的登录失败来源 IP 去重集
+    # (request_ip 是审计列;details.username 是 JSONB,.astext 后 lower 比对)
+    forms = LocalAuthService.user_key_forms(target)
+    since = datetime.now(UTC) - timedelta(hours=24)
+    res = await db.execute(
+        select(AuditEvent.request_ip)
+        .where(
+            AuditEvent.event_type == "local_login_failed",
+            AuditEvent.event_time >= since,
+            func.lower(AuditEvent.details["username"].astext).in_(forms),
+            AuditEvent.request_ip.isnot(None),
+        )
+        .distinct()
+    )
+    failed_ips = [row[0] for row in res.all() if row[0] is not None]
+    cleared_ips = await local_auth.clear_ip_locks(failed_ips)
+
+    await audit.write(
+        event_type="user_login_unlocked",
+        actor_user_id=user.id,
+        details={
+            "user_id": str(user_id), "username": target.username,
+            "name": target.name,
+            "cleared_user_forms": cleared.forms,
+            "cleared_ips": cleared_ips,
+            "was_locked": cleared.was_locked,
+        },
+        request_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    log.info("user unlocked id=%s by admin=%s forms=%s ips=%d",
+             user_id, user.id, cleared.forms, len(cleared_ips))
+    return {
+        "cleared_user_forms": cleared.forms,
+        "cleared_ips": cleared_ips,
+        "was_locked": cleared.was_locked,
+    }
 
 
 # ─── groups ───────────────────────────────────────────────────────────────────
