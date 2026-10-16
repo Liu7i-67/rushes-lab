@@ -121,7 +121,7 @@ _BIND_RATE_KEY = "baidu:bind:cnt:user:{user_id}"
 _BIND_RATE_MAX = 10             # 每小时至多 10 次绑定尝试(测试态另有百度侧 10 次/小时兜底)
 _BIND_RATE_WINDOW_S = 3600
 _TASK_RATE_KEY = "baidu:task:create:cnt:user:{user_id}"
-_TASK_RATE_MAX = 10             # 每小时至多 10 次建任务(防反复建删白耗枚举配额,§5.2)
+_TASK_RATE_MAX = 100            # 每小时至多 100 次建任务尝试(对内服务器放宽,原 10;防反复建删白耗枚举配额,§5.2)
 _TASK_RATE_WINDOW_S = 3600
 _FOLDERS_CACHE_KEY = "baidu:netdisk:folders:{user_id}:{path_hash}"
 _FOLDERS_CACHE_TTL_S = 60       # 方案 §9:60s (user_id,path) 缓存,省网盘 API 配额
@@ -344,13 +344,13 @@ async def bind(
     if not client.credentials_ready:
         raise HTTPException(503, "百度应用凭证未配置(BAIDU_APP_KEY/BAIDU_APP_SECRET),无法绑定")
 
-    # 应用层限流(Redis 计数;防接口滥用 —— 正式态放开百度侧频控后的本地防线)
+    # 应用层限流(Redis 计数;防接口滥用 —— 正式态放开百度侧频控后的本地防线)。
+    # 固定窗口:仅窗口首跳设 TTL——若每次请求都续期,429 后的重试会无限顺延解锁时间
     redis = request.app.state.redis
     rate_key = _BIND_RATE_KEY.format(user_id=user.id)
-    pipe = redis.pipeline()
-    pipe.incr(rate_key)
-    pipe.expire(rate_key, _BIND_RATE_WINDOW_S)
-    count, _ = await pipe.execute()
+    count = await redis.incr(rate_key)
+    if count == 1:
+        await redis.expire(rate_key, _BIND_RATE_WINDOW_S)
     if int(count) > _BIND_RATE_MAX:
         raise HTTPException(429, f"操作过于频繁,请稍后再试(每小时至多 {_BIND_RATE_MAX} 次)")
 
@@ -687,13 +687,13 @@ async def create_task(
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
 
-    # 用户维度频控(防反复建删任务白耗枚举配额与派发,§5.2)
+    # 用户维度频控(防反复建删任务白耗枚举配额与派发,§5.2)。
+    # 固定窗口:仅窗口首跳设 TTL——若每次请求都续期,429 后的重试会无限顺延解锁时间
     redis = request.app.state.redis
     rate_key = _TASK_RATE_KEY.format(user_id=user.id)
-    pipe = redis.pipeline()
-    pipe.incr(rate_key)
-    pipe.expire(rate_key, _TASK_RATE_WINDOW_S)
-    count, _ = await pipe.execute()
+    count = await redis.incr(rate_key)
+    if count == 1:
+        await redis.expire(rate_key, _TASK_RATE_WINDOW_S)
     if int(count) > _TASK_RATE_MAX:
         raise HTTPException(429, f"创建过于频繁,请稍后再试(每小时至多 {_TASK_RATE_MAX} 次)")
 
