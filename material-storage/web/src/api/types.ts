@@ -50,6 +50,11 @@ export interface DirectoryUser {
   must_change_password: boolean;
   created_at: string;
   resigned_at: string | null;
+  // W1(2026-10-17):登录锁定态 —— 列表端点批量 MGET 三形态 username/email/name 的
+  // Redis user 锁 key,**只反映 user 维度**(IP 维度命中时此处不置位,登录仍会 429)。
+  // 「解锁」行按钮与「登录已锁定」pill 依此渲染。可选 —— 旧后端无此字段,消费侧
+  // falsy 回落(不渲染解锁入口,同 is_project_creator 惯例)。
+  login_locked?: boolean;
 }
 
 export interface DirectoryUserCreateOut extends DirectoryUser {
@@ -263,6 +268,14 @@ export interface Folder {
   subtree_file_count?: number;
 }
 
+// ─── W4/W5:目录改名 / 移动(六项优化 2026-10-17;PATCH /api/v1/folders/{id})──
+/** PATCH /folders/{id} 请求体(至少传一项;改名与移动同端点,前端拆两个入口)。
+ *  parent_folder_id 显式 null = 移为项目一级(项目根);sensitive 源禁移动(后端 enforce)。*/
+export interface FolderUpdateIn {
+  name?: string;
+  parent_folder_id?: string | null;
+}
+
 export interface Asset {
   id: string;
   folder_id: string;
@@ -318,6 +331,22 @@ export interface AssetBatchPrefixResult {
     empty_result: number;     // remove:剥离后为空串
     deleted: number;          // 已删除/不存在
   };
+}
+
+// ─── W6 一期:文件批量移动(六项优化 2026-10-17;POST /api/v1/assets/batch-move)──
+/** 单条跳过明细(reason 键固定 ASCII:duplicate_location / duplicate_filename,前端中文映射)。*/
+export interface AssetBatchMoveSkipped {
+  asset_id: string;
+  reason: string;
+}
+
+/** 批量移动结果(对账恒等式:moved_count + skipped 条数 + fga_pending 条数 = 提交数)。
+ *  fga_pending = DB 已移动但 FGA parent tuple 交换失败的资产 id(后台幂等巡检兜底,
+ *  页面明示「权限同步延迟」;HTTP 恒 200,不以 500 掩盖)。*/
+export interface AssetBatchMoveResult {
+  moved_count: number;
+  skipped: AssetBatchMoveSkipped[];
+  fga_pending: string[];
 }
 
 /** 文件夹文件列表 = items 分页窗口(服务端分页)+ total 全量计数(分页器用)。*/
@@ -588,4 +617,26 @@ export interface AdminBaiduTaskFile {
 export interface AdminBaiduTaskFilesPage {
   items: AdminBaiduTaskFile[];
   total: number;
+}
+
+// ─── 审计(W2b;GET /api/v1/admin/audit)─────────────────────────────────────
+/** 审计事件行(原 AdminAuditPage 页内接口上移;消费方:AdminAuditPage)。
+ *  W2b(2026-10-17)补名:target_project_name / target_asset_filename 由后端按页内
+ *  target_asset_id 集合批量反查回填;purge 后 asset 行已删 → null(前端回落显示
+ *  UUID 片段,不报错)。可选 —— 旧后端无此字段,消费侧空值回落。 */
+export interface AuditEvent {
+  id: string;
+  event_type: string;
+  event_time: string;
+  actor_user_id: string | null;
+  actor_name: string | null;
+  actor_open_id: string | null;
+  target_asset_id: string | null;
+  target_project_id: string | null;
+  // W2b 反查补名(LEFT JOIN 口径,查不到回 null)
+  target_asset_filename?: string | null;
+  target_project_name?: string | null;
+  target_minio_key: string | null;
+  request_ip: string | null;
+  details: Record<string, unknown>;
 }

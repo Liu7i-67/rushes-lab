@@ -12,6 +12,7 @@ import type {
   ApprovalTargetType,
   ApplyDefaultResult,
   Asset,
+  AssetBatchMoveResult,
   AssetBatchPrefixResult,
   AssetList,
   BatchPrefixAction,
@@ -34,6 +35,7 @@ import type {
   Folder,
   FolderTemplate,
   FolderTemplateEntry,
+  FolderUpdateIn,
   GrantEntry,
   GrantTemplate,
   Me,
@@ -270,6 +272,49 @@ export const useFolder = (folderId: string | undefined) =>
     enabled: !!folderId,
   });
 
+// ─── W4/W5:目录改名 / 移动(六项优化 2026-10-17)────────────────────────────
+// 同端点 PATCH /folders/{id} 双语义(name / parent_folder_id 至少传一),前端拆两入口:
+// 重命名弹窗 / 拖拽+「移动到」。后端 D1-B 重算子树 minio_prefix → ['folders', projectId]
+// 整树失效(null 与值两个 key 都覆盖:invalidate 前缀 ['folders'] 只带 projectId 时
+// 恰好命中本项目的 list 缓存);['folder', id] 刷新单条 my_can_* / prefix;
+// ['assets'] 系一并失效(列表页 folder header 挂 prefix 展示)。
+export const useRenameFolder = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: { folder_id: string; name: string; project_id: string }) => {
+      const body: FolderUpdateIn = { name: args.name };
+      return (await http.patch<Folder>(`/api/v1/folders/${args.folder_id}`, body)).data;
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ['folders', vars.project_id] });
+      qc.invalidateQueries({ queryKey: ['folder', vars.folder_id] });
+      qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+  });
+};
+
+// parent_folder_id 显式 null = 移为项目一级(合法方向,§5.2);sensitive 源禁移动、
+// 目标 sensitive 及其子树禁 —— 三句式在 FolderTree allowDrop / MoveFolderModal 预判,
+// 后端 enforce 为准(409/400 反探测文案)
+export const useMoveFolder = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (args: {
+      folder_id: string;
+      parent_folder_id: string | null;
+      project_id: string;
+    }) => {
+      const body: FolderUpdateIn = { parent_folder_id: args.parent_folder_id };
+      return (await http.patch<Folder>(`/api/v1/folders/${args.folder_id}`, body)).data;
+    },
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: ['folders', vars.project_id] });
+      qc.invalidateQueries({ queryKey: ['folder', vars.folder_id] });
+      qc.invalidateQueries({ queryKey: ['assets'] });
+    },
+  });
+};
+
 export const useInviteFolder = () => {
   const qc = useQueryClient();
   return useMutation({
@@ -471,6 +516,25 @@ export const useBatchPrefix = () => {
       qc.invalidateQueries({ queryKey: ['assets'] });
       // 文件名可被盲搜命中,改名后同步失效搜索缓存
       qc.invalidateQueries({ queryKey: ['asset-search'] });
+    },
+  });
+};
+
+// ─── W6 一期:文件批量移动(六项优化 2026-10-17;项目内,key 不迁)──────────────
+// 对账恒等式 moved + skipped + fga_pending = 提交数;HTTP 恒 200(FGA 失败不以 500
+// 掩盖,fga_pending 清单由后台幂等巡检兜底)。object_key 不动,只 UPDATE folder_id。
+// 失效:['assets'](源/目标夹列表两端)+ ['folders', projectId](subtree_file_count
+// 两端变化);跨项目一期不做,projectId 恒为当前项目。
+export const useBatchMoveAssets = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: {
+      asset_ids: string[];          // 1..1000
+      target_folder_id: string;
+    }) => (await http.post<AssetBatchMoveResult>('/api/v1/assets/batch-move', body)).data,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['assets'] });
+      qc.invalidateQueries({ queryKey: ['folders'] });
     },
   });
 };
@@ -689,6 +753,22 @@ export const useResetUserPassword = () => {
       (await http.post<{ temporary_password: string }>(
         `/api/v1/admin/directory/users/${userId}/reset-password`,
       )).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-users'] }),
+  });
+};
+
+// W1(2026-10-17): 管理员解锁登录锁定(require_system_admin;照 useDisableUser 同款 invalidate)。
+// 后端清 user 维度锁/失败计数(username/email/name 三形态)+ 连带清近 24h 失败 IP 的锁,
+// 并写审计 user_login_unlocked;reset-password 端点顺带同款清理。
+export const useUnlockUser = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (userId: string) =>
+      (await http.post<{
+        cleared_user_forms: string[];   // 实际清除的登录名形态(lower 后)
+        cleared_ips: string[];          // 连带清除的 IP 锁
+        was_locked: boolean;
+      }>(`/api/v1/admin/directory/users/${userId}/unlock`)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-users'] }),
   });
 };

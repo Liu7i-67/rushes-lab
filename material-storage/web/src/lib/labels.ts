@@ -75,6 +75,10 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   baidu_file_random_suffix: '备份文件随机后缀导入',
   baidu_file_imported: '备份文件导入',
   baidu_task_auto_finalized: '备份任务自动终态',
+  // ── 六项优化 W1(2026-10-17):登录锁定审计(前端只回填本包两事件;
+  //    W4/W5/W6 三事件由并行包自行追加,勿在此代填)────────────────────────────
+  user_login_unlocked: '解除登录锁定',
+  local_login_locked: '触发登录锁定',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

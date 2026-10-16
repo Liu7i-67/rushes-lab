@@ -1,18 +1,19 @@
 /**
  * /admin/users — 本地用户管理(#150 数据源本地化)。
- * 系统 admin 创建本地账号(临时密码 + must_change_password)、停用/启用、重置密码。
+ * 系统 admin 创建本地账号(临时密码 + must_change_password)、停用/启用、重置密码、
+ * 解锁登录锁定(W1:连续登录失败触发 Redis user 锁,列表 login_locked 实时反映 user 维度)。
  * backend 对目录接口 enforce system admin;前端仅做体验提示。
  * 管理后台优化:新建用户可选用户组(F3.1)、行内编辑姓名/邮箱/用户组(F4.1)、
  * 服务端分页 + 总数(F5.2)。
  */
 import {
-  Alert, App, Button, Empty, Form, Input, Modal, Pagination, Select, Skeleton, Tooltip,
+  Alert, App, Button, Empty, Form, Input, Modal, Pagination, Popconfirm, Select, Skeleton, Tooltip,
 } from 'antd';
-import { KeyRound, Pencil, Power, RotateCcw, UserPlus } from 'lucide-react';
+import { KeyRound, LockOpen, Pencil, Power, RotateCcw, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import dayjs from 'dayjs';
 import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail, useDirectoryGroups,
-         useDisableUser, useEnableUser, useDirectoryUsers, useResetUserPassword,
+         useDisableUser, useEnableUser, useDirectoryUsers, useResetUserPassword, useUnlockUser,
          USERS_PAGE_SIZE } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
@@ -149,6 +150,8 @@ function UserRow({ user }: { user: DirectoryUser }) {
   const disable = useDisableUser();
   const enable = useEnableUser();
   const reset = useResetUserPassword();
+  // W1: 解锁登录锁定(仅 login_locked 行渲染入口)
+  const unlock = useUnlockUser();
   const [pw, setPw] = useState<string | null>(null);
   // F4.1: 编辑姓名 / 邮箱 / 所属用户组
   const [editOpen, setEditOpen] = useState(false);
@@ -182,6 +185,18 @@ function UserRow({ user }: { user: DirectoryUser }) {
       message.error(errorMessage(e, '重置失败'));
     } finally { setBusy(false); }
   };
+  // W1: 解锁成功后 useUnlockUser 已 invalidate 列表,pill 随新 login_locked 刷新
+  const doUnlock = async () => {
+    setBusy(true);
+    try {
+      const out = await unlock.mutateAsync(user.id);
+      message.success(out.was_locked
+        ? `已解锁 ${user.name}(清 ${out.cleared_user_forms.length} 个登录名形态 / ${out.cleared_ips.length} 个 IP 锁)`
+        : `${user.name} 当前无用户名维度登录锁,已顺手清理失败计数`);
+    } catch (e) {
+      message.error(errorMessage(e, '解锁失败'));
+    } finally { setBusy(false); }
+  };
 
   return (
     <div style={{
@@ -192,7 +207,8 @@ function UserRow({ user }: { user: DirectoryUser }) {
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <span style={{ fontSize: 13, fontWeight: 500, color: 'var(--ms-ink)' }}>{user.name}</span>
-          <StatusPill active={user.is_active} mustChange={user.must_change_password} />
+          <StatusPill active={user.is_active} mustChange={user.must_change_password}
+                      loginLocked={user.login_locked} />
           {!user.is_active && user.resigned_at && (
             <Tooltip title={`停用于 ${dayjs(user.resigned_at).format('YYYY-MM-DD HH:mm')}`}>
               <span style={{ fontSize: 11, color: 'var(--ms-ink-subtle)' }}>已停用</span>
@@ -234,6 +250,20 @@ function UserRow({ user }: { user: DirectoryUser }) {
                 loading={busy} onClick={doReset}>
           重置密码
         </Button>
+        {/* W1: 解锁 — 仅登录锁定行渲染(Popconfirm 二次确认;同 AdminGroupsPage 删除先例) */}
+        {user.login_locked && (
+          <Popconfirm
+            title={`解锁 ${user.name} 的登录锁定?`}
+            description="清除用户名维度锁定与失败计数,并连带清近 24h 失败 IP 的锁;完成后即可重新登录。"
+            okText="解锁" cancelText="取消"
+            onConfirm={doUnlock}
+          >
+            <Button size="small" icon={<LockOpen size={12} strokeWidth={2} />}
+                    loading={busy}>
+              解锁
+            </Button>
+          </Popconfirm>
+        )}
       </div>
       <TempPasswordModal open={!!pw} password={pw} onClose={() => setPw(null)} />
       {/* F4.1: 条件挂载 — 打开才发详情请求(编辑弹窗挂每行,常挂会 N 倍请求) */}
@@ -242,7 +272,9 @@ function UserRow({ user }: { user: DirectoryUser }) {
   );
 }
 
-function StatusPill({ active, mustChange }: { active: boolean; mustChange: boolean }) {
+function StatusPill({ active, mustChange, loginLocked }: {
+  active: boolean; mustChange: boolean; loginLocked?: boolean;
+}) {
   return (
     <>
       <span style={{
@@ -261,6 +293,19 @@ function StatusPill({ active, mustChange }: { active: boolean; mustChange: boole
         }}>
           待改密
         </span>
+      )}
+      {/* W1: 登录已锁定 — 只反映 user 维度(IP 维度锁不在此列,命中时登录仍 429),
+          tooltip 明示口径;可用行内「解锁」立即清除 */}
+      {loginLocked && (
+        <Tooltip title="连续登录失败触发锁定(用户名维度;IP 维度锁不在此列)。可用「解锁」立即清除。">
+          <span style={{
+            fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
+            fontWeight: 500, padding: '1px 7px', borderRadius: 3,
+            color: 'var(--ms-crimson)', background: 'var(--ms-crimson)14',
+          }}>
+            登录已锁定
+          </span>
+        </Tooltip>
       )}
     </>
   );
