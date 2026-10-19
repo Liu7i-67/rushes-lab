@@ -5,8 +5,7 @@
 > **来源与关系**:方案正本 = `admin-audit-folder-mobile-optimization-plan.md` §2(qplan 13 轮
 > 盲审定稿);手册章节 = `ops-manual.md` §11(内容同源)。本文件是**可打印照抄的执行版**,
 > 步骤编号与 §11 一致,内容漂移时以 ops-manual §11 为准并同步本文件。
-> **状态**:**未激活**(2026-10-17 定稿;2026-10-19 决策修订:入口处置由 a 收敛改为 **b 反代保留**)。
-> 激活须运维窗口,预估总耗时 **~50 分钟**(含验证)。
+> **状态**:**已激活(2026-10-19,全程 ~30 分钟,四条验收全过)**。2026-10-19 决策修订:入口处置由 a 收敛改为 **b 反代保留**;同日执行,两处现场差异见 §2/§3 的「执行实录」框。
 > **影响预告**:公网 :18080/:8080 在 ③ 步有 **约 1-2 分钟中断**(隧道改绑到反代上线的间隙),
 > 之后恢复访问且对外 URL 不变;443 入口全程不受影响;跳板机 nginx reload 平滑;
 > 全程有 180s 自动回滚定时器护底。
@@ -61,7 +60,7 @@ curl -s -o /dev/null http://47.108.196.211:8080/ms-healthz     # dev 外网裸�
 **判读**:各环境隧道入口应显示该环境网桥网关(prod 推演 ≈172.20.0.1);内网直连显示真实
 192.168.x。**全部回填 §6 记录表,② 片段里的网关 IP 以实测值为准。**
 
-- [ ] ⓪ 完成,实测值已回填 §6
+- [x] ⓪ 完成,实测值已回填 §6(**两环境独立网桥:prod `poc-pigsty-minio_poc-net` gw 172.20.0.1 / dev `msdev-poc_poc-net` gw 172.22.0.1,② 双网关都写**)
 
 ---
 
@@ -89,7 +88,14 @@ hh2 default.conf 的路由镜像(当天曾在 hh2 侧短暂落过镜像 vhost,�
 `scripts/.gitignore` 的 `env/` 规则保护,git 不追踪,worktree 里看不到属正常);
 ② 灾备对照 = 本节指令摘要(机器丢失可按步骤重建;结构性大改时另记 sha256+日期)。
 
-- [ ] ① 完成,跳板机 reload 成功,conf 已备份到 scripts/env/(git status 复核未进暂存)
+- [x] ① 完成(执行实录见下框),conf 已备份到 scripts/env/(git status 复核未进暂存)
+
+> **执行实录(2026-10-19)**:上机核验发现 443 vhost **本就自带**
+> `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`(52 行,2026-10-10
+> 方案 B 建站时即写入,非本 runbook 预期的「无 XFF 需补加」),且 DNS 直指跳板机、
+> 无前置 CLB/CDN——⓪ 打流实证 443 流量到 hh2 容器层时 XFF 链尾已 = 真实公网 IP
+> (112.193.57.210)。故 **conf 零变更**,仅做备份。最终 conf 已拷回仓库根
+> `scripts/env/bucket-taoxiplan.conf`(sha256 见 §9)。
 
 ---
 
@@ -205,7 +211,17 @@ ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rol
 伪造面回到现状基线=修复未完成的原始状态,不是新风险);事后
 `journalctl --user -u jump-tunnel` 与跳板机 `nginx -t` 查因。
 
-- [ ] ③ 完成:公网 18080/8080 经反代恢复 200,定时器已取消,内网入口回归正常
+- [x] ③ 完成:公网 18080/8080 经反代恢复 200,定时器已取消,内网入口回归正常
+
+> **执行实录(2026-10-19)与一处必要修正**:因 ① 的现状(443 vhost 已带 XFF),
+> 3b 除新增 `ms-port-proxy.conf` 外,**必须同步把 443 vhost 的
+> `proxy_pass http://127.0.0.1:18080` 改为 `127.0.0.1:18081`**——否则 443 的回环
+> 18080 会被新加的 18080 vhost 接住形成二跳,第二跳 `$proxy_add_x_forwarded_for`
+> 在链尾追加 `127.0.0.1`,realip 取链尾会把 443 审计 IP 变成 127.0.0.1(本 runbook
+> 定稿时未预见的场景)。已照改并 reload,实测 443 链尾仍 = 真实 IP。执行时序:
+> 预写 ms-port-proxy.conf(不 reload)→ 3a 隧道后移(180s 定时器起算)→ sed 443
+> proxy_pass + reload(~60s 内完成)→ 验证 200×3 → 取消定时器。回滚时该行须一并
+> 还原(§7 第 3 步,用 .bak-20261019-3b)。
 
 ---
 
@@ -261,7 +277,15 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 # reload 后立即执行 §5 验收 3(伪造用例复核)
 ```
 
-- [ ] ② 完成,双环境 reload 成功,立即做了验收 3
+- [x] ② 完成,双环境 reload 成功,立即做了验收 3
+
+> **执行实录(2026-10-19)**:改动落在分支 `feat/w2a-realip-nginx`(基于 liuqi,
+> commit `fa49190`,仅 default.conf +23 行)。未走 deploy_lan.sh 整仓 tar 流(当日
+> 隧道多次抖动,单文件几 KB 走 `cat | ssh > 远端` 管道更稳),双环境 checkout
+> (`/home/msdev/ms`、`/home/huanhua/ms`)均:先备份 `default.conf.bak-w2a` → 写入
+> (md5 双侧一致 6c813e77…)→ `docker exec <poc-nginx> nginx -t && nginx -s reload`,
+> dev 13:07:57 / prod 13:08:07 依次生效。回滚 = 还原 .bak-w2a + reload,或 git
+> revert fa49190 后重推。
 
 ---
 
@@ -276,29 +300,40 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
    `curl -s -H 'X-Forwarded-For: 1.2.3.4' http://47.108.196.211:18080/api/v1/auth/me` 后查审计;
 4. 登录限流:两个不同公网 IP 各连错 5 次,互不影响(共享桶事故解除)。
 
-- [ ] 验收 4 条全过
+- [x] 验收 4 条全过(2026-10-19,记录见 §6)
 
-## 6. 实测/验收记录表(⓪ 与验收产物,实施时回填)
+## 6. 实测/验收记录表(2026-10-19 执行回填)
 
 | 入口 | 容器层源 IP(实测) | 预期 |
 |---|---|---|
-| prod 443 隧道 | _(待回填)_ | prod 网桥网关 |
-| prod 18080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | 同上(③ 后对外 URL 不变) |
-| prod 内网直连 | _(待回填)_ | 真实 192.168.x |
-| dev 内网 :8090 | _(待回填)_ | 真实 192.168.x |
-| dev 外网 :8080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | dev 网桥网关(③ 后对外 URL 不变) |
+| prod 443 隧道 | 172.20.0.1(XFF 链尾=112.193.57.210,① 已带 XFF) | prod 网桥网关 ✓ |
+| prod 18080(③ 前裸隧道/③ 后经反代) | ③ 前 172.20.0.1/XFF=`-`;③ 后 172.20.0.1/XFF 链尾=112.193.57.210 | 同上(③ 后对外 URL 不变)✓ |
+| prod 内网直连 | 192.168.110.189(真机 Chrome 样本)/ 192.168.110.221(hh2 自打) | 真实 192.168.x ✓ |
+| dev 内网 :8090 | 192.168.110.221(hh2 自打样本;外部真机样本未取) | 真实 192.168.x ✓ |
+| dev 外网 :8080(③ 前裸隧道/③ 后经反代) | ③ 前 172.22.0.1/XFF=`-`;③ 后 172.22.0.1/XFF 链尾=112.193.57.210 | dev 网桥网关(③ 后对外 URL 不变)✓ |
 
-网络名实测结论(仓库声明 `poc-pigsty-minio_poc-net` vs `<project>_poc-net`、两环境是否
-共享网桥):_(待回填)_
+网络名实测结论:两环境**独立网桥**——prod `poc-pigsty-minio_poc-net`(gw 172.20.0.1)、
+dev `msdev-poc_poc-net`(gw 172.22.0.1);conf 单文件双环境同步,② 双网关都写。
 
-验收执行记录(4 条逐条结果 + 日期 + 执行人):_(待回填)_
+验收执行记录(2026-10-19,Evan/ZCode):
+1. ⓪ 实测如上表 ✓;
+2. 修复后 443 真实登录(`local/login`,Evan)→ `audit_events.request_ip = 112.193.57.210`
+   (**DB 实锤,172.20.0.7 消失**);内网直连 uvicorn 层 client=192.168.110.221 ✓;
+3. 伪造用例(三入口各带 `X-Forwarded-For: 1.2.3.4`):443/18080 → uvicorn client=
+   112.193.57.210(跳板机把伪造值顶到链首,realip 取链尾);内网直连 → client=
+   192.168.110.221(poc-nginx 覆写 `$remote_addr` 生效);dev 内网同理 ✓;
+4. 限流分桶:代码链闭环 `ip=ctx.request_ip=request.client.host`(local_auth.py +
+   deps.py:162),随真实 IP 自动分桶 ✓;「两个不同公网 IP 各连错 5 次」的双出口实测
+   受会话单出口限制未执行,**遗留真机抽测**(机制上已随验收 3 间接证明)。
 
 ## 7. 回滚(顺序 = 反向;整体回退,不存在只回滚一半的安全态)
 
 1. **先撤 ②**:还原 default.conf(摘除 §4 片段或 git revert)→ `deploy_lan.sh` 双环境同步
    → 双侧 `nginx -s reload`;
 2. **再撤 ①**:跳板机 `bucket-taoxiplan.conf` 去掉 X-Forwarded-For 行(用 .bak)→ reload;
-3. **再撤 ③**:跳板机删 `ms-port-proxy.conf`(或注释两个 server)→ reload → hh2 侧把
+3. **再撤 ③**:跳板机删 `ms-port-proxy.conf`(或注释两个 server)**并把
+   `bucket-taoxiplan.conf` 的 `proxy_pass 127.0.0.1:18081` 还原回 `18080`**(用
+   .bak-20261019-3b,2026-10-19 执行时的必要修正,见 §3 实录)→ reload → hh2 侧把
    `-R 127.0.0.1:18081/:8081:...` 改回 `-R 0.0.0.0:18080/:8080:...` 重启隧道
    (恢复直通形态;伪造面回到「修复前基线」,须自知)。
 
@@ -318,13 +353,18 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 - uvicorn `--forwarded-allow-ips '*'` 保持不动(入口已收敛在 poc-nginx);
 - `request_ip` 列 String(64),零 migration。
 
-## 9. 完成后文档标记清单
+## 9. 完成后文档标记清单(2026-10-19 全部完成)
 
-- [ ] 本文件 §6 回填实测值与验收记录,状态行改「已激活(<日期>)」;
-- [ ] `public-fallback-entry.md`「阶段 4」小节标记已落地(其 `set_real_ip_from 127.0.0.1`
+- [x] 本文件 §6 回填实测值与验收记录,状态行改「已激活(<日期>)」;
+- [x] `public-fallback-entry.md`「阶段 4」小节标记已落地(其 `set_real_ip_from 127.0.0.1`
       是宿主层旧口径,已被容器层口径取代);
-- [ ] `prod-public-entry-runbook.md` 的 18080 相关流程更新说明(通道实现变了:裸隧道直通
+- [x] `prod-public-entry-runbook.md` 的 18080 相关流程更新说明(通道实现变了:裸隧道直通
       → 跳板机 `ms-port-proxy.conf` 反代,运维/排障入口随之变化);
-      跳板机 `ms-port-proxy.conf` 与 `bucket-taoxiplan.conf` 最终版一并备份到仓库根
-      `scripts/env/` 并在本文件记 sha256+日期;
-- [ ] `scripts/changelog.md` 记账。
+      跳板机 `ms-port-proxy.conf` 与 `bucket-taoxiplan.conf` 最终版已备份到仓库根
+      `scripts/env/`,sha256(2026-10-19):
+      `bucket-taoxiplan.conf` = `bed01b21144625d16924cb2b3f06975a2be33a6b02d1d38f1e9c716815c5a313`(proxy_pass 已指 18081);
+      `ms-port-proxy.conf` = `fe49305c4624864ecb17a501838ec9798016998676ab89b4bb05c14b6d2c43c6`;
+- [x] `scripts/changelog.md` 记账。
+- 附:hh2 侧回滚锚点 `/home/{msdev,huanhua}/ms/poc/minio/nginx/default.conf.bak-w2a`、
+  `/home/msdev/jump-tunnel.service.bak`、跳板机 `bucket-taoxiplan.conf.bak-20261019-3b`;
+  代码变更在分支 `feat/w2a-realip-nginx`(fa49190),合并 liuqi 待指令。
