@@ -1,8 +1,10 @@
 # 目录树拖拽图标移除 + 批量移动弹窗「幽灵成功」修复方案
 
-> 2026-10-19 调研定稿。**调研全程未动代码,实施等用户明确指令。**
-> 两个独立小改,均纯前端:①PC 侧栏目录树每行拖拽把手图标占宽移除(拖拽功能保留);
-> ②W6 批量移动弹窗重开时直接显示上一次成功结果的「幽灵成功弹窗」bug(组件状态残留)。
+> 2026-10-19 调研定稿;**同日用户拍板 D1(保留拖拽只藏图标)/D2(A:调用方条件挂载)/
+> D3(两项 P2 顺手带上)**。**仍未动代码,实施等用户明确指令。**
+> 三个小改,均纯前端:①PC 侧栏目录树每行拖拽把手图标占宽移除(拖拽功能保留);
+> ②W6 批量移动弹窗重开时直接显示上一次成功结果的「幽灵成功弹窗」bug(组件状态残留);
+> ③两项体验打磨:0 移动结果弹窗降级 warning + 目标树禁选源夹自身。
 > 背景:六项优化(2899dcd,2026-10-17 合并 liuqi)交付的 W4/W5 拖拽与 W6 批量移动上线后用户反馈。
 
 ---
@@ -11,15 +13,16 @@
 
 | 维度 | 结论 |
 |---|---|
-| 成本 | **极低**:前端 **2 文件 ~5 行改动**,0.5 人时含自验 |
+| 成本 | **极低**:前端 **3 文件 ~15-20 行改动**,≤1 人时含自验 |
 | DB 迁移 / FGA / 依赖 | **全无**(纯 web 层,后端零触碰) |
 | 部署 | 仅 SPA 替换(`pnpm build` → 分片同步,照既有 deploy_lan 通道);api 不动 |
 | 回滚 | SPA 换回备份目录即可,无数据面影响 |
 | 风险 | 低;①为组件库声明式配置,②与姊妹弹窗(Rename/MoveFolderModal)既有模式对齐 |
 
-改动两处:①`FolderTree.tsx` 一行——`draggable` 由布尔改 `{ icon: false }` 配置,
+改动三处(D1/D2/D3 均已拍板):①`FolderTree.tsx`——`draggable` 由布尔改 `{ icon: false }` 配置,
 拖拽把手图标不再渲染;②`ProjectDetailPage.tsx` 的 `BatchMoveAssetsModal` 由常挂载改
-条件挂载——重开即全新实例,`result`/`target` 状态自动复位。
+条件挂载——重开即全新实例,`result`/`target` 状态自动复位;③`BatchMoveAssetsModal.tsx`
+结果视图 0 移动降级 warning + 目标树禁选源夹自身(经 FolderTree 新增不级联的禁选 prop)。
 
 ---
 
@@ -101,7 +104,7 @@ draggable={enableDrag ? { icon: false } : false}
 
 ### 2.3 修法(决策点 D2,推荐 A)
 
-**A(推荐):调用方改条件挂载**,与姊妹弹窗同款模式:
+**A(推荐,已拍板 D2):调用方改条件挂载**,与姊妹弹窗同款模式:
 
 ```tsx
 {batchMoveOpen && (
@@ -122,15 +125,25 @@ draggable={enableDrag ? { icon: false } : false}
 **B(等效备选)**:组件内 `useEffect(() => { if (open) { setResult(null); setTarget(null); } }, [open])`
 ——保挂载保动画,但多 4 行,且未来新增状态须记得同步重置,不如卸载彻底。
 
-### 2.4 顺带发现(P2,默认不做,待拍板)
+### 2.4 顺带打磨(D3 已拍板:随本次带上)
 
-- 结果视图在 `moved_count === 0 && skipped > 0`(如整批选了当前所在目录,全部
-  `duplicate_location`)时 Alert 仍是 success 绿色,文案「成功移动 0 个文件」易误读,
-  建议 `moved_count=0` 时降级为 warning;
-- 批量移动弹窗的目标树未禁选**源夹自身**,允许构造出上述全 skip 的空操作提交,
-  可选把当前夹加入 `disabledIds`。
-
-两项均为体验打磨,不影响正确性,标 P2 待用户拍板,不进本次默认范围。
+- **P2-1 结果弹窗 0 移动降级 warning**:现状 `moved_count === 0 && skipped > 0`(如整批
+  选了当前所在目录,全部 `duplicate_location`)时 Alert 仍是 success 绿色,文案
+  「成功移动 0 个文件」易误读。改法(BatchMoveResultView,~3 行):
+  `type={pendingCount > 0 || result.moved_count === 0 ? 'warning' : 'success'}`,
+  且 `moved_count === 0` 时 message 改「本次未移动任何文件(共提交 N 个)」,对账行不变。
+  对账恒等式保证此时 skipped/pending 至少一侧非空(提交数 ≥1),下方明细必然给出原因。
+- **P2-2 目标树禁选源夹自身**:消除「选回当前夹 → 整批 duplicate_location」的空操作提交。
+  ⚠**实现勘正(相对初稿,勿照初稿实施)**:不能直接把当前夹塞进既有 `disabledIds`——
+  该 prop 语义是「命中节点**及其整棵子树**级联禁选」(FolderTree.tsx:33-35,buildTree
+  以自身命中为级联源,FolderTree.tsx:101-102),会把源夹的子夹一并禁掉,而
+  「A 夹文件移入 A/B 子夹」是合法且常见的整理操作,属误伤回归。正确做法:
+  FolderTree 新增可选 prop `disabledSelfIds?: string[]`——仅禁选命中节点自身、
+  **不级联子树**,buildTree 把「级联源」与「节点 disabled」拆开计
+  (`sub = build(f.id, ancestorDisabled || disabledSet.has(f.id))`,节点自身再
+  `|| selfSet.has(f.id)`,~3 行);`BatchMoveAssetsModal` 加 `sourceFolderId` prop
+  接到该 prop,调用方传 `activeFolderId`。既有 `disabledIds` 使用点(备份目标选择的
+  sensitive 集合等)语义不动、零影响。
 
 ---
 
@@ -150,15 +163,22 @@ draggable={enableDrag ? { icon: false } : false}
    单实例,改一处两态同愈。
 6. 结果视图「取消」语义不回归:结果态点 X 或「完成」都走 `onMoved`(清选中),选择态
    取消走 `onClose`(保留选中)。
+7. **P2-2 回归(重点防级联误伤)**:目标树中源夹自身置灰禁选;其**子夹仍可选**——
+   A 夹文件移入 A/B 子夹全流程可用;既有 `disabledIds` 级联语义不回归(备份目标选择
+   的 sensitive 整子树禁选照旧)。
+8. **P2-1**:构造全 skip 提交(如同名冲突/已在目标位置)→ 结果弹窗为 warning 黄色、
+   文案「本次未移动任何文件」,不出现「成功移动 0 个文件」;moved>0 时仍绿色 success;
+   fga_pending>0 的 warning 不回归。
 
 ---
 
 ## 4. 改动清单与部署
 
 | 文件 | 改动 | 规模 |
-|---|---|---|
-| `material-storage/web/src/components/FolderTree.tsx` | `draggable` 改 `{ icon: false }` 三元 + 注释 | ~3 行 |
-| `material-storage/web/src/pages/ProjectDetailPage.tsx` | `BatchMoveAssetsModal` 常挂载 → `{batchMoveOpen && …}` 条件挂载 | ~3 行 |
+| --- | --- | --- |
+| `material-storage/web/src/components/FolderTree.tsx` | ①`draggable` 改 `{ icon: false }` 三元 + 注释;②新增 `disabledSelfIds` prop(仅禁自身不级联)+ buildTree 拆级联变量 | ~6 行 |
+| `material-storage/web/src/pages/ProjectDetailPage.tsx` | `BatchMoveAssetsModal` 常挂载 → `{batchMoveOpen && …}` 条件挂载,补传 `sourceFolderId={activeFolderId}` | ~4 行 |
+| `material-storage/web/src/components/BatchMoveAssetsModal.tsx` | ①Alert 0 移动降级 warning + message 文案;②`sourceFolderId` prop 接 `disabledSelfIds` | ~5 行 |
 
 - 纯前端、零 api/迁移/FGA/依赖改动 → dev/prod 均走既有「SPA build → 分片同步 →
   原子替换」通道,api 容器不动;回滚 = SPA 换回部署前备份目录。
@@ -167,8 +187,8 @@ draggable={enableDrag ? { icon: false } : false}
 
 ## 5. 决策点
 
-| # | 问题 | 推荐 | 备选 |
+| # | 问题 | 决议(2026-10-19 用户拍板) | 落选方备查 |
 |---|---|---|---|
-| D1 | 拖拽图标移除方式 | `{ icon: false }` 隐藏图标、保留拖拽(antd 声明式配置,零残留) | 连拖拽功能一并关(若用户本意是不要拖拽);CSS 隐藏(不推荐) |
-| D2 | 幽灵弹窗修法 | A:调用方条件挂载(与姊妹弹窗模式对齐,顺带复位 `target`) | B:`open` 翻转时 useEffect 重置(保动画,多状态同步负担) |
-| D3 | §2.4 两项 P2(0 移动降级 warning / 目标树禁选源夹) | 默认不做,待拍板 | 随本次顺手带上(各 ~3 行) |
+| D1 | 拖拽图标移除方式 | **保留拖拽只藏图标**:`{ icon: false }`(antd 声明式配置,零残留) | 连拖拽功能一并关;CSS 隐藏(不推荐) |
+| D2 | 幽灵弹窗修法 | **A:调用方条件挂载**(与姊妹弹窗模式对齐,顺带复位 `target`) | B:`open` 翻转时 useEffect 重置(保动画,多状态同步负担) |
+| D3 | §2.4 两项 P2 | **随本次顺手带上**(P2-2 按勘正实现:`disabledSelfIds` 不级联,勿用 `disabledIds` 误伤子夹) | — |
