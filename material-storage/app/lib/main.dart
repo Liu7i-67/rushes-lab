@@ -88,7 +88,7 @@ class MsApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '素材库',
+      title: '浣花素材管理',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFFC2410C),

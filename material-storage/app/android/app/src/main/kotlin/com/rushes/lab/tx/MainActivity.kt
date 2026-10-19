@@ -1,4 +1,4 @@
-package dev.rushes.ms_app
+package com.rushes.lab.tx
 
 import io.flutter.embedding.android.FlutterActivity
 
