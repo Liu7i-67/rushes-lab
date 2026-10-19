@@ -62,6 +62,7 @@ if command -v rsync >/dev/null 2>&1; then
     --exclude 'data' --exclude 'data-dev' --exclude 'data-thumbs' --exclude 'backup-mirror' \
     --exclude 'poc/minio/data' --exclude 'poc/minio/data-dev' --exclude 'poc/minio/data-thumbs' \
     --exclude 'docker-compose.override.yml' \
+    --exclude 'app/build' --exclude 'app/.dart_tool' \
     ./ "$HOST:/tmp/ms-sync-$ENVNAME/"
 else
   # 无 rsync 的环境(如 Windows Git Bash):tar 流替代,排除项与 rsync 对齐
@@ -71,6 +72,7 @@ else
     --exclude='data' --exclude='data-dev' --exclude='data-thumbs' --exclude='backup-mirror' \
     --exclude='poc/minio/data' --exclude='poc/minio/data-dev' --exclude='poc/minio/data-thumbs' \
     --exclude='docker-compose.override.yml' \
+    --exclude='app/build' --exclude='app/.dart_tool' \
     . | ssh_r "mkdir -p /tmp/ms-sync-$ENVNAME && tar -xpf - -C /tmp/ms-sync-$ENVNAME/"
 fi
 
