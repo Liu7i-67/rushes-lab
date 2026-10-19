@@ -5,17 +5,20 @@
 > **来源与关系**:方案正本 = `admin-audit-folder-mobile-optimization-plan.md` §2(qplan 13 轮
 > 盲审定稿);手册章节 = `ops-manual.md` §11(内容同源)。本文件是**可打印照抄的执行版**,
 > 步骤编号与 §11 一致,内容漂移时以 ops-manual §11 为准并同步本文件。
-> **状态**:**未激活**(2026-10-17 定稿)。激活须运维窗口,预估总耗时 ~40 分钟(含验证)。
-> **影响预告**:公网入口会闪断两次(隧道重启 + nginx reload);prod :18080 与 dev :8080
-> 两个外网入口将被**关闭**(决策 16/17 已拍 a);全程有 180s 自动回滚定时器护底。
+> **状态**:**未激活**(2026-10-17 定稿;2026-10-19 决策修订:入口处置由 a 收敛改为 **b 反代保留**)。
+> 激活须运维窗口,预估总耗时 **~50 分钟**(含验证)。
+> **影响预告**:公网 :18080/:8080 在 ③ 步有 **约 1-2 分钟中断**(隧道改绑到反代上线的间隙),
+> 之后恢复访问且对外 URL 不变;443 入口全程不受影响;跳板机 nginx reload 平滑;
+> 全程有 180s 自动回滚定时器护底。
 
 ---
 
 ## 0. 执行前核对(全过才开工)
 
-- [ ] 运维窗口已确认(公网入口闪断两次:③ 隧道重启、② nginx reload);
-- [ ] 「dev 外网 :8080 随 ③ 关闭」已确认接受(决策 17=a:dev 没有跳板机 443 vhost,
-      改绑后 dev 外网不可达;如需保留须先在跳板机为 dev 新增反代 vhost 并同加 XFF);
+- [ ] 运维窗口已确认(:18080/:8080 中断约 1-2 分钟,443 与内网入口不受影响);
+- [ ] 已知悉 ③ 后 :18080/:8080 的实现方式变化:**对外 URL 与端口完全不变**,内部改为
+      经跳板机 nginx 反代(隧道后移到跳板机回环 :18081/:8081),真实 IP 修复对这两个
+      端口同样生效且伪造面被封(2026-10-19 用户拍板:对内服务,保留两端口访问,弃 a 收敛方案);
 - [ ] 本文件已打印/双屏打开:⓪ 的实测值要回填 §6 记录表,② 的信任源直接依赖它;
 - [ ] **硬顺序已牢记:⓪ → ① → ③ → ②,不可调换**——
       ① 未生效而 ② 先 reload = 443 流量 XFF 链尾是客户端自带值,realip 采信伪造 IP(伪造窗口);
@@ -90,18 +93,26 @@ hh2 default.conf 的路由镜像(当天曾在 hh2 侧短暂落过镜像 vhost,�
 
 ---
 
-## 3. ③ 公网裸隧道入口收敛(hh2 侧 `-R` 改绑 127.0.0.1;先于 ② reload)
+## 3. ③ 公网 :18080/:8080 改经跳板机 nginx 反代(2026-10-19 改拍 b 方案;先于 ② reload)
 
-**为什么必须做**:② 生效后,18080/8080 裸隧道流量与 443 隧道流量在 poc-nginx 眼里同源同信任,
-客户端自带 `X-Forwarded-For: 1.2.3.4` 会经 realip(取链尾)直接变成 `$remote_addr`——
-审计 IP 可任意伪造 + 换一个伪造 IP 就换一个全新 per-IP 限流桶。绑定地址由 hh2 侧 ssh
-客户端决定,服务文件在 **hh2 的 `/home/msdev/.config/systemd/user/jump-tunnel.service`**,
-不是去跳板机上改。
+**为什么必须做**:② 生效后,poc-nginx 会信任隧道流量来源并采信 XFF 链尾——若 18080/8080
+仍是**裸隧道直通**(链路上没有代理追加真实 IP),客户端自带 `X-Forwarded-For: 1.2.3.4`
+就直接变成 `$remote_addr`:审计 IP 可任意伪造 + 换一个伪造 IP 就换一个全新 per-IP 限流桶。
+**处置(决策 16/17 改拍 b,2026-10-19,对内服务保留端口)**:两条隧道各后移一个回环端口
+(prod 18080→127.0.0.1:18081、dev 8080→127.0.0.1:8081,`+1` 是为给 nginx 腾出公网监听位,
+同端口双绑不可靠),跳板机 nginx 在原公网端口上新增两个反代 vhost 并追加 XFF——
+**对外 URL 与端口完全不变**,且这两个入口与 443 同信任(真实 IP 进链尾,伪造值被顶掉)。
+
+**中断窗口说明**:公网 :18080/:8080 从隧道改绑生效到 vhost reload 完成**中断约 1-2 分钟**
+(3a 与 3b 的间隙);443 与内网入口全程不受影响。180s 定时器护底:vhost 配置失败时自动
+还原直通隧道。
+
+### 3a. hh2 侧隧道 `-R` 后移回环 +1(含 180s 自动回滚定时器)
 
 ```bash
 ssh hh2 '
 set -e
-# 0) 备份 + 预埋 180s 自动还原定时器(防重启隧道杀掉脚下连接后的自锁;验证通过后必须取消,见第 4 步)
+# 0) 备份 + 预埋 180s 自动还原定时器(防重启隧道杀掉脚下连接后的自锁;验证通过后必须取消,见 3c)
 cp /home/msdev/.config/systemd/user/jump-tunnel.service /home/msdev/jump-tunnel.service.bak
 cat > /home/msdev/tunnel-rollback.sh <<RBEOF
 #!/bin/sh
@@ -114,29 +125,87 @@ chmod +x /home/msdev/tunnel-rollback.sh
 export XDG_RUNTIME_DIR=/run/user/1003
 systemd-run --user --on-active=180 --unit=tunnel-rollback /home/msdev/tunnel-rollback.sh
 
-# 1) 两条裸隧道 -R 改绑 127.0.0.1(prod 18080 + dev 8080;12222 运维通道勿动!)
+# 1) 两条隧道 -R 改绑回环并后移 +1(12222 运维通道勿动!)
 sed -i \
-  -e "s|-R 0.0.0.0:8080:127.0.0.1:8090|-R 127.0.0.1:8080:127.0.0.1:8090|" \
-  -e "s|-R 0.0.0.0:18080:127.0.0.1:80|-R 127.0.0.1:18080:127.0.0.1:80|" \
+  -e "s|-R 0.0.0.0:8080:127.0.0.1:8090|-R 127.0.0.1:8081:127.0.0.1:8090|" \
+  -e "s|-R 0.0.0.0:18080:127.0.0.1:80|-R 127.0.0.1:18081:127.0.0.1:80|" \
   /home/msdev/.config/systemd/user/jump-tunnel.service
 systemctl --user daemon-reload && systemctl --user restart jump-tunnel
-'   # 本会话掉线属预期(12222 隧道随重启重建,重连即可)
+'   # 本会话掉线属预期(12222 隧道随重启重建,重连即可);此刻起公网 18080/8080 中断,立刻做 3b
+```
 
-# 2) 验证(新开会话):跳板机上两条端口只剩 127.0.0.1 监听,外网访问超时
-ssh aliyun-swas 'ss -tlnp | grep -E "18080|8080"'
-#   期望 127.0.0.1:18080 / 127.0.0.1:8080,不再是 *:18080
-curl -m 5 -o /dev/null http://47.108.196.211:18080/ms-healthz || echo "外网已不可达(预期)"
-curl -m 5 -o /dev/null http://47.108.196.211:8080/ms-healthz  || echo "外网已不可达(预期)"
+### 3b. 跳板机加两个反代 vhost(在 180s 定时器窗口内完成并 reload)
+
+```bash
+ssh aliyun-swas '
+cp /etc/nginx/conf.d/bucket-taoxiplan.conf /etc/nginx/conf.d/bucket-taoxiplan.conf.bak-$(date +%Y%m%d)-3b 2>/dev/null || true
+cat > /etc/nginx/conf.d/ms-port-proxy.conf <<\EOF
+# ─── W2a:公网 18080/8080 由裸隧道直通改为 nginx 反代(2026-10-19)────────────
+# 隧道已后移到 127.0.0.1:18081(prod→hh2:80)与 127.0.0.1:8081(dev→hh2:8090);
+# 对外端口与 URL 不变。X-Forwarded-For 追加真实客户端 IP 到链尾(hh2 realip 取链尾),
+# 客户端自带的伪造 XFF 被顶到链首不再被采信。指令镜像 bucket-taoxiplan.conf 443 vhost:
+# Host $http_host(保端口,presign 签名依赖)/零缓冲大文件/长超时/ws upgrade。
+server {
+    listen 18080;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    location / {
+        proxy_pass http://127.0.0.1:18081;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+server {
+    listen 8080;
+    client_max_body_size 0;
+    proxy_request_buffering off;
+    proxy_buffering off;
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_http_version 1.1;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+EOF
+nginx -t && systemctl reload nginx
+'
+```
+
+### 3c. 验证 + 取消定时器
+
+```bash
+# 1) 公网两端口恢复访问(经反代;对外行为不变)
+curl -s -o /dev/null -w "18080:%{http_code}\n" http://47.108.196.211:18080/ms-static/web/
+curl -s -o /dev/null -w "8080:%{http_code}\n"  http://47.108.196.211:8080/ms-static/web/
+#   期望 200(经反代到 hh2)
+
+# 2) 跳板机监听形态:公网位=nginx,回环位=sshd
+ssh aliyun-swas 'ss -tlnp | grep -E "18080|18081|8080|8081"'
 
 # 3) 内网回归:ssh hh2(经 12222)通;内网 prod 80 / dev 8090 仍 200
 
-# 4) ★ 成功后立刻取消 180s tunnel-rollback 定时器(不取消 = 180s 后改绑被静默还原、裸通道重新对外)
+# 4) ★ 成功后立刻取消 180s tunnel-rollback 定时器(不取消 = 改绑被静默还原、公网端口回到裸隧道直通=伪造面回来)
 ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rollback.timer; systemctl --user list-timers | grep -c tunnel-rollback'
 ```
 
-**失败处理**:什么都不用做,180 秒后定时器自动还原;事后 `journalctl --user -u jump-tunnel` 查因。
+**失败处理**:什么都不用做,180 秒后定时器自动还原直通隧道(公网端口恢复旧行为,
+伪造面回到现状基线=修复未完成的原始状态,不是新风险);事后
+`journalctl --user -u jump-tunnel` 与跳板机 `nginx -t` 查因。
 
-- [ ] ③ 完成,定时器已取消,外网 18080/8080 已不可达,内网入口回归正常
+- [ ] ③ 完成:公网 18080/8080 经反代恢复 200,定时器已取消,内网入口回归正常
 
 ---
 
@@ -202,8 +271,9 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 2. 修复后:公网 443 请求的审计 `request_ip` = 用户真实公网 IP;内网直连 = 真实内网 IP;
    **不再出现 172.20.0.7**;
 3. 伪造用例:内网直连带伪造 `X-Forwarded-For` 头 → 审计 IP 仍为真实内网 IP(被覆写);
-   经公网裸通道带伪造 XFF → 不可达/不可伪造(**② reload 后立即复核**);
-   `curl -s -H 'X-Forwarded-For: 1.2.3.4' http://192.168.110.221/api/v1/auth/me` 后查审计;
+   经公网 :18080/:8080(反代后)带伪造 XFF → 审计 IP = 真实公网 IP,伪造值被顶到链首
+   不被采信(**② reload 后立即复核本条**)——
+   `curl -s -H 'X-Forwarded-For: 1.2.3.4' http://47.108.196.211:18080/api/v1/auth/me` 后查审计;
 4. 登录限流:两个不同公网 IP 各连错 5 次,互不影响(共享桶事故解除)。
 
 - [ ] 验收 4 条全过
@@ -213,10 +283,10 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 | 入口 | 容器层源 IP(实测) | 预期 |
 |---|---|---|
 | prod 443 隧道 | _(待回填)_ | prod 网桥网关 |
-| prod 18080 裸隧道 | _(待回填)_ | 同上(③ 后该入口关闭) |
+| prod 18080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | 同上(③ 后对外 URL 不变) |
 | prod 内网直连 | _(待回填)_ | 真实 192.168.x |
 | dev 内网 :8090 | _(待回填)_ | 真实 192.168.x |
-| dev 外网 :8080 裸隧道 | _(待回填)_ | dev 网桥网关(③ 后该入口关闭) |
+| dev 外网 :8080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | dev 网桥网关(③ 后对外 URL 不变) |
 
 网络名实测结论(仓库声明 `poc-pigsty-minio_poc-net` vs `<project>_poc-net`、两环境是否
 共享网桥):_(待回填)_
@@ -228,8 +298,9 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 1. **先撤 ②**:还原 default.conf(摘除 §4 片段或 git revert)→ `deploy_lan.sh` 双环境同步
    → 双侧 `nginx -s reload`;
 2. **再撤 ①**:跳板机 `bucket-taoxiplan.conf` 去掉 X-Forwarded-For 行(用 .bak)→ reload;
-3. ③ 一般不回滚;确需恢复裸通道:把 `-R 127.0.0.1:...` 改回 `-R 0.0.0.0:...` 并重启隧道
-   (伪造面随之回来,须自知)。
+3. **再撤 ③**:跳板机删 `ms-port-proxy.conf`(或注释两个 server)→ reload → hh2 侧把
+   `-R 127.0.0.1:18081/:8081:...` 改回 `-R 0.0.0.0:18080/:8080:...` 重启隧道
+   (恢复直通形态;伪造面回到「修复前基线」,须自知)。
 
 回滚后审计 IP 回落 172.20.0.7 现象、登录限流共享桶问题一并回来。
 
@@ -239,9 +310,11 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 - 只信网关**单 IP** 勿放宽网段(同网段容器可直连 nginx:80 伪造);宿主本机进程经
   loopback → docker-proxy → 网关源在信任内(可信面);hairpin 边缘(容器经宿主发布端口)
   风险低,记录即可;
+- **③ 后 :18080/:8080 与 443 同信任**(都经跳板机 nginx 追加真实 IP 到 XFF 链尾,
+  realip 取链尾,客户端伪造值被顶到链首不被采信);
 - **网桥重建可能变更网关 IP**,环境重建后须复核 ⓪ 并更新 set_real_ip_from;
 - **dev 退化依赖**:若 ⓪ 实测两环境共享网桥,「只写 prod 网关」物理上不可行(conf 单文件
-  双环境同步),只能双网关 + 双入口收敛(本 runbook 默认形态)或整体缓行;
+  双环境同步),只能双网关都写(本 runbook 默认形态)或整体缓行;
 - uvicorn `--forwarded-allow-ips '*'` 保持不动(入口已收敛在 poc-nginx);
 - `request_ip` 列 String(64),零 migration。
 
@@ -250,6 +323,8 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
 - [ ] 本文件 §6 回填实测值与验收记录,状态行改「已激活(<日期>)」;
 - [ ] `public-fallback-entry.md`「阶段 4」小节标记已落地(其 `set_real_ip_from 127.0.0.1`
       是宿主层旧口径,已被容器层口径取代);
-- [ ] `prod-public-entry-runbook.md` 的 18080 全套流程与回滚节标记过时(被本 runbook 取代);
-      阿里云轻量机防火墙的 18080/8080 放行规则一并收敛(纵深防御);
+- [ ] `prod-public-entry-runbook.md` 的 18080 相关流程更新说明(通道实现变了:裸隧道直通
+      → 跳板机 `ms-port-proxy.conf` 反代,运维/排障入口随之变化);
+      跳板机 `ms-port-proxy.conf` 与 `bucket-taoxiplan.conf` 最终版一并备份到仓库根
+      `scripts/env/` 并在本文件记 sha256+日期;
 - [ ] `scripts/changelog.md` 记账。

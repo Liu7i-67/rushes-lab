@@ -182,7 +182,9 @@ proxy_set_header X-Forwarded-For $remote_addr;
 `0.0.0.0:18080` 直通 hh2:80,链路上没有任何代理追加真实 IP;② 生效后,18080 流量与
 443 隧道流量在 poc-nginx 眼里**同源同信任**,客户端自带 `X-Forwarded-For: 1.2.3.4` 会经
 realip(取链尾)直接变成 `$remote_addr` → 审计 IP 可任意伪造,且每换一个伪造 IP 就拿到一个
-全新的 per-IP 限流桶——恰好打穿本方案要修的共享桶防线的另一面。三选一(决策点 16,推荐 a):
+全新的 per-IP 限流桶——恰好打穿本方案要修的共享桶防线的另一面。三选一(决策点 16;
+**2026-10-19 用户改拍 b:对内服务保留两端口,改经跳板机 nginx 反代 + XFF,对外 URL 不变;
+实现细节以 ops-manual §11.4 / w2a-realip-activation-runbook §3 为准,下文 a/b/c 为原始选项存档**):
 
 - (a) **改 hh2 侧 jump-tunnel.service 的 `-R` 绑定地址**为 `127.0.0.1:18080:127.0.0.1:80`
   (绑定地址由 hh2 侧 ssh 客户端决定,服务文件在 hh2 的
@@ -648,8 +650,8 @@ old/new minio_prefix;labels.ts + AdminAuditPage EVENT_TYPES 两处回填。
 | 13 | W6 跨项目大批量是否 arq 异步化 | 二期视实测耗时定 |
 | 14 | D1-B 后上传侧是否补 (folder_id, filename) 同名查重 | 建议补轻量应用层查重;**本项是决策点 8 选 B 的同 PR 前置**——8=B 而 14=否 = 「一夹一名」语义静默丢失带病上线,除非显式接受并写入 ops-manual |
 | 15 | W6 一期目标夹同名处置 | skip(新增 skipped_reason=duplicate_filename),与百度导入语义对齐 |
-| 16 | W2a 公网 18080 裸隧道入口处置 | **a:hh2 侧 jump-tunnel 的 -R 改绑 127.0.0.1,公网收敛为 nginx 443 唯一通道**(18080 本是 fallback 临时通道;改时取消 tunnel-rollback 定时器) |
-| 17 | W2a dev 环境口径(:8080 裸隧道 + dev 网关是否入信任源 + **dev 外网入口是否保留**) | 随 16 选 a:dev :8080 同款收敛 + conf 双写两网关,**但 dev 外网入口因此关闭须显式确认**(如需保留须为 dev 新增跳板机反代 vhost);或选 b 明确 dev 暂不修(只写 prod 网关)。禁止半修(加 dev 网关不收敛 8080)。**退化依赖:若 ⓪ 实测两环境共享网桥(网关同 IP),conf 又是单文件双环境同步,b 物理上不可行**(写 prod 网关即同时信任 dev 隧道)→ 只能选 a 或整体缓行 |
+| 16 | W2a 公网 18080 裸隧道入口处置 | ~~a:收敛关闭~~ → **2026-10-19 用户改拍 b:保留端口,改经跳板机 nginx 反代**(+XFF,隧道后移回环 :18081,对外 URL 不变;实现=ops-manual §11.4/w2a runbook §3) |
+| 17 | W2a dev 环境口径(:8080 + dev 网关) | **2026-10-19 随 16 改拍 b:dev :8080 同款反代保留**(隧道后移 :8081,dev 外网入口不再关闭)+ conf 双写两网关。禁止半修(加 dev 网关而不处置 8080)。退化依赖不变:若 ⓪ 实测两环境共享网桥,只能双网关都写或整体缓行 |
 | 18 | W6 二期单对象 >5GiB(超 CopyObject 上限)处置 | multipart copy(UploadPartCopy/compose)或显式 skip 计入 skipped_reasons;推荐 MVP 先显式 skip + 提示,大对象迁移按需再开 multipart |
 | 19 | W4/W5 目录移动门槛是否复用组级删除授权闸门(file_deleter∧can_view) | MVP 不复用,仍按 can_upload(移动是重组不是删除,与创建对称);复用与否留待组级授权语义稳定后再议 |
 

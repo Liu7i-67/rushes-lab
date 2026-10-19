@@ -767,7 +767,8 @@ cd ../api    && docker compose up -d --force-recreate ms-api ms-worker
 > **执行版 runbook** = `w2a-realip-activation-runbook.md`(可打印照抄,含勾选清单/实测记录表,
 > 内容与本节同源;内容漂移时以本节为准并同步该文件)。
 > 来源:`admin-audit-folder-mobile-optimization-plan.md` §2(13 轮盲审定稿);
-> 决策点 16 / 17 按推荐 **a** 拍板(18080/8080 裸隧道改绑 127.0.0.1 收敛,dev 外网入口随之关闭)。
+> 决策点 16 / 17:原拍 a(裸隧道收敛关闭 18080/8080),**2026-10-19 用户改拍 b(对内服务,
+> 保留两端口公网访问:改经跳板机 nginx 反代 + XFF,对外 URL 不变,详见 §11.4)**。
 > **2026-10-17 本轮交付物 = 本节文档**:仓库内 `poc/minio/nginx/default.conf` 与跳板机 conf
 > 均未改动(防止 routine 部署把 ② 先于跳板机 ① 推上线,打开伪造窗口)。① ③ 为远端机器人工
 > 步骤,② 为仓库 conf 变更 + 既有部署流程;激活时机 = 部署窗口,须按 §11.5 硬顺序执行。
@@ -815,7 +816,7 @@ ssh hh2 'docker logs -f poc-nginx --tail=0'
 ssh hh2 'docker logs -f poc-nginx-dev --tail=0'
 
 curl -s -o /dev/null https://bucket.taoxiplan.com/ms-healthz     # prod 443 隧道(未切域名时用 https://47.108.196.211/)
-curl -s -o /dev/null http://47.108.196.211:18080/ms-healthz      # prod 18080 裸隧道
+curl -s -o /dev/null http://47.108.196.211:18080/ms-healthz      # prod 18080 裸隧道(③ 后=经反代,URL 不变)
 curl -s -o /dev/null http://192.168.110.221/ms-healthz           # prod 内网直连
 curl -s -o /dev/null http://192.168.110.221:8090/ms-healthz      # dev 内网
 curl -s -o /dev/null http://47.108.196.211:8080/ms-healthz       # dev 外网裸隧道
@@ -853,63 +854,35 @@ default.conf 的路由镜像(2026-10-10 曾在 hh2 侧短暂落过「default.con
 2. **灾备对照 = 本节指令摘要**(机器丢失后按上述步骤可重建;conf 做结构性大改时另记
    sha256 + 日期)。
 
-### 11.4 ③ 公网裸隧道入口收敛(hh2 侧 jump-tunnel `-R` 改绑 127.0.0.1;先于 ② reload)
+### 11.4 ③ 公网 :18080/:8080 改经跳板机 nginx 反代(决策 16/17=b;先于 ② reload)
 
-**为什么必须做**:② 生效后,18080(dev 为 8080)裸隧道流量与 443 隧道流量在 poc-nginx
-眼里**同源同信任** —— 客户端自带 `X-Forwarded-For: 1.2.3.4` 会经 realip(取链尾)直接变成
-`$remote_addr`,审计 IP 可任意伪造,且每换一个伪造 IP 拿到一个全新 per-IP 限流桶,恰好
-打穿要修的共享桶防线的另一面。三选一(方案决策点 16,**已拍板 a**):改 hh2 侧
-jump-tunnel.service 的 `-R` 绑定地址为 `127.0.0.1:...`,公网收敛为跳板机 nginx 443 唯一
-通道(18080 本就是 fallback 手册定位的临时通道;如需保留应急直达,改经跳板机 nginx 反代
-并同加 XFF)。绑定地址由 hh2 侧 ssh 客户端决定,**服务文件在 hh2 的
+**为什么必须做**:② 生效后,poc-nginx 会信任隧道流量来源并采信 XFF 链尾——若 18080/8080
+仍是**裸隧道直通**(链路上没有代理追加真实 IP),客户端自带 `X-Forwarded-For: 1.2.3.4`
+就直接变成 `$remote_addr`:审计 IP 可任意伪造,且每换一个伪造 IP 拿到一个全新 per-IP
+限流桶。**处置(2026-10-19 用户改拍 b:对内服务,保留两端口公网访问)**:两条隧道各后移
+一个回环端口(prod 18080→`127.0.0.1:18081`、dev 8080→`127.0.0.1:8081`;`+1` 是为给
+nginx 腾出公网监听位,同端口双绑不可靠),跳板机 nginx 在原公网端口新增两个反代 vhost
+并追加 XFF——**对外 URL 与端口完全不变**,两入口与 443 同信任(真实 IP 进链尾,客户端
+伪造值被顶到链首不被采信)。绑定地址由 hh2 侧 ssh 客户端决定,**服务文件在 hh2 的
 `/home/msdev/.config/systemd/user/jump-tunnel.service`,不是去跳板机上改**。
 
-**⚠ 明示(dev 口径,决策点 17=a)**:dev :8080 同款改绑后,**dev 的外网 :8080 入口即关闭**
-(dev 没有跳板机 443 vhost,bucket-taoxiplan.conf 只服务 prod)。dev 如需保留外网入口,
-须在跳板机为 dev 新增反代 vhost 并同加 XFF —— 「dev 是否还需要外网入口」是显式拍板项,
-当前拍板 = 接受关闭,以本节为记录。
+**中断窗口**:公网 :18080/:8080 从隧道改绑生效到 vhost reload 完成**中断约 1-2 分钟**
+(3a 与 3b 的间隙);443 与内网入口全程不受影响。180s 定时器护底:vhost 失败自动还原直通。
+完整可照抄命令(3a 隧道后移+定时器 / 3b 跳板机 `ms-port-proxy.conf` 两个 vhost(指令镜像
+443 vhost:Host $http_host/零缓冲/3600s/ws upgrade) / 3c 验证+取消定时器)见执行版
+runbook §3,此处不重复;要点三条:
 
-```bash
-ssh hh2 '
-set -e
-# 0) 备份 + 预埋 180s 自动还原定时器(照 runbook 步骤 1(:95-113)流程;定时器防的是
-#    重启隧道杀掉脚下连接后的自锁,验证通过后必须取消,见第 4 步)
-cp /home/msdev/.config/systemd/user/jump-tunnel.service /home/msdev/jump-tunnel.service.bak
-cat > /home/msdev/tunnel-rollback.sh <<RBEOF
-#!/bin/sh
-cp /home/msdev/jump-tunnel.service.bak /home/msdev/.config/systemd/user/jump-tunnel.service
-export XDG_RUNTIME_DIR=/run/user/1003
-systemctl --user daemon-reload
-systemctl --user restart jump-tunnel
-RBEOF
-chmod +x /home/msdev/tunnel-rollback.sh
-export XDG_RUNTIME_DIR=/run/user/1003
-systemd-run --user --on-active=180 --unit=tunnel-rollback /home/msdev/tunnel-rollback.sh
+1. sed 目标改为 `-R 127.0.0.1:18081:127.0.0.1:80` 与 `-R 127.0.0.1:8081:127.0.0.1:8090`
+   (12222 运维通道勿动);
+2. vhost 反代指向 `127.0.0.1:18081` / `127.0.0.1:8081`,`proxy_set_header X-Forwarded-For
+   $proxy_add_x_forwarded_for;` 是伪造面封死的关键,Host/XFP/零缓冲镜像 443 vhost;
+3. 验证=公网两端口经反代恢复 200(对外行为不变)+ `ss -tlnp` 监听形态(公网位=nginx、
+   回环位=sshd)+ 内网回归,**然后立刻取消 180s tunnel-rollback 定时器**(不取消=改绑被
+   静默还原、公网端口回到裸隧道直通=伪造面回来)。
 
-# 1) 两条裸隧道 -R 改绑 127.0.0.1(prod 18080 + dev 8080;12222 运维通道勿动!)
-sed -i \
-  -e "s|-R 0.0.0.0:8080:127.0.0.1:8090|-R 127.0.0.1:8080:127.0.0.1:8090|" \
-  -e "s|-R 0.0.0.0:18080:127.0.0.1:80|-R 127.0.0.1:18080:127.0.0.1:80|" \
-  /home/msdev/.config/systemd/user/jump-tunnel.service
-systemctl --user daemon-reload && systemctl --user restart jump-tunnel
-'   # 本会话掉线属预期(12222 隧道随重启重建,重连即可)
-
-# 2) 验证(新开会话):跳板机上两条端口只剩 127.0.0.1 监听,外网访问超时
-ssh aliyun-swas 'ss -tlnp | grep -E "18080|8080"'
-#   期望 127.0.0.1:18080 / 127.0.0.1:8080,不再是 *:18080
-curl -m 5 -o /dev/null http://47.108.196.211:18080/ms-healthz || echo "外网已不可达(预期)"
-curl -m 5 -o /dev/null http://47.108.196.211:8080/ms-healthz  || echo "外网已不可达(预期)"
-
-# 3) 内网回归:ssh hh2(经 12222)通;内网 prod 80 / dev 8090 仍 200
-
-# 4) ★ 成功后立刻取消 180s tunnel-rollback 定时器(取消步骤 = runbook:117-119;
-#    不取消 = 180s 后改绑被静默还原、裸隧道重新对外):
-ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rollback.timer; systemctl --user list-timers | grep -c tunnel-rollback'
-```
-
-失败处理:什么都不用做,180 秒后定时器自动还原;事后 `journalctl --user -u jump-tunnel` 查因。
-隧道层回滚注意(`tunnel-rollback.sh` 还原的是 `.bak`,备份新鲜度)照 runbook 回滚总表脚注
-(:180-182)。
+失败处理:什么都不用做,180 秒后定时器自动还原直通隧道(公网端口恢复旧行为,伪造面回到
+现状基线=修复未完成的原始状态,不是新风险);事后 `journalctl --user -u jump-tunnel` 与
+跳板机 `nginx -t` 查因。
 
 ### 11.5 ② poc-nginx default.conf 变更(仓库文件;硬顺序最后一步)
 
@@ -969,7 +942,7 @@ ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rol
      ※ 先于 ② reload,缩短「realip 已采信网关流量链尾值但裸通道未封」的窗口
  → ② default.conf 改仓库 + deploy_lan.sh 同步(conf bind mount)
      + docker exec poc-nginx nginx -s reload(dev 侧 poc-nginx-dev 同款;既有流程)
- → reload 后立即从 18080(如未收敛)打伪造 XFF 复核被拒(§11.6 验收 3)
+ → reload 后立即经公网 18080/8080(反代后)打伪造 XFF 复核被拒(§11.6 验收 3)
 ```
 
 ### 11.6 验收(4 条,方案 §2.4)
@@ -978,7 +951,7 @@ ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rol
 2. 修复后:公网 443 请求的审计 `request_ip` = 用户真实公网 IP;内网直连 = 真实内网 IP;
    不再出现 172.20.0.7;
 3. 伪造用例:内网直连带伪造 `X-Forwarded-For` 头 → 审计 IP 仍为真实内网 IP(被覆写);
-   ③ 处置后经公网裸通道带伪造 XFF → 审计 IP 同样不可伪造(**② reload 后立即复核本条**);
+   经公网 :18080/:8080(③ 反代后)带伪造 XFF → 审计 IP = 真实公网 IP,伪造值被顶到链首不被采信(**② reload 后立即复核本条**);
 4. 登录限流:两个不同公网 IP 各连错 5 次,互不影响(共享桶事故解除)。
 
 ### 11.7 实测记录(⓪ 产物,实施时回填)
@@ -986,10 +959,10 @@ ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rol
 | 入口 | 容器层源 IP(实测) | 预期 |
 |---|---|---|
 | prod 443 隧道 | _(待回填)_ | prod 网桥网关 |
-| prod 18080 裸隧道 | _(待回填)_ | 同上(③ 后该入口关闭) |
+| prod 18080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | 同上(③ 后对外 URL 不变) |
 | prod 内网直连 | _(待回填)_ | 真实 192.168.x |
 | dev 内网 :8090 | _(待回填)_ | 真实 192.168.x |
-| dev 外网 :8080 裸隧道 | _(待回填)_ | dev 网桥网关(③ 后该入口关闭) |
+| dev 外网 :8080(③ 前裸隧道/③ 后经反代) | _(待回填)_ | dev 网桥网关(③ 后对外 URL 不变) |
 
 网络名实测结论(仓库声明 `poc-pigsty-minio_poc-net` vs `<project>_poc-net`、两环境是否共享网桥):_(待回填)_。
 
@@ -1028,7 +1001,8 @@ ssh hh2 'export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user stop tunnel-rol
 - 本节 §11.7 回填实测值,§11.6 验收 4 条打勾;
 - `public-fallback-entry.md`「阶段 4:真实 IP 与登录限流」小节(:299 起)标记已落地
   (其 `set_real_ip_from 127.0.0.1` 是宿主层旧口径,已被本节容器层口径取代);
-- 16(a) 落地后:`prod-public-entry-runbook.md` 的 18080 全套流程与回滚节
-  (:65 / :95-119 / :177-178)整体过时须标记取代;阿里云轻量机防火墙的 18080 / 8080 放行规则
-  (runbook:29 / :164 / :178)一并收敛(纵深防御)。
+- ③(b) 落地后:`prod-public-entry-runbook.md` 的 18080 相关流程更新说明(通道实现变了:
+  裸隧道直通 → 跳板机 `ms-port-proxy.conf` 反代,运维/排障入口随之变化);跳板机
+  `ms-port-proxy.conf` 与 `bucket-taoxiplan.conf` 最终版备份到仓库根 `scripts/env/`
+  并记 sha256+日期;防火墙 18080/8080 放行规则**保留**(b 方案端口继续对外)。
 
