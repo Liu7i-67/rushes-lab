@@ -298,6 +298,13 @@ nginx 的 `$http_host` 透传(MinIO 签名校验侧)已就绪,不动。
 
 ### 阶段 4:真实 IP 与登录限流(公网入口上线前必须做)
 
+> **✅ 已落地(2026-10-19,W2a)**:实施与验收记录 = `w2a-realip-activation-runbook.md`
+> (四条验收全过,DB 实锤 `audit_events.request_ip` = 真实公网 IP,172.20.0.7 消失)。
+> 本小节的 `set_real_ip_from 127.0.0.1` 是**宿主层旧口径,已被容器层口径取代**:
+> 容器内的 poc-nginx 经 docker-proxy 转投,隧道流量源是网桥网关(实测 prod 172.20.0.1 /
+> dev 172.22.0.1),「信任 127.0.0.1」在容器层不成立;现役写法见仓库
+> `material-storage/poc/minio/nginx/default.conf` 的 realip 组(双网关单 IP + 取 XFF 链尾)。
+
 问题:经隧道进来的请求在 hh2 nginx 眼里源 IP 全是 `127.0.0.1` → per-IP 登录限流把**所有公网用户塞进同一个桶**,
 任何人输错 5 次密码 = 全体公网用户锁 15 分钟;审计日志也丢真实 IP。
 

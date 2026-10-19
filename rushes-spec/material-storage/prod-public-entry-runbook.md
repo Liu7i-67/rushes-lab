@@ -1,5 +1,17 @@
 # 生产环境外网映射操作流程(runbook)
 
+> **2026-10-19 通道实现变更(W2a,影响本流程)**:公网 :18080/:8080 已从**裸隧道直通**
+> 改为**跳板机 nginx 反代**(跳板机 `/etc/nginx/conf.d/ms-port-proxy.conf`,XFF 追加真实
+> 客户端 IP);两条隧道后移回环 `-R 127.0.0.1:18081:→hh2:80`、`-R 127.0.0.1:8081:→hh2:8090`,
+> **对外 URL 与端口不变**,443 vhost 的 proxy_pass 也已随之改指 18081。排障入口变化:
+> - 公网 18080/8080 不通 → 先查跳板机 `nginx -t`/`systemctl status nginx` 与
+>   `ss -tlnp`(公网位应=nginx,回环 18081/8081 应=sshd),再查 hh2 侧 jump-tunnel;
+> - `ss -tlnp | grep 18080` 期望从旧的 `sshd *:18080` 变为 `nginx 0.0.0.0:18080`;
+> - 回滚形态见 `w2a-realip-activation-runbook.md` §7(含 443 proxy_pass 还原,
+>   备份 `bucket-taoxiplan.conf.bak-20261019-3b`;hh2 回滚锚点
+>   `/home/msdev/jump-tunnel.service.bak` 与两侧 `default.conf.bak-w2a`)。
+> 变更动机与验收 = W2a 真实 IP(审计 `request_ip` 还原真实 IP + 解除公网登录限流共桶)。
+
 > **2026-09-10 跳板机迁移(最新状态)**:隧道跳板已从旧 ECS(47.108.119.221)迁至**轻量应用服务器
 > 47.108.196.211**(2核0.5G,200Mbps 峰值,无固定流量套餐;root 密钥 `scripts/env/fileali.pem`)。
 > 轻量机已配 `GatewayPorts clientspecified`(备份 `/etc/ssh/sshd_config.bak-swas-20260910`)+ `tunnel`
