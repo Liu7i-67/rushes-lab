@@ -1,7 +1,8 @@
 # 四项前端体验优化方案:内置浏览器检测提示 / 预览弹窗导航下载 / 审计展开详情补名 / 移动端批量栏溢出
 
 > 2026-10-19 调研定稿(同日追加 D 包;E 包「iOS livp 上传引导」调研后经用户拍板移除),
-> 调研全程未动代码。行号引用为 **liuqi @ 4748980** 基线快照,
+> 调研全程未动代码。行号引用为 **liuqi @ c423431** 基线快照
+> (代码同 4748980,c423431 仅多本方案文档的保存提交),
 > 实施时一律按符号名/端点名 + grep 定位,勿按行号盲跳。
 > 四个工作包(A–D)互相独立,可并行或分批实施。
 > 实施等待用户明确指令。
@@ -30,7 +31,11 @@
 - 全局挂载点现成:`web/src/App.tsx:313-316`,`MaintenanceBanner` 与 `AppShell` 并列挂在
   `BrowserRouter` 下 —— 意味着放这个位置的组件**覆盖所有路由**,包括 `/login`、`/change-password`、
   分享落地页 `/s/:token`、申请链接页 `/r/:token`(分享链接正是在微信里点开的,是最主要的内置浏览器入口)。
-- 已有 `copy-to-clipboard` 依赖(AssetSummaryPanel 在用),复制链接按钮零新增依赖。
+- 已有 `copy-to-clipboard` 依赖,且有**全站统一复制入口** `web/src/utils/copy.ts` 的
+  `copyToClipboard(text): boolean`——内网部署为纯 HTTP(非安全上下文),
+  `navigator.clipboard` 不可用,库内部自动落 `execCommand('copy')` 兜底;
+  复制链接按钮零新增依赖,**必须走该入口**(直连库/裸 API 在微信 webview 的 HTTP
+  环境大概率静默失败)。
 
 ### 1.2 选型:inapp-spy + 国产 App UA 补充表
 
@@ -90,10 +95,22 @@ export function detectInApp(): InAppResult { /* InAppSpy() + supplement + isMobi
 
 **新组件 `web/src/components/InAppBrowserTip.tsx`**,挂 `App.tsx:314` `<MaintenanceBanner />` 旁:
 
-- 形态:**非阻断顶部固定 Alert 横幅**(antd `Alert` type=warning,`position: fixed; top: 0; z-index` 低于
-  Modal 但盖住页面头),可关闭。决策点 D-A3:横幅(默认)vs 不可关 modal(过重,不推荐)。
+- 形态:**非阻断顶部固定 Alert 横幅**(antd `Alert` type=warning),可关闭。决策点 D-A3:横幅(默认)vs 不可关 modal(过重,不推荐)。
   理由:内置浏览器里系统「能用但体验差」,阻断会把低配场景变成不可用;维护 modal(MaintenanceBanner)
   只留给真不可用场景。
+- **层叠策略(定稿)**:`position: fixed; left/right: 0`,**top 动态**:常规路由
+  `top: 56px`(AppHeader 既有高度,登录后的所有页面含分享页 `/s/:token` 都在壳内、
+  header 常驻)—— 横幅贴 header 下沿悬浮,**header 保持完全可交互**(用户在内置浏览器里
+  正需要 header 的导航入口去登录/切页);**无 header 路由降为 `top: 12px`**:
+  `/login`、`/change-password`、`/dev-login`(AppShell 对未登录 auth 页与 dev-login
+  提前 `return <RouterRoutes />`,App.tsx:105/119-127,**不渲染 AppHeader** ——
+  这些页面 56px 会悬空盖住登录卡;判定用 pathname 白名单,实施取简单)。
+  z-index 走 tokens.css 既有 z 体系(`--ms-z-header: 50 / --ms-z-batchbar: 60 /
+  --ms-z-float: 80`),新增 token `--ms-z-inapp-tip: 55`(介于 header 与批量栏;
+  antd Modal 默认 1000+,横幅远低于之,弹窗内不受影响)。fixed 不占文档流 →
+  悬浮期间遮内容顶部约一条(~44px),关闭即恢复;这是「不挡 header 交互」优先于
+  「零遮挡」的刻意取舍(若遮 header,用户在内置浏览器里反而更难完成
+  「复制链接→去登录」的关键路径)。
 - 文案(初稿,实施期真机核对):
   - 标题:`当前在 {appName} 内置浏览器中打开,部分功能(下载/预览)可能不可用`
   - 引导(iOS):`点击右上角「…」,选择在 Safari 中打开;或复制链接后粘贴到浏览器`
@@ -101,8 +118,9 @@ export function detectInApp(): InAppResult { /* InAppSpy() + supplement + isMobi
   - 注意:不同 App 菜单项措辞不一(iOS 微信 historically 无「在 Safari 打开」直入口,
     企业微信/抖音菜单项也各异)→ **「复制链接」按钮是通用兜底 CTA**,菜单文案仅作辅助,
     实施时逐家真机核对后微调(低风险纯文案)。
-- 操作:`[复制链接]`(copy-to-clipboard,`window.location.href` 整串含 `/ms-static/web` 前缀,
-  复制原样即可)+ `[关闭]`。
+- 操作:`[复制链接]`(走 `utils/copy.ts` 的 `copyToClipboard(window.location.href)`
+  —— 整串含 `/ms-static/web` 前缀,复制原样即可;返回 `false`(极旧浏览器无兜底)→
+  `message.warning('复制失败,请长按地址栏手动复制')`)+ `[关闭]`。
 - 关闭持久化:`sessionStorage['ms-inapp-tip-dismissed']='1'` —— 当次会话不再弹,次日新会话再提示
   (决策点 D-A4:sessionStorage(默认)vs localStorage 长期静默)。
 - 挂载位置在 `BrowserRouter` 内但**不依赖路由**,与 MaintenanceBanner 同层,登录页/分享页全覆盖。
@@ -117,7 +135,11 @@ Python constraints 不涉及)。
 2. 普通 Chrome/Safari/PC 微信(含 MicroMessenger 但非 mobile)→ 不弹。
 3. 关闭后本次会话内切路由不再弹;新开标签页(新 session)重新弹。
 4. 分享落地页 `/s/:token` 直接在微信内打开 → 横幅覆盖(highest-priority 场景)。
-5. 真机回归:微信内点「复制链接」→ 粘贴到 Safari 能打开(clipboard 在微信 webview 的兼容性)。
+5. 层叠:横幅显示期间 AppHeader 各入口(汉堡菜单/搜索/头像)可正常点击;
+   弹出任意 Modal(如登录后的操作弹窗)时横幅在其下层,不遮挡弹窗;
+   登录页/改密页(无 header)横幅贴顶(top:12)不盖登录卡。
+6. 真机回归:微信内点「复制链接」→ 粘贴到 Safari 能打开(走 `copyToClipboard`
+   的 HTTP execCommand 降级路径)。
 
 ### 1.5 风险与钉子
 
@@ -135,13 +157,24 @@ Python constraints 不涉及)。
 - `web/src/components/AssetPreviewModal.tsx:19-23`:Props 只有 `{ asset, open, onClose }`,
   **没有列表上下文**;`footer={null}`,正常预览态(image/video/pdf/md/text)无任何操作按钮,
   下载按钮只存在于三张降级卡(iOS PDF §3.6 / HEIC 失败 / livp 失败)。
+- ⚠ **挂载结构(实施必改的前置事实)**:`AssetSummaryPanel.tsx:210-216` 对
+  `AssetPreviewModal` 是 `{isPreviewable(a) && (<AssetPreviewModal …>)}` **条件渲染**,
+  「预览」QuickAction(156-160 行)同受 `isPreviewable` 门控。`isPreviewable` = kind !==
+  'unsupported' —— 一旦导航把当前 asset 切到 .zip 等不支持预览的文件,该条件翻假,
+  **modal 会被整个从 DOM 卸载**(Drawer 还开着,弹窗突然消失),unsupported 卡与
+  footer 下载在该路径永远不可达。见 §2.2「挂载改造」。
 - 唯一调用方 `AssetSummaryPanel.tsx:210-216`(单选态 QuickAction「预览」打开)。
   AssetSummaryPanel 的使用方(即列表持有方):
   - `FolderDetailPage.tsx:241` —— 单文件详情 bottom Drawer,`selected={[detailAsset]}`,
     **Drawer 标题已有 ‹ n/N › 翻页**(detailIndex + items,页内 30 条边界禁用);
-  - `ProjectDetailPage.tsx:948` —— 同构(detailIndex + assetItems);另有两处面板(空选/多选)无预览;
+  - `ProjectDetailPage.tsx:948` —— 同构(detailIndex + assetItems);另有两处面板
+    (空选/多选)无预览;
+  - `ProjectDetailPage.tsx:1281` —— **PC 三栏右栏**(`selected={selectedAssets}`,
+    单选时同样出现「预览」入口,但页面无 detailIndex 上下文,见 §2.2「明确不做」);
   - `SearchPage.tsx:264` —— focus Drawer,**刻意未做翻页**(源码注释「单文件态不做 ‹ n/N ›
-    跨结果切换(二期可选)」),focus 由 `?asset=` 查询参数驱动。
+    跨结果切换(二期可选)」),focus 由 **`?focus=`** 查询参数驱动
+    (`sp.get('focus')`;注意 `/folders/:id?asset=` 是 FolderDetailPage 的深链参数,
+    两页参数名不同,勿混)。
 - 下载链路现成:`useDownloadLink` + `useDownloads().start`(浮窗进度),403 → message.warning
   (AssetPreviewModal.tsx:76-85 已有同款 handler,可提为组件级复用)。
 - 键盘:antd Modal 自带 Esc 关闭;←/→ 无监听。
@@ -157,8 +190,11 @@ interface Props {
   onClose: () => void;
   // 列表上下文(三入口传入后启用导航条;不传 = 现行为,单 asset)
   list?: Asset[];
-  index?: number;                 // asset 在 list 中的下标
+  index?: number | null;          // asset 在 list 中的下标;两页实态是
+                                  // `detailIndex: number | null`(null = 未开),按 null 安全处理
+                                  // (边界禁用照抄 Drawer 既有写法 `(detailIndex ?? 0) <= 0`)
   onIndexChange?: (i: number) => void;
+  canDownload?: boolean;          // 缺省 true;false 时 footer 下载禁用(面板权限语义透传)
 }
 ```
 
@@ -168,12 +204,23 @@ interface Props {
 - 边界:`index<=0` 禁用 ‹,`index>=list.length-1` 禁用 ›(与 Drawer 翻页同语义,**不跨分页**,
   FolderDetail 页内 items 是当前页 30 条,SearchPage 最多 50 条截断)。
 - **下载按钮:footer 常驻**(替换 `footer={null}` 为自定义 footer:`[下载]` 居中/居右,
-  `icon=<Download/>`,`loading={dlLink.isPending}`),所有 kind(含 unsupported 卡)可见可用;
-  403 → `message.warning('无下载权限,请联系项目管理员')`(与现有降级卡 handler 同文案);
-  降级卡内的下载按钮可顺势复用同一个 handler(三处重复代码收敛为组件级 `handleDownload`)。
+  `icon=<Download/>`,`loading={dlLink.isPending}`),所有 kind(含 unsupported 卡)可见;
+  **权限态对齐面板语义**:Props 增加可选 `canDownload`(AssetSummaryPanel 透传既有
+  `folder?.my_can_download !== false` 判定),无权时按钮**禁用 + tooltip
+  「无下载权限,可在文件面板点『申请下载』」**(antd disabled Button 不触发 hover,
+  tooltip 须照抄仓内既有写法:Tooltip 包住 disabled Button —— ProjectDetailPage
+  批量删除按钮同款,~1193-1197)—— 与列表「下载/申请下载」QuickAction
+  同口径,不给无权用户一个必然 403 的可点按钮(面板的 403 handler 会自动弹
+  RequestAccessModal,modal 内保持纯 warning 不跨组件开弹窗);
+  403 → `message.warning('无下载权限,请联系项目管理员')`(与降级卡同文案兜底);
+  复用组件级 `handleDownload`(现已被三张降级卡共用,footer 是第 4 个调用点)。
 - **键盘导航**:open 且 list 长度 >1 时挂 `keydown`(←/→ → onIndexChange,注意焦点在 input 时忽略
   —— 预览态无输入框,风险低,但 livp 播放态 video 有自己的键位,绑在 `document` 并检查
   `e.target` 非 `video` 即可)。Esc 维持 antd 自带。
+- **挂载改造钉子(实施必改,先于其余改动)**:`AssetSummaryPanel` 把 modal 挂载条件从
+  `isPreviewable(a) &&` 改为 `previewOpen`(即 modal 常挂、由 open 开关;「预览」QuickAction
+  按钮仍保留 `isPreviewable` 门控,入口不变)。不改这条,导航切到 unsupported 文件时
+  modal 整个卸载(§2.1 前置事实),unsupported 卡与 footer 下载永远不可达。
 - **切换重置钉子(实施必改)**:现有 effect(`AssetPreviewModal.tsx:89-143`)只在 `!open` 时清
   `content/liveUrl/playingLive`;**asset 切换时 livp 的 `playingLive/liveUrl` 不清** —— 从 livp(正在播实况)
   切到下一张再切回 livp,会直接残留播放态。实施时把「asset.id 变化」也纳入重置分支
@@ -192,7 +239,9 @@ interface Props {
 }
 ```
 
-forward 给 `AssetPreviewModal`。多选态/空选态不涉及(无预览入口)。
+forward 给 `AssetPreviewModal`(含内部已有判定 `canDownload = folder?.my_can_download
+!== false`(AssetSummaryPanel.tsx:44)一并透传,页面无需新传)。多选态/空选态不涉及
+(无预览入口)。
 
 **三页面接线**:
 
@@ -200,19 +249,26 @@ forward 给 `AssetPreviewModal`。多选态/空选态不涉及(无预览入口)�
 |------|------|-------|---------------|------|
 | FolderDetailPage:241 | `items` | `detailIndex` | `setDetailIndex` | Drawer 标题翻页与 modal 翻页天然同步(同一 state) |
 | ProjectDetailPage:948 | `assetItems` | `detailIndex` | `setDetailIndex` | 同上 |
-| SearchPage:264 | `results` | `results.findIndex(r => r.id === focused.id)` | `(i) => setSearchParams({ q, asset: results[i].id }, { replace: true })` | 顺带把「二期可选」的 Drawer 翻页也补了(可选:Drawer 标题加同款 ‹ n/N ›,复用同一 index 源) |
+| SearchPage:264 | `results` | `results.findIndex(r => r.id === focused.id)` | `(i) => setSearchParams({ q, focus: results[i].id }, { replace: true })` | 参数名是 **`focus`**(非 `asset`,SearchPage.tsx:63 `sp.get('focus')`;`?asset=` 是 FolderDetailPage 的深链参数)。顺带把「二期可选」的 Drawer 翻页也补了(可选:Drawer 标题加同款 ‹ n/N ›,复用同一 index 源) |
 
 **明确不做(P2 备忘)**:移动端滑动手势切图(motion 库可做,另期);相邻图预加载;
 跨分页连续导航(与 Drawer 翻页语义保持一致,页边界即停);分享落地页 `/s/:token` 加预览弹窗
-(分享页目前只有缩略图列表无预览,属另一需求)。
+(分享页目前只有缩略图列表无预览,属另一需求);
+**PC 三栏右栏预览不接 list**(`ProjectDetailPage.tsx:1281`,`selectedAssets` 单选态)——
+该面板无 detailIndex 上下文,保持单文件预览模式(footer 下载仍生效;导航条仅在
+compact Drawer 三入口出现,验收时勿把 PC 右栏无翻页当缺陷报)。
 
 ### 2.3 测试点
 
 1. 三入口(Folder/Project/Search)开预览:‹ › 计数正确、边界禁用、标题文件名随切换变。
 2. 键盘 ←/→;Esc 关闭;livp 播放中按 ←/→ 不误触 video 键位。
 3. 各 kind 轮播:image → md → pdf → livp → heic → unsupported,逐一验证内容正确重载、
-   **livp 播放态切换后不残留**(§2.2 钉子)。
-4. footer 下载:正常下载走浮窗;无权限 403 → warning;unsupported 卡下载可用。
+   **livp 播放态切换后不残留**(§2.2 钉子);unsupported 环节同时验证 **modal 不因
+   `isPreviewable` 翻假而消失**(§2.2 挂载改造生效),unsupported 卡与 footer 下载可达。
+   显式用例:**livp A(播放实况中)→ livp C** —— C 不得串用 A 的实况视频
+   (`playingLive && liveUrl` 残留会把 A 的实况渲染在 C 上,比「切回残留」更严重)。
+4. footer 下载:正常下载走浮窗;无权限 403 → warning;unsupported 卡下载可用;
+   **无下载权账号**(canDownload=false)footer 按钮**禁用** + tooltip 指引申请入口。
 5. 回归:AssetSummaryPanel 多选态/空选态不受影响;预览关闭后 Drawer 翻页仍正常。
 6. compact(移动端):导航条 + footer 在小屏不溢出,title 长文件名省略。
 
@@ -220,8 +276,10 @@ forward 给 `AssetPreviewModal`。多选态/空选态不涉及(无预览入口)�
 
 - Modal 与 Drawer 叠层(Drawer 内开 Modal)现状靠 DOM 挂载序维持同 z-index —— 本次不动层级,
   只改 title/footer 内容,不引入新叠层。
-- SearchPage 的 index 是 `findIndex` 派生值(非 state),`?asset=` 不在 results 里(如翻搜索词后
-  旧深链)→ findIndex 返回 -1,此时不传 list(降级为单 asset 模式),不渲染导航条。
+- SearchPage 的 index 是 `findIndex` 派生值(非 state)。`?focus=` 未命中时
+  `focused` 为 undefined → Drawer 本身不开(SearchPage.tsx:64/241),「预览开着但
+  findIndex=-1」在正常交互下**不可达**;接线处的 -1 降级分支是**防御性代码**
+  (防未来入口变化,如 Drawer 内直接开预览的新路径),保留无害、勿删。
 
 ---
 
@@ -257,18 +315,42 @@ target_asset_id / target_minio_key / request_ip` + `details` 整块 `JSON.string
 **后端(落点 `routers/admin.py`,与 W2b 同构,零 migration)**:
 
 1. `AuditOut` 新增字段(全部 optional,向后兼容):
-   - `user_agent: str | None`(裸列透传);
-   - `resolved_names: dict[str, str]` —— key = details 里的键名,value = 补出的显示名。
-2. 新 helper `_resolve_audit_detail_names(rows)`,扫描每行 `details` 的已知键集合
-   `{folder_id, target_folder_id, group_id, user_id, sharer_user_id, subject}`,
-   按类型分桶收集 UUID(**details 是自由 JSON,值须 try-UUID 解析,垃圾值静默跳过**),每类一次批量
-   IN 查询:
-   - folder_id / target_folder_id → `folders.name`(不递归拼全路径,P2 可选);
+   - `user_agent: str | None`(裸列透传;**写入端顺手截断,收口在
+     `services/audit.py` 的 `AuditService.write`** —— record 组装处
+     `user_agent[:512]` 与列宽 `String(512)` 对齐。⚠ 不能只改 `deps.py:163`
+     的 ctx 组装点:`directory.py` 有 **9 处**绕过 ctx 直读
+     `request.headers.get("user-agent")` 传给 `audit.write`(112/352/401/467/
+     501/565/831/946/1052 行,用户禁用/解锁、密码重置、组与成员增删等管理员操作),
+     只改 deps.py 目录管理域的超长 UA 仍会溢出丢审计;`write` 是全部审计写入的
+     唯一必经收口,一行覆盖全路径 —— 既有隐患:超长 UA 不截断会 insert 失败
+     丢整条审计事件);
+   - `resolved_names: dict[str, str]` —— key = details 里的键名,value = 补出的显示名
+     (**纯名称,不拼「(用户)/(用户组)」后缀** —— 与 `subject_names.py` 既有口径一致
+     「名称不再拼前缀,类型由前端展示」;前端类型区分见 §3.2 前端第 2 点)。
+2. 新 helper `_resolve_audit_detail_names(rows)`,扫描每行 `details` 的已知标量键集合
+   `{folder_id, target_folder_id, parent_folder_id, old_parent_folder_id,
+   new_parent_folder_id, group_id, user_id, sharer_user_id, subject}`
+   (folder 桶含改名/移动事件的三个父目录 id 键 —— `folder_renamed` 写
+   `parent_folder_id`、`folder_moved` 写 `old_parent_folder_id`/`new_parent_folder_id`
+   (folders.py ~488-506),与 folder_id 同桶同 IN 查询零额外成本,高频管理操作值得补)。
+   **一期不补、原样渲染的其余 id 键**:`group_ids`(列表)、`target_id`(share 通用键)、
+   `task_id`(baidu_task_*,有 source_dir 可读性尚可)、`file_id`(baidu_file_*)、
+   `receiver_user_id`、`approval_id`、`subject_id`、details 内 `project_id`/`template_id`/
+   `asset_id` —— 后三者的可读名称多数行已由顶层 W2b 派生列(target_project_name/
+   target_asset_filename)覆盖,details 内重复键不单独补(与 §3.1 表格口径对齐;
+   白名单制允许后续按需补)。
+   按类型分桶收集(**details 是自由 JSON,值须 try-UUID 解析,垃圾值静默跳过**),
+   每类一次批量 IN 查询:
+   - folder_id / target_folder_id / parent_folder_id / old_parent_folder_id /
+     new_parent_folder_id → `folders.name`(不递归拼全路径,P2 可选);
    - user_id / sharer_user_id → `users.name`;
    - group_id → `groups.name`;
-   - `subject` 特殊解析:`user:<uuid>` → `users.name` + 后缀`(用户)`;
-     `group:<uuid>#member` → `groups.name` + 后缀`(用户组)`;解析不出原样跳过。
-   查不到(已删除)→ 该键不进 `resolved_names`,前端回落裸值显示(与 W2b purge 行回 null 同口径)。
+   - `subject` **复用既有服务** `api/app/services/subject_names.py` 的
+     `resolve_subject_names(db, subjects)`(完整实现 `user:<uuid>` / `group:<uuid>#member`
+     解析、非 UUID 容错、users+groups 批量查;已被 project/folder 成员与授权列表接口
+     复用)—— 传原始 subject 串,`found=False`(已删/存量非 UUID)的键**不进
+     `resolved_names`**,前端回落裸值(与下述「查不到」同口径,不引入「名称…」半吊子兜底);
+   - 查不到(已删除)→ 该键不进 `resolved_names`,前端回落裸值显示(与 W2b purge 行回 null 同口径)。
    页大小 ≤30、每页至多 3-4 个 IN 查询,无性能顾虑。
 3. `list_audit` 组装(165-185 行)与 CSV 导出:`list` 接口带上;**CSV 导出默认不动**
    (决策点 D-C1:导出是否同步补 resolved_names,默认不动 —— CSV 已有项目名/文件名列,
@@ -284,17 +366,26 @@ target_asset_id / target_minio_key / request_ip` + `details` 整块 `JSON.string
      token→令牌、via→来源、username→登录名、name→名称、action→动作 …;缺 key 回落 raw 键名,
      与 `tlabel()` 同哲学);
    - 值渲染:`resolved_names` 有该键 → `名称(UUID 前 8 位…)` 并列展示(**id 和名称都给**,
-     满足「有 id 展示名称」且不丢溯源能力);布尔 → 是/否;null → —;数组 → 逐项 join;
-     ISO 时间串(expires_at)→ locale 格式;未知键 → 原样字符串。
+     满足「有 id 展示名称」且不丢溯源能力;`subject` 键的类型区分由前端从原始串前缀取
+     (`user:` → 名称后缀「(用户)」,`group:` → 「(用户组)」),后端 resolved_names 只回纯名称);
+     布尔 → 是/否;null → —;数组 → 逐项 join(**标量数组**;对象/对象数组 →
+     逐字段展开渲染或回落 JSON.stringify —— 实测写入面有 `user_updated.details.
+     changes.groups_added = [{group_id, group_name}, …]`(directory.py:335-343)
+     这类结构,直接 join 会打出 `[object Object]`);ISO 时间串(expires_at)→
+     locale 格式;未知键 → 原样字符串。
 3. 展开态补充展示:`actor_user_id`(替换误导性的 `actor_open_id` —— open_id 仅历史行非空时保留展示)、
-   `user_agent`(有值才显示)、完整 `event_time`(绝对时间,收起态只有 Tooltip 悬浮)。
+   `user_agent`(有值才显示;**展示端截断 ~120 字符 + title 悬浮完整值**,512 列全量塞进
+   键值列表会把布局撑爆)、完整 `event_time`(绝对时间,收起态只有 Tooltip 悬浮)。
 4. 不动收起态元信息行(W2b 已优化过)与过滤/导出逻辑。
 
 ### 3.3 测试点
 
 1. 造数覆盖:folder_grant_added(subject=user)、project_member_added(subject=group#member)、
-   baidu_task_create(target_folder_id)、group_member_added(带 group_name 的行不受影响)、
-   share_link_created(sharer_user_id)→ 展开后各 id 旁均有名称。
+   folder_moved(old/new_parent_folder_id)、baidu_task_create(target_folder_id)、
+   group_member_added(带 group_name 的行不受影响)、share_link_created(sharer_user_id)、
+   user_updated(changes.groups_added 对象数组 → 不打出 `[object Object]`)→
+   展开后各 id 旁均有名称;subject 补名是**纯名称**
+   (不带「(用户)/(用户组)」后缀,类型标注由前端渲染)。
 2. 已删除对象:grant 的 folder 删掉后 → 回落裸 UUID,不报错。
 3. details 垃圾值(folder_id="not-a-uuid")→ 跳过补名,接口不 500。
 4. 历史行(无 resolved_names 字段的旧响应缓存)→ 前端回落现行为。
@@ -378,12 +469,14 @@ target_asset_id / target_minio_key / request_ip` + `details` 整块 `JSON.string
 
 | 包 | 新增文件 | 修改文件 | 依赖 |
 |----|---------|---------|------|
-| A | `web/src/lib/inapp.ts`、`web/src/components/InAppBrowserTip.tsx` | `web/src/App.tsx`(挂载)、`web/package.json`(+inapp-spy) | 无 |
+| A | `web/src/lib/inapp.ts`、`web/src/components/InAppBrowserTip.tsx` | `web/src/App.tsx`(挂载)、`web/src/styles/tokens.css`(新增 `--ms-z-inapp-tip: 55`)、`web/package.json`(+inapp-spy) | 无 |
 | B | — | `web/src/components/AssetPreviewModal.tsx`(Props+导航+footer+切换重置)、`AssetSummaryPanel.tsx`(透传)、`pages/FolderDetailPage.tsx` / `pages/ProjectDetailPage.tsx` / `pages/SearchPage.tsx`(接线) | 无 |
-| C | — | `api/app/routers/admin.py`(AuditOut+helper+组装)、`web/src/api/types.ts`、`web/src/pages/AdminAuditPage.tsx` | 无 |
+| C | — | `api/app/routers/admin.py`(AuditOut+helper+组装)、`api/app/services/audit.py`(write 内 user_agent[:512] 截断收口)、`web/src/api/types.ts`、`web/src/pages/AdminAuditPage.tsx` | 无 |
 | D | — | `web/src/pages/ProjectDetailPage.tsx`(批量栏重构 + paddingBottom) | 无 |
 
-四包零交集,可并行;均零 migration、零 FGA model 变更、零 nginx/env 变更。
+四包可并行;均零 migration、零 FGA model 变更、零 nginx/env 变更。
+唯一文件交叉:B 与 D 都改 `ProjectDetailPage.tsx`(B 接线区 ~948 Drawer / D 批量栏区
+~840-890,改动区不重叠)—— 同分支实施时按包分 commit,并行分支则留意该文件合并。
 
 ## 6. 决策点汇总(默认值可被否决)
 
@@ -401,7 +494,9 @@ target_asset_id / target_minio_key / request_ip` + `details` 整块 `JSON.string
 
 - A:微信/企业微信/抖音真机各开一次分享链接 + 一次登录页 → 横幅 + 复制链接可用;
   系统 Safari/Chrome 无横幅。
-- B:文件夹页/项目页/盲搜页三入口,预览内 ‹ › 键盘翻页 + 下载,移动端小屏不破版。
+- B:文件夹页/项目页/盲搜页三入口,预览内 ‹ › 键盘翻页 + 下载,移动端小屏不破版
+  (注意:**PC 三栏右栏预览无翻页是预期行为**,见 §2.2「明确不做」);无下载权账号
+  footer 下载为禁用态。
 - C:管理员审计页,挑 grant / 成员 / 备份类事件各一条展开,id 旁有名称,raw JSON 仍可查。
 - D:iPhone(含最小屏 SE 或 320px 模拟)项目文件夹多选 → 5 个批量按钮全部可见可点,
   无横向裁剪,列表底部不被遮挡。
