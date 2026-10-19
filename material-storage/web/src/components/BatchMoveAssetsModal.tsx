@@ -27,6 +27,9 @@ interface Props {
   assets: Asset[];
   /** 全量选中 id(提交数据源,≤1000) */
   selectedIds: string[];
+  /** 当前所在目录 id — 目标树禁选其自身(不级联子夹,A 夹文件可移入 A/B 子夹);
+   *  null/缺省 = 无禁选。 */
+  sourceFolderId?: string | null;
 }
 
 /** skipped reason → 中文(键固定 ASCII;未知键回落 raw token,tlabel 同款兜底)。*/
@@ -39,7 +42,7 @@ const SKIP_REASON_LABEL: Record<string, string> = {
 const BATCH_MOVE_LIMIT = 1000;
 
 export function BatchMoveAssetsModal({
-  open, onClose, onMoved, projectId, projectName, folders, assets, selectedIds,
+  open, onClose, onMoved, projectId, projectName, folders, assets, selectedIds, sourceFolderId,
 }: Props) {
   const move = useBatchMoveAssets();
   const { message } = App.useApp();
@@ -117,6 +120,7 @@ export function BatchMoveAssetsModal({
               projectName={projectName}
               selectMode
               disabledIds={sensitiveIds}
+              disabledSelfIds={sourceFolderId ? [sourceFolderId] : undefined}
               activeFolderId={target?.id ?? null}
               onSelect={(fid) => {
                 const f = folders.find(x => x.id === fid);
@@ -150,9 +154,11 @@ function BatchMoveResultView({ result, submitted, nameById }: {
   return (
     <div>
       <Alert
-        type={pendingCount > 0 ? 'warning' : 'success'}
+        type={pendingCount > 0 || result.moved_count === 0 ? 'warning' : 'success'}
         showIcon
-        message={`成功移动 ${result.moved_count} 个文件(共提交 ${submitted} 个)`}
+        message={result.moved_count === 0
+          ? `本次未移动任何文件(共提交 ${submitted} 个)`
+          : `成功移动 ${result.moved_count} 个文件(共提交 ${submitted} 个)`}
         description={`对账:成功 ${result.moved_count} + 跳过 ${skippedCount}${pendingCount > 0 ? ` + 待同步 ${pendingCount}` : ''} = ${submitted}`}
       />
       {skippedCount > 0 && (
