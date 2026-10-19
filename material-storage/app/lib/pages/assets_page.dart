@@ -7,11 +7,15 @@ import '../api/ms_api.dart';
 import '../main.dart' show api;
 import '../models.dart';
 import '../services/album.dart';
+import '../services/app_log.dart';
 import '../services/livp.dart';
 
 class AssetsPage extends StatefulWidget {
-  const AssetsPage(
-      {super.key, required this.folderId, required this.folderName});
+  const AssetsPage({
+    super.key,
+    required this.folderId,
+    required this.folderName,
+  });
 
   final String folderId;
   final String folderName;
@@ -33,7 +37,8 @@ class _AssetsPageState extends State<AssetsPage> {
   void _reload() => setState(() => _future = api.assets(widget.folderId));
 
   void _say(String msg) {
-    debugPrint(msg);
+    // 界面浮层 + 全量日志双写(推送企业微信走 AppLog)
+    AppLog.info('assets', msg);
     if (!mounted) return;
     setState(() => _log.insert(0, msg));
     if (_log.length > 6) _log.removeRange(6, _log.length);
@@ -111,8 +116,10 @@ class _AssetsPageState extends State<AssetsPage> {
         // PC/Android:验证容器可解包(不存相册)
         final bytes = await File(save).readAsBytes();
         final parts = LivpService.decode(bytes);
-        _say('✓ livp 解包 OK:静态图 ${parts.image.name}'
-            '${parts.video != null ? ' + 视频 ${parts.video!.name}' : ' (无视频)'}');
+        _say(
+          '✓ livp 解包 OK:静态图 ${parts.image.name}'
+          '${parts.video != null ? ' + 视频 ${parts.video!.name}' : ' (无视频)'}',
+        );
       }
     } on ApiException catch (e) {
       _say('下载失败:${e.message}');
@@ -158,10 +165,12 @@ class _AssetsPageState extends State<AssetsPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   for (final l in _log.take(3))
-                    Text(l,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: Theme.of(context).textTheme.bodySmall),
+                    Text(
+                      l,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                 ],
               ),
             ),
@@ -175,7 +184,9 @@ class _AssetsPageState extends State<AssetsPage> {
                 if (snap.hasError) {
                   return Center(
                     child: FilledButton.tonal(
-                        onPressed: _reload, child: Text('${snap.error}')),
+                      onPressed: _reload,
+                      child: Text('${snap.error}'),
+                    ),
                   );
                 }
                 final items = snap.data?.items ?? const [];
@@ -190,13 +201,18 @@ class _AssetsPageState extends State<AssetsPage> {
                     itemBuilder: (context, i) {
                       final a = items[i];
                       return ListTile(
-                        leading: Icon(a.isLivp
-                            ? Icons.motion_photos_on_outlined
-                            : Icons.insert_drive_file_outlined),
-                        title: Text(a.filename,
-                            overflow: TextOverflow.ellipsis),
+                        leading: Icon(
+                          a.isLivp
+                              ? Icons.motion_photos_on_outlined
+                              : Icons.insert_drive_file_outlined,
+                        ),
+                        title: Text(
+                          a.filename,
+                          overflow: TextOverflow.ellipsis,
+                        ),
                         subtitle: Text(
-                            '${_fmtSize(a.sizeBytes)} · ${a.createdAt.length >= 10 ? a.createdAt.substring(0, 10) : a.createdAt}'),
+                          '${_fmtSize(a.sizeBytes)} · ${a.createdAt.length >= 10 ? a.createdAt.substring(0, 10) : a.createdAt}',
+                        ),
                         trailing: a.isLivp && AlbumService.isSupported
                             ? FilledButton.tonal(
                                 onPressed: () => _downloadLivp(a),

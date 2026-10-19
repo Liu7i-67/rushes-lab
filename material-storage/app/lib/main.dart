@@ -16,6 +16,7 @@ import 'pages/assets_page.dart';
 import 'pages/folders_page.dart';
 import 'pages/login_page.dart';
 import 'pages/projects_page.dart';
+import 'services/app_log.dart';
 
 /// 后端入口预设(2026-10-19 实测外网全通,手机直连):
 ///   dev  = http://47.108.196.211:8080(跳板机 → hh2 dev)
@@ -75,6 +76,9 @@ MsApi get api => _api!;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
+  // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
+  AppLog.init();
   runApp(const MsApp());
 }
 

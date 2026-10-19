@@ -26,6 +26,7 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
 import '../models.dart';
+import '../services/app_log.dart';
 
 class ApiException implements Exception {
   ApiException(this.status, this.message);
@@ -58,6 +59,23 @@ class MsApi {
         )) {
     _jar = jar ?? CookieJar();
     _http.interceptors.add(CookieManager(_jar));
+    // 全量 API 日志(移动端 debug 通道):方向/状态码/错误均入 AppLog
+    _http.interceptors.add(InterceptorsWrapper(
+      onRequest: (o, h) {
+        AppLog.info('api', '→ ${o.method} ${o.uri.path}'
+            '${o.uri.query.isEmpty ? '' : '?${o.uri.query}'}');
+        h.next(o);
+      },
+      onResponse: (r, h) {
+        AppLog.info('api', '← ${r.statusCode} ${r.requestOptions.uri.path}');
+        h.next(r);
+      },
+      onError: (e, h) {
+        AppLog.error('api',
+            '✗ ${e.requestOptions.method} ${e.requestOptions.uri.path}', e.error);
+        h.next(e);
+      },
+    ));
     // 分片 PUT 走独立裸 Dio:presigned URL 可能指向另一 host,不带 cookie/拦截器
     _put = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),

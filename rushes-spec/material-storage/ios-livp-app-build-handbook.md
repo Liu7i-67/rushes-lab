@@ -62,7 +62,9 @@ flutter doctor                         # 确认 iOS toolchain 全绿
    - [ ] 上传一张实况 → 网页端同文件夹能看到 `.livp` 且预览有「播放实况」;
    - [ ] 下载该 `.livp` → 「已存入相册」→ 相册里长按能播放(是实况不是静态图);
    - [ ] 两次相册权限弹窗文案正确(读取/添加)。
-   若 ③④ 行为异常(选图含非实况/存回变静态图),把现象 + `flutter run` 控制台日志发回来,
+   - [ ] 点右上角 🐞 图标 →「推送」→ 企业微信群收到 `msapp_log_*.log` 文件消息,
+     App 内提示已清空(移动端 debug 主通道:全量日志含每个 API 请求/错误/未捕获异常)。
+   若 ③④ 行为异常(选图含非实况/存回变静态图),把现象 + 点 🐞 推送的日志文件发回来,
    对应 `lib/services/album.dart`(读取 `originFile/originFileWithSubtype`,
    保存 `editor.darwin.saveLivePhoto`,注释里标了每处原理)。
 

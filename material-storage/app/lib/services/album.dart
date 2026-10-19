@@ -11,11 +11,12 @@ library;
 import 'dart:io';
 
 import 'package:archive/archive.dart' show Archive, ArchiveFile, ZipEncoder;
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:path_provider/path_provider.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
+import 'app_log.dart';
 import 'livp.dart';
 
 class AlbumService {
@@ -23,6 +24,7 @@ class AlbumService {
 
   static Future<void> ensurePermission() async {
     final state = await PhotoManager.requestPermissionExtend();
+    AppLog.info('album', '相册权限 state=$state');
     if (!state.isAuth) {
       throw StateError('未获相册权限(需「所有照片/有限」+「添加到照片」授权)');
     }
@@ -54,7 +56,7 @@ class AlbumService {
     final imgBytes = await image.readAsBytes();
     if (video == null) {
       // 非实况(onlyLivePhotos 已滤,理论不可达)→ 退化为纯静态 livp
-      debugPrint('warn: asset ${e.id} 无配对视频,打包为无实况 livp');
+      AppLog.info('album', 'asset ${e.id} 无配对视频,打包为无实况 livp');
       final arc = Archive()
         ..addFile(ArchiveFile(
             '$baseName.${_extOf(image.path, 'HEIC')}',
@@ -85,6 +87,8 @@ class AlbumService {
           .saveImageWithPath(imageFile.path, title: baseName);
       return;
     }
+    AppLog.info('album', 'saveLivePhoto: image=${imageFile.path.split('/').last}'
+        ' video=${videoFile.path.split('/').last} title=$baseName');
     await PhotoManager.editor.darwin.saveLivePhoto(
       imageFile: imageFile,
       videoFile: videoFile,

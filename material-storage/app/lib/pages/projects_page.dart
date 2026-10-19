@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../main.dart' show api;
 import '../models.dart';
+import 'log_push.dart';
 
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({super.key});
@@ -28,6 +29,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
       appBar: AppBar(
         title: Text(me != null ? '项目 · ${me.name}' : '项目'),
         actions: [
+          logPushButton(context),
           IconButton(onPressed: _reload, icon: const Icon(Icons.refresh)),
         ],
       ),
