@@ -639,4 +639,9 @@ export interface AuditEvent {
   target_minio_key: string | null;
   request_ip: string | null;
   details: Record<string, unknown>;
+  // C 包(2026-10-19):UA 裸列透传(写入端已截 512,展示端前端再截断)
+  user_agent?: string | null;
+  // C 包(2026-10-19):details 白名单键批量补名(key=details 键名,value=纯显示名,
+  // 不带类型后缀;查不到/垃圾值不进 dict)。可选 —— 旧后端无此字段,消费侧回落现行为。
+  resolved_names?: Record<string, string>;
 }

@@ -196,6 +196,7 @@ html, body {
   --ms-tabbar-h: 56px;
   /* z 阶梯(antd Drawer/Modal 自带 z 1000+,浮于全部常驻层之上,不冲突) */
   --ms-z-header: 50;     /* 现有 sticky header */
+  --ms-z-inapp-tip: 55;  /* 内置浏览器引导横幅(header 之上、批量栏之下) */
   --ms-z-batchbar: 60;   /* 批量操作栏 */
   --ms-z-tabbar: 70;     /* (保留)TabBar 已改文档流,无 fixed 层暂不消费 */
   --ms-z-float: 80;      /* UploadFloatingIndicator */
