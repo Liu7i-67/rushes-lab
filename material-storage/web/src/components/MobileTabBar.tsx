@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { Badge, Drawer } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Bell, ClipboardCheck, Folder, LayoutTemplate, Menu, Search,
+  Bell, ClipboardCheck, CloudDownload, Folder, FolderTree, LayoutTemplate, Menu, Search,
   ScrollText, ShieldCheck, Users as UsersIcon, UsersRound,
 } from 'lucide-react';
 import { useMe, useNotificationsUnread } from '../api/hooks';
@@ -40,7 +40,10 @@ export function MobileTabBar() {
 
   const active = activeTabOf(location.pathname);
 
-  // "更多"条目:后三个仅系统管理员可见(非 admin 不出现 403 死链)
+  // "更多"条目(W3 2026-10-17):admin 块五项(审计/用户管理/用户组管理/权限模板/备份任务)
+  // 仅系统管理员可见(非 admin 不出现 403 死链);目录模板是独立三态门
+  // (is_folder_template_manager ?? is_system_admin,同 AppHeader PC 口径)——
+  // 仅持 folder_template_manager flag 的非系统 admin 组员也要能看到,故不并入 admin 数组
   const moreItems = [
     { to: '/my-permissions', label: '我的权限', icon: <ShieldCheck size={16} strokeWidth={1.8} /> },
     ...(me?.is_system_admin ? [
@@ -48,6 +51,10 @@ export function MobileTabBar() {
       { to: '/admin/users', label: '用户管理', icon: <UsersIcon size={16} strokeWidth={1.8} /> },
       { to: '/admin/groups', label: '用户组管理', icon: <UsersRound size={16} strokeWidth={1.8} /> },
       { to: '/admin/grant-templates', label: '权限模板', icon: <LayoutTemplate size={16} strokeWidth={1.8} /> },
+      { to: '/admin/baidu-tasks', label: '备份任务', icon: <CloudDownload size={16} strokeWidth={1.8} /> },
+    ] : []),
+    ...((me?.is_folder_template_manager ?? me?.is_system_admin) ? [
+      { to: '/admin/folder-templates', label: '目录模板', icon: <FolderTree size={16} strokeWidth={1.8} /> },
     ] : []),
   ];
 

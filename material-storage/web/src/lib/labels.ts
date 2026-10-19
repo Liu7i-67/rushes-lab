@@ -17,6 +17,7 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   approval_notified: '审批通知已发送',
   approval_state_changed: '审批状态变更',
   approval_submitted: '审批申请已提交',
+  asset_batch_moved: '批量移动资产',  // W6 一期:文件项目内批量移动(2026-10-17)
   asset_deleted: '文件删除',
   asset_restored: '文件恢复',
   asset_purged: '文件彻底删除',
@@ -31,6 +32,8 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   folder_deleted: '文件夹删除',
   folder_grant_added: '文件夹权限授予',
   folder_grant_removed: '文件夹权限撤销',
+  folder_moved: '目录移动',  // W5:目录拖拽/「移动到」换父(2026-10-17)
+  folder_renamed: '目录改名',  // W4:目录改名(2026-10-17)
   folder_template_applied: '目录模板应用',  // 目录模板:项目创建时按模板建目录
   folder_template_changed: '目录模板变更',  // 目录模板增删改
   grant_revoked: '授权撤回',
@@ -75,6 +78,10 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   baidu_file_random_suffix: '备份文件随机后缀导入',
   baidu_file_imported: '备份文件导入',
   baidu_task_auto_finalized: '备份任务自动终态',
+  // ── 六项优化 W1(2026-10-17):登录锁定审计(前端只回填本包两事件;
+  //    W4/W5/W6 三事件由并行包自行追加,勿在此代填)────────────────────────────
+  user_login_unlocked: '解除登录锁定',
+  local_login_locked: '触发登录锁定',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

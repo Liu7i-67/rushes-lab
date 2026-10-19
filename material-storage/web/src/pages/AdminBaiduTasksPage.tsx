@@ -71,6 +71,10 @@ const FILE_TABS = [
 
 export default function AdminBaiduTasksPage() {
   const { data: me } = useMe();
+  // W3(2026-10-17): compact(<1024)下主区 overflowX hidden,主表固定列合计 806px+
+  // 会被裁切且无法横滚 → 按条件注入 scroll.x(scroll 是全端属性,无条件加会让 PC 窄窗
+  // 出现滚动条,违背 PC 零回归);hooks 置顶,分支只切 JSX
+  const compact = useCompactViewport();
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<string | undefined>(undefined);
   const [page, setPage] = useState(1);
@@ -238,6 +242,7 @@ export default function AdminBaiduTasksPage() {
         columns={columns}
         dataSource={data?.items ?? []}
         loading={isLoading}
+        scroll={compact ? { x: 'max-content' } : undefined}
         onRow={(row) => ({
           onClick: () => setDetailId(row.id),
           style: { cursor: 'pointer' },
@@ -291,6 +296,8 @@ function FilterBar({ q, setQ, status, setStatus, total }: {
 // ─── 任务详情抽屉(详情字段 + 文件明细分页)──────────────────────────────────
 function TaskDetailDrawer({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const { data: task, isLoading } = useAdminBaiduTask(taskId);
+  // W3: Drawer 在 375-834px 视口宽于 main,但文件表固定列合计仍超宽 → 同款条件注入横滚
+  const compact = useCompactViewport();
   const [fileStatus, setFileStatus] = useState<string>('all');
   const [filePage, setFilePage] = useState(1);
 
@@ -487,6 +494,7 @@ function TaskDetailDrawer({ taskId, onClose }: { taskId: string; onClose: () => 
             columns={fileColumns}
             dataSource={filesPage?.items ?? []}
             loading={filesLoading}
+            scroll={compact ? { x: 'max-content' } : undefined}
             pagination={{
               size: 'small',
               current: filePage,

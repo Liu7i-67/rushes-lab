@@ -277,6 +277,71 @@ class PermissionsService:
             )
         )
 
+    async def swap_folder_parent_tuple(
+        self,
+        *,
+        folder_id: str,
+        project_id: str,
+        old_parent_folder_id: str | None,
+        new_parent_folder_id: str | None,
+    ) -> str:
+        """原子交换 folder 的 parent tuple(W4/W5 reparent;方案 §5.2)。
+
+        单次 ClientWriteRequest(writes=[新 parent], deletes=[旧 parent]) —— OpenFGA
+        Write API 单请求事务生效。删/写分两次调用在 move 场景不适用:写新失败 =
+        子树按旧图授权或失 parent 不可见,删旧失败 = 双父残留,均是静默权限漂移。
+
+        旧 tuple 形态 read-then-delete 精确匹配(先例 assets purge 的 tuple 清理):
+        嵌套子夹建夹时 parent_type 恒写 "folder"(folders.py bootstrap 分支),即便
+        旧父是 sensitive 也按 `folder:<旧父>` 拼 —— 按旧父 is_sensitive 改拼
+        `sensitive_folder:` 会删空,配合吞错惯例即静默残留第二父授权。读到的
+        parent tuple 集合为空(历史孤儿断链,无 tuple 可删)则只写新不删旧 ——
+        OpenFGA Write 整包原子,删不存在的 tuple 报 is_not_exists 且连写一起不落;
+        读失败时按移动方向构造兜底(一级 = `project:<pid>`),兜底 tuple 实际
+        不存在(is_not_exists)自动降级为只写新。
+
+        返回 "ok" 或 "failed: <err>":调用方已 DB commit,FGA 失败不得 500 误导重试,
+        内部重试 3 次后把结果交调用方记入 folder_moved 审计 details。
+        """
+        new_user = (
+            f"project:{project_id}" if new_parent_folder_id is None
+            else f"folder:{new_parent_folder_id}"
+        )
+        new_tup = ClientTuple(
+            user=new_user, relation="parent", object=f"folder:{folder_id}",
+        )
+        old_tups: list[ClientTuple] | None = None
+        try:
+            rows = await self.read_all_tuples(
+                object_type="folder", object_id=folder_id, relation="parent",
+            )
+            old_tups = [ClientTuple(user=u, relation=r, object=o) for u, r, o in rows]
+        except Exception as e:
+            log.warning("read old parent tuples fail folder=%s err=%s", folder_id, e)
+        if old_tups is None:
+            # 读失败兜底:按移动方向构造(嵌套旧父即便 sensitive 也按 folder: 拼,
+            # 写入口径恒 folder:);实际不存在则下方 is_not_exists 降级只写新
+            old_user = (
+                f"project:{project_id}" if old_parent_folder_id is None
+                else f"folder:{old_parent_folder_id}"
+            )
+            old_tups = [ClientTuple(
+                user=old_user, relation="parent", object=f"folder:{folder_id}",
+            )]
+        last_err: Exception | None = None
+        for _ in range(3):
+            try:
+                await self._client.write(ClientWriteRequest(
+                    writes=[new_tup], deletes=old_tups or None,
+                ))
+                return "ok"
+            except Exception as e:
+                last_err = e
+                log.warning("swap folder parent tuple fail folder=%s err=%s", folder_id, e)
+                if old_tups and is_not_exists_error(e):
+                    old_tups = []  # 旧 tuple 不存在(孤儿断链)→ 降级只写新 parent
+        return f"failed: {last_err}"
+
     async def bootstrap_sensitive_folder(
         self, *, folder_id: str, project_id: str
     ) -> None:

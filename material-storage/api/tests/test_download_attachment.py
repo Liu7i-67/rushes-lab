@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from starlette.requests import Request
 
+from app.db.tables import Folder
 from app.routers.assets import (
     DownloadLinkIn,
     attachment_content_disposition,
@@ -65,12 +66,15 @@ class RecordingSigner:
 
 
 class StubDB:
-    """最小 async db 替身:get 恒返预置 asset。"""
+    """最小 async db 替身:get 对 Asset 返预置 asset;对 Folder 返带 project_id
+    的行(W2b 起下载链路读 asset.folder_id 反查夹行补审计 target_project_id)。"""
 
     def __init__(self, asset: object) -> None:
         self._asset = asset
 
     async def get(self, model: object, pk: object) -> object | None:
+        if model is Folder:
+            return SimpleNamespace(id=pk, project_id=uuid.uuid4())
         return self._asset
 
 
@@ -123,6 +127,7 @@ def mk_asset(filename: str) -> SimpleNamespace:
         id=uuid.uuid4(),
         deleted_at=None,
         filename=filename,
+        folder_id=uuid.uuid4(),  # W2b:download-link 读它反查 Folder 补审计
         minio_bucket="ms-proj",
         minio_key=f"folder-a/{filename}",
     )

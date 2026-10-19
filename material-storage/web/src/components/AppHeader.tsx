@@ -102,10 +102,11 @@ export function AppHeader({ me }: Props) {
           <NavChip to="/" label="项目" navigate={navigate} />
           <NavChip to="/approvals" label="审批" navigate={navigate} />
           <NavChip to="/my-permissions" label="我的权限" navigate={navigate} />
-          <NavChip to="/admin/audit" label="审计" navigate={navigate} />
-          {/* #150: 本地用户/组管理 — 仅系统管理员可见 */}
+          {/* #150/W2b: 本地用户/组管理与审计 — 仅系统管理员可见
+              (审计数据面 require_system_admin,入口此前全员可见点进去 403,收敛进本块) */}
           {me.is_system_admin && (
             <>
+              <NavChip to="/admin/audit" label="审计" navigate={navigate} />
               <NavChip to="/admin/users" label="用户" navigate={navigate} />
               <NavChip to="/admin/groups" label="用户组" navigate={navigate} />
               {/* 权限模板(方案 §4.4)— 仅系统管理员可见 */}

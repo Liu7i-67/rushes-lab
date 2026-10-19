@@ -41,7 +41,7 @@ from httpx import AsyncClient
 from starlette.requests import Request
 
 from app.db.session import get_sessionmaker
-from app.db.tables import Asset
+from app.db.tables import Asset, Folder
 from app.routers.share import resolve as share_resolve
 from app.services.presign import PresignService, request_base_from
 from app.settings import Settings, get_settings
@@ -150,10 +150,12 @@ def mk_request(
 def mk_asset(filename: str) -> SimpleNamespace:
     # size_bytes / content_type:share resolve 出参 asset dict 的既有契约字段
     # (644de17 前就在读),与本文件被测的动态 host 正交,补齐避免 AttributeError
+    # folder_id:W2b 起 share resolve 读它反查 Folder 补审计 target_project_id
     return SimpleNamespace(
         id=uuid.uuid4(),
         deleted_at=None,
         filename=filename,
+        folder_id=uuid.uuid4(),
         minio_bucket="ms-proj",
         minio_key=f"folder-a/{filename}",
         size_bytes=1024,
@@ -162,12 +164,15 @@ def mk_asset(filename: str) -> SimpleNamespace:
 
 
 class StubDB:
-    """最小 async db 替身:get 恒返预置 asset。"""
+    """最小 async db 替身:get 对 Asset 返预置 asset;对 Folder 返带 project_id
+    的行(W2b 起 resolve 读 asset.folder_id 反查夹行补审计)。"""
 
     def __init__(self, asset: object) -> None:
         self._asset = asset
 
     async def get(self, model: object, pk: object) -> object | None:
+        if model is Folder:
+            return SimpleNamespace(id=pk, project_id=uuid.uuid4())
         return self._asset
 
 

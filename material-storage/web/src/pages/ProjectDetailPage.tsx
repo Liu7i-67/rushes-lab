@@ -8,14 +8,14 @@ import {
 } from 'antd';
 import {
   Archive, ChevronDown, ChevronLeft, ChevronRight, Download, FileText,
-  Folder as FolderIcon, FolderPlus, Key, Link2, Lock, Menu, RotateCw, Settings, Tags,
-  Trash2, Type, Upload, Users as UsersIcon,
+  Folder as FolderIcon, FolderInput, FolderPlus, Key, Link2, Lock, Menu, Pencil, RotateCw,
+  Settings, Tags, Trash2, Type, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDeleteProject,
-  useDownloadLink, useFolder, useFolders, useMe, useProject, useTrashAssets,
+  useDownloadLink, useFolder, useFolders, useMe, useMoveFolder, useProject, useTrashAssets,
   useUpdateAssetMeta,
 } from '../api/hooks';
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
@@ -24,9 +24,12 @@ import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 import { AssetCardList } from '../components/AssetCardList';
 import { AssetTagEditor } from '../components/AssetTagEditor';
 import { AssetThumbnail } from '../components/AssetThumbnail';
+import { BatchMoveAssetsModal } from '../components/BatchMoveAssetsModal';
 import { BatchPrefixModal } from '../components/BatchPrefixModal';
 import { FolderTrashModal } from '../components/FolderTrashModal';
+import { MoveFolderModal } from '../components/MoveFolderModal';
 import { ProjectMembersDrawer } from '../components/ProjectMembersDrawer';
+import { RenameFolderModal } from '../components/RenameFolderModal';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
 import { NewFolderModal } from '../components/NewFolderModal';
@@ -136,6 +139,8 @@ export default function ProjectDetailPage() {
   const dlLink = useDownloadLink();
   const del = useDeleteAsset();
   const delFolder = useDeleteFolder();
+  // W5:拖拽换父用(header「移动到」入口的提交在 MoveFolderModal 内部,各自独立实例)
+  const moveFolderMut = useMoveFolder();
   // 项目逻辑删除(project_deleter 权限):详情页头部入口,删除后跳回项目列表
   const delProject = useDeleteProject();
   const { message, modal } = App.useApp();
@@ -151,11 +156,24 @@ export default function ProjectDetailPage() {
     && (folder.is_sensitive
       ? !!folder.my_can_admin
       : !!(folder.my_can_upload || folder.my_delete_grant));
+  // W4/W5 目录重组闸门(六项优化 2026-10-17):普通夹 can_upload(与创建对称;
+  // 移动是重组不是删除,不复用删除闸门,方案决策点 19)、sensitive 夹 can_admin。
+  // sensitive 源「移动」一律禁(FGA parent 必挂 project,后端 enforce)
+  const canRenameThisFolder = !!folder
+    && (folder.is_sensitive ? !!folder.my_can_admin : !!folder.my_can_upload);
+  const canMoveThisFolder = !!folder && !folder.is_sensitive && !!folder.my_can_upload;
+  // W6 批量移动源夹闸门:与重命名同式(源 sensitive 需 can_admin,后端逐源夹 enforce)
+  const canBatchMoveFromThisFolder = canRenameThisFolder;
 
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
   const [applySensitive, setApplySensitive] = useState(false);
   const [newFolderMode, setNewFolderMode] = useState<'root' | 'child' | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
+  // W4/W5:目录改名 / 移动目标(folder 对象来自树节点菜单或 header 入口)
+  const [renameTarget, setRenameTarget] = useState<Folder | null>(null);
+  const [moveTarget, setMoveTarget] = useState<Folder | null>(null);
+  // W6:批量移动弹窗(一期项目内)
+  const [batchMoveOpen, setBatchMoveOpen] = useState(false);
   // #151: 批量打标 — 选中多个文件时统一加标签
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
   // #129: folder admin 才显"申请链接"按钮 — folder 级精细化授权入口
@@ -307,6 +325,42 @@ export default function ProjectDetailPage() {
       message.error(errorMessage(e, '删除文件夹失败'));
     }
   };
+
+  // W4/W5:FolderTree 节点菜单闸门。列表端点不回填 my_can_*(仅 get_folder 回填),
+  // 节点级只能按项目角色 + is_system_admin 预判;sensitive 节点不渲菜单
+  // (can_admin 无法从列表判定,避免 403 入口),sensitive 改名走 header 入口
+  // (get_folder 回填真实 my_can_admin)。真实判定以后端 enforce 为准
+  const folderNodeActions = useCallback((f: Folder): { rename: boolean; move: boolean } | null => {
+    if (me?.is_system_admin) return { rename: true, move: !f.is_sensitive };
+    if (!canUploadProject || f.is_sensitive) return null;
+    return { rename: true, move: true };
+  }, [me?.is_system_admin, canUploadProject]);
+
+  // W5:拖拽落点(目标语义已由 FolderTree allowDrop 预判:源 sensitive/目标 sensitive
+  // 及其子树/自身后代均不可达这里)→ 确认弹窗 → PATCH parent_folder_id
+  const handleMoveDrop = useCallback((args: { folder: Folder; newParentId: string | null }) => {
+    if (!projectId) return;
+    const destName = args.newParentId
+      ? (folders ?? []).find(f => f.id === args.newParentId)?.name ?? '目标目录'
+      : '项目根';
+    modal.confirm({
+      title: `将「${args.folder.name}」移动到「${destName}」?`,
+      content: '移动后其子文件夹与文件的访问权限随新位置生效;目录存储前缀同步更新(已上传文件本身不迁移)。',
+      okText: '移动',
+      onOk: async () => {
+        try {
+          await moveFolderMut.mutateAsync({
+            folder_id: args.folder.id,
+            parent_folder_id: args.newParentId,
+            project_id: projectId,
+          });
+          message.success(`文件夹「${args.folder.name}」已移动到${args.newParentId ? `「${destName}」` : '项目根'}`);
+        } catch (e) {
+          message.error(errorMessage(e, '移动文件夹失败'));
+        }
+      },
+    });
+  }, [projectId, folders, modal, message, moveFolderMut]);
 
   if (foldersLoading) return <Skeleton active />;
 
@@ -525,6 +579,41 @@ export default function ProjectDetailPage() {
           onClose={() => setTrashOpen(false)}
         />
       )}
+
+      {/* W4/W5:目录改名 / 移动(入口 = header 操作区按钮 + FolderTree 节点菜单;
+          条件挂载 → 弹窗内 state 随目标切换自动复位) */}
+      {renameTarget && (
+        <RenameFolderModal
+          open
+          onClose={() => setRenameTarget(null)}
+          folder={renameTarget}
+        />
+      )}
+      {moveTarget && (
+        <MoveFolderModal
+          open
+          onClose={() => setMoveTarget(null)}
+          folder={moveTarget}
+          folders={folders}
+          projectName={project?.name}
+        />
+      )}
+
+      {/* W6:批量移动(一期项目内;结果视图含 skipped 逐条中文原因与 fga_pending。
+          提交成功关闭时清空选中 —— 已移动/跳过的行不再属于本夹语义,保留会误导批量操作) */}
+      <BatchMoveAssetsModal
+        open={batchMoveOpen}
+        onClose={() => setBatchMoveOpen(false)}
+        onMoved={() => {
+          setBatchMoveOpen(false);
+          setSelectedIds([]);
+        }}
+        projectId={projectId ?? ''}
+        projectName={project?.name}
+        folders={folders}
+        assets={selectedAssets}
+        selectedIds={selectedIds}
+      />
     </>
   );
 
@@ -592,6 +681,19 @@ export default function ProjectDetailPage() {
                   申请链接
                 </Button>
               </Tooltip>
+            )}
+            {/* W4/W5:目录改名/移动到(普通夹 can_upload;sensitive 夹 can_admin 且禁移动) */}
+            {canRenameThisFolder && (
+              <Button size="small" icon={<Pencil size={13} strokeWidth={1.8} />}
+                      onClick={() => { if (folder) setRenameTarget(folder); }}>
+                重命名
+              </Button>
+            )}
+            {canMoveThisFolder && (
+              <Button size="small" icon={<FolderInput size={13} strokeWidth={1.8} />}
+                      onClick={() => { if (folder) setMoveTarget(folder); }}>
+                移动到
+              </Button>
             )}
             {canDeleteThisFolder && (
               <Popconfirm
@@ -758,6 +860,13 @@ export default function ProjectDetailPage() {
                     disabled={!folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
               前缀
             </Button>
+            {/* W6: 批量移动(一期项目内)— 源夹门控:非 sensitive 需 my_can_upload、
+                sensitive 需 my_can_admin(后端逐源夹 enforce);移动端批量栏常显,
+                AssetCardList 多选后同款入口 */}
+            <Button style={{ height: 44 }} icon={<FolderInput size={14} strokeWidth={2} />}
+                    disabled={!canBatchMoveFromThisFolder} onClick={() => setBatchMoveOpen(true)}>
+              移动
+            </Button>
             <Popconfirm
               title={`删除 ${selectedIds.length} 个文件?`}
               description="软删除;管理员可在回收站恢复或彻底清除"
@@ -793,6 +902,10 @@ export default function ProjectDetailPage() {
             onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
             onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
             canUpload={canUploadProject}
+            // W4/W5:移动端 Drawer 树不适合拖拽 → 走「移动到」菜单(§5.2)
+            nodeActions={folderNodeActions}
+            onRenameFolder={setRenameTarget}
+            onMoveFolder={setMoveTarget}
           />
         </Drawer>
 
@@ -874,6 +987,12 @@ export default function ProjectDetailPage() {
           onCreateRoot={canUploadProject ? () => setNewFolderMode('root') : undefined}
           onCreateChild={canUploadProject ? () => setNewFolderMode('child') : undefined}
           canUpload={canUploadProject}
+          // W4/W5:PC 专属拖拽换父(allowDrop 已禁 sensitive/自身后代;落点弹确认框)
+          nodeActions={folderNodeActions}
+          onRenameFolder={setRenameTarget}
+          onMoveFolder={setMoveTarget}
+          enableDrag
+          onMoveDrop={handleMoveDrop}
         />
       </Layout.Sider>
 
@@ -923,6 +1042,20 @@ export default function ProjectDetailPage() {
                   申请链接
                 </Button>
               </Tooltip>
+            )}
+            {/* W4/W5:目录改名/移动到(方案 §5.2,删除按钮旁;普通夹 can_upload、
+                sensitive 夹 can_admin;sensitive 源禁移动 —— 后端 enforce) */}
+            {canRenameThisFolder && (
+              <Button size="small" icon={<Pencil size={13} strokeWidth={1.8} />}
+                      onClick={() => { if (folder) setRenameTarget(folder); }}>
+                重命名
+              </Button>
+            )}
+            {canMoveThisFolder && (
+              <Button size="small" icon={<FolderInput size={13} strokeWidth={1.8} />}
+                      onClick={() => { if (folder) setMoveTarget(folder); }}>
+                移动到
+              </Button>
             )}
             {/* 删除文件夹:须空夹 + 回收站已清空(硬删,不可恢复)。普通夹需
                 can_upload(与创建对称)或组织级删除授权 my_delete_grant;sensitive
@@ -1021,6 +1154,16 @@ export default function ProjectDetailPage() {
               <Button size="small" icon={<Type size={13} strokeWidth={2} />}
                       disabled={!hasSelection || !folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
                 前缀{hasSelection ? ` ${selectedIds.length}` : ''}
+              </Button>
+            </Tooltip>
+            {/* W6: 批量移动(一期项目内)— 源夹门控:非 sensitive 需 my_can_upload、
+                sensitive 需 my_can_admin(后端逐源夹 enforce;跨页保留选中 ≤1000 由弹窗拦截) */}
+            <Tooltip title={!hasSelection ? '' : canBatchMoveFromThisFolder
+              ? '' : folder?.is_sensitive ? '敏感目录内移动需管理权限' : '无编辑权限(需 uploader 角色)'}>
+              <Button size="small" icon={<FolderInput size={13} strokeWidth={2} />}
+                      disabled={!hasSelection || !canBatchMoveFromThisFolder}
+                      onClick={() => setBatchMoveOpen(true)}>
+                移动{hasSelection ? ` ${selectedIds.length}` : ''}
               </Button>
             </Tooltip>
             <Button size="small" icon={<RotateCw size={13} strokeWidth={2} />}

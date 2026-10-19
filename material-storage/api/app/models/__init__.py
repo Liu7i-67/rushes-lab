@@ -210,6 +210,38 @@ class AssetBatchPrefixIn(BaseModel):
         return normalized
 
 
+class AssetBatchMoveIn(BaseModel):
+    """批量移动资产(W6 一期:项目内移动,方案 §6.2)。
+
+    asset_ids ≤1000(batch-prefix 同上限);一期不收 cross_project 字段 ——
+    跨项目是物理迁移(换 bucket),二期单独拍板,一期端点显式断言整批恰属
+    一个项目且 target_folder 同项目(漏断言会把项目内端点变成事实跨项目入口)。
+    """
+
+    asset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=1000)
+    target_folder_id: uuid.UUID
+
+
+class AssetBatchMoveSkipOut(BaseModel):
+    """单资产跳过条目(reason 固定 ASCII 枚举,前端中文映射,batch-prefix 同款):
+    duplicate_location = 已在目标夹;duplicate_filename = 目标夹已有同名未软删
+    资产(决策 15,与百度导入 (folder_id, filename) 查重口径对齐,排除软删);
+    deleted = 已软删或不存在(快照查不到)。"""
+
+    asset_id: uuid.UUID
+    reason: str
+
+
+class AssetBatchMoveOut(BaseModel):
+    """尽力而为 + 结果报告:对账恒等式 moved_count + len(skipped) + len(fga_pending)
+    = 提交 asset_ids 去重后条数。fga_pending = DB 已迁入目标夹但 OpenFGA parent
+    tuple 交换失败(重试后仍败,不 500 掩盖,方案 §6.2)。"""
+
+    moved_count: int
+    skipped: list[AssetBatchMoveSkipOut] = []
+    fga_pending: list[uuid.UUID] = []
+
+
 class TrashOut(BaseModel):
     """回收站列表 — items 为分页窗口(上限 500),total 为全量计数。
 
@@ -333,6 +365,20 @@ class FolderInviteIn(BaseModel):
     level: str = Field("viewer", pattern=r"^(viewer|downloader)$")
     duration_seconds: int | None = Field(None, ge=60, le=365 * 24 * 3600,
                                          description="None=永久邀请;int=时间限定")
+
+
+class FolderUpdateIn(BaseModel):
+    """PATCH /folders/{id} 入参(W4/W5 目录改名 / 层级移动,需求 §3.5)。
+
+    name 与 parent_folder_id 至少传一;「是否传了」由路由以 model_fields_set 判定
+    (缺省 ≠ 显式 null):parent_folder_id **显式传 null** = 移为项目一级
+    (前端目标集合含项目根);name 显式传 null 一律 422(不改名请省略字段)。
+    """
+
+    name: str | None = Field(None, min_length=1, max_length=255)
+    parent_folder_id: uuid.UUID | None = Field(
+        None, description="新父文件夹 id;显式 null = 移为项目一级",
+    )
 
 
 class ApprovalOut(ORMModel):
@@ -555,6 +601,10 @@ class DirectoryUserOut(BaseModel):
     must_change_password: bool
     created_at: datetime
     resigned_at: datetime | None
+    # W1:登录锁定状态,**只反映 user 维度**(IP 维度命中时登录照样 429 但不在此
+    # 显示,前端 pill 文案需标注「用户名维度」);列表端点批量 pipeline MGET 三形态
+    # 锁 key,详情/建号/编辑响应单查真实值;锁定状态以实时查 Redis 为准,不从审计推断
+    login_locked: bool = False
 
 
 class UserCreateIn(BaseModel):
