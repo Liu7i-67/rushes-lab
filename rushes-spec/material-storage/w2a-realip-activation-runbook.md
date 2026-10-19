@@ -367,4 +367,4 @@ dev `msdev-poc_poc-net`(gw 172.22.0.1);conf 单文件双环境同步,② 双网�
 - [x] `scripts/changelog.md` 记账。
 - 附:hh2 侧回滚锚点 `/home/{msdev,huanhua}/ms/poc/minio/nginx/default.conf.bak-w2a`、
   `/home/msdev/jump-tunnel.service.bak`、跳板机 `bucket-taoxiplan.conf.bak-20261019-3b`;
-  代码变更在分支 `feat/w2a-realip-nginx`(fa49190),合并 liuqi 待指令。
+  代码变更已 no-ff 合并 liuqi(`f861b47`,2026-10-19;分支已清,线上=liuqi 主线内容)。
