@@ -33,6 +33,10 @@ interface Props {
   /** 禁选节点 id 集合 — 命中节点**及其整棵子树**一律禁选
    *  (antd Tree 节点 disabled;备份目标选择时传 sensitive 集合,§7)。 */
   disabledIds?: string[];
+  /** 禁选节点 id 集合 — 仅命中节点**自身**禁选,**不级联子树**(与 disabledIds 的
+   *  整子树级联语义互补;批量移动弹窗禁选源夹自身用,子夹仍可选 ——
+   *  A 夹文件移入 A/B 子夹是合法操作,不得改用 disabledIds 误伤子夹)。 */
+  disabledSelfIds?: string[];
   /** 节点操作菜单闸门(调用方按 my_can_upload/my_can_admin + is_system_admin 判):
    *  返回 null/全 false = 不渲染菜单;sensitive 源禁 move(三句式①)。 */
   nodeActions?: (folder: Folder) => { rename: boolean; move: boolean } | null;
@@ -78,6 +82,7 @@ function hasSensitiveAncestry(folders: Folder[], folderId: string): boolean {
 function buildTree(
   folders: Folder[],
   disabledSet: Set<string>,
+  selfDisabledSet: Set<string>,
   renderNodeOps?: (folder: Folder) => React.ReactNode,
 ): TreeNode[] {
   const byParent = new Map<string | null, Folder[]>();
@@ -97,9 +102,10 @@ function buildTree(
 
   const build = (parent: string | null, ancestorDisabled: boolean): TreeNode[] =>
     (byParent.get(parent) ?? []).map(f => {
-      // 整棵子树级联禁选:命中集合的节点其后代全部 disabled
-      const disabled = ancestorDisabled || disabledSet.has(f.id);
-      const sub = build(f.id, disabled);
+      // 整棵子树级联禁选:disabledSet 命中为级联源(后代全 disabled);
+      // selfDisabledSet 只禁节点自身,不进级联源,子夹仍可选
+      const disabled = ancestorDisabled || disabledSet.has(f.id) || selfDisabledSet.has(f.id);
+      const sub = build(f.id, ancestorDisabled || disabledSet.has(f.id));
       // 子树含活跃文件(subtree_file_count>0,软删不计)→ 图标实心填充;空夹保持空心。
       // D1 定档:仅图标区分,无数字、无 tooltip。lucide 透传 fill 覆盖默认 fill="none"(已核实 v1.16.0 Icon 源码)。
       const hasFiles = (f.subtree_file_count ?? 0) > 0;
@@ -162,13 +168,15 @@ function buildTree(
 
 export function FolderTree({
   folders, projectName, activeFolderId, onSelect, onCreateChild, onCreateRoot, canUpload,
-  selectMode, disabledIds, nodeActions, onRenameFolder, onMoveFolder, enableDrag, onMoveDrop,
+  selectMode, disabledIds, disabledSelfIds, nodeActions, onRenameFolder, onMoveFolder,
+  enableDrag, onMoveDrop,
 }: Props) {
   const disabledSet = useMemo(() => new Set(disabledIds ?? []), [disabledIds]);
+  const selfDisabledSet = useMemo(() => new Set(disabledSelfIds ?? []), [disabledSelfIds]);
   const tree = useMemo(
-    () => buildTree(folders, disabledSet, renderNodeOps),
+    () => buildTree(folders, disabledSet, selfDisabledSet, renderNodeOps),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [folders, disabledSet, nodeActions, onRenameFolder, onMoveFolder],
+    [folders, disabledSet, selfDisabledSet, nodeActions, onRenameFolder, onMoveFolder],
   );
 
   function renderNodeOps(folder: Folder): React.ReactNode {
@@ -346,7 +354,9 @@ export function FolderTree({
           defaultExpandedKeys={defaultExpanded}
           selectedKeys={activeFolderId ? [activeFolderId] : []}
           onSelect={(keys) => keys[0] && onSelect(keys[0] as string)}
-          draggable={enableDrag ?? false}
+          // icon:false 隐藏 antd 默认拖拽把手(⠿)回收占宽;拖拽能力挂在节点内容
+          // wrapper 上(rc-tree 语义),隐藏把手不影响拖拽 —— 抓节点标题即可拖
+          draggable={enableDrag ? { icon: false } : false}
           allowDrop={enableDrag ? allowDrop : undefined}
           onDrop={enableDrag ? handleDrop : undefined}
         />

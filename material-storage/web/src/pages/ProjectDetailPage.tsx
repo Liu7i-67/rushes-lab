@@ -600,20 +600,25 @@ export default function ProjectDetailPage() {
       )}
 
       {/* W6:批量移动(一期项目内;结果视图含 skipped 逐条中文原因与 fga_pending。
-          提交成功关闭时清空选中 —— 已移动/跳过的行不再属于本夹语义,保留会误导批量操作) */}
-      <BatchMoveAssetsModal
-        open={batchMoveOpen}
-        onClose={() => setBatchMoveOpen(false)}
-        onMoved={() => {
-          setBatchMoveOpen(false);
-          setSelectedIds([]);
-        }}
-        projectId={projectId ?? ''}
-        projectName={project?.name}
-        folders={folders}
-        assets={selectedAssets}
-        selectedIds={selectedIds}
-      />
+          提交成功关闭时清空选中 —— 已移动/跳过的行不再属于本夹语义,保留会误导批量操作;
+          条件挂载 → result/target 随重开自动复位,防上次结果残留成「幽灵成功弹窗」;
+          sourceFolderId 仅禁选源夹自身,不级联子夹) */}
+      {batchMoveOpen && (
+        <BatchMoveAssetsModal
+          open
+          onClose={() => setBatchMoveOpen(false)}
+          onMoved={() => {
+            setBatchMoveOpen(false);
+            setSelectedIds([]);
+          }}
+          projectId={projectId ?? ''}
+          projectName={project?.name}
+          folders={folders}
+          assets={selectedAssets}
+          selectedIds={selectedIds}
+          sourceFolderId={activeFolderId}
+        />
+      )}
     </>
   );
 
