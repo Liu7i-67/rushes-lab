@@ -11,6 +11,7 @@ import { PersistentUploadDrawer } from './components/PersistentUploadDrawer';
 import { UploadFloatingIndicator } from './components/UploadFloatingIndicator';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { MaintenanceBanner } from './components/MaintenanceBanner';
+import { InAppBrowserTip } from './components/InAppBrowserTip';
 import { UploadProvider } from './lib/upload-store';
 import { DownloadProvider } from './lib/download-store';
 import { useCompactViewport } from './lib/use-viewports';
@@ -312,6 +313,7 @@ export default function App() {
               <DownloadProvider>
                 <BrowserRouter basename="/ms-static/web">
                   <MaintenanceBanner />
+                  <InAppBrowserTip />
                   <AppShell />
                 </BrowserRouter>
               </DownloadProvider>

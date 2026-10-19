@@ -792,8 +792,10 @@ export default function ProjectDetailPage() {
         </div>
 
         {/* 卡片列表 + 分页器(文档流普通块);勾选态追加批量栏高度 padding-bottom,
-            防末端内容被 sticky 批量栏盖住 */}
-        <div style={{ padding: '12px 0 0', paddingBottom: hasSelection ? 76 : 12 }}>
+            防末端内容被 sticky 批量栏盖住。
+            180 = 三块批量栏高度估算:行1 32 + 行2 2×2(两行 × 44)+ 行间 gap 8×2
+            + 栏内上下 padding 12 + 栏 marginTop 12,再留真机余量(以真机实测微调) */}
+        <div style={{ padding: '12px 0 0', paddingBottom: hasSelection ? 180 : 12 }}>
           <AssetCardList
             assets={assetItems}
             loading={assetsLoading || isFetching}
@@ -836,57 +838,72 @@ export default function ProjectDetailPage() {
         </div>
 
         {/* 批量操作栏(§3.1):sticky 钉在 main 滚动容器可视底(= TabBar 上沿);
-            键盘弹起隐藏。不放「下载」— 移动端浏览器拦截连续多下载,下载走每卡行内按钮 */}
+            键盘弹起隐藏。不放「下载」— 移动端浏览器拦截连续多下载,下载走每卡行内按钮。
+            确定性布局(方案 §4.2):刻意不引入 flexWrap,高度可静态预算 ——
+            行1 = 已选计数 + flex 占位 + 「清空选择」(text 型视觉弱化);
+            行2 = 打标/前缀/移动/删除 4 动作按钮 2×2 等宽网格(antd Button min-content
+            ~85px,4 列在 320/375px 视口最小需 364px 溢出被裁;2 列每列 ≥124px 全宽安全)。
+            扩展约定:行2 已占满 4 格,后续新按钮按行内追加或改 3×2 网格(轻操作可移入行1) */}
         {hasSelection && (
           <div style={{
             position: 'sticky',
             bottom: 0,
             zIndex: 'var(--ms-z-batchbar)',
             marginTop: 12,
-            display: kbVisible ? 'none' : 'flex',
-            alignItems: 'center', gap: 8,
+            display: kbVisible ? 'none' : 'block',
             padding: '6px 8px 6px 14px',
             background: 'var(--ms-surface)',
             border: '1px solid var(--ms-hairline)',
             borderRadius: 'var(--ms-radius-lg)',
             boxShadow: 'var(--ms-shadow-md)',
           }}>
-            <span style={{ fontSize: 13, color: 'var(--ms-ink-muted)', flexShrink: 0 }}>
-              已选 <span className="ms-mono" style={{ color: 'var(--ms-accent)', fontWeight: 500 }}>
-                {selectedIds.length}</span>
-            </span>
-            <div style={{ flex: 1 }} />
-            <Button style={{ height: 44 }} icon={<Tags size={14} strokeWidth={2} />}
-                    disabled={!folder?.my_can_upload} onClick={() => setBulkTagOpen(true)}>
-              打标
-            </Button>
-            {/* PR-1: 批量前缀 — 门控随打标 = folder.my_can_upload */}
-            <Button style={{ height: 44 }} icon={<Type size={14} strokeWidth={2} />}
-                    disabled={!folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
-              前缀
-            </Button>
-            {/* W6: 批量移动(一期项目内)— 源夹门控:非 sensitive 需 my_can_upload、
-                sensitive 需 my_can_admin(后端逐源夹 enforce);移动端批量栏常显,
-                AssetCardList 多选后同款入口 */}
-            <Button style={{ height: 44 }} icon={<FolderInput size={14} strokeWidth={2} />}
-                    disabled={!canBatchMoveFromThisFolder} onClick={() => setBatchMoveOpen(true)}>
-              移动
-            </Button>
-            <Popconfirm
-              title={`删除 ${selectedIds.length} 个文件?`}
-              description="软删除;管理员可在回收站恢复或彻底清除"
-              okText="删除" okButtonProps={{ danger: true }}
-              disabled={!canDeleteFiles}
-              onConfirm={confirmBulkDelete}
-            >
-              <Button danger style={{ height: 44 }} icon={<Trash2 size={14} strokeWidth={2} />}
-                      disabled={!canDeleteFiles} loading={del.isPending}>
-                删除
+            {/* 行1:计数 + 轻操作(清空选择) */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ fontSize: 13, color: 'var(--ms-ink-muted)', flexShrink: 0 }}>
+                已选 <span className="ms-mono" style={{ color: 'var(--ms-accent)', fontWeight: 500 }}>
+                  {selectedIds.length}</span>
+              </span>
+              <div style={{ flex: 1 }} />
+              <Button type="text" style={{ height: 32, flexShrink: 0 }}
+                      onClick={() => setSelectedIds([])}>
+                清空选择
               </Button>
-            </Popconfirm>
-            <Button style={{ height: 44 }} onClick={() => setSelectedIds([])}>
-              清空选择
-            </Button>
+            </div>
+            {/* 行2:4 动作 2×2 等宽网格(4 列在 320/375px 视口溢出,见上注释);
+                单钮 height 44 维持触达标准,icon 尺寸不变 */}
+            <div style={{
+              display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)',
+              gap: 8, marginTop: 8,
+            }}>
+              <Button style={{ height: 44 }} icon={<Tags size={14} strokeWidth={2} />}
+                      disabled={!folder?.my_can_upload} onClick={() => setBulkTagOpen(true)}>
+                打标
+              </Button>
+              {/* PR-1: 批量前缀 — 门控随打标 = folder.my_can_upload */}
+              <Button style={{ height: 44 }} icon={<Type size={14} strokeWidth={2} />}
+                      disabled={!folder?.my_can_upload} onClick={() => setBatchPrefixOpen(true)}>
+                前缀
+              </Button>
+              {/* W6: 批量移动(一期项目内)— 源夹门控:非 sensitive 需 my_can_upload、
+                  sensitive 需 my_can_admin(后端逐源夹 enforce);移动端批量栏常显,
+                  AssetCardList 多选后同款入口 */}
+              <Button style={{ height: 44 }} icon={<FolderInput size={14} strokeWidth={2} />}
+                      disabled={!canBatchMoveFromThisFolder} onClick={() => setBatchMoveOpen(true)}>
+                移动
+              </Button>
+              <Popconfirm
+                title={`删除 ${selectedIds.length} 个文件?`}
+                description="软删除;管理员可在回收站恢复或彻底清除"
+                okText="删除" okButtonProps={{ danger: true }}
+                disabled={!canDeleteFiles}
+                onConfirm={confirmBulkDelete}
+              >
+                <Button danger style={{ height: 44 }} icon={<Trash2 size={14} strokeWidth={2} />}
+                        disabled={!canDeleteFiles} loading={del.isPending}>
+                  删除
+                </Button>
+              </Popconfirm>
+            </div>
           </div>
         )}
 
@@ -945,7 +962,11 @@ export default function ProjectDetailPage() {
           }
         >
           {detailAsset && (
-            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder} />
+            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder}
+              // B 包:同 FolderDetailPage 接线 — Drawer 标题与 modal 导航翻同一
+              // state 天然同步;null 传 undefined 防导航条渲染
+              list={assetItems} listIndex={detailIndex ?? undefined}
+              onListIndexChange={setDetailIndex} />
           )}
         </Drawer>
 

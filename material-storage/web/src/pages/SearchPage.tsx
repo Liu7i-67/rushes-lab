@@ -72,6 +72,12 @@ export default function SearchPage() {
   const kbViewportHeight = useKeyboardViewportHeight();
   const drawerHeight = kbViewportHeight != null ? kbViewportHeight - 56 : 'min(72vh, 72dvh)';
 
+  // B 包预览导航接线:index 是 findIndex 派生值(非 state)。-1(focus 未命中,
+  // 正常交互不可达,§2.4)防御性降级 → modal 无导航条
+  const focusIndex = focused && results
+    ? results.findIndex(r => r.id === focused.id)
+    : -1;
+
   return (
     <div className="ms-enter" style={{ maxWidth: 900, margin: '0 auto' }}>
       <AppBreadcrumb />
@@ -261,7 +267,16 @@ export default function SearchPage() {
         }
       >
         {focused && (
-          <AssetSummaryPanel selected={[focused]} me={me} folder={focusFolder} />
+          <AssetSummaryPanel selected={[focused]} me={me} folder={focusFolder}
+            // B 包:list=全部结果;翻页写回 ?focus=(replace)— 与行点击同参数名
+            // focus(勿混 FolderDetailPage 的 ?asset= 深链)
+            list={results ?? undefined}
+            listIndex={focusIndex >= 0 ? focusIndex : undefined}
+            onListIndexChange={(i) => {
+              // 导航只在 list(results)存在时启用,防御性再守一层
+              const next = results?.[i];
+              if (next) setSearchParams({ q, focus: next.id }, { replace: true });
+            }} />
         )}
       </Drawer>
     </div>

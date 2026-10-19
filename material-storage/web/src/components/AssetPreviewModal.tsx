@@ -4,9 +4,9 @@
  * livp(iOS Live Photo):静态图走缩略图,实况短片走 live-preview-url(可播放)。
  * heic/heif:浏览器(除 Safari)不解码原图,大图预览走服务端转码的缩略图。
  */
-import { App, Button, Modal, Spin } from 'antd';
-import { Download, FileText, Image as ImageIcon, Play } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { App, Button, Modal, Spin, Tooltip } from 'antd';
+import { ChevronLeft, ChevronRight, Download, FileText, Image as ImageIcon, Play } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Asset } from '../api/types';
@@ -20,6 +20,15 @@ interface Props {
   asset: Asset;
   open: boolean;
   onClose: () => void;
+  // ── B 包列表导航(全部可选向后兼容:不传 list = 现行为,单 asset 无导航条)──
+  /** 页面持有的完整列表(传入后 title 区出现 ‹ n/N › 导航)。*/
+  list?: Asset[];
+  /** asset 在 list 中的下标;页面实态是 number | null(null = 未开),null/-1 时不渲染导航条。*/
+  index?: number | null;
+  /** 切张回调(与页面 Drawer 翻页同 state,天然同步)。*/
+  onIndexChange?: (i: number) => void;
+  /** 缺省 true;false(无下载权)时 footer 下载禁用 + tooltip 指引申请入口。*/
+  canDownload?: boolean;
 }
 
 type Kind = 'markdown' | 'text' | 'image' | 'pdf' | 'video' | 'livp' | 'heic' | 'unsupported';
@@ -59,7 +68,9 @@ export function isPreviewable(a: Asset): boolean {
   return detectKind(a) !== 'unsupported';
 }
 
-export function AssetPreviewModal({ asset, open, onClose }: Props) {
+export function AssetPreviewModal({
+  asset, open, onClose, list, index, onIndexChange, canDownload,
+}: Props) {
   const { message } = App.useApp();
   // hooks 置顶(见 use-viewports 模块注释)
   const compact = useCompactViewport();
@@ -70,6 +81,8 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
   const [playingLive, setPlayingLive] = useState(false);
   const [loading, setLoading] = useState(false);
+  // 切换重置钉子的 asset.id 比较基准(见下方 effect)
+  const prevAssetIdRef = useRef<string | null>(null);
   const kind = detectKind(asset);
 
   // iOS PDF 降级卡(§3.6)的下载按钮 — 走既有下载链路(as_attachment 直连系统预览)
@@ -86,8 +99,16 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
 
   // 关闭即清预览态:有意的 modal 生命周期重置;重排为 render 期重置会改动态,豁免 cascading 警告
   /* eslint-disable react-hooks/set-state-in-effect */
-  useEffect(() => {
-    if (!open) { setContent(null); setLiveUrl(null); setPlayingLive(false); return; }
+  useLayoutEffect(() => {
+    // 切换重置钉子:asset.id 变化(列表导航切张)时也清三态 — 不清的话 livp A
+    // 播放实况中切到 C 再切回,残留的 playingLive/liveUrl 会把 A 的实况串到 C 上;
+    // content 同步清空(loading 态盖住,新请求立即覆盖),无视觉问题
+    const assetChanged = prevAssetIdRef.current !== asset.id;
+    prevAssetIdRef.current = asset.id;
+    if (!open || assetChanged) {
+      setContent(null); setLiveUrl(null); setPlayingLive(false);
+    }
+    if (!open) return;
     if (kind === 'unsupported') return;
     let cancelled = false;
     setLoading(true);
@@ -100,8 +121,8 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
             http.get<{ url: string }>(`/api/v1/assets/${asset.id}/thumbnail-url`),
             http.get<{ url: string }>(`/api/v1/assets/${asset.id}/live-preview-url`),
           ]);
-          if (thumb.status === 'fulfilled') setContent(thumb.value.data.url);
-          if (live.status === 'fulfilled') setLiveUrl(live.value.data.url);
+          if (thumb.status === 'fulfilled' && !cancelled) setContent(thumb.value.data.url);
+          if (live.status === 'fulfilled' && !cancelled) setLiveUrl(live.value.data.url);
           return;
         }
         if (kind === 'heic') {
@@ -142,12 +163,71 @@ export function AssetPreviewModal({ asset, open, onClose }: Props) {
   }, [open, asset.id, kind, message]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // 键盘导航(B6):预览打开且列表 >1 时 ←/→ 切张(边界即停,与导航条禁用同语义)。
+  // livp 播放态 video 有自己的键位,e.target 是 video 时忽略;Esc 维持 antd Modal 自带
+  useEffect(() => {
+    if (!open || !onIndexChange || !list || list.length <= 1 || index == null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLVideoElement) return;
+      if (e.key === 'ArrowLeft' && index > 0) onIndexChange(index - 1);
+      if (e.key === 'ArrowRight' && index < list.length - 1) onIndexChange(index + 1);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [open, list, onIndexChange, index]);
+
+  // 导航条(B2):title 区 ‹ n/N › + 文件名省略,样式对齐 Folder/ProjectDetailPage
+  // Drawer 标题既有写法;不传 list 或 index 为 null/-1 = 单文件模式,不渲染
+  let title: React.ReactNode = asset.filename;
+  if (list && list.length > 0 && onIndexChange && index != null && index >= 0) {
+    title = (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, minWidth: 0 }}>
+        <Button type="text" size="small" aria-label="上一个"
+                icon={<ChevronLeft size={16} strokeWidth={1.8} />}
+                disabled={index <= 0}
+                onClick={() => onIndexChange(index - 1)} />
+        <span className="ms-mono" style={{
+          fontSize: 12.5, color: 'var(--ms-ink-muted)', flexShrink: 0,
+        }}>{index + 1} / {list.length}</span>
+        <Button type="text" size="small" aria-label="下一个"
+                icon={<ChevronRight size={16} strokeWidth={1.8} />}
+                disabled={index >= list.length - 1}
+                onClick={() => onIndexChange(index + 1)} />
+        <span style={{
+          flex: 1, minWidth: 0, marginLeft: 6, fontSize: 13,
+          color: 'var(--ms-ink-muted)',
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{asset.filename}</span>
+      </div>
+    );
+  }
+
+  // footer 常驻下载(B5):所有 kind(含 unsupported 卡)可见;403 兜底走组件级
+  // handleDownload(与三张降级卡同文案);无下载权时禁用 + tooltip 指引申请入口
+  // —— antd disabled Button 不触发 hover,Tooltip 须包住 Button(同 ProjectDetailPage
+  // 批量删除既有写法)
+  const downloadButton = (
+    <Button size={compact ? 'large' : 'middle'}
+            icon={<Download size={15} strokeWidth={1.8} />}
+            disabled={canDownload === false}
+            loading={dlLink.isPending}
+            onClick={() => void handleDownload()}>
+      下载
+    </Button>
+  );
+
   return (
     <Modal
       open={open}
       onCancel={onClose}
-      footer={null}
-      title={asset.filename}
+      footer={
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          {canDownload === false ? (
+            <Tooltip title="无下载权限,可在文件面板点『申请下载』">{downloadButton}</Tooltip>
+          ) : downloadButton}
+        </div>
+      }
+      title={title}
       width="min(960px, 92vw)"
       styles={{ body: { maxHeight: 'min(72vh, 72dvh)', overflow: 'auto', padding: 24 } }}
       destroyOnClose

@@ -33,6 +33,12 @@ services:
     container_name: feat-ms-api
     restart: unless-stopped
     env_file: .env
+    # 隔离栈自洽:.env 的 DB/REDIS host 指向主栈容器名(ms-db/ms-redis),
+    # 这里覆盖为本栈容器(compose environment 优先于 env_file);openfga/minio
+    # 复用 poc-net 上的共享实例(poc-openfga / poc-pigsty-minio)不隔离。
+    environment:
+      DB_URL: postgresql+asyncpg://msuser:mspass@feat-ms-db:5432/material_storage
+      REDIS_URL: redis://feat-ms-redis:6379/0
     depends_on:
       feat-ms-db:
         condition: service_healthy

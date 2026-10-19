@@ -92,6 +92,10 @@ class AuditOut(BaseModel):
     target_project_name: str | None = None
     target_minio_key: str | None
     request_ip: str | None
+    # C 包:user_agent 裸列透传(展示端前端截断);resolved_names = details 白名单键
+    # → 纯显示名派生列,不入库;查不到/垃圾值的键不进 dict,前端回落裸值
+    user_agent: str | None = None
+    resolved_names: dict[str, str] = {}
     details: dict
 
 
@@ -114,6 +118,115 @@ async def _resolve_audit_target_names(
         .where(Asset.id.in_(asset_ids))
     )
     return {row[0]: (row[1], row[2]) for row in res.all()}
+
+
+# C 包:details 白名单标量键(白名单制 —— 漏掉的键前端原样渲染不会错,后续新增
+# 事件写入点时按需在此补;一期刻意不补的 id 键:group_ids(列表)/ target_id /
+# task_id / file_id / receiver_user_id / approval_id / subject_id 及 details 内
+# project_id / template_id / asset_id,正本 §3.2)
+_AUDIT_FOLDER_KEYS = frozenset({
+    "folder_id", "target_folder_id", "parent_folder_id",
+    "old_parent_folder_id", "new_parent_folder_id",
+})
+_AUDIT_USER_KEYS = frozenset({"user_id", "sharer_user_id"})
+_AUDIT_GROUP_KEYS = frozenset({"group_id"})
+_AUDIT_DETAIL_SCALAR_KEYS = _AUDIT_FOLDER_KEYS | _AUDIT_USER_KEYS | _AUDIT_GROUP_KEYS
+_AUDIT_DETAIL_SUBJECT_KEY = "subject"  # FGA 串 user:<uuid> / group:<uuid>#member,非 UUID
+
+
+def _try_uuid(value: str) -> uuid.UUID | None:
+    """details 是自由 JSON,值 try-UUID 解析;垃圾值静默跳过(不 500)。"""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+async def _resolve_audit_detail_names(
+    db: AsyncSession, rows: list[AuditEvent],
+) -> dict[uuid.UUID, dict[str, str]]:
+    """C 包:扫页内每行 details 的白名单键,分桶批量 IN 反查纯显示名。
+
+    独立批量查询(**勿在 audit 主列表查询上 JOIN**,W2b 同款口径);页 ≤limit 行
+    至多 folder/user/group/subject 4 次 IN 查询,无性能顾虑。值 try-UUID 解析,
+    垃圾值/None 静默跳过;查不到(已删)的键不进结果,前端回落裸值。subject 复用
+    subject_names.resolve_subject_names(纯名称不加「(用户)/(用户组)」后缀,
+    类型标注归前端;found=False 不进结果)。返回 {事件 id: {details 键: 纯名称}}。
+    """
+    folder_ids: set[uuid.UUID] = set()
+    user_ids: set[uuid.UUID] = set()
+    group_ids: set[uuid.UUID] = set()
+    subjects: list[str] = []
+    # 一遍扫描:白名单键原始值按行收集(UUID 键直接解析成 UUID,subject 保留原始串)
+    per_row: list[tuple[AuditEvent, dict[str, uuid.UUID | str]]] = []
+    for e in rows:
+        details = e.details if isinstance(e.details, dict) else {}
+        raw: dict[str, uuid.UUID | str] = {}
+        for key, value in details.items():
+            if not isinstance(value, str) or not value:
+                continue
+            if key == _AUDIT_DETAIL_SUBJECT_KEY:
+                raw[key] = value
+                subjects.append(value)
+            elif key in _AUDIT_DETAIL_SCALAR_KEYS:
+                uid = _try_uuid(value)
+                if uid is None:
+                    continue
+                raw[key] = uid
+                if key in _AUDIT_FOLDER_KEYS:
+                    folder_ids.add(uid)
+                elif key in _AUDIT_USER_KEYS:
+                    user_ids.add(uid)
+                else:
+                    group_ids.add(uid)
+        if raw:
+            per_row.append((e, raw))
+    if not per_row:
+        return {}
+
+    folder_names: dict[uuid.UUID, str] = {}
+    if folder_ids:
+        res = await db.execute(
+            select(Folder.id, Folder.name).where(Folder.id.in_(folder_ids))
+        )
+        folder_names = {row[0]: row[1] for row in res.all()}
+    user_names: dict[uuid.UUID, str] = {}
+    if user_ids:
+        res = await db.execute(
+            select(User.id, User.name).where(User.id.in_(user_ids))
+        )
+        user_names = {row[0]: row[1] for row in res.all()}
+    group_names: dict[uuid.UUID, str] = {}
+    if group_ids:
+        res = await db.execute(
+            select(Group.id, Group.name).where(Group.id.in_(group_ids))
+        )
+        group_names = {row[0]: row[1] for row in res.all()}
+    subject_names: dict[str, str] = {}
+    if subjects:
+        resolved = await resolve_subject_names(db, subjects)
+        subject_names = {
+            s: info["name"] for s, info in resolved.items() if info["found"]
+        }
+
+    out: dict[uuid.UUID, dict[str, str]] = {}
+    for e, raw in per_row:
+        names: dict[str, str] = {}
+        for key, value in raw.items():
+            if key == _AUDIT_DETAIL_SUBJECT_KEY:
+                name = subject_names.get(value)  # type: ignore[arg-type]
+            else:
+                bucket = (
+                    folder_names if key in _AUDIT_FOLDER_KEYS
+                    else user_names if key in _AUDIT_USER_KEYS
+                    else group_names
+                )
+                name = bucket.get(value)  # type: ignore[arg-type]
+            if name is not None:
+                names[key] = name
+        if names:
+            out[e.id] = names
+    return out
 
 
 def _build_audit_query(
@@ -165,6 +278,9 @@ async def list_audit(
     names = await _resolve_audit_target_names(
         db, {e.target_asset_id for e in events if e.target_asset_id},
     )
+    # C 包:details 白名单键补名(独立批量查询,勿在主查询上 JOIN;仅 list 带上,
+    # CSV 导出不动 —— D-C1)
+    detail_names = await _resolve_audit_detail_names(db, events)
     out: list[AuditOut] = []
     for e in events:
         pair = names.get(e.target_asset_id) if e.target_asset_id else None
@@ -181,6 +297,8 @@ async def list_audit(
             target_project_name=pair[1] if pair else None,
             target_minio_key=e.target_minio_key,
             request_ip=e.request_ip,
+            user_agent=e.user_agent,
+            resolved_names=detail_names.get(e.id, {}),
             details=e.details or {},
         ))
     return out

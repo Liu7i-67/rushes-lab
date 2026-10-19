@@ -9,7 +9,7 @@ import {
   ChevronRight, Clock, Download, Filter,
 } from 'lucide-react';
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import dayjs, { type Dayjs } from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
@@ -65,6 +65,54 @@ const EVENT_TYPES = [
 ];
 
 const PAGE_SIZE = 30;
+
+// C 包(2026-10-19):audit details 键 → 中文 label。与 tlabel 同哲学 —— 缺 key 回落
+// raw 键名,后端新增写入点时按需补行,漏掉的键原样展示不会错(白名单制)。
+const DETAIL_KEY_LABEL: Record<string, string> = {
+  folder_id: '目录',
+  target_folder_id: '目标目录',
+  parent_folder_id: '父目录',
+  old_parent_folder_id: '原父目录',
+  new_parent_folder_id: '新父目录',
+  group_id: '用户组',
+  group_ids: '用户组列表',
+  group_name: '用户组名',
+  user_id: '用户',
+  sharer_user_id: '分享者',
+  subject: '主体',
+  level: '权限级别',
+  role: '角色',
+  task_id: '任务',
+  file_id: '备份文件',
+  source_dir: '源目录',
+  reason: '原因',
+  size_bytes: '大小',
+  expires_at: '过期时间',
+  expires_in_seconds: '有效期(秒)',
+  token: '令牌',
+  via: '来源',
+  username: '登录名',
+  name: '名称',
+  old_name: '原名称',
+  new_name: '新名称',
+  action: '动作',
+  kind: '类型',
+  filename: '文件名',
+  asset_id: '文件',
+  project_id: '项目',
+  template_id: '模板',
+  changes: '变更内容',
+  permanent: '永久',
+  fga_swap: 'FGA 变更',
+  old_minio_prefix: '原存储前缀',
+  new_minio_prefix: '新存储前缀',
+  status: '状态',
+  fail_reason: '失败原因',
+  email: '邮箱',
+  notes: '备注',
+  user_labels: '手工标签',
+  baidu_uid: '百度账号',
+};
 
 export default function AdminAuditPage() {
   const compact = useCompactViewport();
@@ -270,6 +318,8 @@ function EventRow({
     ?? (e.target_project_id ? `${e.target_project_id.slice(0, 8)}…` : null);
   const assetName = e.target_asset_filename
     ?? (e.target_asset_id ? `${e.target_asset_id.slice(0, 8)}…` : null);
+  // C 包:details 结构化键值列表数据源(空对象 → 渲染空态)
+  const detailEntries = Object.entries(e.details ?? {});
   return (
     <div style={{
       position: 'relative',
@@ -334,21 +384,47 @@ function EventRow({
         </div>
       )}
 
-      {/* 展开:full details(W2b: 补全 UUID/key 之外新增项目名/文件名行) */}
+      {/* 展开:full details(C 包 2026-10-19:顶部补操作者 ID/UA/绝对时间;
+          details 从整块 JSON dump 改结构化键值列表(id→resolved_names 补名),
+          raw JSON 折叠区保留作调试兜底) */}
       {expanded && (
         <div style={{
           marginTop: 10, paddingLeft: 24,
           fontFamily: 'var(--ms-font-mono)', fontSize: 11.5,
           color: 'var(--ms-ink-muted)',
         }}>
-          {e.actor_open_id && <div>actor: {e.actor_open_id}</div>}
+          <div>时间: {dayjs(e.event_time).format('YYYY-MM-DD HH:mm:ss')}</div>
+          {e.actor_user_id && <div>操作者 ID: {e.actor_user_id}</div>}
+          {/* actor_open_id 仅历史飞书行非空(#148 起新用户恒 NULL,单独展示易误导) */}
+          {e.actor_open_id && (
+            <div title="历史飞书标识(仅历史数据行存在)">
+              历史飞书标识: {e.actor_open_id}
+            </div>
+          )}
+          {/* UA 列最长 512,截 120 防撑爆布局;完整值 title 悬浮 */}
+          {e.user_agent && (
+            <div>UA: <span title={e.user_agent}>{truncateText(e.user_agent, 120)}</span></div>
+          )}
           {e.target_project_name && <div>project_name: {e.target_project_name}</div>}
           {e.target_project_id && <div>project: {e.target_project_id}</div>}
           {e.target_asset_filename && <div>asset_filename: {e.target_asset_filename}</div>}
           {e.target_asset_id && <div>asset: {e.target_asset_id}</div>}
           {e.target_minio_key && <div>key: {e.target_minio_key}</div>}
           {e.request_ip && <div>ip: {e.request_ip}</div>}
-          <details open style={{ marginTop: 8 }}>
+          {/* details 结构化键值列表(resolved_names 命中 → 名称(id 片段);空对象 → 空态) */}
+          <div style={{
+            marginTop: 8, display: 'flex', flexDirection: 'column', gap: 2,
+            whiteSpace: 'pre-wrap', overflowWrap: 'anywhere',
+          }}>
+            {detailEntries.length === 0
+              ? <div>details: —</div>
+              : detailEntries.map(([k, v]) => (
+                <div key={k}>
+                  {tlabel(k, DETAIL_KEY_LABEL)}: {renderDetailValue(k, v, e.resolved_names)}
+                </div>
+              ))}
+          </div>
+          <details style={{ marginTop: 8 }}>
             <summary style={{ cursor: 'pointer', color: 'var(--ms-ink)', userSelect: 'none' }}>
               details
             </summary>
@@ -363,6 +439,84 @@ function EventRow({
       )}
     </div>
   );
+}
+
+// ─── details 值渲染(C 包 2026-10-19)───────────────────────────────────────
+// ISO 8601 绝对时间串(如 expires_at)→ 页面统一的 dayjs 绝对格式
+const ISO_TIME_RE = /^\d{4}-\d{2}-\d{2}T/;
+
+// UA 列最长 512,展示截断防撑爆键值行(完整值走 title 悬浮)
+const truncateText = (s: string, max: number): string =>
+  s.length > max ? `${s.slice(0, max)}…` : s;
+
+// subject 串 → 类型标注(前端从原始串前缀取;后端 resolved_names 只回纯名称)
+const subjectKindTag = (raw: string): string => {
+  if (raw.startsWith('user:')) return '(用户)';
+  if (raw.startsWith('group:')) return '(用户组)';
+  return '';
+};
+
+// subject 串(user:<uuid> / group:<uuid>#member)→ 纯 id 部分(溯源展示用)
+const subjectId = (raw: string): string =>
+  raw.slice(raw.indexOf(':') + 1).split('#')[0];
+
+// 标量 → 展示串(布尔 → 是/否;ISO 时间串 → 绝对格式;其余原样)
+const formatScalar = (x: unknown): string => {
+  if (typeof x === 'boolean') return x ? '是' : '否';
+  if (x === null || x === undefined) return '—';
+  if (typeof x === 'string') {
+    return ISO_TIME_RE.test(x) ? dayjs(x).format('YYYY-MM-DD HH:mm:ss') : x;
+  }
+  return String(x);
+};
+
+// 对象数组已知结构({group_id, group_name} 等,实测 user_updated.changes.groups_added)
+// → 可读行「名称 (id 前 8 位…)」;未知结构回落紧凑 JSON,杜绝 [object Object]
+const formatObjectItem = (item: Record<string, unknown>): string => {
+  const name = [item.group_name, item.name, item.username, item.filename]
+    .find((x): x is string => typeof x === 'string' && x !== '');
+  const id = [item.group_id, item.user_id, item.id, item.asset_id]
+    .find((x): x is string => typeof x === 'string' && x !== '');
+  if (name !== undefined) {
+    return id !== undefined ? `${name} (${id.slice(0, 8)}…)` : name;
+  }
+  return JSON.stringify(item);
+};
+
+// 任意 details 值 → 展示串:标量数组 join('、');对象数组逐项可读/JSON;
+// 对象逐字段一行(键同名 label 化),递归复用同一分派
+const formatAny = (x: unknown): string => {
+  if (Array.isArray(x)) {
+    if (x.every((it) => it === null || typeof it !== 'object')) {
+      return x.map((it) => formatAny(it)).join('、');
+    }
+    return x
+      .map((it) => (
+        it !== null && typeof it === 'object'
+          ? formatObjectItem(it as Record<string, unknown>)
+          : formatAny(it)
+      ))
+      .join('\n');
+  }
+  if (x !== null && typeof x === 'object') {
+    return Object.entries(x as Record<string, unknown>)
+      .map(([k, v]) => `${tlabel(k, DETAIL_KEY_LABEL)}: ${formatAny(v)}`)
+      .join('\n');
+  }
+  return formatScalar(x);
+};
+
+// details 单键值渲染:resolved_names 命中 → 「名称(类型标注) (id 前 8 位…)」并列
+// (id 与名称都给,保溯源能力;subject 的 id 取串内 uuid 部分);未命中走通用分派
+function renderDetailValue(
+  key: string, v: unknown, resolved?: Record<string, string>,
+): ReactNode {
+  const raw = typeof v === 'string' ? v : null;
+  if (raw !== null && raw !== '' && resolved?.[key]) {
+    const id8 = (key === 'subject' ? subjectId(raw) : raw).slice(0, 8);
+    return <>{resolved[key]}{key === 'subject' ? subjectKindTag(raw) : ''} ({id8}…)</>;
+  }
+  return formatAny(v);
 }
 
 // event_type → 颜色(粗类别)

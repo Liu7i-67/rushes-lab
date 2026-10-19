@@ -31,9 +31,18 @@ interface Props {
   selected: Asset[];
   me?: Me;
   folder?: Folder;       // active folder — D iter3 用于 sensitive folder 邀请面板切模式
+  // ── B 包列表导航(全部可选:不传 = 单文件预览,无导航条;多选/空选态不涉及)──
+  /** 页面持有的完整列表,透传给预览 modal。*/
+  list?: Asset[];
+  /** selected[0] 在 list 中的下标。*/
+  listIndex?: number;
+  /** 切张回调(与页面 Drawer 翻页同 state)。*/
+  onListIndexChange?: (i: number) => void;
 }
 
-export function AssetSummaryPanel({ selected, me, folder }: Props) {
+export function AssetSummaryPanel({
+  selected, me, folder, list, listIndex, onListIndexChange,
+}: Props) {
   const [shareOpen, setShareOpen] = useState(false);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [applyOpen, setApplyOpen] = useState(false);
@@ -207,13 +216,19 @@ export function AssetSummaryPanel({ selected, me, folder }: Props) {
             target={{ kind: 'asset', id: a.id, label: a.filename }}
           />
         )}
-        {isPreviewable(a) && (
-          <AssetPreviewModal
-            asset={a}
-            open={previewOpen}
-            onClose={() => setPreviewOpen(false)}
-          />
-        )}
+        {/* B 包挂载改造钉子:modal 常挂,由 open 开关(原 isPreviewable 条件渲染
+            已去掉)— 导航切到 unsupported 文件时 modal 不被整个卸载,unsupported 卡
+            与 footer 下载才可达;「预览」QuickAction 仍保留 isPreviewable 门控(入口不变)。
+            canDownload 用面板内部既有判定直接透传,页面无需新传 */}
+        <AssetPreviewModal
+          asset={a}
+          open={previewOpen}
+          onClose={() => setPreviewOpen(false)}
+          list={list}
+          index={listIndex}
+          onIndexChange={onListIndexChange}
+          canDownload={canDownload}
+        />
         {applyOpen && (
           <RequestAccessModal
             open

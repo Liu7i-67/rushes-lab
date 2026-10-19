@@ -23,6 +23,7 @@
     "axios": "^1.16.1",
     "copy-to-clipboard": "^4.0.2",
     "dayjs": "^1.11.20",
+    "inapp-spy": "^5.0.10",
     "lucide-react": "^1.16.0",
     "motion": "^12.38.0",
     "react": "^19.2.6",

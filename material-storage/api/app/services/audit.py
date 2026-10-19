@@ -67,7 +67,10 @@ class AuditService:
             "dedup_key": dedup_key or f"internal:{uuid_lib.uuid4()}",
             "trace_id": trace_id,
             "request_ip": request_ip,
-            "user_agent": user_agent,
+            # C2:列宽 String(512) 对齐截断 —— write 是全部审计写入的唯一必经收口
+            # (directory.py 有 9 处绕过 ctx 直读 header 的写入路径,只改 deps.py 修
+            # 不干净),超长 UA 不截会 insert 失败丢整条审计事件
+            "user_agent": user_agent[:512] if user_agent else None,
             "details": details or {},
             "event_time": event_time or datetime.now(timezone.utc),
         }

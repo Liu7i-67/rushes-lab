@@ -238,7 +238,11 @@ export default function FolderDetailPage() {
           }
         >
           {detailAsset && (
-            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder} />
+            <AssetSummaryPanel selected={[detailAsset]} me={me} folder={folder}
+              // B 包:list/detailIndex 同源透传 → Drawer 标题与 modal 导航翻同一
+              // state 天然同步;null 传 undefined 防导航条渲染
+              list={items} listIndex={detailIndex ?? undefined}
+              onListIndexChange={setDetailIndex} />
           )}
         </Drawer>
 
