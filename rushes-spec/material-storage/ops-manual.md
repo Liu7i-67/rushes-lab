@@ -764,6 +764,8 @@ cd ../api    && docker compose up -d --force-recreate ms-api ms-worker
 
 ## 11. W2a:审计真实 IP 落地(2026-10-17 方案定稿,配置激活待部署窗口)
 
+> **执行版 runbook** = `w2a-realip-activation-runbook.md`(可打印照抄,含勾选清单/实测记录表,
+> 内容与本节同源;内容漂移时以本节为准并同步该文件)。
 > 来源:`admin-audit-folder-mobile-optimization-plan.md` §2(13 轮盲审定稿);
 > 决策点 16 / 17 按推荐 **a** 拍板(18080/8080 裸隧道改绑 127.0.0.1 收敛,dev 外网入口随之关闭)。
 > **2026-10-17 本轮交付物 = 本节文档**:仓库内 `poc/minio/nginx/default.conf` 与跳板机 conf
