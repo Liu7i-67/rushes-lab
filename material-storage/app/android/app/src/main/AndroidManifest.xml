@@ -1,5 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- photo_manager:相册读(Android 13+ 细分媒体权限 + 旧版兜底) -->
+    <!-- ⚠ Flutter 模板只在 debug/profile 清单给 INTERNET;release 包必须在主清单声明,
+         否则安装后一切网络请求(host lookup)全挂 -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
