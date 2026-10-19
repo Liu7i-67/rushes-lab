@@ -43,7 +43,7 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | 回摆期间该行再次失败 → 任务按通用终态判定转 failed            | test_swingback_row_refail_task_failed |
 | completed 任务带残留 cancel_requested → overwrite 复活 → completed(取消位复位)【集成】 | test_completed_with_stale_cancel_requested_overwrite_recovers |
 | 复活统一前置复位(fail_reason/cancel 位/attempts=0/retry_count+1) | test_manual_revival_resets_attempts_and_flags |
-| 复活型接口统一前置 409 矩阵(expired/活动互斥/目标夹删/换绑 uid) | test_revival_conflict_409_matrix |
+| 复活型接口统一前置矩阵(expired 409/活动任务→入队放行/目标夹删/换绑 uid) | test_revival_conflict_409_matrix |
 | cancelled 任务 retry/overwrite 返回 409(用户终态不得复活)    | test_cancelled_task_retry_and_overwrite_409 |
 | 单文件 retry 不触碰其他 failed 行                             | test_single_file_retry_touches_only_target_row |
 | 覆盖导入走物理 purge(旧 asset 删行+对象删除+asset_purged 审计;断言并入回摆计数用例) | test_overwrite_swingback_completed_count_migration |
@@ -60,8 +60,8 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | 入队失败/Redis 队列丢失 → sweeper 下一轮必须接管【集成】     | test_enqueue_failure_queue_loss_sweeper_takeover_next_round |
 | 入队返回 None 分支(不重试派发步,交 sweeper)【集成】         | test_enqueue_returns_none_branch |
 | sweeper 对 cancel_requested+无租约直接终态化【集成】          | test_sweeper_cancel_requested_direct_finalize |
-| 同任务并发互斥(partial index + 应用层检查双层)【集成】       | test_concurrent_active_mutex_partial_index_and_app_layer |
-| ≥3 排队任务同轮派发:确定性准入恰 2 运行、其余可最终认领【集成】 | test_admission_three_queued_top2_deterministic |
+| 同绑定多任务排队:创建放行 + running-only 唯一兜底(并发方案 §2.5)【集成】 | test_same_binding_multi_task_queue_running_unique_backstop |
+| ≥3 排队任务跨道准入:4 槽+分道下全部入队运行、互不挤占【集成】 | test_admission_three_queued_lanes_all_admitted_deterministic |
 | multipart 断点续传真实恢复(bytes_done 偏移续传)【集成】      | test_multipart_breakpoint_real_resume_from_bytes_done |
 | 死会话(NoSuchUpload)自动清零重传【集成】                     | test_dead_session_no_such_upload_resets_retransmit |
 | complete 后崩溃(upload_id 已死)→ 接管后 head 命中直接落库【集成】 | test_crash_after_complete_head_hit_finalizes_asset |
@@ -182,6 +182,8 @@ from app.db.tables import (
 from app.main import create_app
 from app.services import baidu_client as baidu_client_module
 from app.services.baidu_backup import (
+    ACTIVE_STATUSES,
+    admission_top_task_ids,
     claim_task,
     dispatch_and_enqueue,
     renew_lease,
@@ -799,7 +801,9 @@ def mock_oauth(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
                               expires_in=int(token["expires_in"]))
 
     async def fake_uinfo(self: Any, *_a: Any, **_k: Any) -> BaiduUserInfo:
-        return BaiduUserInfo(uid=str(script["uid"]), nickname=str(script["nickname"]))
+        # vip_type(并发方案 §3.1):剧本可注入("vip_type" 键);缺省 None = 响应缺失
+        return BaiduUserInfo(uid=str(script["uid"]), nickname=str(script["nickname"]),
+                             vip_type=script.get("vip_type"))
 
     monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "exchange_code", fake_exchange)
     monkeypatch.setattr(baidu_client_module.BaiduNetdiskClient, "uinfo", fake_uinfo)
@@ -2006,7 +2010,8 @@ async def _mk_completed_with_skipped(world: World, *, old: bytes = b"old-bytes",
 async def test_overwrite_swingback_completed_count_migration(
     world: World, mock_baidu, client, enable_baidu, stack,
 ) -> None:
-    """completed 任务 overwrite 回摆:completed→running→completed;skipped-1/success+1/done 不变。【集成】P1"""
+    """completed 任务 overwrite 回摆:completed→enumerating(入队)→completed;
+    skipped-1/success+1/done 不变。【集成】P1"""
     old_content = b"old-object-bytes"
     task, row, old_asset, key = await _mk_completed_with_skipped(world, old=old_content)
     # 重传内容与行 source_size 等长(16B):落库前 head size == source_size 完整性校验
@@ -2016,7 +2021,11 @@ async def test_overwrite_swingback_completed_count_migration(
                           headers=_h(world.admin.id))
     assert r.status_code == 202, r.text
     t = await _get_task(task.id)
-    assert t.status == "running", "回摆必须重新占用活动名额(暂停删除)"
+    assert t.status == "enumerating" and t.enum_done is True, \
+        "回摆统一入队漏斗(并发方案 §2.5/D11):复活落 enumerating 排队、enum_done=true " \
+        "保留在行上(worker 认领后短路直达收尾,不再 API 事务内直写 running)"
+    assert t.status in ACTIVE_STATUSES, \
+        "ACTIVE_STATUSES 口径下回摆任务仍为活动态(继续占用活动名额、暂停删除语义不变)"
 
     mock_baidu.add((await _get_file(row.id)).fs_id, new_content)
     await _claim_and_run(task.id)
@@ -2311,7 +2320,8 @@ async def test_overwrite_purge_incomplete_retry_no_head_shortcut(
 async def test_revival_conflict_409_matrix(
     world: World, client, enable_baidu, stack,
 ) -> None:
-    """复活统一前置 409 矩阵:绑定失效/同绑定活动互斥/目标夹删/跨账号换绑。【集成】P1"""
+    """复活统一前置矩阵:绑定失效/目标夹删/跨账号换绑 409;同绑定有活动任务改为
+    入队放行(并发方案 §2.5)。【集成】P1"""
     # 前置 (a):binding expired
     t1 = await _mk_task(world, status="failed", fail_reason="timeout")
     await _mk_file(t1, "x.mp4", status="failed", attempts=1)
@@ -2320,12 +2330,15 @@ async def test_revival_conflict_409_matrix(
     assert r.status_code == 409 and "binding_inactive" in r.text
     await _touch_binding(world.binding.id, status="active")
 
-    # 前置 (b):同绑定已有其他活动中任务(partial unique 之外的应用层检查)
+    # 前置 (b)(并发方案 §2.5 改写):同绑定有其他活动中任务不再拒绝复活 ——
+    # 改为入队放行(202 + enumerating;软上限拦截归 test_baidu_concurrency T6)
     t2 = await _mk_task(world, status="failed", fail_reason="timeout")
     await _mk_file(t2, "x.mp4", status="failed", attempts=1)
     await _mk_task(world, status="running")     # 另一个活动任务(同 binding)
     r = await client.post(f"{BA}/tasks/{t2.id}/retry-failed", headers=_h(world.member.id))
-    assert r.status_code == 409
+    assert r.status_code == 202, \
+        f"同绑定有活动任务时复活必须入队放行(§2.5 复活统一入队漏斗),实际 {r.status_code}"
+    assert (await _get_task(t2.id)).status == "enumerating", "复活落 enumerating 排队"
 
     # 前置 (c):目标夹已删(target_folder_id NULL)
     t3 = await _mk_task(world, status="failed", fail_reason="timeout")
@@ -2372,7 +2385,9 @@ async def test_single_file_retry_touches_only_target_row(
     f2_after = await _get_file(f2.id)
     assert f2_after.status == "pending" and f2_after.attempts == 0
     t = await _get_task(task.id)
-    assert t.status == "running", "复活后任务回 running(重新占用活动名额)"
+    assert t.status == "enumerating", \
+        "复活统一入队漏斗(并发方案 §2.5/D11):复活任务入队等待(enumerating)," \
+        "不再立即回 running"
 
     # non_retryable 行(not_found 类):单文件 retry 409
     task2 = await _mk_task(world, status="failed", fail_reason="file_failed", enum_done=True)
@@ -2396,7 +2411,9 @@ async def test_manual_revival_resets_attempts_and_flags(
     t = await _get_task(task.id)
     assert t.retry_count == 2 and t.fail_reason is None
     assert t.cancel_requested is False and t.cancel_reason is None
-    assert t.status == "running", "enum_done=true 的复活直接进导入循环(§4)"
+    assert t.status == "enumerating", \
+        "复活统一入队漏斗(并发方案 §2.5/D11):恒落 enumerating 排队,enum_done=true " \
+        "保留在行上(worker 认领后短路直达导入循环,不再 API 事务内直写 running)"
     row_after = await _get_file(row.id)
     assert row_after.status == "pending" and row_after.attempts == 0, "含 attempts=0 重置(§5.2)"
     imp_after = await _get_file(imp.id)
@@ -2611,10 +2628,12 @@ async def test_sweeper_cancel_requested_direct_finalize(world: World, stack) -> 
     assert _list_parts_sync(world.project.minio_bucket, key, up) is None
 
 
-async def test_concurrent_active_mutex_partial_index_and_app_layer(
+async def test_same_binding_multi_task_queue_running_unique_backstop(
     world: World, client, enable_baidu, stack,
 ) -> None:
-    """同绑定并发互斥双层:应用层 409 + partial unique index 硬兜底。【集成】P1"""
+    """同绑定多任务排队(并发方案 §2.5/T1/T10):创建不再因「有活动任务」409,
+    第二个任务 201 入队;DB 硬兜底降级为 running-only 唯一(uq_baidu_task_running),
+    enumerating 排队行不再受唯一索引限制。【集成】P1"""
     from sqlalchemy.exc import IntegrityError
 
     await _mk_task(world, status="running")
@@ -2622,26 +2641,28 @@ async def test_concurrent_active_mutex_partial_index_and_app_layer(
         "source_dir": "/it-src-2", "project_id": str(world.project.id),
         "target_folder_id": str(world.folder.id),
     }, headers=_h(world.member.id))
-    assert r.status_code == 409, "应用层活动互斥检查 → 409"
+    assert r.status_code == 201, \
+        f"同绑定第二个任务必须可创建(排队语义,§2.5),实际 {r.status_code}: {r.text}"
+    assert r.json()["status"] == "enumerating", "创建即 enumerating(排队,dormant)"
 
-    # 硬兜底:绕过应用层直插第二条活动任务 → 撞 uq_baidu_task_active
-    t2 = BaiduBackupTask(
-        user_id=world.member.id, binding_id=world.binding.id, bound_baidu_uid="100",
-        source_dir="/it-src-3", project_id=world.project.id,
-        target_folder_id=world.folder.id, status="running",
-        lease_seq=0, total_files=0, done_files=0, failed_files=0, skipped_files=0,
-        cancelled_files=0, total_bytes=0, done_bytes=0, speed_bps=0, speed_anchor_bytes=0,
-    )
+    # 新硬兜底:绕过应用层直插同绑定第二条 running → 撞 uq_baidu_task_running
+    # (§2.2 第 2 条:恰好护住最危险的「同绑定双下载循环」)
     with pytest.raises(IntegrityError):
-        async with _db() as db:
-            db.add(t2)
-            await db.commit()
+        await _mk_task(world, status="running", source_dir="/it-src-4")
+
+    # enumerating(排队)行不再受唯一索引限制(§2.2:枚举期互斥由准入层负责)
+    queued = await _mk_task(world, status="enumerating", enum_done=False,
+                            source_dir="/it-src-5")
+    assert queued.id is not None, "同绑定 dormant 排队行必须可直插(旧 uq_baidu_task_active 已删)"
 
 
-async def test_admission_three_queued_top2_deterministic(
+async def test_admission_three_queued_lanes_all_admitted_deterministic(
     world: World, mock_baidu, stack,
 ) -> None:
-    """≥3 排队任务同轮派发:确定性准入恰 2 运行(创建序),其余门控退出后可最终认领。【集成】P1"""
+    """≥3 排队任务跨 3 绑定(2 非会员:member/outsider 的 vip_type NULL=未知按
+    非会员道;1 会员:admin vip_type=1):4 槽 + 分道新语义下三条绑定代表全部准入、
+    互不挤占,依创建序逐个认领完成(原「恰 2 运行」语义随并发方案 §3 作废;
+    分道/去重细节归 tests/test_baidu_concurrency.py T2/T11/T12)。【集成】P1"""
     perms = PermissionsService(get_settings())
     await perms.add_project_subject(project_id=str(world.project.id),
                                     subject=f"user:{world.outsider.id}", role="uploader")
@@ -2652,7 +2673,7 @@ async def test_admission_three_queued_top2_deterministic(
                           access_token_enc=encrypt_token("it-access-admin"),
                           refresh_token_enc=encrypt_token("it-refresh-admin"),
                           baidu_uid="200", access_token_expires_at=NOW + timedelta(days=30),
-                          status="active", token_rotated_at=NOW)
+                          status="active", token_rotated_at=NOW, vip_type=1)
         b3 = BaiduBinding(user_id=world.outsider.id,
                           access_token_enc=encrypt_token("it-access-outsider"),
                           refresh_token_enc=encrypt_token("it-refresh-outsider"),
@@ -2672,32 +2693,18 @@ async def test_admission_three_queued_top2_deterministic(
         mock_baidu.add(fs, b"admit-bytes")
         await _mk_file(t, f"f{i}.mp4", size=11, fs_id=fs)
         tasks.append(t)
+
+    # 分道准入(并发方案 §3.1):3 绑定各取最老代表,2 非会员(≤nonvip_limit)+ 1 会员
+    # ≤ 总限 4 → 全部进 picked;每绑定恰一条(去重,§2.3)
+    async with _db() as db:
+        picked = await admission_top_task_ids(db, limit=4, nonvip_limit=2)
+    assert set(picked) == {t.id for t in tasks}, "3 绑定代表全部准入、互不挤占"
+
+    # 依创建序逐个认领并完成(跨绑定并发照旧的回归口径;每条都真实走完导入循环)
     for t in tasks:
-        async with _db() as db:
-            assert await dispatch_baidu_task(db, t.id, sweeper=True)
-
-    # 准入排序(round_started_at NULLS LAST, created_at, id):给前两名置非 NULL 轮起点
-    # (模拟已认领运行),第 3 名保持 NULL 排末位 → 门控退出;实现语义见
-    # admission_top_task_ids(NULLS LAST 下非 NULL 恒排前,仅置 t3 反而会让它排第一)
-    await _touch_task(tasks[0].id, round_started_at=NOW)
-    await _touch_task(tasks[1].id, round_started_at=NOW)
-    await _touch_task(tasks[2].id, round_started_at=NOW)   # 模拟曾运行过;门控退出必须复位
-    seq3 = (await _get_task(tasks[2].id)).lease_seq
-    await _run_job(tasks[2].id, seq3)
-    t3 = await _get_task(tasks[2].id)
-    assert t3.status == "running", "门控退出不落终态,回队列等待"
-    assert t3.runner_id is None and t3.lease_until is None and t3.round_started_at is None, \
-        "门控退出必须复位轮起点并清租约(不留半租约干扰计数与接管判定)"
-    assert t3.lease_seq == seq3, "门控退出不得自派发(job 侧禁自旋,§6)"
-
-    # 前两名按创建序依次认领并完成;随后 t3 重新拾取 → 排名 ≤2 → 准入认领续跑
-    await _run_job(tasks[0].id, (await _get_task(tasks[0].id)).lease_seq)
-    assert await _task_status(tasks[0].id) == "completed"
-    await _run_job(tasks[1].id, (await _get_task(tasks[1].id)).lease_seq)
-    assert await _task_status(tasks[1].id) == "completed"
-    await _run_job(tasks[2].id, (await _get_task(tasks[2].id)).lease_seq)
-    t3 = await _get_task(tasks[2].id)
-    assert t3.status == "completed", "排队任务最终必须获得认领(确定性准入防瞬时全退饥饿)"
+        await _run_job(t.id, (await _get_task(t.id)).lease_seq)
+        assert await _task_status(t.id) == "completed", \
+            "排队任务最终必须获得认领(确定性准入防瞬时全退饥饿)"
 
 
 # ─── 断点续传 / 死会话 / head 快捷路径 / 落库防线 ─────────────────────────────

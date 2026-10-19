@@ -42,7 +42,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.session import get_db
+from app.db.session import get_db, get_sessionmaker
 from app.db.tables import BaiduBackupTask, BaiduBackupTaskFile, BaiduBinding, Folder, Project
 from app.deps import CurrentUser, get_audit, get_current_user, get_request_context
 from app.models import (
@@ -69,11 +69,11 @@ from app.services.baidu_backup import (
     STATUS_CANCELLED,
     STATUS_ENUMERATING,
     STATUS_FAILED,
-    STATUS_RUNNING,
     TERMINAL_STATUSES,
     BaiduTaskError,
     abort_leftover_sessions,
     assert_binding_active,
+    assert_binding_queue_not_full,
     assert_target_chain_not_sensitive,
     derive_eta_seconds,
     derive_queued,
@@ -83,7 +83,6 @@ from app.services.baidu_backup import (
     finalize_task_terminal,
     find_root_level_folder,
     guard_revival,
-    has_active_task,
     is_key_conflict_error,
     lease_free,
     load_session_refs,
@@ -214,6 +213,44 @@ def _baidu_error_to_http(e: BaiduApiError) -> HTTPException:
 # ─── 断点作废①②(换绑/解绑共用,方案 §5.2 覆盖前处置)────────────────────────
 
 
+async def _refresh_binding_vip_type(
+    db: AsyncSession, request: Request, binding: BaiduBinding | None,
+) -> None:
+    """任务创建/复活时 best-effort 刷新绑定 vip_type(并发方案 §3.1 保鲜):
+
+    uinfo 属已申报六接口(零新增 API 面),从既有响应多取一个字段回填分道数据源,
+    防「绑定后才升级会员」滞后;**失败静默沿用旧值,绝不阻塞创建/复活**。
+    存量 NULL 行随本路径自然回填(§2.2 第 4 条,不做批量回灌)。
+
+    token 刷新 + uinfo 放独立 session(并发方案 §2.6.2 同款,必须):
+    ensure_fresh_access_token 的失败回滚与并发单飞短路(另一请求先刷完)都会
+    rollback —— 曾在 API 请求会话内直调,rollback expire 了会话内全部 ORM 实例,
+    返回后读 binding.baidu_uid / task.id 触发 MissingGreenlet → 500(连短路
+    「全成功」窗口也炸);独立会话隔离后其回滚不再污染主会话。成功后对主会话
+    实例 db.refresh 回写(31045 处置同理由):vip_type + 新双 token,防主会话
+    身份映射缓存陈旧。"""
+    if binding is None:
+        return
+    try:
+        client = _get_baidu_client(request)
+        crypto = _get_token_crypto(request)
+        async with get_sessionmaker()() as refresh_db:
+            # 独立会话内重取行(勿跨会话复用主会话实例);latest 状态复判 active
+            row = await refresh_db.get(BaiduBinding, binding.id)
+            if row is None or row.status != "active":
+                return
+            token = await ensure_fresh_access_token(
+                refresh_db, row, crypto=crypto, client=client,
+            )
+            info = await client.uinfo(token)
+            row.vip_type = info.vip_type
+            await refresh_db.commit()
+        await db.refresh(binding)
+    except Exception as e:
+        log.info("baidu vip_type refresh skipped binding=%s err=%s(best-effort 沿用旧值)",
+                 binding.id, e)
+
+
 async def _cancel_active_tasks_of_binding(
     db: AsyncSession, *, binding_id: uuid.UUID, now: datetime,
 ) -> list[uuid.UUID]:
@@ -301,14 +338,18 @@ async def _apply_binding_fields(
     refresh_token_enc: str,
     baidu_uid: str,
     nickname: str | None,
+    vip_type: int | None,
     expires_at: datetime,
     now: datetime,
 ) -> None:
-    """重新授权 = 原子覆盖同一 user 行(两 token + uinfo 身份 + 两个甄别锚点)。"""
+    """重新授权 = 原子覆盖同一 user 行(两 token + uinfo 身份 + 两个甄别锚点)。
+
+    vip_type 并发方案 §3.1:仅 bind/重授权(调 uinfo)时回填,分道数据源保鲜。"""
     binding.access_token_enc = access_token_enc
     binding.refresh_token_enc = refresh_token_enc
     binding.baidu_uid = baidu_uid
     binding.nickname = nickname
+    binding.vip_type = vip_type
     binding.access_token_expires_at = expires_at
     binding.status = "active"
     # 仅 bind/重授权(调 uinfo)时刷新 —— 换绑甄别锚点之一(§4)
@@ -391,6 +432,7 @@ async def bind(
             refresh_token_enc=refresh_enc,
             baidu_uid=info.uid,
             nickname=info.nickname,
+            vip_type=info.vip_type,
             expires_at=expires_at,
             now=now,
         )
@@ -410,6 +452,7 @@ async def bind(
             refresh_token_enc=refresh_enc,
             baidu_uid=info.uid,
             nickname=info.nickname,
+            vip_type=info.vip_type,
             expires_at=expires_at,
             now=now,
         )
@@ -679,8 +722,12 @@ async def create_task(
     audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
     ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008  # FastAPI DI,repo 全量同款
 ) -> BaiduTaskOut:
-    """创建备份任务(§5.2):校验链(source_dir 护栏/绑定/归属/敏感祖先链/can_upload
-    /承接夹解析/活动互斥)+ 派发步入队;撞 uq_baidu_task_active 统一 409。"""
+    """创建备份任务(§5.2;并发方案 §2.5):校验链(source_dir 护栏/绑定/同绑定
+    软上限/归属/敏感祖先链/can_upload/承接夹解析)+ vip_type 保鲜 + 派发步入队。
+
+    多任务排队语义:同绑定可建多个任务一跑一排队,不再因「有活动任务」拒绝;
+    软上限(≥ baidu_max_active_tasks_per_binding)409「该绑定排队任务已达上限」。
+    """
     _ensure_enabled()
     try:
         source_dir = validate_source_dir(payload.source_dir)
@@ -707,8 +754,12 @@ async def create_task(
     project = await db.get(Project, payload.project_id)
     if project is None:
         raise HTTPException(404, "project not found")
-    if await has_active_task(db, binding_id=binding.id):
-        raise HTTPException(409, "同一绑定已有进行中的备份任务,请等待其结束")
+    # 软上限前置(并发方案 §2.5):同绑定活动任务 ≥ 上限 → 409(防滥用一次排
+    # 20 个目录;check-then-insert 无 DB 兜底,并发窗口可短暂超出,防滥用口径可接受)
+    try:
+        await assert_binding_queue_not_full(db, binding_id=binding.id)
+    except BaiduTaskError as e:
+        raise _task_error_to_http(e) from e
 
     permissions: PermissionsService = request.app.state.permissions
     org = await get_default_organization(db)
@@ -787,6 +838,12 @@ async def create_task(
             target_folder_id = node.folder_id
         target_auto_created = True
 
+    # vip_type 保鲜(并发方案 §3.1):创建时 best-effort 刷一次,失败静默不阻塞。
+    # 置于 can_upload 权限校验与目标解析之后(刷新已独立 session 化,不再有
+    # 「rollback 丢弃未提交写入」的时序顾虑):无权限/目标非法的请求不白耗一次
+    # uinfo API 面
+    await _refresh_binding_vip_type(db, request, binding)
+
     # ── 插入任务(bound_baidu_uid 创建时快照,换绑甄别锚点)────────────────────
     task = BaiduBackupTask(
         user_id=user.id,
@@ -799,12 +856,9 @@ async def create_task(
         status=STATUS_ENUMERATING,
     )
     db.add(task)
-    try:
-        await db.commit()
-    except IntegrityError as e:
-        # partial unique index uq_baidu_task_active 兜底(并发创建/复活统一 409)
-        await db.rollback()
-        raise HTTPException(409, "同一绑定已有进行中的备份任务,请等待其结束") from e
+    # 并发方案 §2.5:uq_baidu_task_active 已随迁移 0017 删除,同绑定多活动行合法,
+    # 创建侧不再有 IntegrityError 兜底(软上限为 best-effort,无 DB 约束)
+    await db.commit()
 
     outcome = await dispatch_and_enqueue(
         db, _get_arq_pool(request), task_id=task.id, mode="create", now=datetime.now(UTC),
@@ -1054,20 +1108,26 @@ async def _revive_and_dispatch(
     allowed_from: tuple[str, ...],
 ) -> str:
     """复活型统一前置的落库侧(§5.2):在途行复位 + 派发步(reset_round);
-    撞 uq_baidu_task_active / CAS 0 行统一 409。返回复活后的目标状态
-    (enum_done=false → enumerating 重枚举 / true → running,§4)。"""
+    CAS 0 行统一 409。返回复活后的目标状态 —— 恒为 enumerating。
+
+    复活统一入队漏斗(并发方案 §2.5 关键修正/D11):dispatch_task revive 分支
+    一律落 enumerating(enum_done 原样保留在行上)—— 原实现对 enum_done=true
+    在 API 事务内直写 running,「同绑定 A running + B 复活」必撞
+    uq_baidu_task_running 且旧 IntegrityError 兜底已删(未捕获即 500);统一后
+    API 响应 status 语义 =「已入队」,worker 侧对 enum_done=true 短路直达枚举
+    收尾 UPDATE(零 list API 重放),全系统仅 worker 收尾一条置 running 路径。
+
+    vip_type 保鲜由各路由在 guard_revival 后、reset_* 行复位前调用
+    (_refresh_binding_vip_type):刷新已独立 session 化,失败回滚不污染本会话,
+    放置点仅为语义前置(保鲜属复活前置,不阻塞复位与派发)。"""
     await reset_importing_rows(db, task_id=task.id)  # 接管/复活分支复位在途行
-    try:
-        outcome = await dispatch_and_enqueue(
-            db, _get_arq_pool(request), task_id=task.id, mode="revive",
-            allowed_from=allowed_from, now=datetime.now(UTC),
-        )
-    except IntegrityError as e:
-        await db.rollback()
-        raise HTTPException(409, "同一绑定已有进行中的任务,请等待其结束") from e
+    outcome = await dispatch_and_enqueue(
+        db, _get_arq_pool(request), task_id=task.id, mode="revive",
+        allowed_from=allowed_from, now=datetime.now(UTC),
+    )
     if outcome.seq is None:
         raise HTTPException(409, "任务状态已变化,请刷新后重试")
-    return STATUS_RUNNING if task.enum_done else STATUS_ENUMERATING
+    return STATUS_ENUMERATING
 
 
 @router.post("/backup/tasks/{task_id}/retry-failed", response_model=BaiduReviveOut, status_code=202)
@@ -1091,6 +1151,10 @@ async def retry_failed(
         await guard_revival(db, task=task, binding=binding)
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
+    # vip_type 保鲜(并发方案 §3.1):复活时 best-effort 刷一次,失败静默不阻塞
+    # (刷新走独立 session,rollback 不污染本会话;置于 reset_* 复位前,复活主链
+    # 前置完成保鲜,失败也不阻塞后续复位与派发)
+    await _refresh_binding_vip_type(db, request, binding)
 
     reset = await reset_failed_rows(db, task_id=task.id)
     if task.enum_done and reset == 0:
@@ -1135,6 +1199,10 @@ async def retry_file(
         await guard_revival(db, task=task, binding=binding)
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
+    # vip_type 保鲜(并发方案 §3.1):复活时 best-effort 刷一次,失败静默不阻塞
+    # (刷新走独立 session,rollback 不污染本会话;置于 reset_* 复位前,复活主链
+    # 前置完成保鲜,失败也不阻塞后续复位与派发)
+    await _refresh_binding_vip_type(db, request, binding)
 
     reset = await reset_one_failed_row(db, task_id=task.id, file_id=file_id)
     if reset == 0:
@@ -1180,6 +1248,10 @@ async def overwrite_file(
         await guard_revival(db, task=task, binding=binding)
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
+    # vip_type 保鲜(并发方案 §3.1):复活时 best-effort 刷一次,失败静默不阻塞
+    # (刷新走独立 session,rollback 不污染本会话;置于 reset_* 复位前,复活主链
+    # 前置完成保鲜,失败也不阻塞后续复位与派发)
+    await _refresh_binding_vip_type(db, request, binding)
 
     action_reason: str | None = None
     reset = await reset_skipped_row_for_overwrite(db, task_id=task.id, file_id=file_id)
@@ -1242,6 +1314,10 @@ async def random_suffix_file(
         await guard_revival(db, task=task, binding=binding)
     except BaiduTaskError as e:
         raise _task_error_to_http(e) from e
+    # vip_type 保鲜(并发方案 §3.1):复活时 best-effort 刷一次,失败静默不阻塞
+    # (刷新走独立 session,rollback 不污染本会话;置于 reset_* 复位前,复活主链
+    # 前置完成保鲜,失败也不阻塞后续复位与派发)
+    await _refresh_binding_vip_type(db, request, binding)
 
     row = (await db.execute(
         select(BaiduBackupTaskFile).where(

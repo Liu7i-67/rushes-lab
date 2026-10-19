@@ -144,6 +144,23 @@ class Settings(BaseSettings):
     # *.baidupcs.com 不受此影响,仍按宿主后缀硬校验)
     baidu_openapi_base_url: str = "https://openapi.baidu.com"  # OAuth authorize/token
     baidu_pan_base_url: str = "https://pan.baidu.com"          # xpan file/multimedia/nas
+    # ── 并发与排队参数(方案 baidu-backup-multi-task-concurrency-plan.md §3.2;
+    # env 可调不发版。⚠ 调 .env 后 docker compose restart 不重读 env_file,须按
+    # 消费方分别 up -d --force-recreate:前三个消费方是 ms-worker,软上限消费在
+    # ms-api,见方案 §3.2)──
+    baidu_admission_limit: int = Field(
+        4, description="全局准入并发槽总数(VIP 分道:会员恒有 ≥2 槽可用,方案 §3.1)",
+    )
+    baidu_nonvip_admission_limit: int = Field(
+        2, description="非会员道并发上限(非会员 = vip_type 0/NULL,§3.1)",
+    )
+    worker_max_jobs: int = Field(
+        8, description="arq WorkerSettings.max_jobs 全池并发(§3.3:4 百度槽 + "
+                       "≥4 缩略图/cron 槽;并发升 4 不动它会挤饿缩略图)",
+    )
+    baidu_max_active_tasks_per_binding: int = Field(
+        5, description="同绑定活动任务软上限(§2.5 防滥用;check-then-insert 无 DB 兜底)",
+    )
 
     def baidu_stream_backoff_steps(self) -> list[int]:
         """解析 BAIDU_STREAM_RETRY_BACKOFF_S 逗号串为 0 基退避档位列表(秒)。
@@ -165,6 +182,10 @@ class Settings(BaseSettings):
         - PART_SIZE_BYTES ≥ 5MiB:S3/MinIO complete 强制除末片外每片 ≥5MiB(EntityTooSmall)
         - STREAM_RETRY_BACKOFF_S:非空逗号分隔正整数串(流内重试退避档,§3.4);
           STREAM_RETRY_MAX / MAX_ROW_ATTEMPTS ≥ 1(并入下方正数校验组)
+        - 并发红线(§3.2):1 ≤ NONVIP ≤ ADMISSION-2 —— 上限守住「会员恒有 ≥2 槽」
+          承诺(只校验 ≤ 总数则运维配 2/2 会把 VIP 保证静默清零),下限 ≥1 防 2/0
+          把非会员道清零饿死(排队无超时,round 为 NULL 不受 48h 判停);隐含
+          ADMISSION ≥ 3。软上限 ≥1(配 0/负值会静默砖死创建与复活、恒 409 无启动报错)
         """
         assert self.baidu_relay_after_s + 300 <= 3600, (
             f"BAIDU_RELAY_AFTER_S={self.baidu_relay_after_s} 必须满足 +300 ≤ 3600"
@@ -187,6 +208,20 @@ class Settings(BaseSettings):
         assert all(part.isdigit() and int(part) > 0 for part in items), (
             f"BAIDU_STREAM_RETRY_BACKOFF_S={raw_backoff!r} 必须为逗号分隔的"
             "正整数串(如 2,5,15;逐项 >0,见方案 §3.4)"
+        )
+        assert (
+            1 <= self.baidu_nonvip_admission_limit
+            <= self.baidu_admission_limit - 2
+        ), (
+            f"BAIDU_NONVIP_ADMISSION_LIMIT={self.baidu_nonvip_admission_limit} 必须满足 "
+            f"1 ≤ nonvip ≤ BAIDU_ADMISSION_LIMIT-2(当前 ADMISSION="
+            f"{self.baidu_admission_limit};上限守住「会员恒有 ≥2 槽」、下限防非会员道"
+            "清零饿死,见并发方案 §3.2)"
+        )
+        assert self.baidu_max_active_tasks_per_binding >= 1, (
+            f"BAIDU_MAX_ACTIVE_TASKS_PER_BINDING="
+            f"{self.baidu_max_active_tasks_per_binding} 必须 ≥ 1"
+            "(配 0/负值会静默砖死创建与复活、恒 409 且无启动报错,见并发方案 §3.2)"
         )
 
 

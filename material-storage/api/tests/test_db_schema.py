@@ -102,36 +102,78 @@ def test_baidu_binding_unique_user() -> None:
     assert col.nullable is False  # NOT NULL 防线:uinfo 失败 → 绑定整体失败
 
 
-def test_baidu_task_active_partial_unique_index() -> None:
-    """同绑定同时至多一个活动中任务(partial unique index 硬兜底,方案 §4)。"""
+def test_baidu_task_running_partial_unique_index() -> None:
+    """同绑定 running 唯一兜底(uq_baidu_task_running,并发方案 §2.2 第 2 条/T7)。
+
+    原 uq_baidu_task_active(全活动唯一)已随迁移 0017 删除(多任务排队,§2.5);
+    新兜底恰好护住最危险的「同绑定双下载循环」,枚举期互斥由 VIP 分道准入层负责
+    (D3:DB 护下载互斥、准入护执行互斥)。断言口径 = 模型元数据。
+    """
     indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
-    idx = indices.get("uq_baidu_task_active")
-    assert idx is not None
+    assert "uq_baidu_task_active" not in indices, \
+        "旧全活动唯一索引必须已删(并发方案 §2.2 第 1 条,否则第二个任务建不出来)"
+    idx = indices.get("uq_baidu_task_running")
+    assert idx is not None, "缺 uq_baidu_task_running(并发方案 §2.2 第 2 条)"
     assert idx.unique is True
-    # partial 谓词:WHERE status IN ('enumerating','running')
+    # partial 谓词:WHERE status = 'running'
     where_sql = str(idx.dialect_options["postgresql"]["where"])
-    assert "enumerating" in where_sql and "running" in where_sql
+    assert "running" in where_sql
+    # 谓词列含 binding_id(UNIQUE(binding_id) WHERE ...)
+    assert [c.name for c in idx.columns] == ["binding_id"]
 
 
-def test_baidu_task_active_index_predicate_matches_active_statuses() -> None:
-    """uq_baidu_task_active 的 partial 谓词状态集与 ACTIVE_STATUSES 常量严格一致。
+def test_baidu_task_running_index_predicate_is_deliberate_subset() -> None:
+    """uq_baidu_task_running 的 partial 谓词恰为 {'running'}(D3 刻意子集,T7)。
 
-    防回归:任一侧增删活动状态(如新增状态机档位)而另一侧未跟 → 硬兜底与
-    应用层谓词(claim/renew/终态化全走 ACTIVE_STATUSES)漂移,出现「应用层放行、
-    索引拒绝」或反之的并发窗口。
+    防回归:谓词被「顺手」改回 ACTIVE_STATUSES 全集会让枚举期第二个任务建不出来
+    (多任务排队语义被静默拆除);只应护 running 下载互斥。
+    """
+    import re
+
+    indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
+    idx = indices["uq_baidu_task_running"]
+    where_sql = str(idx.dialect_options["postgresql"]["where"])
+    statuses_in_predicate = set(re.findall(r"'([a-z_]+)'", where_sql))
+    assert statuses_in_predicate == {"running"}, (
+        f"uq_baidu_task_running 谓词状态集应为刻意子集 {{'running'}}(D3),"
+        f"实际 {sorted(statuses_in_predicate)}"
+    )
+
+
+def test_baidu_task_active_binding_index_predicate_matches_active_statuses() -> None:
+    """idx_baidu_task_active_binding(非唯一 partial 准入索引,§2.2 第 3 条)的
+    partial 谓词状态集与 ACTIVE_STATUSES 常量严格一致(T7 谓词漂移断言)。
+
+    防回归:任一侧增删活动状态(如新增状态机档位)而另一侧未跟 → 准入查询漏行
+    (该状态的活动任务不参与准入/接管),出现「应用层放行、索引不覆盖」的并发窗口。
     """
     import re
 
     from app.services.baidu_backup import ACTIVE_STATUSES
 
     indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
-    idx = indices["uq_baidu_task_active"]
+    idx = indices["idx_baidu_task_active_binding"]
+    assert idx.unique is False, "准入查询索引必须为非唯一 partial(§2.2 第 3 条)"
+    assert [c.name for c in idx.columns] == ["binding_id"]
     where_sql = str(idx.dialect_options["postgresql"]["where"])
     statuses_in_predicate = set(re.findall(r"'([a-z_]+)'", where_sql))
     assert statuses_in_predicate == set(ACTIVE_STATUSES), (
-        f"uq_baidu_task_active 谓词 {sorted(statuses_in_predicate)} 与 "
+        f"idx_baidu_task_active_binding 谓词 {sorted(statuses_in_predicate)} 与 "
         f"ACTIVE_STATUSES {sorted(ACTIVE_STATUSES)} 不一致"
     )
+
+
+def test_baidu_binding_vip_type_column() -> None:
+    """vip_type 分道数据源列(并发方案 §2.2 第 4 条/§3.1/T7):smallint NULL。
+
+    NULL=未知,按非会员处理(保守归类保护会员槽位,D9);随 bind/重授权/任务
+    创建/复活 best-effort 回填,不做批量回灌。
+    """
+    from sqlalchemy import SmallInteger
+
+    col = BaiduBinding.__table__.c.vip_type
+    assert col.nullable is True
+    assert isinstance(col.type, SmallInteger), f"vip_type 列类型应为 SMALLINT,实际 {col.type}"
 
 
 def test_baidu_task_file_relpath_unique() -> None:

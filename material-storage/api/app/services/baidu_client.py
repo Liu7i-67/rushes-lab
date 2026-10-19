@@ -129,10 +129,16 @@ class BaiduTokenPair:
 
 @dataclass(frozen=True)
 class BaiduUserInfo:
-    """uinfo(xpan/nas?method=uinfo)归一返回;绑定落库 NOT NULL 防线用(§4)。"""
+    """uinfo(xpan/nas?method=uinfo)归一返回;绑定落库 NOT NULL 防线用(§4)。
+
+    vip_type(并发方案 §3.1/D9):旧版语义 0=普通/1=会员/2=超级会员(vip_version=v2
+    时 0/1/2=普通/会员VIP/SVIP),分道只需「≥1=会员」二值,新旧语义一致,不加
+    vip_version 参数;响应缺失 → None(=未知,按非会员处理)。
+    """
 
     uid: str
     nickname: str | None  # 缺失时 UI 回退展示 uid
+    vip_type: int | None
 
 
 @dataclass(frozen=True)
@@ -337,7 +343,16 @@ class BaiduNetdiskClient:
                 f"uinfo 未返回 uid(待实测核定字段),响应 keys={sorted(body.keys())}",
             )
         nickname = body.get("netdisk_name") or body.get("baidu_name") or body.get("nickname")
-        return BaiduUserInfo(uid=str(uid), nickname=str(nickname) if nickname else None)
+        # vip_type 在响应体中(并发方案 §3.1):多取一个字段,零新增 API 面;
+        # 缺失/非法值 → None(未知,按非会员道)
+        raw_vip = body.get("vip_type")
+        try:
+            vip_type = int(raw_vip) if raw_vip is not None else None
+        except (TypeError, ValueError):
+            vip_type = None
+        return BaiduUserInfo(
+            uid=str(uid), nickname=str(nickname) if nickname else None, vip_type=vip_type,
+        )
 
     async def list_dir(
         self,
