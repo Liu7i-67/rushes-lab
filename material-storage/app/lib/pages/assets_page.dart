@@ -68,13 +68,18 @@ class _AssetsPageState extends State<AssetsPage> {
           _say('✓ 已上传:${asset.filename}');
         }
       } else {
+        // Android SAF 按 Mime 过滤,livp 无注册 Mime,FileType.custom 会直接抛
+        // PlatformException(Unsupported filter)→ 改 any + 选完自校验扩展名
         final result = await FilePicker.platform.pickFiles(
-          type: FileType.custom,
-          allowedExtensions: ['livp'],
+          type: FileType.any,
           withData: true,
         );
         final f = result?.files.single;
         if (f == null || f.bytes == null) return;
+        if (!f.name.toLowerCase().endsWith('.livp')) {
+          _say('已忽略非 livp 文件:${f.name}(请选择 .livp 文件)');
+          return;
+        }
         _say('上传 ${f.name} …');
         final asset = await api.uploadBytes(
           folderId: widget.folderId,
