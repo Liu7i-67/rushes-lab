@@ -13,6 +13,11 @@ void main() {
     expect(LivpService.baseNameOf('IMG_1234.HEIC', 'IMG_fb'), 'IMG_1234');
     expect(LivpService.baseNameOf('IMG_1234', 'IMG_fb'), 'IMG_1234');
     expect(LivpService.baseNameOf(' IMG_5.jpg ', 'IMG_fb'), 'IMG_5');
+    // 分隔符净化:iOS PHAsset localIdentifier 形如 "UUID/L0/001" 含 '/',
+    // 兜底名与标题两条路都不得带 '/'/'\'(create_upload 路径校验 400 之前先自净)
+    expect(LivpService.baseNameOf('', 'IMG_UUID/L0/001'), 'IMG_UUID-L0-001');
+    expect(LivpService.baseNameOf('a/b.jpg', 'IMG_fb'), 'a-b');
+    expect(LivpService.baseNameOf(r'c\d.jpg', 'IMG_fb'), 'c-d');
   });
 
   test('兜底基名打包出的条目带主名,不再是 .jpg/.mov 点文件(后端 pathlib 判不出)', () {

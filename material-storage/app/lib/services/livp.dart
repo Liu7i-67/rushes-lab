@@ -34,11 +34,13 @@ class LivpService {
   /// 点文件条目,后端 pathlib 判不出扩展名(2026-10-20 iOS 真机实锤)。
   static String baseNameOf(String? title, String fallback) {
     final t = (title ?? '').trim();
-    final base =
+    var base =
         (t.contains('.') ? t.substring(0, t.lastIndexOf('.')) : t).trim();
     // 去扩展名后只剩点号('.')也视为无主名
-    final meaningful = base.replaceAll('.', '').trim();
-    return meaningful.isEmpty ? fallback : base;
+    if (base.replaceAll('.', '').trim().isEmpty) base = fallback.trim();
+    // 分隔符净化:iOS PHAsset localIdentifier 形如 "UUID/L0/001",兜底名直接
+    // 进文件名会被 create_upload 的路径分隔符校验 400(2026-10-20 TestFlight 实锤)
+    return base.replaceAll('/', '-').replaceAll('\\', '-');
   }
 
   /// 打包:静态帧 + 实况短片 → .livp 字节。
