@@ -50,9 +50,7 @@ class AlbumService {
     if (image == null) {
       throw StateError('读取静态帧失败(资源可能在 iCloud 未下载)');
     }
-    final title = e.title ?? 'IMG_${e.id}';
-    final baseName =
-        title.contains('.') ? title.substring(0, title.lastIndexOf('.')) : title;
+    final baseName = LivpService.baseNameOf(e.title, 'IMG_${e.id}');
     final imgBytes = await image.readAsBytes();
     if (video == null) {
       // 非实况(onlyLivePhotos 已滤,理论不可达)→ 退化为纯静态 livp

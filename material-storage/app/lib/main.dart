@@ -35,6 +35,16 @@ const kDefaultBaseUrl = String.fromEnvironment(
   defaultValue: kDevEntry,
 );
 
+/// 源码最后编辑时间(YYYY-MM-DD HH:mm),打包期注入、项目页标题展示,
+/// 用于 TestFlight 肉眼确认装到的是最新构建(取 git HEAD 提交时刻):
+///   flutter build ipa --release \
+///     --dart-define=APP_BUILD_TIME="$(git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M')"
+/// 未注入(本地 flutter run/test)为空 → 标题不显示该段。
+const kAppBuildStamp = String.fromEnvironment(
+  'APP_BUILD_TIME',
+  defaultValue: '',
+);
+
 const _kPrefKey = 'ms_api_base';
 
 /// 手动切换的后端地址持久化(shared_preferences;插件通道不可用时回落默认)。
@@ -88,7 +98,7 @@ class MsApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '浣花素材管理',
+      title: '浣花视界',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFFC2410C),

@@ -1,7 +1,7 @@
 name: ms_app
 description: 医美素材库移动端(iOS 实况照片 livp 通道 MVP)
 publish_to: 'none'
-version: 0.1.0+2
+version: 0.1.0+4
 
 environment:
   sdk: ^3.13.5
@@ -24,6 +24,16 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
 
 flutter:
   uses-material-design: true
+
+# 应用图标生成:flutter pub get 后跑 `dart run flutter_launcher_icons`
+# 素材=icon/logo.png(1254×1254 RGB);产物直写 ios/Runner/Assets.xcassets 与
+# android/app/src/main/res/mipmap-*(提交入库,Mac 侧无需重跑)
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "icon/logo.png"
+  remove_alpha_ios: true

@@ -30,3 +30,7 @@ desktop.ini
 
 # Claude Code 本地代理状态
 .claude/
+
+# agent 会话调试残留(根目录临时探针/草稿,不属仓库内容)
+/conftest_probe.py
+/tmp_*

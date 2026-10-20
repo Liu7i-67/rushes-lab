@@ -1,8 +1,15 @@
 import 'package:flutter/material.dart';
 
-import '../main.dart' show api;
+import '../main.dart' show api, kAppBuildStamp;
 import '../models.dart';
 import 'log_push.dart';
+
+/// 项目页 AppBar 标题:打包注入 stamp 时在「项目」后追加最后编辑时间
+/// (TestFlight 分辨构建新旧用),未注入时保持原标题。
+String projectsTitle(String? userName, String buildStamp) {
+  final tail = userName == null ? '' : ' · $userName';
+  return buildStamp.isEmpty ? '项目$tail' : '项目 · 最后编辑 $buildStamp$tail';
+}
 
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({super.key});
@@ -27,7 +34,11 @@ class _ProjectsPageState extends State<ProjectsPage> {
     final me = ModalRoute.of(context)?.settings.arguments as Me?;
     return Scaffold(
       appBar: AppBar(
-        title: Text(me != null ? '项目 · ${me.name}' : '项目'),
+        // 标题可能较长(项目 · 最后编辑 YYYY-MM-DD HH:mm · 用户名),缩放防溢出
+        title: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(projectsTitle(me?.name, kAppBuildStamp)),
+        ),
         actions: [
           logPushButton(context),
           IconButton(onPressed: _reload, icon: const Icon(Icons.refresh)),

@@ -10,7 +10,7 @@
 
 ## 0. 你会得到什么 / 需要什么
 
-- 产物:装在 iPhone 上的「素材库」App —— 登录 → 浏览项目/文件夹 →
+- 产物:装在 iPhone 上的「浣花视界」App —— 登录 → 浏览项目/文件夹 →
   从相册选**实况照片**上传为 `.livp` / 下载 `.livp` 存回相册(恢复实况)。
 - 需要:macOS(Xcode 16+)+ Apple 开发者账号(个人/公司 ADP 或企业账号均可)+ 一台 iPhone(iOS 15+)。
 
@@ -77,6 +77,8 @@ flutter doctor                         # 确认 iOS toolchain 全绿
     或其他入口,手填即可。
 - iOS 明文 HTTP 限制已在 Info.plist 处理(dev 是 IP 直连 http,Apple 的
   NSExceptionDomains 不匹配 IP 字面量,故开了 NSAllowsArbitraryLoads;勿删,否则 dev 入口连不上)。
+- Android 同理:主清单(`android/app/src/main/AndroidManifest.xml`)已开
+  `android:usesCleartextTraffic="true"`(networkSecurityConfig 同样不认 IP 字面量),勿删。
 - 打包期想钉死单一环境:`flutter build ipa --dart-define=MS_API_BASE=https://bucket.taoxiplan.com`。
 
 ## 4. 打包发布(按你的分发方式二选一)
@@ -84,9 +86,14 @@ flutter doctor                         # 确认 iOS toolchain 全绿
 ### 路线 A:TestFlight / App Store(推荐,正式)
 
 ```bash
-flutter build ipa --release
+flutter build ipa --release \
+  --dart-define=APP_BUILD_TIME="$(git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M')"
 # 产物:build/ios/ipa/ms_app.ipa
 ```
+
+> `APP_BUILD_TIME` 注入源码最后编辑时间(git 最新提交时刻),App 项目页标题会显示
+> 「项目 · 最后编辑 YYYY-MM-DD HH:mm」——TestFlight 装上新构建后**看标题时间即确认已更新**
+> (旧构建没有该段)。若标题看不到该段,说明打包命令漏带了 `--dart-define`,请重打。
 
 上传(任选其一):
 - Xcode → Window → Organizer → 选最新 Archive → Distribute App → App Store Connect;
@@ -103,8 +110,9 @@ Bundle ID 选你在第 2 步设定的 → 上传构建 → TestFlight 标签页�
 1. App Store Connect → 用户和访问 → 设备(或 Xcode Devices 窗口)注册测试 iPhone 的 **UDID**;
 2. Profile 含这些设备后重新生成(Xcode 自动签名会处理);
 3. ```bash
-   flutter build ipa --release --export-method ad-hoc
-   # 产物:build/ios/ipa/ms_app.ipa
+   flutter build ipa --release --export-method ad-hoc \
+     --dart-define=APP_BUILD_TIME="$(git log -1 --format='%cd' --date=format:'%Y-%m-%d %H:%M')"
+   # 产物:build/ios/ipa/ms_app.ipa(dart-define 同路线 A,标题显示最后编辑时间)
    ```
 4. 把 ipa 发给同事 → Mac Finder/Finder「访达」双击装设备,或 Apple Configurator。
    (若你们账号是企业账号 Enterprise,`--export-method enterprise` 同理,免 UDID。)
