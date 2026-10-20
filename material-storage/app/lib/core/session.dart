@@ -1,6 +1,6 @@
 /// Session — 探活 + baseUrl + cookie 持久化 + Me 缓存 + 401 去抖(§4/§4.1 定稿)。
 ///
-/// 冷启动按序探测 `GET /healthz`(免鉴权,connectTimeout 3s):
+/// 冷启动按序探测 `GET /api/v1/maintenance/banner`(免鉴权,connectTimeout 3s):
 ///   ① --dart-define=MS_API_BASE(仅开发构建,不进 UI)
 ///   ② http://192.168.110.221(内网)③ https://bucket.taoxiplan.com(公网)
 /// 命中即用;全失败 → 登录页「服务不可达 · 重试」(重按重探)。
@@ -24,6 +24,12 @@ const kDartDefineApiBase =
     String.fromEnvironment('MS_API_BASE', defaultValue: '');
 const kIntranetEntry = 'http://192.168.110.221';
 const kPublicEntry = 'https://bucket.taoxiplan.com';
+
+/// 探活路径(2026-10-20 真机验收实测修正):不用 `/healthz`——它被跳板机
+/// nginx 反代 403 拦截(仅隔离栈直连容器时可用,真实入口链路从不放行)。
+/// 改用 web MaintenanceBanner 每 8s 在轮询的公开免鉴权端点
+/// `/api/v1/maintenance/banner`(无 banner 时也返回 200 空数据),反代链路必然放行。
+const kProbePath = '/api/v1/maintenance/banner';
 
 /// §4 定稿候选序;dart-define 优先,未注入则内网→公网。
 List<String> defaultProbeCandidates() => [
@@ -72,7 +78,7 @@ class Session extends ChangeNotifier {
 
   bool get mustChangePassword => me?.mustChangePassword ?? false;
 
-  /// 冷启动探活:按序 GET /healthz,命中即用;全失败 → unreachable。
+  /// 冷启动探活:按序 GET [kProbePath],命中(HTTP 200)即用;全失败 → unreachable。
   /// [candidates] 供单测注入;生产走 [defaultProbeCandidates]。
   Future<void> probe({List<String>? candidates}) async {
     if (_probing) return;
@@ -85,7 +91,10 @@ class Session extends ChangeNotifier {
           final r = await Dio(BaseOptions(
             connectTimeout: const Duration(seconds: 3),
             receiveTimeout: const Duration(seconds: 3),
-          )).get<dynamic>('$base/healthz');
+          )).get<dynamic>('$base$kProbePath');
+          // 4xx(如反代 403)/5xx:默认 validateStatus(2xx)会抛 DioException →
+          // 走 catch 换下一个;statusCode==200 再显式兜底(即便 validateStatus
+          // 被放宽,4xx 也不算命中)。banner 恒 200,判定语义即「HTTP 200」。
           if (r.statusCode == 200) {
             _activate(base);
             return;

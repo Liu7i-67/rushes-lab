@@ -8,15 +8,25 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/session.dart';
 
-/// 起一个只应答 /healthz=200 的本地服务。
-Future<HttpServer> _startHealthz() async {
+/// 起一个只应答探活路径(kProbePath)=200 的本地服务(banner 空数据形态)。
+Future<HttpServer> _startProbeServer() async {
   final s = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
   s.listen((req) async {
-    if (req.uri.path == '/healthz') {
-      req.response.write('{"status":"ok"}');
+    if (req.uri.path == kProbePath) {
+      req.response.write('{"items":[]}');
     } else {
       req.response.statusCode = 404;
     }
+    await req.response.close();
+  });
+  return s;
+}
+
+/// 起一个对探活请求恒应答 403 的本地服务(复刻反代拦截形态,本次真机事故根因)。
+Future<HttpServer> _startForbiddenServer() async {
+  final s = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  s.listen((req) async {
+    req.response.statusCode = 403;
     await req.response.close();
   });
   return s;
@@ -45,7 +55,7 @@ void main() {
   });
 
   test('顺序探测:首候选不可达 → 降级下一候选,命中即用', () async {
-    final ok = await _startHealthz();
+    final ok = await _startProbeServer();
     addTearDown(ok.close);
     final dead = await _deadPort();
 
@@ -60,9 +70,25 @@ void main() {
     expect(s.api, isNotNull);
   });
 
+  test('候选探活 403 → 视为失败继续下一候选(锁死 2026-10-20 真机 /healthz 被反代 403 根因)',
+      () async {
+    final forbidden = await _startForbiddenServer();
+    final ok = await _startProbeServer();
+    addTearDown(forbidden.close);
+    addTearDown(ok.close);
+
+    final s = Session();
+    await s.probe(candidates: [
+      'http://127.0.0.1:${forbidden.port}',
+      'http://127.0.0.1:${ok.port}',
+    ]);
+    expect(s.phase, SessionPhase.ready);
+    expect(s.baseUrl, 'http://127.0.0.1:${ok.port}');
+  });
+
   test('首个命中即用,不再探后续候选(命中即用语义)', () async {
-    final first = await _startHealthz();
-    final second = await _startHealthz();
+    final first = await _startProbeServer();
+    final second = await _startProbeServer();
     addTearDown(first.close);
     addTearDown(second.close);
 
@@ -84,7 +110,7 @@ void main() {
     ]);
     expect(s.phase, SessionPhase.unreachable);
 
-    final ok = await _startHealthz();
+    final ok = await _startProbeServer();
     addTearDown(ok.close);
     await s.probe(candidates: ['http://127.0.0.1:${ok.port}']);
     expect(s.phase, SessionPhase.ready);

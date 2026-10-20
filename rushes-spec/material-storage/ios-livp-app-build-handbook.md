@@ -70,7 +70,9 @@ flutter doctor                         # 确认 iOS toolchain 全绿
 
 ## 3. 后端环境说明(无需配置,知悉即可)
 
-- **完整版起(B1 批)无环境切换 UI**:冷启动自动按序探测 `GET /healthz`(免鉴权,3s 超时),
+- **完整版起(B1 批)无环境切换 UI**:冷启动自动按序探测
+  `GET /api/v1/maintenance/banner`(公开免鉴权,3s 超时;2026-10-20 实测修正:
+  原 `/healthz` 被跳板机 nginx 反代 403 拦截,换 web 在用的公开免鉴权端点),
   命中即用——①`--dart-define=MS_API_BASE`(仅开发构建) ②`http://192.168.110.221`
   (内网,工作室 WiFi) ③`https://bucket.taoxiplan.com`(公网 HTTPS,兜底)。
   全失败登录页显示「服务不可达·重试」横幅,重按重探;运行中不热切换,下次冷启动纠正;

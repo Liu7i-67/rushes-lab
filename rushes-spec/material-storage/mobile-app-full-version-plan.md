@@ -132,11 +132,18 @@ Login(未会话;维护横幅 + 底部小字诊断日志)
 
 ## 4. 后端地址自动探测(定稿口径,同 v1)
 
-冷启动按序探测 `GET /healthz`(免鉴权,connectTimeout 3s),命中即用:
+冷启动按序探测 `GET /api/v1/maintenance/banner`(公开免鉴权,connectTimeout 3s),
+命中(HTTP 200)即用:
 
 1. `--dart-define=MS_API_BASE=…`(仅开发构建,不进 UI)
 2. `http://192.168.110.221`(内网正式环境,工作室 WiFi)
 3. `https://bucket.taoxiplan.com`(公网 HTTPS 反代同一环境)
+
+> 注(v2.2 后实测修正,2026-10-20 真机验收发现):原定探活端点 `/healthz` 被跳板机
+> nginx 反代 **403 拦截**(仅隔离栈直连容器时可用,真实入口链路从不放行),导致公网/
+> 内网候选全灭、登录页恒「服务不可达」。探活端点换用 web MaintenanceBanner 每 8s
+> 在轮询的公开免鉴权端点 `/api/v1/maintenance/banner`(无 banner 时也返回 200 空数据),
+> 反代链路必然放行;命中判定保持「HTTP 200」语义,候选返回 4xx/5xx 一律视为失败继续下一个。
 
 - 删除:登录页 dev/prod/custom 切换 UI、`ms_api_base` 手动持久化、`kDevEntry` 预设。
 - 全失败 → 登录页「服务不可达 · 重试」横幅(重按重探)。
