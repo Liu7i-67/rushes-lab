@@ -26,6 +26,24 @@ class AssetsApi {
     return AssetPage.fromJson(r.data as Map<String, dynamic>);
   }
 
+  /// 缩略图 presigned URL(B2 宫格):tags.thumbnail_key 不存在时端点 404
+  /// → ApiException(404),调用方降级类型色块。
+  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+    final r = await _api.http.get('/api/v1/assets/$assetId/thumbnail-url');
+    if (r.statusCode != 200) throw _api.err(r, '缩略图加载失败');
+    final d = r.data as Map<String, dynamic>;
+    return (url: d['url'] as String, expiresIn: (d['expires_in'] ?? 1800) as int);
+  }
+
+  /// livp 实况短片 presigned URL:can_download enforce(403 无权),
+  /// 无 live_video_key 404 → 调用方落回静态缩略图(web 同口径)。
+  Future<({String url, int expiresIn})> livePreviewUrl(String assetId) async {
+    final r = await _api.http.get('/api/v1/assets/$assetId/live-preview-url');
+    if (r.statusCode != 200) throw _api.err(r, '实况预览加载失败');
+    final d = r.data as Map<String, dynamic>;
+    return (url: d['url'] as String, expiresIn: (d['expires_in'] ?? 1800) as int);
+  }
+
   Future<String> downloadLink(String assetId, {bool asAttachment = true}) async {
     final r = await _api.http.post('/api/v1/assets/$assetId/download-link',
         data: {'as_attachment': asAttachment});

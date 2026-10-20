@@ -11,6 +11,7 @@ import 'features/auth/login_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/me/b0_download_poc_page.dart';
+import 'features/preview/preview_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
 
@@ -56,6 +57,11 @@ class _MsAppState extends State<MsApp> {
             final a = s.arguments as (String, String); // (folderId, folderName)
             return MaterialPageRoute(
                 builder: (_) => AssetsPage(folderId: a.$1, folderName: a.$2));
+          case '/preview':
+            // B2 §8.2 预览:列表序列+起点+单夹详情下载权
+            final args = s.arguments as PreviewArgs;
+            return MaterialPageRoute(
+                builder: (_) => PreviewPage(args: args));
           case '/baidu-bind':
             // B0① 百度绑定 oob 复制码流程(§8.10)
             return MaterialPageRoute(builder: (_) => const BindCodePage());

@@ -17,6 +17,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/models.dart';
 import '../services/app_log.dart';
+import '../features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'api/ms_api.dart';
 
 /// dart-define 注入的开发口(不在 UI 呈现;47.108.196.211 预设已删除)。
@@ -155,6 +156,7 @@ class Session extends ChangeNotifier {
       await api?.auth.logout();
     } catch (_) {}
     me = null;
+    thumbnailCache.clear(); // P2-7:预签缩略图 URL 不跨会话残留(过期前仍可直连)
     await _clearSessionCookie();
     notifyListeners();
   }
@@ -164,6 +166,7 @@ class Session extends ChangeNotifier {
     if (!_expiredGate.acquire() || me == null) return;
     AppLog.info('session', '会话失效(401)→ 清会话回登录页');
     me = null;
+    thumbnailCache.clear(); // P2-7:与 logout 同口径,换账号前清 URL 缓存
     await _clearSessionCookie();
     navigatorKey.currentState?.pushNamedAndRemoveUntil('/', (r) => false);
     notifyListeners();
