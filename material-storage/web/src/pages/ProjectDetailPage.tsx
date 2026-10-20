@@ -988,6 +988,13 @@ export default function ProjectDetailPage() {
     );
   }
 
+  // 桌面右栏:B 包列表导航下标 — 单选(AssetSummaryPanel 单选态由 assetItems
+  // 过滤而来必命中);多选/未选 = -1 → undefined 不渲染导航条。与 SearchPage
+  // focusIndex 同口径
+  const desktopPanelIndex = selectedAssets.length === 1
+    ? assetItems.findIndex(a => a.id === selectedAssets[0].id)
+    : -1;
+
   // 桌面:三栏 layout
   return (
     <Layout className="ms-enter" style={{
@@ -1299,7 +1306,17 @@ export default function ProjectDetailPage() {
             统计为当前页已加载的 {selectedAssets.length} 项(共已选 {selectedIds.length} 个)
           </div>
         )}
-        <AssetSummaryPanel selected={selectedAssets} me={me} folder={folder} />
+        <AssetSummaryPanel selected={selectedAssets} me={me} folder={folder}
+          // B 包补齐(桌面):右栏预览 Modal 接列表导航 — 单选时标题区 ‹ n/N ›
+          // + ←/→ 键盘切张(切张 = 换选中行,右栏内容/表格高亮天然联动);
+          // 多选/未选不渲染导航条,与 compact 详情 Drawer 同语义
+          list={assetItems}
+          listIndex={desktopPanelIndex >= 0 ? desktopPanelIndex : undefined}
+          onListIndexChange={(i) => {
+            const next = assetItems[i];
+            if (next) setSelectedIds([next.id]);
+          }}
+        />
       </Layout.Sider>
 
       {modals}
