@@ -60,6 +60,11 @@ pnpm lint
 
 ### 测试
 
+**本地(开发机)docker 跑集成测试/验收:默认禁止,仅用户明确要求时才做**(2026-10-20 立)。背景:本地隔离栈
+共享的 `poc-pigsty-minio` 容器把仓库内 `material-storage/poc/minio/data` bind mount 为 /data,百度相关集成测试
+每次新建 `it-baidu-*` 桶且无回收,曾累计 4261 个桶共 **181G** 把开发机 E 盘吃满。常规验证一律走 shserver 验证机
+或 hh2 dev;若经用户明确许可跑了本地栈,收尾必须清空 `material-storage/poc/minio/data/` 下的测试桶再收工。
+
 `tests/test_healthz.py` 和 `test_db_schema.py` 是可独立跑的 smoke test。`test_v4_permissions.py` 是**集成测试,必须在 ms-api 容器内跑**,依赖已 seed 的 demo 数据(user/project UUID 在测试文件里 hardcode)+ 已 push 的 OpenFGA model:
 
 ```bash
