@@ -91,13 +91,21 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
       return;
     }
     try {
-      await create.mutateAsync({
+      const task = await create.mutateAsync({
         source_dir: sourceDir,
         project_id: projectId,
         ...(target.kind === 'folder' ? { target_folder_id: target.id } : {}),
       });
       // 排队预期管理(方案 §6-P2-b):前端不感知绑定是否已有任务在跑,无条件提示
       message.success('备份任务已创建,清单准备中;已有任务执行中时,新任务将排队,前序完成后约数分钟至一刻钟内自动开始');
+      // W1 跨项目重叠预警(方案 §1 改动点 3,文案逐字采用):非阻塞,不拦创建、不影响关闭
+      if (task.cross_project_prefix_overlap) {
+        // 对方项目名顿号连接;null/空退化不点名(后端恒带,防御兜底)
+        const names = task.overlap_project_names?.join('、');
+        message.warning(names
+          ? `目标文件夹名与项目「${names}」下的同名文件夹共用存储编号：同名文件将自动加随机后缀存储（两处各持独立文件，互不覆盖）；目标目录内已存在同名文件（含回收站）时该文件仍会失败并保留人工处理出路，如需同键替换请换一个目标文件夹名`
+          : '目标文件夹名与其他项目下的同名文件夹共用存储编号：同名文件将自动加随机后缀存储（两处各持独立文件，互不覆盖）；目标目录内已存在同名文件（含回收站）时该文件仍会失败并保留人工处理出路，如需同键替换请换一个目标文件夹名');
+      }
       onClose();
     } catch (e) {
       message.error(errorMessage(e, '创建任务失败'));

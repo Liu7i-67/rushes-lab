@@ -493,6 +493,11 @@ class BaiduTaskOut(BaseModel):
     target_folder_id: uuid.UUID | None = None
     target_folder_name: str | None = None      # NULL = 目标夹已删除(UI 显示「(已删除)」)
     target_auto_created: bool = False
+    # W1 创建时跨项目路径预警:目标前缀与其他项目文件夹重叠时回填对方项目名
+    # (≤3,rtrim('/') 归一比较,不过滤归档/软删)。仅创建响应由 handler 后赋值
+    # 回填,列表/详情侧不落库、保持默认(见 routers/baidu_backup.py create_task)。
+    cross_project_prefix_overlap: bool = False
+    overlap_project_names: list[str] | None = None
     status: str                                 # enumerating/running/completed/cancelled/failed
     queued: bool = False                        # 派生态派生:活动中但当前无 runner 实际推进
     fail_reason: str | None = None

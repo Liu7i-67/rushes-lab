@@ -806,6 +806,7 @@ async def create_task(
                               payload.project_id)
         target_folder_id: uuid.UUID | None = folder.id
         target_auto_created = False
+        target_prefix = folder.minio_prefix
     else:
         allowed = await _is_org_admin() or await permissions.check(
             user_subject=user.subject, relation="can_upload",
@@ -825,6 +826,7 @@ async def create_task(
             if existing.is_sensitive:
                 raise HTTPException(400, "目标文件夹名不可用,请改名或另选目标")
             target_folder_id = existing.id
+            target_prefix = existing.minio_prefix
         else:
             try:
                 node = await ensure_root_folder_at_project(
@@ -836,7 +838,32 @@ async def create_task(
                     raise HTTPException(400, "目标文件夹名不可用,请改名或另选目标") from e
                 raise
             target_folder_id = node.folder_id
+            target_prefix = node.prefix
         target_auto_created = True
+
+    # ── W1 跨项目同前缀预警(best-effort,非阻塞)─────────────────────────────
+    # 目标前缀与其他项目文件夹重叠 → 响应回填对方项目名(≤3,无 ORDER BY 不定序)。
+    # rtrim('/') 归一比较:FolderCreateIn 允许客户端自传无尾斜杠前缀且无归一化,
+    # 裸等值会漏报「灵机备份 vs 灵机备份/」形态;不过滤 is_archived/deleted_at:
+    # 项目软删后数据与桶不动、物理 key 占用仍在,过滤会让预警失效(点名可含
+    # 已删除项目为已写明的取舍,方案 §1 改动点 1)。
+    overlap_project_names: list[str] | None = None
+    try:
+        overlap_rows = await db.execute(
+            select(Project.name)
+            .join(Folder, Folder.project_id == Project.id)
+            .where(
+                func.rtrim(Folder.minio_prefix, "/") == func.rtrim(target_prefix, "/"),
+                Folder.project_id != project.id,
+            )
+            .limit(3)
+        )
+        names = list(overlap_rows.scalars())
+        if names:
+            overlap_project_names = names
+    except Exception:
+        # 预警是 best-effort:查询失败不得挡任务创建,降级为不带 overlap 仅记日志
+        log.warning("baidu task cross-project prefix overlap lookup failed", exc_info=True)
 
     # vip_type 保鲜(并发方案 §3.1):创建时 best-effort 刷一次,失败静默不阻塞。
     # 置于 can_upload 权限校验与目标解析之后(刷新已独立 session 化,不再有
@@ -887,7 +914,13 @@ async def create_task(
     log.info("baidu task created id=%s user=%s source=%s dispatch_seq=%s",
              task.id, user.id, source_dir, outcome.seq)
     outs = await _build_task_outs(db, [task])
-    return outs[0]
+    # W1:overlap 是创建时刻的观测值,不落库;_build_task_outs 只从持久化行派生、
+    # 感知不到 → 此处对 outs[0] 后赋值覆盖(pydantic 支持后赋值)。列表/详情侧
+    # 不回填,保持模型默认值(方案 §1 改动点 2)。
+    out = outs[0]
+    out.cross_project_prefix_overlap = bool(overlap_project_names)
+    out.overlap_project_names = overlap_project_names
+    return out
 
 
 @router.get("/backup/tasks", response_model=BaiduTasksPage)
