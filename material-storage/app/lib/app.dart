@@ -10,7 +10,6 @@ import 'features/auth/change_password_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/folders/folders_page.dart';
-import 'features/me/b0_download_poc_page.dart';
 import 'features/preview/preview_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
@@ -69,10 +68,6 @@ class _MsAppState extends State<MsApp> {
           case '/baidu-bind':
             // B0① 百度绑定 oob 复制码流程(§8.10)
             return MaterialPageRoute(builder: (_) => const BindCodePage());
-          case '/b0-download-poc':
-            // B0② Android 落盘 PoC(入口仅 Android 显示)
-            return MaterialPageRoute(
-                builder: (_) => const B0DownloadPocPage());
         }
         return null;
       },

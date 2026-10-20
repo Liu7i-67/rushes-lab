@@ -17,7 +17,6 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/models.dart';
 import '../services/app_log.dart';
-import '../features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'api/ms_api.dart';
 
 /// dart-define 注入的开发口(不在 UI 呈现;47.108.196.211 预设已删除)。
@@ -76,6 +75,20 @@ class Session extends ChangeNotifier {
   CookieJar? _persistentJar;
   bool _probing = false;
   final _expiredGate = SingleFlightGate(const Duration(seconds: 1));
+
+  /// 会话清空钩子(B2 遗留解耦:core 不再 import features——缩略图 URL 缓存
+  /// 等特性侧资源经此挂清理回调,main.dart 注册,logout/401 统一触发)。
+  final _clearHooks = <void Function()>[];
+
+  void addSessionClearHook(void Function() hook) => _clearHooks.add(hook);
+
+  void _runClearHooks() {
+    for (final h in _clearHooks) {
+      try {
+        h();
+      } catch (_) {/* 钩子失败不阻断登出 */}
+    }
+  }
 
   bool get mustChangePassword => me?.mustChangePassword ?? false;
 
@@ -156,7 +169,7 @@ class Session extends ChangeNotifier {
       await api?.auth.logout();
     } catch (_) {}
     me = null;
-    thumbnailCache.clear(); // P2-7:预签缩略图 URL 不跨会话残留(过期前仍可直连)
+    _runClearHooks(); // B2 遗留解耦:预签缩略图 URL 不跨会话残留(过期前仍可直连)
     await _clearSessionCookie();
     notifyListeners();
   }
@@ -166,7 +179,7 @@ class Session extends ChangeNotifier {
     if (!_expiredGate.acquire() || me == null) return;
     AppLog.info('session', '会话失效(401)→ 清会话回登录页');
     me = null;
-    thumbnailCache.clear(); // P2-7:与 logout 同口径,换账号前清 URL 缓存
+    _runClearHooks(); // 与 logout 同口径,换账号前清特性侧缓存
     await _clearSessionCookie();
     navigatorKey.currentState?.pushNamedAndRemoveUntil('/', (r) => false);
     notifyListeners();

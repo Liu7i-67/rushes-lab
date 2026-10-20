@@ -1,12 +1,9 @@
 /// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 诊断(日志推送)+
-/// 当前服务入口(只读,内网/公网标识)+ 退出登录。
-/// B0 批挂载:网盘备份区(features/baidu/bind_code_page.dart)与
-/// 诊断区「B0 落盘验证」入口(features/me/b0_download_poc_page.dart,仅 Android)。
+/// 当前服务入口(只读,内网/公网标识)+ 退出登录。B0 批挂载:网盘备份区
+/// (features/baidu/bind_code_page.dart)。B4:B0 落盘 PoC 入口移除(使命完成,
+/// 正式实现=下载线落盘矩阵,决策 #1)。
 library;
 
-import 'dart:io' show Platform;
-
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/session.dart';
@@ -66,16 +63,6 @@ class MePage extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showLogPushDialog(context),
               ),
-              // B0② 技术验证入口:iOS 无 media_store_plus,仅 Android 显示
-              if (!kIsWeb && Platform.isAndroid)
-                ListTile(
-                  leading: const Icon(Icons.download_outlined),
-                  title: const Text('B0 落盘验证'),
-                  subtitle: const Text('图库 + Downloads 双路技术验证(PoC)'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () =>
-                      Navigator.of(context).pushNamed('/b0-download-poc'),
-                ),
               const _SectionLabel('当前服务'),
               ListTile(
                 leading: const Icon(Icons.dns_outlined),

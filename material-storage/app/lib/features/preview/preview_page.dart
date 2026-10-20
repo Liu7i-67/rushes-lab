@@ -1,11 +1,13 @@
 /// PreviewPage — 预览页(B2 §8.2):暗色画布(#141210)+ 顶部 ‹n/N› + 胶片条
-/// (列表序列切张、边界即停)+ 底部元数据卡;下载/分享/申请权限三钮占位禁用
-/// (B4/B5 点亮);下载权=false 时下载钮附「申请权限」入口样式提示。
+/// (列表序列切张、边界即停)+ 底部元数据卡;B4 功能点 4①:下载钮点亮
+/// (入队 TransferQueue kind=download,落盘矩阵见 services/downloads.dart);
+/// 下载权=false 时下载钮禁用+「申请权限」入口样式提示。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../services/downloads.dart';
 import '../../theme/tokens.dart';
 import 'filmstrip.dart';
 import 'meta_panel.dart';
@@ -13,19 +15,22 @@ import 'preview_actions.dart';
 import 'preview_media.dart';
 
 /// 路由参数:进入预览时的列表序列 + 起点 + 宫格页单夹详情的下载权
-/// (三态:bool=详情可信值;null=详情未到/失败,提示退回中性口径)。
+/// (三态:bool=详情可信值;null=详情未到/失败,提示退回中性口径)
+/// + where 显示路径(下载任务归属,项目/文件夹)。
 class PreviewArgs {
   PreviewArgs({
     required this.items,
     required this.index,
     required this.folderId,
     required this.canDownload,
+    this.where,
   });
 
   final List<Asset> items;
   final int index;
   final String folderId;
   final bool? canDownload;
+  final String? where;
 }
 
 class PreviewPage extends StatefulWidget {
@@ -48,6 +53,18 @@ class _PreviewPageState extends State<PreviewPage> {
   void _go(bool forward) {
     final moved = forward ? _pager.next() : _pager.prev(); // 边界即停
     if (moved) setState(() {});
+  }
+
+  /// 下载当前张(B4 功能点 4①):入队即回(进度/取消/重试在传输页),
+  /// 完成去处 toast 由 worker 落盘后报(「已存入相册/Download/浣花视界」)。
+  void _downloadCurrent() {
+    enqueueDownload(
+      asset: _current,
+      where: widget.args.where ?? widget.args.folderId,
+    );
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: Text('已加入下载队列:${_current.filename}')),
+    );
   }
 
   @override
@@ -105,7 +122,10 @@ class _PreviewPageState extends State<PreviewPage> {
               onSelect: (i) => setState(() => _pager.moveTo(i)),
             ),
           MetaPanel(asset: _current),
-          PreviewActions(canDownload: widget.args.canDownload),
+          PreviewActions(
+            canDownload: widget.args.canDownload,
+            onDownload: _downloadCurrent,
+          ),
         ],
       ),
     );

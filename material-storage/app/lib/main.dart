@@ -7,6 +7,8 @@ library;
 import 'package:flutter/material.dart';
 
 import 'app.dart';
+import 'core/session.dart';
+import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
 
 /// 源码最后编辑时间(YYYY-MM-DD HH:mm),打包期注入、项目页标题展示,
@@ -21,6 +23,9 @@ const kAppBuildStamp = String.fromEnvironment(
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
+  // 特性侧缓存在此挂载,core 不再反向 import features)
+  session.addSessionClearHook(thumbnailCache.clear);
   // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
   // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
   AppLog.init();

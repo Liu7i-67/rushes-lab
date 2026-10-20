@@ -9,7 +9,8 @@ import '../../theme/tokens.dart';
 import '../../widgets/type_block.dart';
 
 /// 降级卡:类型色块 + 失败信息 +「下载后打开」提示
-/// (svg/avif/ico、unsupported、视频解码失败、pdf Android 占位共用)。
+/// (svg/avif/ico、unsupported、视频解码失败、pdf Android 共用;
+/// B4 起下载入口已开放,引导点下方「下载」)。
 class PreviewBlock extends StatelessWidget {
   const PreviewBlock({
     super.key,
@@ -37,7 +38,7 @@ class PreviewBlock extends StatelessWidget {
             style: const TextStyle(color: Colors.white70, fontSize: 13)),
         const SizedBox(height: 4),
         const Text(
-          '可下载后用系统应用打开(下载入口后续版本开放)',
+          '点下方「下载」保存后用系统应用打开',
           style: TextStyle(color: Tk.subtle, fontSize: 11),
         ),
       ],

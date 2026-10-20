@@ -62,24 +62,30 @@ class AlbumService {
   /// 当前无 app 内调用点,**B4 消费**(下载线「存到相册」接入);勿删。
   static Future<void> saveLivpToAlbum(List<int> livpBytes) async {
     final tmp = await getTemporaryDirectory();
-    final parts = await LivpService.unpackToFiles(
-        livpBytes, Directory('${tmp.path}/livp_in'));
-    final imageFile = parts.image;
-    final videoFile = parts.video;
-    final baseName = _stripExt(_baseNameOf(imageFile.path));
-    if (videoFile == null) {
-      // 无视频部分 → 按普通照片存
-      await PhotoManager.editor
-          .saveImageWithPath(imageFile.path, title: baseName);
-      return;
+    // 每次唯一子目录(P2-3:固定 livp_in 跨调用会互相覆盖/串包)+ 用后清理
+    final dir = Directory(
+        '${tmp.path}/livp_in_${DateTime.now().microsecondsSinceEpoch}');
+    try {
+      final parts = await LivpService.unpackToFiles(livpBytes, dir);
+      final imageFile = parts.image;
+      final videoFile = parts.video;
+      final baseName = _stripExt(_baseNameOf(imageFile.path));
+      if (videoFile == null) {
+        // 无视频部分 → 按普通照片存
+        await PhotoManager.editor
+            .saveImageWithPath(imageFile.path, title: baseName);
+        return;
+      }
+      AppLog.info('album', 'saveLivePhoto: image=${imageFile.path.split('/').last}'
+          ' video=${videoFile.path.split('/').last} title=$baseName');
+      await PhotoManager.editor.darwin.saveLivePhoto(
+        imageFile: imageFile,
+        videoFile: videoFile,
+        title: baseName,
+      );
+    } finally {
+      dir.delete(recursive: true).ignore(); // 用后清理;失败静默(临时区自回收)
     }
-    AppLog.info('album', 'saveLivePhoto: image=${imageFile.path.split('/').last}'
-        ' video=${videoFile.path.split('/').last} title=$baseName');
-    await PhotoManager.editor.darwin.saveLivePhoto(
-      imageFile: imageFile,
-      videoFile: videoFile,
-      title: baseName,
-    );
   }
 
   static String _extOf(String path, String fallback) {

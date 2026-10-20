@@ -82,12 +82,13 @@ class AssetsApi {
     return (r.data as Map<String, dynamic>)['url'] as String;
   }
 
-  /// 下载到本地文件,返回文件;onProgress(0..1)。
+  /// 下载到本地文件,返回文件;onProgress(0..1);cancelToken 取消=dio abort 即刻落终态。
   Future<File> downloadTo(String url, String savePath,
-      {void Function(double)? onProgress}) async {
-    await _api.presignedHttp.download(url, savePath, onReceiveProgress: (c, t) {
+      {void Function(double)? onProgress, CancelToken? cancelToken}) async {
+    await _api.presignedHttp.download(url, savePath,
+        onReceiveProgress: (c, t) {
       if (t > 0 && onProgress != null) onProgress(c / t);
-    });
+    }, cancelToken: cancelToken);
     return File(savePath);
   }
 
@@ -99,8 +100,7 @@ class AssetsApi {
 
   /// 上传 [bytes] 为 [filename](livp 建议 content_type application/zip)。
   /// onPartsDone(completed, total) 供进度展示。失败时尽力 abort 半成品。
-  /// B3:小包(livp)专用;cancelToken 供传输队列取消(abort 清理不挂 token,
-  /// 取消场景下半成品清理仍要发出)。
+  /// B3:小包(livp)专用;cancelToken 取消=dio abort,清理/abort 不挂 token 照发。
   Future<Asset> uploadBytes({
     required String folderId,
     required String filename,

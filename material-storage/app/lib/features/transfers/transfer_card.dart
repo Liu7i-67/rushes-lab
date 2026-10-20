@@ -97,7 +97,10 @@ class TransferCard extends StatelessWidget {
                   IconButton(
                     onPressed: onRetry,
                     icon: const Icon(Icons.refresh_outlined),
-                    tooltip: '重试(从头重传)',
+                    // B4:下载重试=重新下载+重新落盘(决策 #3);上传=从头重传
+                    tooltip: t.kind == TransferKind.download
+                        ? '重试(重新下载并落盘)'
+                        : '重试(从头重传)',
                   ),
                 IconButton(
                   onPressed: onRemove,

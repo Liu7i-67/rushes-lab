@@ -1,18 +1,16 @@
-/// PreviewMedia — 预览主体渲染(B2 §8.2 八类):image/heic/livp/video/markdown/
-/// text/pdf/unsupported。切张由父级以 ValueKey(asset.id) 重建本组件清态
-/// (web 切张清预览态同哲学);起播/解码失败一律降级「下载后打开」色块
-/// (辅助呈现件见 preview_doc_views.dart)。
+/// PreviewMedia — 预览主体渲染(B2 §8.2 八类;B2 遗留拆分后装配层):
+/// 决策在 preview_plan.dart(纯函数),md/text 拉取在 preview_text_load.dart,
+/// 视频/实况播放器在 preview_player.dart(自持控制器)。本层只做加载编排与
+/// 组装:切张由父级以 ValueKey(asset.id) 重建清态;起播/解码失败一律降级
+/// 「下载后打开」色块。livp「查看照片」回切显示静态缩略图而非暂停帧
+/// (plan playingLive 维度,控制器 Offstage 保活便于续播)。
 library;
 
-import 'dart:convert';
 import 'dart:io';
 
-import 'package:dio/dio.dart'
-    show CancelToken, Options, ResponseBody, ResponseType;
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:video_player/video_player.dart';
 
 import '../../core/preview_kind.dart';
 import '../../core/session.dart';
@@ -20,62 +18,9 @@ import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../assets/thumbnail_image.dart' show thumbnailCache;
 import 'preview_doc_views.dart';
-
-/// md/text 拉取单次缓冲上限(P2-8):presigned 源超 10MB 不读流,降级色块。
-const kMaxInlineTextBytes = 10 * 1024 * 1024;
-
-/// 预览主体渲染决策(纯函数,单测锁 P1-1):video 类在视频控制器未就绪时
-/// 恒为 loading,绝不落到 image 分支——把视频 presigned URL 塞进 Image.network
-/// 会在起播期误显「图片解码失败」卡 + 多余图片式拉流(2026-10-20 测试 P1-1)。
-PreviewBody previewBodyPlan({
-  required PreviewKind kind,
-  required bool videoReady,
-  required bool hasFail,
-  required bool hasUrl,
-}) {
-  if (hasFail) return PreviewBody.block;
-  switch (kind) {
-    case PreviewKind.markdown:
-      return PreviewBody.markdown;
-    case PreviewKind.text:
-      return PreviewBody.text;
-    case PreviewKind.pdf:
-      return PreviewBody.pdf;
-    case PreviewKind.video:
-      return videoReady ? PreviewBody.player : PreviewBody.loading;
-    case PreviewKind.livp:
-      // 实况:控制器未就绪时静态图兜底(起播中由 _image 叠加载圈)
-      return videoReady
-          ? PreviewBody.player
-          : (hasUrl ? PreviewBody.image : PreviewBody.loading);
-    case PreviewKind.image || PreviewKind.heic:
-      return hasUrl ? PreviewBody.image : PreviewBody.loading;
-    case PreviewKind.unsupported:
-      return PreviewBody.block;
-  }
-}
-
-/// 预览主体渲染分支(与 [previewBodyPlan] 配套的呈现枚举)。
-enum PreviewBody { block, markdown, text, pdf, player, image, loading }
-
-/// 视频时长/进度文本(P2-1):m:ss,满一小时进 h:mm:ss。
-String videoClock(Duration d) {
-  final total = d.inSeconds < 0 ? 0 : d.inSeconds;
-  final h = total ~/ 3600;
-  final m = (total % 3600) ~/ 60;
-  final s = total % 60;
-  String two(int n) => n.toString().padLeft(2, '0');
-  return h > 0 ? '$h:${two(m)}:${two(s)}' : '$m:${two(s)}';
-}
-
-/// 缩略图缺失/失败两态文案(P2-6,web AssetPreviewModal 同口径):
-/// `tags.thumbnail_failed` 有值=worker 明确失败(原因标记透出,不误导重试);
-/// 无值=还在生成(引导稍后刷新)。
-String thumbFailText(Map<dynamic, dynamic> tags) {
-  final reason = (tags['thumbnail_failed'] as String? ?? '').trim();
-  if (reason.isEmpty) return '预览图还在生成,请稍后刷新重试';
-  return '预览图生成失败(原因:$reason),可下载原片查看,恢复请联系管理员';
-}
+import 'preview_player.dart';
+import 'preview_plan.dart';
+import 'preview_text_load.dart';
 
 class PreviewMedia extends StatefulWidget {
   const PreviewMedia({super.key, required this.asset});
@@ -91,32 +36,27 @@ class _PreviewMediaState extends State<PreviewMedia> {
   String? _url; // 可直接呈现的图 URL(原图 inline / 缩略图)
   String? _text; // md/text 内容
   String? _fail; // 降级提示(色块 + 下载后打开)
-  VideoPlayerController? _vc;
   var _videoReady = false;
+  var _playerDead = false; // 起播/解码失败后停挂播放器(重试时复位)
   String? _liveUrl; // livp 实况短片(非空才有回切按钮,web 同口径)
-  var _playingLive = false; // livp 在播实况短片;video 类恒 true(成功后)
+  var _playingLive = false; // livp 在播实况短片;video 类就绪即 true
 
   Asset get _a => widget.asset;
 
   PreviewKind get _kind =>
       detectKind(filename: _a.filename, contentType: _a.contentType);
 
+  /// 播放器挂载 URL:video=原图 inline;livp=实况短片。
+  String? get _playUrl => switch (_kind) {
+        PreviewKind.video => _url,
+        PreviewKind.livp => _liveUrl,
+        _ => null,
+      };
+
   @override
   void initState() {
     super.initState();
     _load();
-  }
-
-  @override
-  void dispose() {
-    _vc?.removeListener(_onVideoTick);
-    _vc?.dispose();
-    super.dispose();
-  }
-
-  /// 播放态驱动重建(P2-1 进度/时长/播放键跟随 value 刷新)。
-  void _onVideoTick() {
-    if (mounted) setState(() {});
   }
 
   Future<void> _load() async {
@@ -141,7 +81,7 @@ class _PreviewMediaState extends State<PreviewMedia> {
         }
         await _loadInlineUrl();
       case PreviewKind.video:
-        await _playVideo(await _loadInlineUrl());
+        await _loadInlineUrl(); // URL 就绪即挂播放器(plan loading 分支可见)
       case PreviewKind.markdown || PreviewKind.text:
         await _loadText();
       case PreviewKind.pdf:
@@ -153,15 +93,13 @@ class _PreviewMediaState extends State<PreviewMedia> {
   }
 
   /// download-link(inline)原图/媒体 URL;失败置 _fail。
-  Future<String?> _loadInlineUrl() async {
+  Future<void> _loadInlineUrl() async {
     try {
       final url =
           await session.api!.assets.downloadLink(_a.id, asAttachment: false);
       if (mounted) _url = url;
-      return url;
     } catch (_) {
       if (mounted) _fail = '预览加载失败';
-      return null;
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -180,30 +118,19 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
+  /// md/text 正文(拆 preview_text_load.dart;P2-8 超限断流降级)。
   Future<void> _loadText() async {
     try {
       final url =
           await session.api!.assets.downloadLink(_a.id, asAttachment: false);
-      // P2-8 大小预检:流式打开先看 Content-Length,>10MB 断流降级,不整包进内存
-      // (presigned URL 按 GET 签名,HEAD 会被 MinIO 拒,不能走 HEAD 预检)。
-      final cancel = CancelToken();
-      final r = await session.api!.presignedHttp.get<ResponseBody>(
-        url,
-        options: Options(responseType: ResponseType.stream),
-        cancelToken: cancel,
-      );
-      final body = r.data;
-      if (body == null) throw StateError('empty response body');
-      final len = body.contentLength; // -1 = 未回长度,无从预检则放行
-      if (len > kMaxInlineTextBytes) {
-        cancel.cancel(); // 断流:超限不缓冲(ResponseBody.close 是 dio 内部 API 勿用)
-        if (mounted) {
-          _fail = '文件过大(${(len / 1024 / 1024).ceil()}MB),建议下载后打开';
-        }
-        return;
-      }
-      final text = await utf8.decodeStream(body.stream);
+      final text = await fetchInlineText((token) =>
+          openPresignedStream(session.api!.presignedHttp, url,
+              cancelToken: token));
       if (mounted) _text = text;
+    } on TextTooLargeException catch (e) {
+      if (mounted) {
+        _fail = '文件过大(${(e.sizeBytes / 1024 / 1024).ceil()}MB),建议下载后打开';
+      }
     } catch (_) {
       if (mounted) _fail = '预览加载失败';
     } finally {
@@ -211,45 +138,8 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
-  /// 视频/实况短片起播;初始化或解码失败(如 Android HEVC .mov)→ 降级色块
-  /// (实况落回静态图)。实况短片 loop+静音,web autoPlay loop muted 同口径。
-  Future<void> _playVideo(String? url) async {
-    if (url == null) return;
-    try {
-      final c = VideoPlayerController.networkUrl(Uri.parse(url));
-      await c.initialize();
-      if (!mounted) {
-        await c.dispose();
-        return;
-      }
-      _vc?.removeListener(_onVideoTick);
-      _vc?.dispose();
-      if (_kind == PreviewKind.livp) {
-        await c.setLooping(true);
-        await c.setVolume(0);
-      }
-      setState(() {
-        _vc = c;
-        _videoReady = true;
-        _playingLive = true;
-      });
-      c.addListener(_onVideoTick);
-      await c.play();
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          if (_kind == PreviewKind.livp) {
-            _playingLive = false; // 实况播放失败落回静态图
-          } else {
-            _fail = '视频解码失败,建议下载后打开';
-          }
-        });
-      }
-    }
-  }
-
   /// pdf iOS:dio 下载临时文件 → share_plus 面板(快速预览/存储到文件);
-  /// Android 本批色块占位,B4 随 media_store_plus 落盘矩阵点亮(决策 #1)。
+  /// Android 改「下载后打开」(§8.2/B4 功能点 5:点下方「下载」→ Downloads)。
   Future<void> _sharePdf() async {
     try {
       final url = await session.api!.assets.downloadLink(_a.id);
@@ -261,37 +151,24 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
-  /// livp 实况/静态回切(P2-2,web 同款按钮语义):
-  /// 静态→实况:控制器已就绪直接续播,否则起播(首播/失败重试);
-  /// 实况→静态:暂停(控制器保留,再切回续播)。
+  /// livp 实况/静态回切(P2-2,web 同款按钮语义):静态→实况:控制器已就绪
+  /// 直接续播,否则起播(首播/失败重试);实况→静态:暂停保活,显示静态缩略图。
   void _toggleLive() {
     if (_playingLive) {
-      setState(() {
-        _playingLive = false;
-        _vc?.pause();
-      });
+      setState(() => _playingLive = false); // 控制器保留,plan 转 image 分支
       return;
     }
-    if (_videoReady && _vc != null) {
-      setState(() => _playingLive = true);
-      _vc!.play();
-    } else {
-      _playVideo(_liveUrl);
-    }
-  }
-
-  /// 视频 播放/暂停(P2-1):起播自动播,点画面/按钮切换。
-  void _togglePlay() {
-    final v = _vc?.value;
-    if (v == null) return;
-    v.isPlaying ? _vc!.pause() : _vc!.play();
+    setState(() {
+      _playerDead = false; // 失败重试:重新挂播放器
+      _playingLive = true;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     if (_kind == PreviewKind.unsupported) return _block('该类型暂不支持预览');
     if (_kind == PreviewKind.pdf && !Platform.isIOS) {
-      return _block('PDF 预览后续版本开放');
+      return _block('PDF 需下载后打开(保存在 Download/浣花视界)');
     }
     return Center(
       child: _loading
@@ -301,12 +178,14 @@ class _PreviewMediaState extends State<PreviewMedia> {
   }
 
   Widget _render() {
-    switch (previewBodyPlan(
+    final body = previewBodyPlan(
       kind: _kind,
-      videoReady: _videoReady && _vc != null,
+      videoReady: _videoReady,
       hasFail: _fail != null,
       hasUrl: _url != null,
-    )) {
+      playingLive: _playingLive,
+    );
+    switch (body) {
       case PreviewBody.block:
         return _block(_fail ?? '暂无可预览内容');
       case PreviewBody.markdown:
@@ -321,13 +200,37 @@ class _PreviewMediaState extends State<PreviewMedia> {
       case PreviewBody.pdf:
         return PdfReadyPanel(onShare: _sharePdf);
       case PreviewBody.player:
-        return _player();
+      case PreviewBody.loading:
+        // loading 且可播 URL 已在:挂播放器(自显转圈;livp 静起播同款)
+        if (_playUrl != null && !_playerDead) return _player();
+        return const Center(
+            child: CircularProgressIndicator(color: Colors.white70));
       case PreviewBody.image:
         return _image();
-      case PreviewBody.loading:
-        return const Center(child: CircularProgressIndicator(color: Colors.white70));
     }
   }
+
+  Widget _player() => MediaVideoPlayer(
+        key: ValueKey(_playUrl!),
+        url: _playUrl!,
+        playing: _kind == PreviewKind.video || _playingLive,
+        isLive: _kind == PreviewKind.livp,
+        onReady: () {
+          if (!mounted) return;
+          setState(() => _videoReady = true);
+        },
+        onError: () {
+          if (!mounted) return;
+          setState(() {
+            _playerDead = true;
+            if (_kind == PreviewKind.livp) {
+              _playingLive = false; // 实况起播失败落回静态图(可重试)
+            } else {
+              _fail = '视频解码失败,建议下载后打开';
+            }
+          });
+        },
+      );
 
   Widget _image() {
     final stack = <Widget>[
@@ -340,8 +243,8 @@ class _PreviewMediaState extends State<PreviewMedia> {
         ),
       ),
     ];
-    // livp 起播中:静态图上叠加加载圈
-    if (_playingLive && _kind == PreviewKind.livp && !_videoReady) {
+    // livp 起播中:静态图上叠加加载圈(播放器 Offstage 预热)
+    if (_kind == PreviewKind.livp && _playingLive && !_videoReady) {
       stack.add(const Positioned.fill(
         child: Center(
             child: CircularProgressIndicator(color: Colors.white70)),
@@ -351,8 +254,20 @@ class _PreviewMediaState extends State<PreviewMedia> {
     if (_kind == PreviewKind.livp && _liveUrl != null && !_playingLive) {
       stack.add(_liveToggle());
     }
+    // 播放器后台挂载保活(livp 静态态/起播中):暂停续播免重新起播
+    if (_playUrl != null && !_playerDead && bodyBehindImage) {
+      stack.add(Offstage(
+        offstage: true,
+        child: _player(),
+      ));
+    }
     return Stack(fit: StackFit.expand, children: stack);
   }
+
+  /// image 分支下播放器需后台挂载的条件:livp 已有就绪控制器或正在起播
+  /// (video 类 plan 恒走 player/loading 分支,不经此处)。
+  bool get bodyBehindImage =>
+      _kind == PreviewKind.livp && (_videoReady || _playingLive);
 
   Widget _liveToggle() => Positioned(
         left: 0,
@@ -374,54 +289,6 @@ class _PreviewMediaState extends State<PreviewMedia> {
           ),
         ),
       );
-
-  Widget _player() {
-    final v = _vc!.value;
-    final isLive = _kind == PreviewKind.livp; // 实况短片无控制条(web 同口径)
-    return AspectRatio(
-      aspectRatio: v.aspectRatio == 0 ? 16 / 9 : v.aspectRatio,
-      child: Stack(
-        alignment: Alignment.bottomCenter,
-        children: [
-          VideoPlayer(_vc!),
-          if (!isLive) ...[
-            // P2-1:点画面切换播放/暂停
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _togglePlay,
-              child: const SizedBox.expand(),
-            ),
-            Center(
-              child: IconButton.filled(
-                onPressed: _togglePlay,
-                icon: Icon(v.isPlaying ? Icons.pause : Icons.play_arrow,
-                    size: 32),
-                style: IconButton.styleFrom(backgroundColor: Colors.black54),
-              ),
-            ),
-            VideoProgressIndicator(
-              _vc!,
-              allowScrubbing: true, // P2-1:进度条可拖动
-              colors: const VideoProgressColors(playedColor: Tk.accent),
-            ),
-            // P2-1:进度/时长角标(悬于进度条上方右侧)
-            Positioned(
-              right: 8,
-              bottom: 14,
-              child: Text(
-                '${videoClock(v.position)} / ${videoClock(v.duration)}',
-                style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: 11,
-                    fontFeatures: [FontFeature.tabularFigures()]),
-              ),
-            ),
-          ],
-          if (isLive) _liveToggle(), // 实况在播 →「查看照片」回切
-        ],
-      ),
-    );
-  }
 
   Widget _block(String msg) => PreviewBlock(
         kind: _kind,

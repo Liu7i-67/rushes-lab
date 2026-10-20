@@ -1,6 +1,8 @@
-/// 测试功能点 6(B2):my_can_download=false → 下载钮禁用 + 「申请权限」入口样式
-/// 提示(PreviewActions 组件态;三钮 B2 全批占位禁用)。
-/// 附:数据新鲜度 RefreshBus 失效回调(功能点 5 的机制件)。
+/// 预览页操作钮单测(B4 功能点 4①):下载钮点亮(onDownload 注入,入队
+/// TransferQueue kind=download);my_can_download=false → 禁用+「申请权限」
+/// 入口样式提示(申请动作 B5 点亮);null=中性放行(详情未到≠无权,后端 403
+/// 最终裁决);分享/申请权限仍占位禁用(B5)。附 RefreshBus 机制件单测(原
+/// B2 批落位于此,随迁保留)。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,45 +11,59 @@ import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/features/preview/preview_actions.dart';
 
 void main() {
-  Future<void> pump(WidgetTester tester, {required bool? canDownload}) async {
+  Future<void> pump(
+    WidgetTester tester, {
+    required bool? canDownload,
+    VoidCallback? onDownload,
+  }) async {
     await tester.pumpWidget(MaterialApp(
-      home: Scaffold(body: PreviewActions(canDownload: canDownload)),
+      home: Scaffold(
+        body: PreviewActions(canDownload: canDownload, onDownload: onDownload),
+      ),
     ));
   }
 
-  testWidgets('canDownload=false:下载钮禁用 + 申请权限提示文案在位', (tester) async {
-    await pump(tester, canDownload: false);
-    expect(find.text('下载'), findsOneWidget);
-    expect(find.text('分享'), findsOneWidget);
-    expect(find.text('申请权限'), findsOneWidget);
-    // 无下载权 → 下载钮 tooltip 走「申请权限」入口提示(动作 B5 点亮)
-    expect(
-      find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'),
-      findsOneWidget,
-    );
+  testWidgets('点亮态:canDownload=true + onDownload → 点按触发入队回调', (tester) async {
+    var fired = 0;
+    await pump(tester, canDownload: true, onDownload: () => fired++);
+    await tester.tap(find.text('下载'));
+    expect(fired, 1);
+    expect(find.byTooltip('下载到本机(相册 / Download/浣花视界)'), findsOneWidget);
+    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
   });
 
-  testWidgets('canDownload=true:下载钮 tooltip 回落到「后续版本」占位', (tester) async {
+  testWidgets('canDownload=false:下载钮禁用(点按不触发)+ 申请权限提示在位',
+      (tester) async {
+    var fired = 0;
+    await pump(tester, canDownload: false, onDownload: () => fired++);
+    await tester.tap(find.text('下载'), warnIfMissed: false);
+    await tester.pump();
+    expect(fired, 0, reason: '已知无权 → 禁用');
+    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsOneWidget);
+  });
+
+  testWidgets('canDownload=null(夹详情未到/失败,三态):中性放行,不误显可申请',
+      (tester) async {
+    var fired = 0;
+    await pump(tester, canDownload: null, onDownload: () => fired++);
+    await tester.tap(find.text('下载'));
+    expect(fired, 1);
+    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
+  });
+
+  testWidgets('onDownload 缺省(null):下载钮退占位禁用「后续版本开放」', (tester) async {
     await pump(tester, canDownload: true);
-    expect(find.byTooltip('后续版本开放'), findsNWidgets(3)); // 三钮全占位
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
-  });
-
-  testWidgets('canDownload=null(夹详情未到/失败,B2 修复 P2-4 三态):与 true 同中性口径', (tester) async {
-    await pump(tester, canDownload: null);
-    // 详情未知 ≠ 无权限:提示退回中性「后续版本」,不误显「可申请」
     expect(find.byTooltip('后续版本开放'), findsNWidgets(3));
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
   });
 
-  testWidgets('两态均为禁用呈现:无可交互按钮(onPressed 类回调不存在)', (tester) async {
-    for (final can in [false, true]) {
-      await pump(tester, canDownload: can);
-      // 占位禁用:组件只有 Tooltip+图标文本,无 IconButton/FilledButton 可点
-      expect(find.byType(IconButton), findsNothing);
-      expect(find.byType(FilledButton), findsNothing);
-      expect(find.byType(TextButton), findsNothing);
-    }
+  testWidgets('分享/申请权限仍占位禁用(B5);禁用态无可交互按钮', (tester) async {
+    var fired = 0;
+    await pump(tester, canDownload: true, onDownload: () => fired++);
+    await tester.tap(find.text('分享'), warnIfMissed: false);
+    await tester.tap(find.text('申请权限'), warnIfMissed: false);
+    await tester.pump();
+    expect(fired, 0);
+    expect(find.byTooltip('后续版本开放'), findsNWidgets(2));
   });
 
   group('RefreshBus(数据新鲜度机制件)', () {

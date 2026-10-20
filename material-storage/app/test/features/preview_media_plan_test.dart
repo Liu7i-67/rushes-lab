@@ -1,26 +1,31 @@
-/// B2 测试修复单测锁(P1-1 + P2-1/P2-6 纯逻辑部分):
+/// B2 测试修复单测锁(P1-1 + P2-1/P2-6 纯逻辑部分;B4 起拆自 preview_plan.dart
+/// /preview_text_load.dart)+ B4 新增 playingLive 维度(livp「查看照片」回切
+/// 显示静态缩略图而非暂停帧,B2 遗留清偿):
 /// - P1-1:previewBodyPlan 对 video 类在控制器未就绪时恒 loading,绝不落 image
 ///   分支(老路径把视频 presigned URL 塞 Image.network → 起播期误显
 ///   「图片解码失败」卡 + 多余图片式拉流);
-/// - P2-1:videoClock 时长文本;
-/// - P2-6:thumbFailText 两态文案(tags.thumbnail_failed 有无)。
+/// - playingLive:livp videoReady 且回静态 → image(player 保活 Offstage 续播);
+/// - P2-1:videoClock 时长文本;P2-6:thumbFailText 两态文案。
 library;
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/preview_kind.dart';
-import 'package:ms_app/features/preview/preview_media.dart';
+import 'package:ms_app/features/preview/preview_plan.dart';
+import 'package:ms_app/features/preview/preview_text_load.dart';
 
 PreviewBody plan(
   PreviewKind kind, {
   bool videoReady = false,
   bool hasFail = false,
   bool hasUrl = false,
+  bool playingLive = true,
 }) =>
     previewBodyPlan(
       kind: kind,
       videoReady: videoReady,
       hasFail: hasFail,
       hasUrl: hasUrl,
+      playingLive: playingLive,
     );
 
 void main() {
@@ -47,19 +52,40 @@ void main() {
     });
   });
 
+  group('previewBodyPlan — playingLive 维度(B2 遗留:查看照片显缩略图)', () {
+    test('livp 就绪在播 → player;回切(playingLive=false)→ image 静态缩略图',
+        () {
+      expect(plan(PreviewKind.livp, videoReady: true, hasUrl: true),
+          PreviewBody.player);
+      expect(
+          plan(PreviewKind.livp,
+              videoReady: true, hasUrl: true, playingLive: false),
+          PreviewBody.image,
+          reason: '查看照片=静态缩略图,而非暂停帧(控制器保活便于续播)');
+    });
+
+    test('livp 未就绪:playingLive 不影响(image 兜底/loading),起播圈由视图层叠',
+        () {
+      expect(plan(PreviewKind.livp, hasUrl: true), PreviewBody.image);
+      expect(plan(PreviewKind.livp, hasUrl: true, playingLive: false),
+          PreviewBody.image);
+      expect(plan(PreviewKind.livp), PreviewBody.loading);
+    });
+
+    test('video 类不受 playingLive 影响(就绪恒 player)', () {
+      expect(
+          plan(PreviewKind.video, videoReady: true, hasUrl: true,
+              playingLive: false),
+          PreviewBody.player);
+    });
+  });
+
   group('previewBodyPlan — 八类映射', () {
     test('fail 优先:一切类型有失败即色块', () {
       for (final kind in PreviewKind.values) {
         expect(plan(kind, hasFail: true, videoReady: true, hasUrl: true),
             PreviewBody.block);
       }
-    });
-
-    test('livp:未就绪静态图兜底(起播中加载圈由 image 分支叠加),就绪入播放器', () {
-      expect(plan(PreviewKind.livp, hasUrl: true), PreviewBody.image);
-      expect(plan(PreviewKind.livp, hasUrl: true, videoReady: true),
-          PreviewBody.player);
-      expect(plan(PreviewKind.livp), PreviewBody.loading);
     });
 
     test('image/heic:URL 在即图,不在则加载态', () {
@@ -105,7 +131,7 @@ void main() {
     });
   });
 
-  group('kMaxInlineTextBytes(P2-8 预检阈值)', () {
+  group('kMaxInlineTextBytes(P2-8 预检阈值,现居 preview_text_load)', () {
     test('10MB', () {
       expect(kMaxInlineTextBytes, 10 * 1024 * 1024);
     });

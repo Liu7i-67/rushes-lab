@@ -6,6 +6,8 @@
 /// 混用会死锁,故不落 HttpServer)。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/api/assets_api.dart';
@@ -72,6 +74,49 @@ class _FakeMsApi extends MsApi {
   _FakeFoldersApi get folders => _folders;
 }
 
+/// 列表调用可控挂起的假 API(第 1 次挂起=全屏首拉在途;第 2 次立即完成=
+/// 静默刷新先落地):复现「全屏在途被静默丢弃 → loading 无人清」的卡死场景。
+class _HangingAssetsApi extends AssetsApi {
+  _HangingAssetsApi(super.api);
+
+  final calls = <Completer<AssetPage>>[];
+
+  @override
+  Future<AssetPage> list(String folderId, {int limit = 30, int offset = 0}) {
+    final c = Completer<AssetPage>();
+    calls.add(c);
+    if (calls.length >= 2) {
+      c.complete(AssetPage.fromJson({
+        'items': [
+          {
+            'id': 'a1',
+            'folder_id': 'f9',
+            'filename': 'a1.livp',
+            'size_bytes': 123,
+            'content_type': 'application/zip',
+            'created_at': '2026-10-20T10:00:00Z',
+          }
+        ],
+        'total': 1,
+      }));
+    }
+    return c.future;
+  }
+}
+
+class _HangingMsApi extends MsApi {
+  _HangingMsApi() : super(baseUrl: 'http://b3.test.local');
+
+  late final _HangingAssetsApi _assets = _HangingAssetsApi(this);
+  late final _FakeFoldersApi _folders = _FakeFoldersApi(this);
+
+  @override
+  _HangingAssetsApi get assets => _assets;
+
+  @override
+  _FakeFoldersApi get folders => _folders;
+}
+
 void main() {
   setUp(() {
     session.api = _FakeMsApi();
@@ -111,5 +156,25 @@ void main() {
     expect(find.byTooltip('上传'), findsNothing);
     expect(find.text('上传素材'), findsNothing, reason: '空文件夹引导钮同口径');
     expect(find.text('空文件夹'), findsOneWidget);
+  });
+
+  testWidgets('B3 遗留修复(测试功能点 7):全屏刷新在途+静默先完成 → loading 必清',
+      (tester) async {
+    final api = _HangingMsApi();
+    session.api = api;
+    await tester.pumpWidget(
+        MaterialApp(home: AssetsPage(folderId: 'f9', folderName: '夹f9')));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget,
+        reason: '全屏首拉在途(第 1 次调用挂起)');
+
+    // 上传成功失效 → 静默刷新(第 2 次调用,先于全屏路完成)
+    RefreshBus.I.invalidate('assets:f9');
+    await tester.pump();
+    expect(api.assets.calls.length, 2);
+    expect(find.byType(CircularProgressIndicator), findsNothing,
+        reason: '静默 swap 落地即清全屏 loading(旧实现:_loading 被丢弃的全屏路'
+            '独占,静默路不清 → 整页 spinner 永久卡死)');
+    expect(find.text('a1.livp'), findsOneWidget, reason: '数据已 swap');
   });
 }

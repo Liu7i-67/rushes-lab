@@ -1,25 +1,19 @@
-/// 统一上传面板(方案 §5 / B3 功能点 1):入口唯一=宫格 AppBar「⬆」+ 空态引导
-/// 按钮 → 半屏 bottom sheet 两选:
-/// - 「从相册选择」wechat_assets_picker RequestType.all 多选:iOS 实况照片 →
-///   `entityToLivp` 打包 .livp(现役逻辑,uploadBytes 小包轨);普通图/视频原文件;
-///   Android 全原文件(uploadFile 流式轨)。
-/// - 「选择文件」file_picker any 多选:原文件直传(含 .livp 本身)。
-/// 选完即入队 TransferQueue(全局 FIFO 并发 2),面板即关可继续浏览;
-/// 上传成功经 RefreshBus 失效 assets scope → 宫格自动刷新(B2 预留订阅落地)。
+/// 上传入队主体(方案 §5 / B3 功能点 1;B3 遗留拆分后:选择器与面板在
+/// upload_pick.dart,本文件只留纯函数与入队/指示件):
+/// - filename 净化/批量入队纯循环/汇总文案(可单测);
+/// - enqueueLocalUpload:相册/文件两路汇合点(bytes 小包轨 / path 流式轨);
+/// - UploadEmptyGuide 空态引导 + UploadMiniBar 宫格顶部迷你进度条。
 library;
 
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 import '../../core/api/content_types.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../core/transfers/transfer_queue.dart';
 import '../../core/transfers/transfer_task.dart';
-import '../../services/album.dart';
 import '../../services/app_log.dart';
 import '../../services/livp.dart';
 import '../../widgets/empty_state.dart';
@@ -117,163 +111,6 @@ Future<String> enqueueLocalUpload({
       notifyUploadSuccess(folderId);
     },
   ));
-}
-
-/// 打开统一上传面板(宫格页两入口共用)。
-Future<void> showUploadSheet(
-  BuildContext context, {
-  required String folderId,
-  required String where,
-}) {
-  return showModalBottomSheet<void>(
-    context: context,
-    showDragHandle: true,
-    builder: (sheetCtx) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.photo_library_outlined),
-            title: const Text('从相册选择'),
-            subtitle: const Text('实况照片自动打包 .livp;图/视频传原文件'),
-            onTap: () {
-              Navigator.pop(sheetCtx);
-              _pickFromAlbum(context, folderId: folderId, where: where);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.folder_open_outlined),
-            title: const Text('选择文件'),
-            subtitle: const Text('原文件直传,支持多选(含 .livp)'),
-            onTap: () {
-              Navigator.pop(sheetCtx);
-              _pickFiles(context, folderId: folderId, where: where);
-            },
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    ),
-  );
-}
-
-/// 相册多选(RequestType.all;iOS 实况 → livp 小包轨,其余原文件流式轨;
-/// Android 全原文件)。逐项打包+入队收进 [enqueueBatch] 内层 try/catch
-/// (P1-1:单个失败只跳过,不中断剩余),完事汇总 toast。
-Future<void> _pickFromAlbum(
-  BuildContext context, {
-  required String folderId,
-  required String where,
-}) async {
-  final picked = await _pickAssets(context);
-  if (picked == null || picked.isEmpty) return; // 用户取消:不算上传
-  final (enqueued, skipped) = await enqueueBatch(
-    picked.map((e) => () => _enqueueAlbumAsset(e, folderId: folderId, where: where)),
-    onError: (e) => AppLog.error('upload', '单项入队失败,已跳过', e),
-  );
-  if (!context.mounted) return;
-  _say(context, batchSummary(enqueued, skipped));
-}
-
-/// 相册权限+选择器(用户取消返回 null;选择器/权限失败 toast 后返回 null,
-/// 不与逐项入队失败混为一谈)。
-Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
-  try {
-    await AlbumService.ensurePermission();
-    if (!context.mounted) return null;
-    return await AssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        requestType: RequestType.all,
-        maxAssets: 99,
-      ),
-    );
-  } catch (e) {
-    AppLog.error('upload', '相册选择失败', e);
-    if (context.mounted) _say(context, '相册选择失败:$e');
-    return null;
-  }
-}
-
-/// 单个相册资产打包+入队(iOS 实况 → livp 小包轨,其余原文件流式轨;
-/// Android 全原文件)。抛错由 [enqueueBatch] 逐项捕获计跳过。
-Future<void> _enqueueAlbumAsset(
-  AssetEntity e, {
-  required String folderId,
-  required String where,
-}) async {
-  final live = AlbumService.isSupported && e.isLivePhoto;
-  if (live) {
-    // 现役实况链路:打包 .livp(小包轨,uploadBytes;iCloud 未下载在此抛)
-    final bytes = await AlbumService.entityToLivp(e);
-    await enqueueLocalUpload(
-      folderId: folderId,
-      where: where,
-      filename: '${LivpService.baseNameOf(e.title, 'IMG_${e.id}')}.livp',
-      bytes: bytes,
-    );
-    return;
-  }
-  final f = await e.originFile;
-  if (f == null) {
-    throw StateError('读取原文件失败 asset=${e.id}');
-  }
-  await enqueueLocalUpload(
-    folderId: folderId,
-    where: where,
-    filename: sanitizeUploadName(e.title ?? f.path.split('/').last,
-        fallback: 'IMG_${e.id}'),
-    path: f.path,
-  );
-}
-
-/// 文件多选直传(any:livp 无注册 Mime,custom 过滤会抛,现役钉子)。
-/// 逐项入队收进 [enqueueBatch] 内层 try/catch(P1-1 同款),完事汇总 toast。
-Future<void> _pickFiles(
-  BuildContext context, {
-  required String folderId,
-  required String where,
-}) async {
-  final files = await _pickPlatformFiles();
-  if (files.isEmpty) return; // 用户取消:不算上传
-  final (enqueued, skipped) = await enqueueBatch(
-    files.map((f) => () async {
-      final p = f.path;
-      if (p == null) {
-        throw StateError('无本地路径 file=${f.name}');
-      }
-      await enqueueLocalUpload(
-        folderId: folderId,
-        where: where,
-        filename: sanitizeUploadName(f.name),
-        path: p,
-      );
-    }),
-    onError: (e) => AppLog.error('upload', '单项入队失败,已跳过', e),
-  );
-  if (!context.mounted) return;
-  _say(context, batchSummary(enqueued, skipped));
-}
-
-/// file_picker 选择(用户取消返回空;选择器失败 toast 后返回空)。
-Future<List<PlatformFile>> _pickPlatformFiles() async {
-  try {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.any,
-      allowMultiple: true,
-      withData: false, // 流式轨走 path,不整载入内存
-    );
-    return result?.files ?? const <PlatformFile>[];
-  } catch (e) {
-    AppLog.error('upload', '文件选择失败', e);
-    return const <PlatformFile>[];
-  }
-}
-
-void _say(BuildContext context, String msg) {
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  if (messenger == null) return;
-  messenger.showSnackBar(SnackBar(content: Text(msg)));
 }
 
 /// 空文件夹引导=上传第二入口(§5 入口唯一:AppBar「⬆」+ 此引导钮共用面板);
