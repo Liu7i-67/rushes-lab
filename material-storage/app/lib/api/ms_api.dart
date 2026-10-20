@@ -20,6 +20,7 @@
 library;
 
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
@@ -60,32 +61,41 @@ class MsApi {
     _jar = jar ?? CookieJar();
     _http.interceptors.add(CookieManager(_jar));
     // 全量 API 日志(移动端 debug 通道):方向/状态码/错误均入 AppLog
-    _http.interceptors.add(InterceptorsWrapper(
-      onRequest: (o, h) {
-        AppLog.info('api', '→ ${o.method} ${o.uri.path}'
-            '${o.uri.query.isEmpty ? '' : '?${o.uri.query}'}');
-        h.next(o);
-      },
-      onResponse: (r, h) {
-        AppLog.info('api', '← ${r.statusCode} ${r.requestOptions.uri.path}');
-        h.next(r);
-      },
-      onError: (e, h) {
-        AppLog.error('api',
-            '✗ ${e.requestOptions.method} ${e.requestOptions.uri.path}', e.error);
-        h.next(e);
-      },
-    ));
-    // 分片 PUT 走独立裸 Dio:presigned URL 可能指向另一 host,不带 cookie/拦截器
+    _http.interceptors.add(_logInterceptor());
+    // 分片 PUT 走独立裸 Dio:presigned URL 可能指向另一 host,不带 cookie;
+    // 同样挂日志(预签 URL 的 query 带签名很长,只记 host+path)——
+    // 否则 PUT 失败在日志里完全不可见(2026-10-20 prod 411 排障踩过)
     _put = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(minutes: 10),
     ));
+    _put.interceptors.add(_logInterceptor(withQuery: false));
   }
 
   late final CookieJar _jar;
   late final Dio _http;
   late final Dio _put;
+
+  InterceptorsWrapper _logInterceptor({bool withQuery = true}) =>
+      InterceptorsWrapper(
+        onRequest: (o, h) {
+          AppLog.info('api', '→ ${o.method} ${o.uri.host}${o.uri.path}'
+              '${withQuery && o.uri.query.isNotEmpty ? '?${o.uri.query}' : ''}');
+          h.next(o);
+        },
+        onResponse: (r, h) {
+          AppLog.info('api', '← ${r.statusCode} ${r.requestOptions.uri.path}');
+          h.next(r);
+        },
+        onError: (e, h) {
+          AppLog.error(
+              'api',
+              '✗ ${e.requestOptions.method} ${e.requestOptions.uri.path}'
+              '${e.response?.statusCode != null ? ' (${e.response?.statusCode})' : ''}',
+              e.error);
+          h.next(e);
+        },
+      );
 
   /// 与 web 端 Uppy getChunkSize 一致:16MB 分片(后端无强约束,保持同参最稳)
   static const int partSize = 16 * 1024 * 1024;
@@ -203,13 +213,22 @@ class MsApi {
       for (var n = 1; n <= totalParts; n++) {
         final start = (n - 1) * partSize;
         final end = (n * partSize).clamp(0, bytes.length);
+        final chunk = Uint8List.fromList(bytes.sublist(start, end));
         final sign = await _http.get(
             '/api/v1/assets/uploads/$uploadId/parts/$n',
             queryParameters: {'bucket': bucket, 'key': key});
         if (sign.statusCode != 200) throw _err(sign, '分片签名失败');
         final url = (sign.data as Map<String, dynamic>)['url'] as String;
-        final put = await _put.put(url, data: Stream.fromIterable(
-                [bytes.sublist(start, end)]).cast<List<int>>());
+        // ⚠ 必须显式带 Content-Length:Stream body 无长度时 dio 走 chunked 传输,
+        // prod 链路(跳板机 nginx → MinIO)对 chunked PUT 回 411 Length Required
+        // (iOS prod 实测踩坑;dev 链路容忍 chunked,故 PC 对 dev 验证时未暴露)
+        final put = await _put.put(
+          url,
+          data: Stream<Uint8List>.value(chunk),
+          options: Options(
+            headers: {Headers.contentLengthHeader: chunk.length},
+          ),
+        );
         final etag = put.headers.value('etag') ?? '';
         parts.add({'PartNumber': n, 'ETag': etag});
         if (onPartsDone != null) onPartsDone(n, totalParts);

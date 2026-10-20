@@ -147,6 +147,10 @@ void main() {
         if (putMatch != null && req.method == 'PUT') {
           final n = int.parse(putMatch.group(1)!);
           uploadedParts[n] = await _readBytes(req);
+          // 回归守卫:part PUT 必须带 Content-Length(chunked 传输在 prod 链路回 411)
+          expect(req.headers.value(HttpHeaders.contentLengthHeader),
+              '${uploadedParts[n]!.length}',
+              reason: 'part PUT 需固定长度,禁 chunked');
           req.response.headers.set('etag', '"ETAG$n"');
           req.response.statusCode = 200;
           await req.response.close();
