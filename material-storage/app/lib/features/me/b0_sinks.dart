@@ -74,7 +74,12 @@ String _assetLoc(AssetEntity? e, String fallback) {
 
 /// ② Downloads 路:media_store_plus → Downloads/浣花视界/(免权限,API 29+;
 /// saveFile 内部会搬运并删除源文件——runBothSinks 已为各路复制独立副本,
-/// 此处的删除只波及本路副本,不反噬图库路)。成功 detail=content uri + 常规路径。
+/// 此处的删除只波及本路副本,不反噬图库路)。
+///
+/// 钉子(2026-10-20 真机实证):media_store_plus 0.1.3 的 saveFile **保存成功
+/// 时返回值也可能为 null**(未带回文件信息),勿以返回值判成败,以「无异常」
+/// 为准(B4 正式实现落盘矩阵时同样适用)——null 按 [B0SinkOutcome.ok] 处理,
+/// 仅 detail 提示目视核实;抛异常才判失败。
 Future<B0SinkOutcome> b0SaveToDownloads(File file) async {
   try {
     await MediaStore.ensureInitialized();
@@ -84,14 +89,23 @@ Future<B0SinkOutcome> b0SaveToDownloads(File file) async {
       dirType: DirType.download,
       dirName: DirName.download,
     );
-    if (info == null) {
-      return const B0SinkOutcome.fail('saveFile 返回空(null),未落盘');
-    }
-    return B0SinkOutcome.ok(
-        'Download/$kAppDownloadDir/${info.name}(重复名自动加后缀:'
-        '${info.saveStatus.name}) uri=${info.uri}');
+    return b0DownloadsOutcome(info);
   } catch (e) {
     AppLog.error('b0', 'Downloads 落盘失败', e);
     return B0SinkOutcome.fail('$e');
   }
+}
+
+/// saveFile 返回值 → 结果(纯函数,单测锁死「null 亦成功」语义):
+/// info 非 null → detail=常规路径+saveStatus+content uri;
+/// null → 按成功提交处理,detail 提示目视核实(见 [b0SaveToDownloads] 钉子)。
+B0SinkOutcome b0DownloadsOutcome(SaveInfo? info) {
+  if (info == null) {
+    return const B0SinkOutcome.ok(
+        '已提交 Download/$kAppDownloadDir/(此版本 saveFile 成功亦返回 null,'
+        '未带回文件信息,请目视核实;重名自动加后缀)');
+  }
+  return B0SinkOutcome.ok(
+      'Download/$kAppDownloadDir/${info.name}(重复名自动加后缀:'
+      '${info.saveStatus.name}) uri=${info.uri}');
 }
