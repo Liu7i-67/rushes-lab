@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import secrets
 import time
 import uuid
 from collections import deque
@@ -77,6 +78,8 @@ from app.services.baidu_backup import (
     force_refresh_access_token,
     format_key_conflict_message,
     mark_binding_expired,
+    random_key_taken,
+    random_suffix_key,
     recompute_aggregates,
     relay_dispatch,
     release_for_queueing,
@@ -100,6 +103,8 @@ from app.services.baidu_client import (
 )
 from app.services.baidu_storage import AsyncObjectStore, is_no_such_upload_error
 from app.services.folder_chain import (
+    KEY_MAX_BYTES,
+    KEY_MAX_CHARS,
     FolderChainError,
     ensure_folder_chain,
     ensure_root_folder_at_project,
@@ -123,6 +128,7 @@ DLINK_BATCH = 100               # filemetas 每批 fsid 上限(§2.4)
 ENUM_LIST_MAX_PAGES = 100       # list_dir 聚合页数上限(单目录 10 万条保险丝)
 MANIFEST_MAX_FILES = 20_000     # manifest 护栏(§9)
 MAX_FILE_ATTEMPTS = 5           # 单文件自动重试上限(§5.3)
+_KEY_SUFFIX_ATTEMPTS = 5        # W2 冲突自动后缀候选上限(与手工 F2b 路由同款)
 FILE_BACKOFF_CAP_S = 20.0       # 单次退避封顶 ≤20s(≤ 租约/3,§5.3)
 ORPHAN_BATCH = 50               # sweeper 30d 孤儿清理每轮上限(§6 ≤50 行/批)
 SWEEP_BATCH = 50                # sweeper 候选任务每轮上限
@@ -740,6 +746,12 @@ class _UploadSessionLost(Exception):
     """complete 时 NoSuchUpload(会话在传输窗口内被 lifecycle/并发清掉)。"""
 
 
+class _KeySuffixApplied(Exception):
+    """W2 跨项目 key 冲突已自动后缀重启(reserved_key 已由守卫 UPDATE 固化并
+    refresh 回写)。捕获方以新 key 重进传输步骤 —— 与 _UploadSessionLost 的
+    逐轮烧 attempt 通道刻意区分:不 attempt += 1、不重新认领行。"""
+
+
 async def _next_pending_row(db: AsyncSession, task_id: uuid.UUID) -> TaskFile | None:
     return (await db.execute(
         select(TaskFile)
@@ -871,21 +883,104 @@ async def _check_upload_perm(db: AsyncSession, runner: Runner, folder_id: uuid.U
     return allowed
 
 
+# 跨资产 key 占用行:(Asset, 占用者 project_id);folder 缺失(outerjoin 未命中)
+# → project_id=None,W2 判别按「归属不明」保守处理
+_KeyConflictHolder = tuple[Asset, uuid.UUID | None]
+
+
 async def _key_conflict_holders(
     db: AsyncSession, *, bucket: str, key: str, exclude_asset_id: uuid.UUID | None,
-) -> list[Asset]:
+) -> list[_KeyConflictHolder]:
     """跨资产 key 占用行明细(含软删,与既有跨资产 key 预检计数口径一致;§6
-    步骤 2/5):F1 点名占用者与 F2a 逐行权限复查共用。"""
+    步骤 2/5):F1 点名占用者与 F2a 逐行权限复查共用。outerjoin folders 附带
+    占用者 project_id(W2 跨项目判别用)。"""
     conditions = [Asset.minio_bucket == bucket, Asset.minio_key == key]
     if exclude_asset_id is not None:
         conditions.append(Asset.id != exclude_asset_id)
-    res = await db.execute(select(Asset).where(*conditions).order_by(Asset.id))
-    return list(res.scalars().all())
+    res = await db.execute(
+        select(Asset, Folder.project_id)
+        .outerjoin(Folder, Folder.id == Asset.folder_id)
+        .where(*conditions)
+        .order_by(Asset.id)
+    )
+    return [(asset, project_id) for asset, project_id in res.all()]
 
 
-def _holder_names(holders: list[Asset]) -> list[tuple[str, bool]]:
+def _holder_names(holders: list[_KeyConflictHolder]) -> list[tuple[str, bool]]:
     """F1 文案入参:(filename, 是否软删)(软删者附`(回收站)`)。"""
-    return [(h.filename, h.deleted_at is not None) for h in holders]
+    return [(h.filename, h.deleted_at is not None) for h, _ in holders]
+
+
+def _auto_suffix_eligible(
+    row: TaskFile, holders: list[_KeyConflictHolder], task_project_id: uuid.UUID,
+) -> bool:
+    """W2 触发判别:非 overwrite 行(不与 overwrite 组合)、行未预定 reserved_key
+    (手工 F2b 已预定的行不被改写)且占用者全部属于其他项目;任一占用者归属
+    不明(folder 缺失)按「非跨项目」保守 → 维持现状 key_conflict 失败。"""
+    if row.overwrite or row.reserved_key is not None:
+        return False
+    return all(pid is not None and pid != task_project_id for _, pid in holders)
+
+
+async def _apply_key_conflict_auto_suffix(
+    db: AsyncSession, runner: Runner, row: TaskFile, *, old_key: str, bucket: str,
+    session_to_abort: tuple[str, str, str] | None,
+) -> str | None:
+    """W2 重启机制(首检/二检共用):生成不冲突后缀候选 → abort 旧会话先行 →
+    单条 owned 守卫 UPDATE 同事务「固化 reserved_key + 清断点四元组 +
+    last_error=None」→ refresh 回写。返回后缀 key;None = 五次全撞 / KEY 护栏
+    超限(fail-fast 不重试)/ 守卫未命中,调用方统一 key_conflict 兜底
+    (_fail_row 内部重查所有权,失去所有权退化为 lost)。
+
+    实现纪律(§2):abort 先行、清四元组与写 reserved_key 必须同一条 UPDATE ——
+    拆开则中途崩溃后按存活旧三元组寻址,新 key 配旧 upload_id 抛裸 ClientError;
+    谓词含 reserved_key IS NULL,rowcount=0 同时承接「失去所有权」与「已被并发
+    预定」两语义;末尾必须 db.refresh —— db.execute 的 UPDATE 不回写 ORM 属性,
+    stale attrs 会毒化 _resume_or_create_session 的会话恢复寻址。
+    """
+    candidate: str | None = None
+    for _ in range(_KEY_SUFFIX_ATTEMPTS):
+        cand = random_suffix_key(old_key, secrets.token_hex(4))
+        if len(cand) > KEY_MAX_CHARS or len(cand.encode("utf-8")) > KEY_MAX_BYTES:
+            return None   # 候选增量恒定,一个超限则全部超限
+        if not await random_key_taken(
+            db, bucket=bucket, key=cand, task_id=runner.task_id, exclude_file_id=row.id,
+        ):
+            candidate = cand
+            break
+    if candidate is None:
+        return None
+    if session_to_abort is not None:
+        s_bucket, s_key, s_upload_id = session_to_abort
+        try:
+            await runner.store.abort_multipart_upload(s_bucket, s_key, s_upload_id)
+        except Exception as e:
+            # 会话已死(NoSuchUpload)或 abort 失败:孤儿无 DB 引用、30d sweeper
+            # 扫不到,兜底 = bucket lifecycle(口径对齐 _download_parts 各 abort 点)
+            log.warning(
+                "baidu auto suffix abort fail task=%s file=%s bucket=%s key=%s "
+                "upload_id=%s err=%s(孤儿交 bucket lifecycle)",
+                runner.task_id, row.id, s_bucket, s_key, s_upload_id, e,
+            )
+    res = await db.execute(
+        update(TaskFile)
+        .where(
+            TaskFile.id == row.id,
+            runner.owned_row_predicate(),
+            TaskFile.reserved_key.is_(None),
+        )
+        .values(
+            reserved_key=candidate,
+            minio_bucket=None, minio_key=None, minio_upload_id=None, bytes_done=0,
+            last_error=None,
+        )
+    )
+    if statement_rowcount(res) == 0:
+        return None
+    await db.refresh(row)
+    log.info("baidu key conflict auto suffix task=%s file=%s key %s -> %s",
+             runner.task_id, row.id, old_key, candidate)
+    return candidate
 
 
 def _content_type_for(filename: str) -> str:
@@ -1002,6 +1097,12 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
                 bucket=bucket, key=key, folder_id=folder_id, filename=filename,
                 suppress_head_shortcut=suppress_head_shortcut,
             )
+        except _KeySuffixApplied:
+            # W2:reserved_key 已固化并 refresh 回写(守卫谓词 reserved_key IS NULL
+            # 保证每行至多换一次),以新 key 重进传输 —— 不烧 attempt、不重新认领;
+            # 新 key 仍被占 → 重落 key_conflict 兜底,不无限循环
+            key = row.reserved_key or key
+            continue
         except _LinkRefreshNeeded:
             attempt += 1
             continue
@@ -1270,7 +1371,7 @@ async def _purge_key_holders(
     holders = await _key_conflict_holders(db, bucket=bucket, key=key, exclude_asset_id=None)
     if not holders:
         return None
-    for holder in holders:
+    for holder, _ in holders:
         allowed = await _org_admin_allowed(runner) or await runner.permissions.check(
             user_subject=f"user:{operator_user_id}" if operator_user_id else "user:unknown",
             relation="can_admin", object_type="asset", object_id=str(holder.id),
@@ -1280,7 +1381,7 @@ async def _purge_key_holders(
                 db, runner, row, "overwrite_forbidden_for_holder", clear_overwrite=True,
                 message=f"对占用文件「{holder.filename}」无管理权限,覆盖导入被拒绝",
             )
-    for holder in holders:
+    for holder, _ in holders:
         async with get_sessionmaker()() as audit_session:
             try:
                 await purge_active_asset(
@@ -1341,7 +1442,7 @@ async def _overwrite_precheck_and_purge(
     # 后 _purge_key_holders 还有二次复查兜底,见函数 docstring)
     holders = await _key_conflict_holders(db, bucket=bucket, key=key,
                                           exclude_asset_id=existing_asset.id)
-    for holder in holders:
+    for holder, _ in holders:
         holder_allowed = await _org_admin_allowed(runner) or await runner.permissions.check(
             user_subject=f"user:{operator_user_id}" if operator_user_id else "user:unknown",
             relation="can_admin", object_type="asset", object_id=str(holder.id),
@@ -1677,7 +1778,18 @@ async def _transfer_and_finalize(
         if fail is not None:
             return fail
     elif holders:
-        # F1:非覆盖导入点名占用者(保持可重试;行级出路=覆盖/随机后缀导入)
+        # F1:非覆盖导入点名占用者(保持可重试;行级出路=覆盖/随机后缀导入)。
+        # W2:占用者全跨项目 → 自动随机后缀重启(首检窗口:retry 行保留的断点
+        # 三元组所指旧 key 会话一并作废,防新 key 配旧 upload_id);其余维持失败
+        if _auto_suffix_eligible(row, holders, task.project_id):
+            stale: tuple[str, str, str] | None = None
+            if row.minio_upload_id and row.minio_bucket and row.minio_key:
+                stale = (row.minio_bucket, row.minio_key, row.minio_upload_id)
+            new_key = await _apply_key_conflict_auto_suffix(
+                db, runner, row, old_key=key, bucket=bucket, session_to_abort=stale,
+            )
+            if new_key is not None:
+                raise _KeySuffixApplied
         return await _fail_row(
             db, runner, row, "key_conflict",
             message=format_key_conflict_message(key, _holder_names(holders)),
@@ -1717,11 +1829,20 @@ async def _transfer_and_finalize(
                 return dl.outcome
             # ── complete 前跨资产 key 引用预检(普通导入同样做,收窄窗口,§6)──
             # F1:传输窗口内新出现占用行 → 点名失败(不在此 purge;重试走首检的
-            # F2a 清除路径,避免 complete 前长 purge 拖住 multipart 会话)
+            # F2a 清除路径,避免 complete 前长 purge 拖住 multipart 会话)。
+            # W2:非 overwrite 行遇占用者全跨项目同口径自动后缀——在途会话随旧
+            # key 一并作废,按新 key 从头续跑;overwrite 行不组合(维持点名失败)
             holders = await _key_conflict_holders(
                 db, bucket=bucket, key=key, exclude_asset_id=None,
             )
             if holders:
+                if _auto_suffix_eligible(row, holders, task.project_id):
+                    new_key = await _apply_key_conflict_auto_suffix(
+                        db, runner, row, old_key=key, bucket=bucket,
+                        session_to_abort=(bucket, key, dl.upload_id),
+                    )
+                    if new_key is not None:
+                        raise _KeySuffixApplied
                 return await _fail_row(
                     db, runner, row, "key_conflict",
                     message=format_key_conflict_message(key, _holder_names(holders)),

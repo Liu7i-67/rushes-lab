@@ -471,6 +471,10 @@ export interface BaiduBackupTask {
   target_folder_id: string | null;       // 被删后置 NULL(SET NULL),UI 显示「(已删除)」
   target_folder_name?: string | null;    // 后端 enrich;NULL=目标夹已删除
   target_auto_created?: boolean;         // true=自动创建的承接夹(项目根语义)
+  // 创建时刻检测:目标前缀与其他项目文件夹重叠(rtrim 归一比较,方案 W1)。创建响应恒返回;
+  // 列表/详情侧为默认值 false/null(不回填),前端仅在创建流读用
+  cross_project_prefix_overlap: boolean;
+  overlap_project_names: string[] | null; // 命中时的对方项目名(≤3,无 ORDER BY);无命中为 null
   status: BaiduTaskStatus;
   // 接口派生字段(§3.1):活动中但当前无 runner 实际推进(排队中)——true 时状态 Tag 显示「排队中」
   queued?: boolean;
