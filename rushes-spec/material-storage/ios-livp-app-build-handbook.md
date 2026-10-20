@@ -77,6 +77,8 @@ flutter doctor                         # 确认 iOS toolchain 全绿
     或其他入口,手填即可。
 - iOS 明文 HTTP 限制已在 Info.plist 处理(dev 是 IP 直连 http,Apple 的
   NSExceptionDomains 不匹配 IP 字面量,故开了 NSAllowsArbitraryLoads;勿删,否则 dev 入口连不上)。
+- Android 同理:主清单(`android/app/src/main/AndroidManifest.xml`)已开
+  `android:usesCleartextTraffic="true"`(networkSecurityConfig 同样不认 IP 字面量),勿删。
 - 打包期想钉死单一环境:`flutter build ipa --dart-define=MS_API_BASE=https://bucket.taoxiplan.com`。
 
 ## 4. 打包发布(按你的分发方式二选一)

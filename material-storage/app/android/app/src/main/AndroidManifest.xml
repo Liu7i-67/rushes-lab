@@ -9,7 +9,10 @@
     <application
         android:label="浣花素材管理"
         android:name="${applicationName}"
+        android:usesCleartextTraffic="true"
         android:icon="@mipmap/ic_launcher">
+        <!-- ↑ 对齐 iOS NSAllowsArbitraryLoads:dev/内网入口是裸 IP 直连 http,
+             Android 9+ 默认禁明文且 networkSecurityConfig 不认 IP 字面量,必须全局放开 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
