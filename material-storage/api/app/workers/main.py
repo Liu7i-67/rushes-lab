@@ -688,6 +688,9 @@ class WorkerSettings:
     cron_jobs = _CRON_JOBS
     on_startup = _validate_baidu_settings_on_startup
     redis_settings = _build_redis_settings()
-    max_jobs = 4
+    # 并发方案 §3.2/§3.3:百度准入并发 2→4 后 max_jobs 4→8(4 百度槽 + ≥4 缩略图
+    # /cron 槽,不动会把缩略图挤饿);Settings 参数化,env 可调(改后须 force-
+    # recreate ms-worker,restart 不重读 env_file)
+    max_jobs = get_settings().worker_max_jobs
     job_timeout = 60
     keep_result = 300

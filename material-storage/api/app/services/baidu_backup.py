@@ -1,13 +1,14 @@
 """百度网盘备份任务域服务 — 方案 §5.1(baidu_backup 服务)/§5.2/§6。
 
 职责(批次 2+3):
-- 任务创建校验链(source_dir 护栏 / target 归属与敏感祖先链 / 活动互斥)
+- 任务创建校验链(source_dir 护栏 / target 归属与敏感祖先链 / 同绑定软上限,§2.5)
 - 派发步 / 接力变体 / 认领 / 续期四类租约 CAS(§6 全部谓词含 NULL 分支与所有权守卫)
 - 复活型接口统一前置(§5.2)与文件行复位
+- VIP 分道准入 SQL(并发方案 §3.1;认领后校验判定集合 = 本函数返回)
 - abort_leftover_sessions 统一断点作废 helper(≤20 行内联分批 abort,>20 仅 importing)
 - 终态化归位表 + 三分支判定 + 聚合计数重算(done=success+skipped 口径,§6)
 - 48h 轮判停纯函数与排队豁免口径
-- refresh 单飞(自 router 上收,worker 共用,§5.3)
+- refresh 单飞(自 router 上收,worker 共用,§5.3;force 旁路与耗尽不误杀,§2.6)
 
 约定:所有涉及时间戳列的谓词显式含 NULL 分支(SQL 中 NULL 参与比较恒为假;
 任务在「创建后未派发」「派发后未认领」两窗口 dispatched_at/runner_id/lease_until
@@ -35,6 +36,7 @@ from app.db.tables import BaiduBackupTaskFile as TaskFile
 from app.services.baidu_client import BaiduNetdiskClient
 from app.services.presign import PresignService
 from app.services.token_crypto import TokenCryptoService, TokenDecryptError
+from app.settings import get_settings
 
 log = logging.getLogger(__name__)
 
@@ -281,8 +283,11 @@ async def dispatch_task(
 
     - 复活型/接管分支同事务复位在途行(见 reset_importing_rows,由调用方与本次
       UPDATE 同事务执行 —— 本函数只管 tasks 行)
-    - revive:status 按 enum_done 分叉(false→enumerating 重枚举 / true→running)、
-      复位 round_started_at/retry_count+1/cancel 位/fail_reason;WHERE 带终态来源约束
+    - revive:status 一律落 enumerating(复活统一入队漏斗,并发方案 §2.5 关键
+      修正;enum_done 原样保留在行上,worker 侧对 enum_done=true 短路直达枚举
+      收尾 —— 原「enum_done=true 直写 running」会在同绑定另一任务 running 时撞
+      uq_baidu_task_running 且捕获点已删)、复位 round_started_at/retry_count+1/
+      cancel 位/fail_reason;WHERE 带终态来源约束
     - sweep:WHERE 活动中 + 无租约/租约过期(含 NULL)+ 派发超时(含从未派发);
       不复位 round_started_at(轮起点跨接管累计,48h 判停才可达)
     - 派发不写未来租约(否则取消 API 的「无租约→直接终态化」快路径会被伪装租约挡住)
@@ -301,10 +306,7 @@ async def dispatch_task(
             "cancel_requested": False,          # 防上一轮残留取消位把复活任务「秒取消」
             "cancel_reason": None,
             "fail_reason": None,
-            "status": case(
-                (Task.enum_done.is_(True), literal(STATUS_RUNNING)),
-                else_=literal(STATUS_ENUMERATING),
-            ),
+            "status": STATUS_ENUMERATING,       # 复活统一入队漏斗(方案 §2.5/D11)
         })
         if allowed_from:
             stmt = stmt.where(Task.status.in_(allowed_from))
@@ -437,40 +439,123 @@ async def relay_dispatch(
 async def release_for_queueing(
     db: AsyncSession, *, task_id: uuid.UUID, expected_seq: int, runner_id: str,
 ) -> bool:
-    """并发门控退出(§6 确定性准入):复位 round_started_at=NULL 并清 runner/租约。
+    """并发门控退出(§6 确定性准入):复位 round_started_at=NULL 并清 runner/租约;
+    门控退出统一降级(并发方案 §2.3):status='running' 的行同步降为 enumerating
+    (enum_done 保留)—— 门控退出若留「无租约的 running 行」,既占
+    uq_baidu_task_running 唯一坑位,又会让更老的 enumerating 兄弟在枚举收尾时
+    反复撞索引(绑定级活锁);降级后的行经 §2.5 enum_done 短路(已枚举完)或
+    重枚举恢复,无损。注意仅本路径(门控退出)降级 —— §2.4 belt 路径不降级。
 
     UPDATE 带 CAS 谓词(与全篇守卫风格一致);不留半租约干扰计数与接管判定。
     """
     res = await db.execute(
         update(Task)
         .where(Task.id == task_id, Task.lease_seq == expected_seq, Task.runner_id == runner_id)
-        .values(round_started_at=None, runner_id=None, lease_until=None)
+        .values(
+            round_started_at=None,
+            runner_id=None,
+            lease_until=None,
+            status=case(
+                (Task.status == STATUS_RUNNING, literal(STATUS_ENUMERATING)),
+                else_=Task.status,
+            ),
+        )
         .execution_options(**_SYNC_OFF)
     )
     return _rowcount(res) == 1
 
 
-async def admission_top_task_ids(db: AsyncSession, *, limit: int = 2) -> list[uuid.UUID]:
-    """确定性准入排序(§6):活动中任务按 round_started_at NULLS LAST, created_at, id。"""
-    res = await db.execute(
-        select(Task.id)
+async def admission_top_task_ids(
+    db: AsyncSession, *, limit: int, nonvip_limit: int,
+) -> list[uuid.UUID]:
+    """VIP 分道准入(并发方案 §2.3 + §3.1):活动中任务先按绑定取最老代表
+    (DISTINCT ON binding_id),再 vip/nrm 双道各自按代表序截流后并集 —— 语义
+    红线:总 picked ≤ limit 且其中非会员 ≤ nonvip_limit ⇒ 会员恒有 ≥2 槽可用。
+
+    - is_vip = COALESCE(bindings.vip_type, 0) >= 1:NULL/0 = 未知或普通 → 非会员道
+      (保守归类保护会员槽位,§3.1/D9)
+    - 语法红线(§3.1):给 UNION 单臂加 LIMIT 必须括号包裹子查询 —— 本实现把
+      两臂截流各自收进括号子查询(vip_pick / nrm_pick / nrm_pick_capped)再
+      UNION ALL;裸写臂级 LIMIT 会作用于整个并集(会员代表数 ≥ 总限时把 picked
+      截到 0,含会员在内谁都不被准入)
+    - 接线声明(§3.1):认领后校验(workers gate 的成员判定)的判定集合必须
+      就是本函数返回的 picked 集合;limit/nonvip_limit 来自 Settings
+    """
+    # 每绑定最老代表 + 分道标记(round 非空的 running 任务恒为该绑定代表 → 稳态
+    # 下槽位 = 不同绑定;单用户多任务只占一个并发坑)。CTE 形态(与 §3.1 SQL 草样
+    # 一致):vip/nrm/count 三臂共用,PG 引用多次时物化一次,免 tasks 三重扫描
+    reps = (
+        select(
+            Task.id,
+            Task.round_started_at,
+            Task.created_at,
+            (func.coalesce(BaiduBinding.vip_type, 0) >= 1).label("is_vip"),
+        )
+        .join(BaiduBinding, BaiduBinding.id == Task.binding_id)
         .where(Task.status.in_(ACTIVE_STATUSES))
-        .order_by(Task.round_started_at.nulls_last(), Task.created_at, Task.id)
+        .distinct(Task.binding_id)
+        .order_by(
+            Task.binding_id, Task.round_started_at.nulls_last(), Task.created_at, Task.id,
+        )
+        .cte("reps")
+    )
+    rep_order = (reps.c.round_started_at.nulls_last(), reps.c.created_at, reps.c.id)
+    # 会员道:代表序截前 limit 条
+    vip_pick = (
+        select(
+            reps.c.id.label("id"),
+            reps.c.round_started_at.label("round_started_at"),
+            reps.c.created_at.label("created_at"),
+        )
+        .where(reps.c.is_vip)
+        .order_by(*rep_order)
         .limit(limit)
+        .subquery("vip_pick")
     )
+    # 非会员道:先按道内上限截流(非会员 ≤ nonvip_limit)
+    nrm_pick = (
+        select(
+            reps.c.id.label("id"),
+            reps.c.round_started_at.label("round_started_at"),
+            reps.c.created_at.label("created_at"),
+        )
+        .where(~reps.c.is_vip)
+        .order_by(*rep_order)
+        .limit(nonvip_limit)
+        .subquery("nrm_pick")
+    )
+    # 非会员道二次收紧:总数 ≤ limit(会员道占用后余量让渡;GREATEST 防 vip 满时
+    # 余量为负,§3.1 SQL 草样)
+    vip_count = select(func.count()).select_from(vip_pick).scalar_subquery()
+    nrm_pick_capped = (
+        select(
+            nrm_pick.c.id.label("id"),
+            nrm_pick.c.round_started_at.label("round_started_at"),
+            nrm_pick.c.created_at.label("created_at"),
+        )
+        .limit(func.greatest(literal(limit) - vip_count, 0))
+        .subquery("nrm_pick_capped")
+    )
+    picked = (
+        select(
+            vip_pick.c.id.label("id"),
+            vip_pick.c.round_started_at.label("round_started_at"),
+            vip_pick.c.created_at.label("created_at"),
+        )
+        .union_all(
+            select(
+                nrm_pick_capped.c.id.label("id"),
+                nrm_pick_capped.c.round_started_at.label("round_started_at"),
+                nrm_pick_capped.c.created_at.label("created_at"),
+            )
+        )
+        .subquery("picked")
+    )
+    stmt = select(picked.c.id).order_by(
+        picked.c.round_started_at.nulls_last(), picked.c.created_at, picked.c.id,
+    )
+    res = await db.execute(stmt)
     return list(res.scalars().all())
-
-
-async def has_active_task(
-    db: AsyncSession, *, binding_id: uuid.UUID, exclude_task_id: uuid.UUID | None = None,
-) -> bool:
-    """同绑定活动互斥应用层检查(§5.2;partial unique index 兜底 409)。"""
-    stmt = select(Task.id).where(
-        Task.binding_id == binding_id, Task.status.in_(ACTIVE_STATUSES),
-    )
-    if exclude_task_id is not None:
-        stmt = stmt.where(Task.id != exclude_task_id)
-    return (await db.execute(stmt.limit(1))).scalar_one_or_none() is not None
 
 
 # ─── 残留 multipart 会话(断点作废统一口径,§5.2)────────────────────────────
@@ -581,18 +666,42 @@ async def abort_leftover_sessions(
 # ─── 复活型接口统一前置(§5.2)───────────────────────────────────────────────
 
 
+async def binding_active_task_count(db: AsyncSession, *, binding_id: uuid.UUID) -> int:
+    """同绑定活动任务计数(软上限前置用;§2.5 多任务排队语义下的计数口径)。"""
+    return int(await db.scalar(
+        select(func.count()).select_from(Task).where(
+            Task.binding_id == binding_id, Task.status.in_(ACTIVE_STATUSES),
+        )
+    ) or 0)
+
+
+async def assert_binding_queue_not_full(db: AsyncSession, *, binding_id: uuid.UUID) -> None:
+    """同绑定活动任务软上限前置(并发方案 §2.5):≥ 上限 → 409「该绑定排队任务
+    已达上限」。创建与四个复活路由同口径;上限读 Settings(默认 5,env 可调)。
+
+    best-effort 语义:check-then-insert、无 DB 兜底,并发创建窗口可短暂超出若干
+    —— 防滥用口径下可接受(§2.5;收紧可用 SELECT ... FOR UPDATE 再计数)。
+    """
+    limit = get_settings().baidu_max_active_tasks_per_binding
+    if await binding_active_task_count(db, binding_id=binding_id) >= limit:
+        raise BaiduTaskError("该绑定排队任务已达上限", http_status=409,
+                             code="queue_limit_reached")
+
+
 async def guard_revival(
     db: AsyncSession, *, task: Task, binding: BaiduBinding | None,
 ) -> None:
-    """复活型接口(retry/overwrite)统一前置;违规抛 BaiduTaskError(默认 409)。"""
+    """复活型接口(retry/overwrite)统一前置;违规抛 BaiduTaskError(默认 409)。
+
+    多任务排队语义(并发方案 §2.5):不再因「同绑定有活动任务」拒绝复活 ——
+    改受软上限约束(≥ 上限 → 409),复活任务一律入队等待。"""
     if binding is None or binding.status != "active":
         raise BaiduTaskError("请先重新绑定百度网盘账号", code="binding_inactive")
     if task.target_folder_id is None:
         raise BaiduTaskError("目标文件夹已被删除,请删除任务后重建")
     if task.bound_baidu_uid != binding.baidu_uid:
         raise BaiduTaskError("绑定账号已更换,请删除任务重建")
-    if await has_active_task(db, binding_id=binding.id, exclude_task_id=task.id):
-        raise BaiduTaskError("同一绑定已有进行中的任务,请等待其结束")
+    await assert_binding_queue_not_full(db, binding_id=binding.id)
 
 
 async def reset_failed_rows(db: AsyncSession, *, task_id: uuid.UUID) -> int:
@@ -954,15 +1063,24 @@ async def decrypt_access_token(
 
 async def _refresh_locked_once(
     db: AsyncSession, binding_id: uuid.UUID, *, crypto: TokenCryptoService,
-    client: BaiduNetdiskClient, now: datetime,
+    client: BaiduNetdiskClient, now: datetime, force: bool = False,
 ) -> str:
-    """拿行锁直接 refresh(单飞核心步);失败上抛,由调用方决定重试/置 expired。"""
+    """拿行锁直接 refresh(单飞核心步);失败上抛,由调用方决定重试/置 expired。
+
+    force(并发方案 §2.6.1):跳过新鲜度短路 —— 31045 场景恰是「百度侧拒绝但
+    本地未到期」,不旁路则必然命中短路复用同一个坏 token、零次真实刷新。force
+    路径刻意不去重:并发两次 force 各做一次真实刷新,安全性由行锁串行化 + 锁内
+    复读轮换后的 refresh_token 保证(第二次 FOR UPDATE 阻塞至第一次提交,解密到
+    的是已轮换的新 refresh_token,刷新照样成功、不互踢)—— force 场景宁可多刷
+    不可复用坏 token。"""
     locked = (await db.execute(
         select(BaiduBinding).where(BaiduBinding.id == binding_id).with_for_update(),
     )).scalar_one_or_none()
     if locked is None or locked.status != "active":
         raise BaiduTaskError("百度网盘绑定已失效,请重新绑定", code="binding_inactive")
-    if locked.access_token_expires_at > now + timedelta(seconds=TOKEN_EXPIRY_MARGIN_S):
+    if not force and locked.access_token_expires_at > now + timedelta(
+        seconds=TOKEN_EXPIRY_MARGIN_S,
+    ):
         # 并发请求已完成刷新(单飞)→ 释放行锁直接复用现存 token
         await db.rollback()
         # rollback 会 expire 会话内全部对象;直接读 locked.access_token_enc 是
@@ -1028,10 +1146,16 @@ async def ensure_fresh_access_token(
 
 async def force_refresh_access_token(
     db: AsyncSession, binding_id: uuid.UUID, *, crypto: TokenCryptoService,
-    client: BaiduNetdiskClient,
+    client: BaiduNetdiskClient, expire_binding_on_exhaustion: bool = True,
 ) -> str:
-    """吊销兜底(§5.3):token 提前失效(auth_expired 但 expires_at 未到)时
-    强制走一次 refresh 单飞(不复用现存 token);失败重试口径同 ensure_fresh。"""
+    """吊销兜底(§5.3;并发方案 §2.6):token 提前失效(auth_expired 但 expires_at
+    未到)时强制走一次 refresh 单飞(force 旁路跳过新鲜度短路,不复用现存 token,
+    语义要点见 _refresh_locked_once);失败重试口径同 ensure_fresh。
+
+    expire_binding_on_exhaustion(§2.6.3):默认 True 语义不变(既有调用方不受
+    影响);31045 调用点传 False —— 耗尽路径「先置 expired 再抛」会把绑定误杀,
+    调用方 except 捕获时已无法兑现「刷新失败不误杀绑定」,改为只抛由调用方回落
+    link_expired 路径。"""
     last_err: Exception | None = None
     for attempt in range(REFRESH_MAX_ATTEMPTS):
         if attempt:
@@ -1039,6 +1163,7 @@ async def force_refresh_access_token(
         try:
             return await _refresh_locked_once(
                 db, binding_id, crypto=crypto, client=client, now=datetime.now(UTC),
+                force=True,
             )
         except BaiduTaskError:
             raise
@@ -1046,10 +1171,11 @@ async def force_refresh_access_token(
             last_err = e
             log.warning("baidu token force refresh failed binding=%s attempt=%s err=%s",
                         binding_id, attempt + 1, e)
-    row = await db.get(BaiduBinding, binding_id)
-    if row is not None:
-        row.status = "expired"
-        await db.commit()
+    if expire_binding_on_exhaustion:
+        row = await db.get(BaiduBinding, binding_id)
+        if row is not None:
+            row.status = "expired"
+            await db.commit()
     log.warning("baidu token force refresh exhausted binding=%s last_err=%s", binding_id, last_err)
     raise BaiduTaskError(
         "百度 token 连续刷新失败,绑定已失效,请重新绑定", code="binding_inactive",

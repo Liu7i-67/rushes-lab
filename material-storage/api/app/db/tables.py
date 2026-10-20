@@ -21,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -488,6 +489,11 @@ class BaiduBinding(Base, TimestampMixin):
     )
     last_authorized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     token_rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # VIP 分道数据源(并发方案 §3.1):旧版语义 0=普通/1=会员/2=超级会员
+    # (vip_version=v2 时 0/1/2=普通/会员VIP/SVIP,「≥1=会员」二值口径新旧一致,
+    # D9 不加 vip_version 参数);NULL=未知,按非会员处理(保守归类保护会员槽位),
+    # 随 bind/重授权/任务创建/复活 best-effort 回填,不做批量回灌
+    vip_type: Mapped[int | None] = mapped_column(SmallInteger)
 
     __table_args__ = (
         # one binding per user(方案 §4);显式命名供 test_db_schema 断言
@@ -496,9 +502,10 @@ class BaiduBinding(Base, TimestampMixin):
 
 
 class BaiduBackupTask(Base, TimestampMixin):
-    """百度网盘备份任务(方案 §4)— 单绑定同时至多一个活动中任务。
+    """百度网盘备份任务(方案 §4;并发方案 §2 同绑定多任务排队,一跑一排队)。
 
-    状态:enumerating(清单准备中)→ running → completed / cancelled / failed。
+    状态:enumerating(清单准备中;enum_done=true 的排队任务经 §2.5 短路恢复)
+    → running → completed / cancelled / failed。
     时间戳谓词必须显式含 NULL 分支(SQL 中 NULL 参与比较恒为假):任务在
     「创建后未派发」「派发后未认领」两窗口 dispatched_at / runner_id / lease_until
     均为 NULL(方案 §4 状态谓词)。
@@ -574,9 +581,18 @@ class BaiduBackupTask(Base, TimestampMixin):
     fail_reason: Mapped[str | None] = mapped_column(String(512))
 
     __table_args__ = (
-        # 同绑定同时最多一个活动中任务(应用层检查之外的硬兜底,撞唯一约束统一转 409)
+        # 弱一级兜底(并发方案 §2.2):UNIQUE(binding_id) WHERE status='running',
+        # 恰好护住最危险的「同绑定双下载循环」;枚举期互斥由准入层负责(枚举走
+        # 单飞刷新,本身安全)。谓词为 ACTIVE_STATUSES 的刻意子集(D3/T7)。
         Index(
-            "uq_baidu_task_active", "binding_id", unique=True,
+            "uq_baidu_task_running", "binding_id", unique=True,
+            postgresql_where=text("status = 'running'"),
+        ),
+        # 准入查询索引(并发方案 §2.2):同绑定活动行非唯一 partial(原唯一索引
+        # uq_baidu_task_active 已随迁移 0017 删除);谓词状态集须与 ACTIVE_STATUSES
+        # 保持一致(防未来加状态档位两侧漂移,T7 谓词漂移断言口径=模型元数据)
+        Index(
+            "idx_baidu_task_active_binding", "binding_id",
             postgresql_where=text("status IN ('enumerating','running')"),
         ),
     )

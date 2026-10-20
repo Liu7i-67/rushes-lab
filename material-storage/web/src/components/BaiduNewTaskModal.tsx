@@ -96,7 +96,8 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
         project_id: projectId,
         ...(target.kind === 'folder' ? { target_folder_id: target.id } : {}),
       });
-      message.success('备份任务已创建,清单准备中');
+      // 排队预期管理(方案 §6-P2-b):前端不感知绑定是否已有任务在跑,无条件提示
+      message.success('备份任务已创建,清单准备中;已有任务执行中时,新任务将排队,前序完成后约数分钟至一刻钟内自动开始');
       onClose();
     } catch (e) {
       message.error(errorMessage(e, '创建任务失败'));

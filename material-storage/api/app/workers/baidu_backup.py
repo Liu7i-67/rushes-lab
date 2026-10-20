@@ -18,7 +18,8 @@ in-progress TTL 按**全部注册 function 的最大超时**计算,注册 172800
   → multipart 断点/死会话/head 快捷路径(overwrite 禁用)/md5 单段旁证 → asset
   落库(全谓词 + 预检 + baidu_file_imported 审计)→ 缩略图三分派 → 收尾完整谓词;
 - sweeper cron:timeout=300、NULL/派发超时谓词、cancel_requested/flag 感知直
-  终态化、48h 兜底、30d 孤儿清理逐行 try/except、确定性准入排序前 2。
+  终态化、48h 兜底、30d 孤儿清理逐行 try/except、派发候选按绑定代表去重
+  (终态化支不去重,并发方案 §2.3/D12)
 """
 from __future__ import annotations
 
@@ -34,6 +35,7 @@ from typing import Any
 
 from sqlalchemy import exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -124,7 +126,8 @@ MAX_FILE_ATTEMPTS = 5           # 单文件自动重试上限(§5.3)
 FILE_BACKOFF_CAP_S = 20.0       # 单次退避封顶 ≤20s(≤ 租约/3,§5.3)
 ORPHAN_BATCH = 50               # sweeper 30d 孤儿清理每轮上限(§6 ≤50 行/批)
 SWEEP_BATCH = 50                # sweeper 候选任务每轮上限
-ADMISSION_LIMIT = 2             # 确定性准入稳态恰 2(§6:保证缩略图/cron 至少 2 槽)
+# ADMISSION_LIMIT 硬编码已删(并发方案 §3.2):准入配额改读 Settings
+# (baidu_admission_limit / baidu_nonvip_admission_limit,env 可调)
 AUDIT_DEDUP_FMT = "baidu_task:{task_id}:{event}:{ref}:r{retry}:a{attempts}"
 
 # checkpoint 结果:
@@ -246,10 +249,17 @@ async def _run_claimed(db: AsyncSession, runner: Runner) -> str:
             db, runner, fail_reason=FAIL_FEATURE_DISABLED, reason_row="feature_disabled",
         )
 
-    # 确定性准入(§6):非「活动中任务按 round_started_at NULLS LAST, created_at, id
-    # 排序前 2 名」→ 复位轮钟并清租约,安静退出交 sweeper 重派(10min 节流);
-    # 不可由 job 侧自派发(会形成认领→退出→再拾取的自旋热循环)
-    top = await admission_top_task_ids(db, limit=ADMISSION_LIMIT)
+    # 确定性准入(VIP 分道,并发方案 §3.1):非「picked 集合」成员 → 复位轮钟并
+    # 清租约(status='running' 同步降级回 enumerating,§2.3),安静退出交 sweeper
+    # 重派(10min 节流);不可由 job 侧自派发(会形成认领→退出→再拾取的自旋热循环)。
+    # 接线声明(§3.1):判定集合必须就是 admission_top_task_ids 返回的 picked 集合
+    # —— 若误接无分道 top-N,「2 非会员 running + 第 3 dormant 非会员」纯顺序执行
+    # 就会击穿「非会员 ≤ nonvip_limit」不变量(T11 防接错线)
+    top = await admission_top_task_ids(
+        db,
+        limit=settings.baidu_admission_limit,
+        nonvip_limit=settings.baidu_nonvip_admission_limit,
+    )
     if runner.task_id not in top:
         await release_for_queueing(
             db, task_id=runner.task_id, expected_seq=runner.expected_seq,
@@ -263,6 +273,10 @@ async def _run_claimed(db: AsyncSession, runner: Runner) -> str:
     runner.tenant_key = org[1] if org else None
 
     if task.status == STATUS_ENUMERATING:
+        if task.enum_done:
+            # 复活统一入队漏斗(并发方案 §2.5):enum_done=true 的排队任务跳过
+            # 重枚举(manifest 已在,重枚举纯属冗余 API 调用),直达枚举收尾
+            return await _resume_from_queued_enum(db, runner)
         return await _enumerate(db, runner)
     return await _import_loop(db, runner)
 
@@ -536,16 +550,21 @@ async def _consume_enum_outcome(db: AsyncSession, runner: Runner, outcome: str) 
     )
 
 
-async def _enumerate(db: AsyncSession, runner: Runner) -> str:
-    """枚举仅对 status='enumerating' 执行(§6;接管/续轮的 running 任务已有
-    manifest,直接进导入循环);BFS list_dir 分页写 manifest。"""
+async def _ensure_enum_target_folder(
+    db: AsyncSession, runner: Runner,
+) -> tuple[Folder | None, str | None]:
+    """枚举前 / enum_done 短路前的目标夹存在性预检(并发方案 §2.5,T16)。
+
+    - target_folder_id 为 NULL(创建后夹被删,FK SET NULL):auto_created 重建
+      承接夹写回;显式目标 → 任务级失败(承接夹语义已不可恢复)
+    - 排队期间目标夹可能被删,短路路径不预检则失败口径会从任务级 enum_failed
+      漂移为逐行 target_deleted —— 故与 _enumerate 前置同款强制预检
+    - 返回 (root_folder, None) = 通过;(None, failed_result) = 任务级失败已
+      终态化,failed_result 供调用方直接返回
+    """
     task = await db.get(Task, runner.task_id)
     if task is None:
-        return "task_not_found"
-    part_size = runner.settings.baidu_part_size_bytes
-
-    # 枚举期静态护栏的 prefix 口径:target_folder_id 为 NULL(创建后夹被删)时,
-    # auto_created 重建承接夹写回;显式目标 → 任务级失败(承接夹语义已不可恢复)
+        return None, "task_not_found"
     target_folder_id = task.target_folder_id
     if target_folder_id is None:
         if task.target_auto_created:
@@ -560,14 +579,102 @@ async def _enumerate(db: AsyncSession, runner: Runner) -> str:
             await db.commit()
             target_folder_id = node.folder_id
         else:
-            return await _finalize_task_only_failed(
+            return None, await _finalize_task_only_failed(
                 db, runner, fail_reason=FAIL_ENUM_FAILED, message="目标文件夹已被删除",
             )
     root = await db.get(Folder, target_folder_id)
     if root is None:
-        return await _finalize_task_only_failed(
+        return None, await _finalize_task_only_failed(
             db, runner, fail_reason=FAIL_ENUM_FAILED, message="目标文件夹已被删除",
         )
+    return root, None
+
+
+async def _finalize_enum_and_enter_import(db: AsyncSession, runner: Runner) -> str:
+    """枚举收尾公共步(_enumerate 与 §2.5 enum_done 短路共用):聚合 → 空目录
+    判定 → 置 running 收尾 UPDATE → 进导入循环。全系统仅此一处置 running
+    (并发方案 §2.5.3),§2.4 belt 就在本收尾 UPDATE 上。
+
+    §2.4 belt(撞 uq_baidu_task_running 的处置序,顺序有讲究):瞬态窗口下同绑定
+    另一任务短暂占 running,收尾 UPDATE 撞唯一索引后事务已中止(25P02),不能在
+    原事务继续执行 release ——
+      1. except IntegrityError → rollback(仅丢弃本 UPDATE 与其后的聚合重算;
+         manifest 行早已逐目录提交,无损失)。rollback 会 expire 会话内全部 ORM
+         对象 —— 后续只做纯 CAS UPDATE,不得再读会话内 task 等对象属性;
+      2. 新事务置 enum_done=true(status 保持 enumerating:枚举已完成、manifest
+         已提交,重派经 §2.5 短路直达本步,零 list API 重放;仅 belt 路径置位,
+         门控退出路径不置 —— 未完成枚举者必须重枚举)+ release_for_queueing 回
+         排队 + commit;
+      3. 返回 "queued",本轮 runner 结束、不进导入循环、不终态化失败,等下一拍
+         sweeper 重派。
+    """
+    agg = await compute_aggregates(db, task_id=runner.task_id)
+    await db.commit()
+    if agg.total_files == 0:
+        await finalize_task_terminal(db, task_id=runner.task_id, status=STATUS_COMPLETED)
+        await recompute_aggregates(db, task_id=runner.task_id)
+        await db.commit()
+        log.info("baidu enum empty dir task=%s → completed(源目录为空)", runner.task_id)
+        return "completed_empty"
+    try:
+        await db.execute(
+            update(Task)
+            .where(Task.id == runner.task_id, Task.status == STATUS_ENUMERATING)
+            .values(status=STATUS_RUNNING, enum_done=True)
+        )
+        await recompute_aggregates(db, task_id=runner.task_id)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()   # §2.4:PG 约束冲突后事务中止,只能 rollback 开新事务
+        await db.execute(
+            update(Task)
+            .where(
+                Task.id == runner.task_id,
+                Task.status == STATUS_ENUMERATING,
+                Task.lease_seq == runner.expected_seq,
+                Task.runner_id == runner.runner_id,
+            )
+            .values(enum_done=True)
+        )
+        await release_for_queueing(
+            db, task_id=runner.task_id, expected_seq=runner.expected_seq,
+            runner_id=runner.runner_id,
+        )
+        await db.commit()
+        log.info("baidu enum finish hit uq_baidu_task_running task=%s(belt 回排队)",
+                 runner.task_id)
+        return "queued"
+    log.info("baidu enum done task=%s total_files=%d → import loop",
+             runner.task_id, agg.total_files)
+    return await _import_loop(db, runner)
+
+
+async def _resume_from_queued_enum(db: AsyncSession, runner: Runner) -> str:
+    """enum_done=true 的排队任务恢复执行(并发方案 §2.5 短路):复活/门控退出
+    降级产生的「enumerating ∧ enum_done=true」行经本路径恢复 —— 跳过重枚举
+    (manifest 已在,BFS 重跑纯属冗余 list API 调用),先做目标夹存在性预检
+    (§2.5,排队期间可能被删),再走枚举收尾公共步(聚合 + 空目录判定 + 置
+    running 收尾 UPDATE 进导入循环;§2.4 belt 所在,再撞也只是纯 DB churn)。"""
+    root, failed = await _ensure_enum_target_folder(db, runner)
+    if failed is not None:
+        return failed
+    assert root is not None   # failed is None ⇒ root 必非 None(类型收窄供 mypy)
+    return await _finalize_enum_and_enter_import(db, runner)
+
+
+async def _enumerate(db: AsyncSession, runner: Runner) -> str:
+    """枚举仅对 status='enumerating' 且 enum_done=false 执行(§6;enum_done=true
+    的排队任务走 §2.5 短路;接管/续轮的 running 任务已有 manifest,直接进导入
+    循环);BFS list_dir 分页写 manifest。"""
+    task = await db.get(Task, runner.task_id)
+    if task is None:
+        return "task_not_found"
+    part_size = runner.settings.baidu_part_size_bytes
+
+    root, failed = await _ensure_enum_target_folder(db, runner)
+    if failed is not None:
+        return failed
+    assert root is not None   # failed is None ⇒ root 必非 None(类型收窄供 mypy)
     prefix = root.minio_prefix
 
     dirs: deque[tuple[str, str]] = deque([(task.source_dir, "")])
@@ -618,24 +725,8 @@ async def _enumerate(db: AsyncSession, runner: Runner) -> str:
                 message=f"manifest 超 {MANIFEST_MAX_FILES} 文件护栏",
             )
 
-    # 枚举完成:0 行 → 直接 completed(空目录,§4);否则置 running + enum_done
-    agg = await compute_aggregates(db, task_id=runner.task_id)
-    await db.commit()
-    if agg.total_files == 0:
-        await finalize_task_terminal(db, task_id=runner.task_id, status=STATUS_COMPLETED)
-        await recompute_aggregates(db, task_id=runner.task_id)
-        await db.commit()
-        log.info("baidu enum empty dir task=%s → completed(源目录为空)", runner.task_id)
-        return "completed_empty"
-    await db.execute(
-        update(Task)
-        .where(Task.id == runner.task_id, Task.status == STATUS_ENUMERATING)
-        .values(status=STATUS_RUNNING, enum_done=True)
-    )
-    await recompute_aggregates(db, task_id=runner.task_id)
-    await db.commit()
-    log.info("baidu enum done task=%s total_files=%d → import loop", runner.task_id, agg.total_files)
-    return await _import_loop(db, runner)
+    # 枚举完成:聚合 → 空目录判定 → 置 running 收尾(belt)→ 导入循环,公共步
+    return await _finalize_enum_and_enter_import(db, runner)
 
 
 # ─── 导入循环(§6 步骤 1-7)──────────────────────────────────────────────────
@@ -1026,40 +1117,42 @@ async def _handle_baidu_error(
 async def _handle_errno_31045(
     db: AsyncSession, runner: Runner, row: TaskFile,
 ) -> None:
-    """31045 refresh-first 回退(§5.3):先按 auth_expired 强制试一次 refresh
-    (成功则原子覆盖 binding 双 token + 过期时间,与 §4 覆盖口径一致),随后按
-    link_expired 语义重取一次 dlink;refresh 失败不重试不置 expired(按可重试
-    处理,防误杀绑定),回落 link_expired 路径。重试循环凭内存中的新 dlink 续跑。
+    """31045 refresh-first 回退(§5.3;并发方案 §2.6 四件套改造):
 
-    已知取舍:此处绕过 refresh 单飞 helper 直调 client(force 语义 + 单任务
-    单 runner 持有绑定,竞态窗口仅剩 API 侧自然过期刷新,可接受);仅内存更新
-    行 dlink(dlink 本就是懒取缓存,崩溃后下轮重取自愈)。
+    - 改走 force_refresh_access_token 单飞(force 旁路跳过新鲜度短路,§2.6.1;
+      31045 恰是「百度侧拒绝但本地未到期」,不旁路则短路复用坏 token 零次真实
+      刷新;≤REFRESH_MAX_ATTEMPTS(3) 次带退避真实尝试才回落 —— 刻意接受的口径
+      变化:比旧单次直刷至多多敲 2 次 token 端点,换瞬态抖动自愈)
+    - 会话隔离(§2.6.2,必须):刷新放独立 session —— _refresh_locked_once 的
+      rollback 会 expire 会话内全部 ORM 对象(async 下 MissingGreenlet),不污染
+      runner 主会话;且 expire_binding_on_exhaustion=False(§2.6.3):耗尽路径
+      「先置 expired 再抛」的时序陷阱会误杀绑定,传 False 只抛、此处回落
+      link_expired 重取 dlink,保住「刷新失败不误杀绑定」
+    - 成功后必须对主会话 binding 实例 db.refresh 回写新值 —— 否则主会话身份映射
+      缓存还是旧 token,任务内后续每个文件重踩 31045、各做一次真实刷新(token
+      端点被持续敲打),_maybe_invalidate_stale_dlink 读到的 token_rotated_at 也是
+      旧值、403 甄别失效
+    - 仅内存更新行 dlink(dlink 本就是懒取缓存,崩溃后下轮重取自愈)
     """
     binding = await db.get(BaiduBinding, runner.binding_id) if runner.binding_id else None
-    refresh_token_plain = ""
+    refreshed_token: str | None = None
     if binding is not None and binding.status == "active":
         try:
-            refresh_token_plain = runner.crypto.decrypt(binding.refresh_token_enc)
-        except Exception:
-            refresh_token_plain = ""   # 密文不可解(密钥轮换)→ refresh 必败 → 回落
-    refreshed_token: str | None = None
-    try:
-        tokens = await runner.client.refresh_token(refresh_token_plain)
-    except Exception as refresh_err:
-        log.info("baidu 31045 refresh-first failed task=%s file=%s err=%s(回落 link_expired)",
-                 runner.task_id, row.id, refresh_err)
-    else:
-        if binding is not None:
-            now = _now()
-            binding.access_token_enc = runner.crypto.encrypt(tokens.access_token)
-            binding.refresh_token_enc = runner.crypto.encrypt(tokens.refresh_token)
-            binding.access_token_expires_at = now + timedelta(seconds=tokens.expires_in)
-            binding.token_rotated_at = now   # 任何 token 覆盖写入都刷新(403 甄别锚点,§4)
-            await db.commit()
-        runner.consecutive_auth_expired = 0
-        refreshed_token = tokens.access_token
-        log.info("baidu 31045 refresh-first ok task=%s file=%s(重取 dlink 续跑)",
-                 runner.task_id, row.id)
+            async with get_sessionmaker()() as refresh_db:
+                refreshed_token = await force_refresh_access_token(
+                    refresh_db, binding.id, crypto=runner.crypto, client=runner.client,
+                    expire_binding_on_exhaustion=False,   # §2.6.3 耗尽不误杀绑定
+                )
+        except BaiduTaskError as refresh_err:
+            # §2.6.3:耗尽(≤3 次真实尝试)回落 link_expired 重取 dlink 路径
+            log.info("baidu 31045 refresh failed task=%s file=%s err=%s(回落 link_expired)",
+                     runner.task_id, row.id, refresh_err)
+        else:
+            # §2.6.2 回写配套:主会话身份映射回写新双 token/token_rotated_at
+            await db.refresh(binding)
+            runner.consecutive_auth_expired = 0
+            log.info("baidu 31045 refresh-first ok task=%s file=%s(重取 dlink 续跑)",
+                     runner.task_id, row.id)
     await _refetch_dlink_once(db, runner, row, prefer_token=refreshed_token)
 
 
@@ -1811,6 +1904,9 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
     }
     store = AsyncObjectStore(settings)
     async with store, get_sessionmaker()() as db:
+            # 候选批量查询的排序键 = 准入代表序(并发方案 §2.3/D12:round 非空的
+            # 崩溃行恒压过 NULL 休眠行,接管对象恒优先;只按 created_at 截批会把
+            # 创建较晚的崩溃 running 行挡在 SWEEP_BATCH 外,接管被休眠行无限推迟)
             candidates = (await db.execute(
                 select(Task)
                 .where(
@@ -1820,10 +1916,21 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
                     | (Task.dispatched_at
                        < now - timedelta(seconds=settings.baidu_sweep_throttle_s)),
                 )
-                .order_by(Task.created_at, Task.id)   # 确定性排序
+                .order_by(
+                    Task.round_started_at.nulls_last(), Task.created_at, Task.id,
+                )
                 .limit(SWEEP_BATCH)
             )).scalars().all()
             stats["candidates"] = len(candidates)
+            # 候选处理拆两段(并发方案 §2.3/D12):
+            #   第一段 —— 终态化支(flag/cancel_requested/48h)处理**全量候选不去重**
+            #   (这两支是终态化、不占准入槽,提前处理只降低竞争;若把去重加在整个
+            #   候选集上,「带取消位的休眠非代表行」将永远不被 cancel 支选中,用户会
+            #   看到「点了取消却一直排队」直至同绑定前序任务跑完);
+            #   第二段 —— 剩余派发候选按 DISTINCT ON(binding_id) 语义取每绑定最老
+            #   代表(每绑定每拍 ≤1 job,排队任务「认领→门控退出」churn 压到每绑定
+            #   每拍恰 1 条,且不挤占 SWEEP_BATCH 候选位)
+            dispatch_candidates: list[Task] = []
             for task in candidates:
                 if not settings.baidu_backup_enabled:
                     stats["flag_off"] += 1
@@ -1841,6 +1948,12 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
                         db, task, fail_reason=FAIL_TIMEOUT, reason_row="task_timeout",
                     )
                     continue
+                dispatch_candidates.append(task)
+            seen_bindings: set[uuid.UUID] = set()
+            for task in dispatch_candidates:
+                if task.binding_id in seen_bindings:
+                    continue   # 非代表行:被同绑定代表压制,顺延一拍(≤10min)语义无损
+                seen_bindings.add(task.binding_id)
                 # 派发步(CAS;接管分支同事务复位在途行;不复位 round_started_at ——
                 # 轮起点跨接管累计,否则反复崩溃可无限重置 48h 时钟,§6)
                 await reset_importing_rows(db, task_id=task.id)

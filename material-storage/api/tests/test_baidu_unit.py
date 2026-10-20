@@ -90,6 +90,7 @@ from app.routers.baidu_backup import (
 from app.services.baidu_backup import (
     ENUM_BACKOFF_CAP_S,
     ENUM_BACKOFF_MAX_ATTEMPTS,
+    REFRESH_MAX_ATTEMPTS,
     BaiduTaskError,
     ensure_fresh_access_token,
     source_dir_leaf_name,
@@ -248,6 +249,8 @@ class FakeClient:
                  recheck_metas: list[dict[str, Any]] | None = None) -> None:
         self.refresh_calls = 0
         self.filemetas_calls = 0
+        self.filemetas_tokens: list[str] = []   # 每次 filemetas 收到的 access_token(31045
+        #   断言载体:刷新成功后重取 dlink 必须用新 token,§2.6 回写配套)
         self.refresh_ok = refresh_ok
         # 复核口径(实现协议):空列表 = 文件确认不存在;非空 = 文件仍在
         self.recheck_metas = (
@@ -265,6 +268,7 @@ class FakeClient:
     async def filemetas_batch(self, access_token: str, fsids: list[int], *,
                               dlink: bool = True) -> list[dict[str, Any]]:
         self.filemetas_calls += 1
+        self.filemetas_tokens.append(access_token)
         return list(self.recheck_metas)
 
 
@@ -303,6 +307,7 @@ class FakeDb:
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.commits = 0
         self.rollbacks = 0
+        self.refreshes = 0
         self._select_result = select_result
         self._group_rows = list(group_rows or [])
         self._importing_bytes = importing_bytes
@@ -323,6 +328,11 @@ class FakeDb:
 
     async def get(self, model: Any, pk: Any) -> Any:
         return self._get_map.get((model, pk))
+
+    async def refresh(self, obj: Any) -> None:
+        """§2.6.2 主会话回写替身(db.refresh(binding)):替身与独立会话共享同一
+        内存实例(独立会话的变更本就可见),这里仅记录调用供断言。"""
+        self.refreshes += 1
 
     async def commit(self) -> None:
         self.commits += 1
@@ -362,6 +372,34 @@ class LockedFakeDb(FakeDb):
         if self._lock.locked():
             self._lock.release()
         await super().rollback()
+
+
+class FakeRefreshSessionFactory:
+    """get_sessionmaker 替身(§2.6.2 会话隔离观察面):31045 新实现把 force refresh
+    放独立 session(不污染 runner 主会话),单测以本替身替换 worker.get_sessionmaker
+    —— 返回预置的独立 FakeDb 并记录开启次数,行为语义(行锁 SELECT/commit/rollback)
+    仍走 FakeDb 真实路径,不 mock 被测的刷新逻辑本身。"""
+
+    def __init__(self, refresh_db: FakeDb) -> None:
+        self.refresh_db = refresh_db
+        self.opened = 0
+
+    def __call__(self) -> _FakeSessionCtx:
+        self.opened += 1
+        return _FakeSessionCtx(self.refresh_db)
+
+
+class _FakeSessionCtx:
+    """async with get_sessionmaker()() 的会话上下文替身。"""
+
+    def __init__(self, db: FakeDb) -> None:
+        self.db = db
+
+    async def __aenter__(self) -> FakeDb:
+        return self.db
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
 
 
 def make_runner(*, client: FakeClient | None = None,
@@ -558,26 +596,69 @@ class TestRowErrorHandling:
         assert client.refresh_calls == 0 and client.filemetas_calls == 0, "权限类不重取不刷新"
         assert disposition not in (None, "retry"), "权限类必须就地落失败,不交退避循环"
 
-    async def test_31045_tries_refresh_then_refetches_dlink(self) -> None:
-        """31045 → 先 refresh(auth_expired 尝试),成功后重取 dlink 按 link_expired 续跑。"""
-        db, row, binding = FakeDb(), FakeRow(), FakeBinding()
+    async def test_31045_tries_refresh_then_refetches_dlink(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """31045(并发方案 §2.6 四件套):走 force_refresh_access_token(force 旁路
+        新鲜度短路)+ 独立 session(§2.6.2)+ 成功后主会话 db.refresh(binding) 回写,
+        再以新 token 重取 dlink 按 link_expired 续跑。"""
+        binding = FakeBinding()          # 默认 access_token_expires_at = 30 天后(未到期)
+        db = FakeDb(get_map={(BaiduBinding, binding.id): binding})   # 31045 前置主会话 db.get
+        row = FakeRow()
         client = FakeClient(refresh_ok=True)
+        # §2.6.2 会话隔离替身:force refresh 的独立 session(FOR UPDATE SELECT 服务同一 binding)
+        refresh_db = FakeDb(
+            select_result=FakeResult(scalar_row=binding),
+            get_map={(BaiduBinding, binding.id): binding},
+        )
+        fake_sm = FakeRefreshSessionFactory(refresh_db)
+        monkeypatch.setattr(worker, "get_sessionmaker", lambda: fake_sm)
+
         await _handle_baidu_error(
             db, make_runner(client=client, binding_id=binding.id), row, make_err(None, 31045))
-        assert client.refresh_calls == 1, "31045 必须先试一次 refresh"
+
+        # §2.6.1 force 旁路:binding 未到期,非 force 会被新鲜度短路复用同一个坏
+        # token、零次真实刷新 —— 恰 1 次真实 refresh 证明旁路生效
+        assert client.refresh_calls == 1, "31045 必须 force 真实刷新一次(旁路新鲜度短路)"
+        assert fake_sm.opened == 1, "刷新必须放独立 session(§2.6.2,不污染 runner 主会话)"
+        assert db.refreshes == 1, "成功后必须对主会话 binding db.refresh 回写(§2.6.2 配套)"
         assert client.filemetas_calls == 1, "refresh 后须重取 filemetas 换新 dlink"
+        assert client.filemetas_tokens == ["at-new"], "重取 dlink 必须用刷新后的新 token"
         assert row.dlink == "https://d.pcs.baidu.com/new?access_token=NEW"
+        assert binding.status == "active", "刷新成功不改变绑定状态"
         assert not db.updates, "31045 不得落 non_retryable"
 
-    async def test_31045_refresh_failure_falls_back_to_link_expired(self) -> None:
-        """31045 → refresh 失败 → 回落 link_expired 语义(重取 dlink),不误杀绑定。"""
-        db, row, binding = FakeDb(), FakeRow(), FakeBinding()
+    async def test_31045_refresh_failure_falls_back_to_link_expired(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """31045(并发方案 §2.6.3):refresh 失败经 force_refresh_access_token 带
+        退避真实尝试 ≤REFRESH_MAX_ATTEMPTS(3) 次才回落(刻意接受的口径变化:旧实现
+        单次直刷);expire_binding_on_exhaustion=False —— 耗尽只抛、不误杀绑定,
+        回落 link_expired 语义(重取 dlink 重试)。"""
+        monkeypatch.setattr(baidu_backup_service, "REFRESH_RETRY_BACKOFF_S", 0)
+        binding = FakeBinding()
+        db = FakeDb(get_map={(BaiduBinding, binding.id): binding})
+        row = FakeRow()
         client = FakeClient(refresh_ok=False)
+        refresh_db = FakeDb(
+            select_result=FakeResult(scalar_row=binding),
+            get_map={(BaiduBinding, binding.id): binding},
+        )
+        monkeypatch.setattr(
+            worker, "get_sessionmaker", lambda: FakeRefreshSessionFactory(refresh_db))
+
         await _handle_baidu_error(
             db, make_runner(client=client, binding_id=binding.id), row, make_err(None, 31045))
-        assert client.refresh_calls == 1
+
+        assert client.refresh_calls == REFRESH_MAX_ATTEMPTS == 3, \
+            "改走包装后为 ≤3 次带退避真实尝试才回落(§2.6.3 刻意接受的口径变化)"
         assert client.filemetas_calls == 1, "回落 link_expired → 重取 dlink"
-        assert binding.status == "active", "refresh 失败按可重试处理,不得直接置 expired"
+        assert client.filemetas_tokens == ["at-old"], \
+            "回落路径以现存 token 重取(refresh 未成功,不得凭空造新 token)"
+        assert row.dlink == "https://d.pcs.baidu.com/new?access_token=NEW", \
+            "回落仍完成一次 dlink 换新(交调用方重试循环续跑)"
+        assert binding.status == "active", \
+            "expire_binding_on_exhaustion=False:耗尽路径只抛不误杀绑定(§2.6.3)"
         assert not db.updates
 
     async def test_errno_31360_pure_link_expired_no_refresh(self) -> None:

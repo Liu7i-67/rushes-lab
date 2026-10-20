@@ -30,8 +30,9 @@
         fail_reason 300 字符 + target_folder_id=NULL)/ completed(base+40s)
     u2: completed x 2(同 created_at=base+15s,验 id DESC 稳定排序)/
         enumerating(base+10s,活动任务)/ cancelled(base+5s,cancel 语义)
-  同绑定至多一个活动任务(uq_baidu_task_active 部分唯一索引)→ u1 唯一活动 =
-  running、u2 唯一活动 = enumerating,约束天然满足。
+  同绑定活动任务受 running-only 唯一兜底(uq_baidu_task_running 部分唯一索引)
+  与软上限(baidu_max_active_tasks_per_binding,并发方案 §2.5)约束 → u1 唯一
+  running、u2 唯一 enumerating,均在约束内。
   「跨用户可见」按需求口径为**全系统**(不限默认 org):任务挂在独立 org 的用户名下,
   恰好验证 admin 视角无 org 侬据(若实现错误地按默认 org 过滤,本模块会失败暴露)。
 
