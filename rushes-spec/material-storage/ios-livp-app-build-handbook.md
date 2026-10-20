@@ -70,11 +70,12 @@ flutter doctor                         # 确认 iOS toolchain 全绿
 
 ## 3. 后端环境说明(无需配置,知悉即可)
 
-- 登录页 `dev | prod | 自定义` 三档,登录成功即记忆:
-  - dev = `http://47.108.196.211:8080`(测试环境,外网直连,默认);
-  - prod = `https://bucket.taoxiplan.com`(生产,HTTPS);
-  - 自定义:内网地址 `http://192.168.110.221:8090`(dev)/ `http://192.168.110.221`(prod)、
-    或其他入口,手填即可。
+- **完整版起(B1 批)无环境切换 UI**:冷启动自动按序探测 `GET /healthz`(免鉴权,3s 超时),
+  命中即用——①`--dart-define=MS_API_BASE`(仅开发构建) ②`http://192.168.110.221`
+  (内网,工作室 WiFi) ③`https://bucket.taoxiplan.com`(公网 HTTPS,兜底)。
+  全失败登录页显示「服务不可达·重试」横幅,重按重探;运行中不热切换,下次冷启动纠正;
+  「我的」页只读显示当前命中的入口。
+- 旧 dev 外网口 `http://47.108.196.211:8080` 已不在探活序列(dev 调试一律走 dart-define)。
 - iOS 明文 HTTP 限制已在 Info.plist 处理(dev 是 IP 直连 http,Apple 的
   NSExceptionDomains 不匹配 IP 字面量,故开了 NSAllowsArbitraryLoads;勿删,否则 dev 入口连不上)。
 - Android 同理:主清单(`android/app/src/main/AndroidManifest.xml`)已开
@@ -127,7 +128,7 @@ Bundle ID 选你在第 2 步设定的 → 上传构建 → TestFlight 标签页�
 | `pod install` 卡住/报 CDN 错 | `pod repo update` 后重试;或 `flutter clean && flutter pub get` 再 run |
 | 签名报错 "No profiles for 'dev.rushes.ms-app'" | Xcode 里 Team 没选/Bundle ID 与账号不匹配,按 §2 第 2 步改 |
 | 真机装上闪退(灰图标) | 手机未信任证书:设置→通用→VPN与设备管理→信任 |
-| 登录转圈超时 | 手机网络到所选入口不通;切另一档入口或确认外网可达 `http://47.108.196.211:8080` |
+| 登录页「服务不可达」 | 当前网络到两个探测入口都不通;换网络(如连工作室 WiFi)后点「重试」重探 |
 | 相册里看不到存入的照片 | 检查相册权限(设置→隐私→照片);实况照片在相册默认视图就有,不用筛选 |
 | `flutter doctor` 报 iOS toolchain 异常 | 按 `flutter doctor -v` 提示逐条修(Xcode/许可/CocoaPods) |
 
