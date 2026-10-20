@@ -1,5 +1,6 @@
 ## 2026-10-20
 
+- **key 冲突体验优化方案修订：W2 改无条件自动后缀**（用户拍板「取消自动后缀按钮，这种场景下自动随机后缀」）：取消任务级 Checkbox 开关设计——冲突自动化不该要求事前 opt-in，连带砍掉迁移 0018/API 入参/前端改动（W2 收敛为仅 worker 一个文件）；**触发口径=占用者全跨项目才自动后缀**（Asset 无 project_id 直连，`_key_conflict_holders` 需 join folders 带出归属，folder 缺失归属不明保守走现状失败），同项目占用保留「失败→复活覆盖导入」替换流（自动后缀会把重导入静默变重复副本）；钉子入库=勿复用 reserve_random_key（CAS 前提 status∈(failed,pending) 对在途 importing 行不符，改守卫 UPDATE `reserved_key IS NULL` 谓词）/二检换 key 必先 abort 在途会话+清三元组+refresh 行否则 complete 老 key 产孤儿/换 key 不烧 attempt 每行至多一次；**旧开关设计 WIP（feat/baidu-key-conflict-ux worktree，未提交）整体弃置清理**（基点 30a7c0a 已在 liuqi 无独有提交，worktree+分支已删）；待实施等指令（fcf6266）
 - **App 分片上传 411 修复(prod)+预签 PUT 日志盲区补齐**(iOS 真机反馈:prod https 登录/浏览正常但传 livp 报 411 Length Required;dev 链路容忍故此前 PC 验证未暴露):根因=分片 PUT 用 Stream body 未带 Content-Length → dio 走 chunked 传输,prod 链路(跳板机 nginx→MinIO)拒绝;修法=`Stream<Uint8List>.value(chunk)`+显式 content-length 定长头;单测加回归守卫(part PUT 必须带 Content-Length 禁 chunked);链路兼容性由 web Uppy 同机制(定长分片 PUT 同链路)现网使用背书,未在 prod 造测试数据;**顺带修日志盲区:预签 PUT 走独立裸 Dio 此前无日志(用户报障日志里 PUT 完全不可见),现挂同款拦截器(预签 query 含签名只记 host+path)错误态含状态码**;安卓 APK 已重建;iOS 需同事重打新构建(TestFlight 下一版本)才能带上此修复
 - **iOS 真机 dev 外网入口不可达排查结论**(errno 65 No route to host @47.108.196.211:8080,prod https 同机正常;PC 侧 8080/18080/443 三入口实测全通=服务端无恙):手机网络路径问题(蜂窝/特定 WiFi 对裸 IP:8080 无路由);iOS 真机建议走 prod https,dev 调试连工作室 WiFi 或后续给 dev 配 HTTPS 域名(另期)
 
