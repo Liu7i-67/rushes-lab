@@ -1,6 +1,6 @@
-/// 资产宫格页(B2 §8.1):3 列缩略图、点按=预览、长按=多选;B4 功能点 4②:
-/// 多选底部操作栏亮「下载」键(批量逐文件入队,>20 确认弹窗,其余键 B5);
-/// 进页拉单夹详情取 my_can_download / my_can_upload(列表响应恒 False,§11);
+/// 资产宫格页(B2 §8.1):3 列缩略图、点按=预览、长按=多选;B5 功能点 1:
+/// 多选底部操作栏全量点亮(下载 B4/分享·移动·删除/⋯ 批量打标·前缀·申请权限);
+/// 进页拉单夹详情取 my_can_* + projectId(列表响应恒 False,§11);
 /// 上传入口唯一(「⬆」+空态引导),RefreshBus 订阅 + 顶部迷你进度条。
 library;
 
@@ -11,12 +11,11 @@ import '../../core/session.dart';
 import '../../core/transfers/transfer_queue.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
-import '../../widgets/error_view.dart';
 import '../preview/preview_page.dart';
 import 'asset_selection_bar.dart';
-import 'asset_tile.dart';
+import 'assets_body.dart';
+import 'selection_actions.dart';
 import 'upload_pick.dart' show showUploadSheet;
-import 'upload_sheet.dart';
 
 class AssetsPage extends StatefulWidget {
   const AssetsPage({
@@ -60,6 +59,9 @@ class _AssetsPageState extends State<AssetsPage> {
   /// 上传入口显隐(§13);null=详情未到/失败,保持现役显示口径。
   bool? _canUpload;
 
+  /// 单夹详情原对象(B5:projectId→批量移动目标树数据源;trash/移动闸门口径)。
+  Folder? _detail;
+
   @override
   void initState() {
     super.initState();
@@ -102,6 +104,7 @@ class _AssetsPageState extends State<AssetsPage> {
     _total = page.total.toInt();
     _canDownload = detail?.myCanDownload;
     _canUpload = detail?.myCanUpload;
+    _detail = detail;
   }
 
   /// 全屏刷新(首拉/下拉/ErrorView 重试):整页 spinner,失败走整页错误。
@@ -138,6 +141,10 @@ class _AssetsPageState extends State<AssetsPage> {
       if (!fresh()) return;
       setState(() {
         _applyPage(page, detail);
+        // P2-3:他端删除的资产不在新页,剪掉失效选中 id(操作栏计数与实际一致;
+        // 全屏 _refresh 已整清选中,此处只管 silent swap 路径)
+        final liveIds = {for (final a in page.items) a.id};
+        _selected.removeWhere((id) => !liveIds.contains(id));
         _error = null;
         _loading = false;
       });
@@ -179,6 +186,51 @@ class _AssetsPageState extends State<AssetsPage> {
     if (r != null && mounted) setState(() => _selected.clear());
   }
 
+  // ── B5 功能点 1:操作栏全量回调(编排拆件见 selection_actions.dart)────────
+  List<Asset> get _picked =>
+      _items.where((a) => _selected.contains(a.id)).toList();
+
+  Future<void> _shareSelected() async {
+    await shareSingleAsset(context, _picked);
+  }
+
+  Future<void> _moveSelected() async {
+    final moved = await moveSelectedAssets(context,
+        selectedIds: _selected.toList(),
+        sourceFolderId: widget.folderId,
+        detail: _detail,
+        whereLabel: widget.where?.split('/').first);
+    if (moved && mounted) setState(() => _selected.clear());
+  }
+
+  Future<void> _deleteSelected() async {
+    if (await deleteSelected(context,
+        picked: _picked, folderId: widget.folderId)) {
+      if (mounted) setState(() => _selected.clear());
+    }
+  }
+
+  Future<void> _batchTag() async {
+    if (await batchTagSelected(context,
+        selectedIds: _selected.toList(), folderId: widget.folderId)) {
+      if (mounted) setState(() => _selected.clear());
+    }
+  }
+
+  void _batchPrefix() {
+    batchPrefixSelected(context,
+        picked: _picked,
+        selectedIds: _selected.toList(),
+        folderId: widget.folderId, onSettle: (remaining) {
+      if (!mounted) return;
+      setState(() => _selected..clear()..addAll(remaining));
+    });
+  }
+
+  Future<void> _requestAccess() async {
+    await requestAccessSingle(context, _picked);
+  }
+
   void _openPreview(int index) {
     Navigator.of(context).pushNamed('/preview',
         arguments: PreviewArgs(
@@ -212,87 +264,33 @@ class _AssetsPageState extends State<AssetsPage> {
               count: _selected.length,
               canDownload: _canDownload,
               onDownload: _downloadSelected,
+              onShare: _shareSelected,
+              onMove: _moveSelected,
+              onDelete: _deleteSelected,
+              onBatchTag: _batchTag,
+              onBatchPrefix: _batchPrefix,
+              onRequest: _requestAccess,
               onClear: () => setState(() => _selected.clear()))
           : null,
       body: _body(context),
     );
   }
 
-  Widget _body(BuildContext context) {
-    if (_loading) return const Center(child: CircularProgressIndicator());
-    if (_error != null) {
-      return ErrorView(message: _error!, onRetry: _refresh);
-    }
-    if (_items.isEmpty) {
-      // 空态引导=上传第二入口(§5);my_can_upload 已知 false 时只留文案
-      return Column(
-        children: [
-          UploadMiniBar(queue: widget.transferQueue),
-          Expanded(
-              child: UploadEmptyGuide(
-                  enabled: _canUpload != false, onTap: _openUploadSheet)),
-        ],
-      );
-    }
-    final hasMore = _items.length < _total;
-    return Column(
-      children: [
-        UploadMiniBar(queue: widget.transferQueue),
-        if (_log.isNotEmpty)
-          Container(
-            width: double.infinity,
-            color: Theme.of(context).colorScheme.surfaceContainerLow,
-            padding: const EdgeInsets.fromLTRB(16, 6, 16, 6),
-            child: Text(_log.first,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall),
-          ),
-        Expanded(
-          child: RefreshIndicator(
-            onRefresh: _refresh,
-            child: GridView.builder(
-              padding: const EdgeInsets.all(8),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                mainAxisSpacing: 8,
-                crossAxisSpacing: 8,
-                childAspectRatio: 0.72,
-              ),
-              itemCount: _items.length + (hasMore ? 1 : 0),
-              itemBuilder: (context, i) {
-                if (i >= _items.length) {
-                  return _loadMoreTile();
-                }
-                final a = _items[i];
-                final selected = _selected.contains(a.id);
-                return AssetGridTile(
-                  asset: a,
-                  selected: selected,
-                  selecting: _selected.isNotEmpty,
-                  onTap: _selected.isNotEmpty ? () => _toggle(a) : () => _openPreview(i),
-                  onLongPress: () {
-                    if (!selected) _toggle(a); // 长按=进入多选
-                  },
-                );
-              },
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _loadMoreTile() => InkWell(
-        onTap: _loadMore,
-        child: Center(
-          child: _loadingMore
-              ? const Center(
-                  child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(strokeWidth: 2)))
-              : Text('加载更多(${_items.length}/$_total)'),
-        ),
+  Widget _body(BuildContext context) => AssetsBody(
+        loading: _loading,
+        error: _error,
+        items: _items,
+        total: _total,
+        selectedIds: _selected,
+        loadingMore: _loadingMore,
+        canUpload: _canUpload,
+        logLine: _log.isEmpty ? null : _log.first,
+        transferQueue: widget.transferQueue,
+        onRefresh: _refresh,
+        onRetry: _refresh,
+        onToggle: _toggle,
+        onOpen: _openPreview,
+        onLoadMore: _loadMore,
+        onUploadTap: _openUploadSheet,
       );
 }

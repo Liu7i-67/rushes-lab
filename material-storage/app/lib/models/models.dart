@@ -7,3 +7,4 @@ export 'baidu_binding.dart';
 export 'folder.dart';
 export 'me.dart';
 export 'project.dart';
+export 'share.dart';

@@ -1,17 +1,23 @@
-/// AssetSelectionBar 单测(B4 功能点 4②/4:操作栏壳「下载」键点亮,分享/移动/
-/// 删除占位 B5;downloadSelectedAssets 编排:无权提示、>20 确认弹窗、逐文件
-/// 入队、清选中态由调用方做)。入队经注入 TransferQueue/DownloadIo,PC 零通道。
+/// AssetSelectionBar 单测(B5 功能点 1:操作栏全量点亮;下载 B4 编排保留):
+/// 四键回调点亮/多选置灰(分享·申请权限仅恰好单选)/⋯ 菜单三项;
+/// deleteSelectedAssets 编排:确认弹窗、逐条 DELETE、403 detail 透传、失效。
+/// 入队经注入 TransferQueue/DownloadIo,PC 零通道。
 library;
 
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ms_app/core/api/ms_api.dart';
+import 'package:ms_app/core/refresh_bus.dart';
+import 'package:ms_app/core/session.dart';
 import 'package:ms_app/core/transfers/transfer_queue.dart';
 import 'package:ms_app/features/assets/asset_selection_bar.dart';
 import 'package:ms_app/models/models.dart';
 import 'package:ms_app/services/downloads.dart';
 import 'package:ms_app/services/media_save.dart';
+
+import '../helpers/api_harness.dart';
 
 Asset _asset(String name) => Asset(
     id: 'a-$name', filename: name, sizeBytes: 10,
@@ -40,42 +46,113 @@ Future<void> pumpBar(
   WidgetTester tester, {
   required bool? canDownload,
   required VoidCallback onDownload,
+  int count = 2,
+  VoidCallback? onShare,
+  VoidCallback? onMove,
+  VoidCallback? onDelete,
+  VoidCallback? onBatchTag,
+  VoidCallback? onBatchPrefix,
+  VoidCallback? onRequest,
+  VoidCallback? onClear,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
       body: const SizedBox.shrink(),
       bottomNavigationBar: AssetSelectionBar(
-        count: 2,
+        count: count,
         canDownload: canDownload,
         onDownload: onDownload,
-        onClear: () {},
+        onShare: onShare,
+        onMove: onMove,
+        onDelete: onDelete,
+        onBatchTag: onBatchTag,
+        onBatchPrefix: onBatchPrefix,
+        onRequest: onRequest,
+        onClear: onClear ?? () {},
       ),
     ),
   ));
 }
 
 void main() {
-  testWidgets('操作栏壳:计数 + 「下载」键点亮(有回调);分享/移动/删除占位禁用(B5)',
+  testWidgets('操作栏全量(B5):四键点亮回调 + ⋯ 菜单三项(打标/前缀/申请)',
       (tester) async {
-    var fired = 0;
-    await pumpBar(tester, canDownload: true, onDownload: () => fired++);
-    expect(find.text('已选 2 项'), findsOneWidget);
-    expect(find.text('下载'), findsOneWidget);
-    expect(find.text('分享'), findsOneWidget);
-    expect(find.text('移动'), findsOneWidget);
-    expect(find.text('删除'), findsOneWidget);
+    var fired = '';
+    await pumpBar(tester,
+        canDownload: true,
+        count: 1,
+        onDownload: () => fired = 'download',
+        onShare: () => fired = 'share',
+        onMove: () => fired = 'move',
+        onDelete: () => fired = 'delete',
+        onBatchTag: () => fired = 'tag',
+        onBatchPrefix: () => fired = 'prefix',
+        onRequest: () => fired = 'request');
+    expect(find.text('已选 1 项'), findsOneWidget);
     await tester.tap(find.byTooltip('批量下载'));
-    expect(fired, 1);
-    // 占位键:无 tooltip 命中的批量下载语义,点按不炸(禁用态)
-    expect(find.byTooltip('批量下载'), findsOneWidget);
+    expect(fired, 'download');
+    await tester.tap(find.byTooltip('分享链接(需登录访问)'));
+    expect(fired, 'share');
+    await tester.tap(find.byTooltip('移动到其他目录'));
+    expect(fired, 'move');
+    await tester.tap(find.byTooltip('移入回收站'));
+    expect(fired, 'delete');
+    // ⋯ 溢出菜单
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('批量打标'));
+    await tester.pumpAndSettle();
+    expect(fired, 'tag');
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('批量前缀'));
+    await tester.pumpAndSettle();
+    expect(fired, 'prefix');
+  });
+
+  testWidgets('多选置灰:分享/申请权限仅恰好单选可用(B5 钉子);⋯ 菜单申请项禁用',
+      (tester) async {
+    var shareFired = 0;
+    var requestFired = 0;
+    await pumpBar(tester,
+        canDownload: true,
+        count: 2,
+        onDownload: () {},
+        onShare: () => shareFired++,
+        onRequest: () => requestFired++);
+    await tester.tap(find.byTooltip('仅单选可用'), warnIfMissed: false);
+    await tester.pump();
+    expect(shareFired, 0, reason: '多选分享置灰');
+    // ⋯ 菜单:申请权限带「仅单选可用」副标题且禁用
+    await tester.tap(find.byTooltip('更多操作'));
+    await tester.pumpAndSettle();
+    expect(find.text('仅单选可用'), findsOneWidget);
+    await tester.tap(find.text('申请权限'), warnIfMissed: false);
+    await tester.pumpAndSettle();
+    expect(requestFired, 0);
+    // 禁用项点选不关闭弹出菜单 → 点空白处先收起,避免遮住后续操作键
+    await tester.tapAt(const Offset(20, 20));
+    await tester.pumpAndSettle();
+    // 恰好单选时可用(点 label 文本直击 InkWell,绕开 Tooltip 命中怪癖)
+    await pumpBar(tester,
+        canDownload: true,
+        count: 1,
+        onDownload: () {},
+        onShare: () => shareFired++,
+        onRequest: () => requestFired++);
+    await tester.pump();
+    await tester.tap(find.text('分享'));
+    await tester.pump();
+    expect(shareFired, 1);
+    expect(find.byTooltip('仅单选可用'), findsNothing, reason: '单选不再置灰');
   });
 
   testWidgets('canDownload=false:下载键禁用 + 无权提示 tooltip(三态口径同预览页)',
       (tester) async {
     var fired = 0;
     await pumpBar(tester, canDownload: false, onDownload: () => fired++);
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsOneWidget);
-    await tester.tap(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'),
+    expect(find.byTooltip('无下载权限 · 可先在预览页申请'), findsOneWidget);
+    await tester.tap(find.byTooltip('无下载权限 · 可先在预览页申请'),
         warnIfMissed: false);
     expect(fired, 0);
   });
@@ -184,5 +261,138 @@ void main() {
     final r = await go;
     expect(r, (21, 0));
     expect(q.tasks.length, 21);
+  });
+
+  testWidgets('deleteSelectedAssets:确认弹窗取消 → null 不发请求', (tester) async {
+    final api = installFakeApi();
+    addTearDown(() => session.api = null);
+    late BuildContext captured;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(builder: (ctx) {
+          captured = ctx;
+          return const SizedBox.shrink();
+        }),
+      ),
+    ));
+    final r = deleteSelectedAssets(captured,
+        assets: [_asset('a.jpg')], folderId: 'f1');
+    await tester.pump(); // 弹窗进场
+    expect(find.text('删除 1 个文件?'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pump();
+    expect(await r, isNull);
+    expect(api.assets.deleteCalls, isEmpty);
+  });
+
+  testWidgets('deleteSelectedAssets:全败(403)→ (0,1) 不失效;detail 透传入汇总',
+      (tester) async {
+    final api = installFakeApi();
+    api.assets.deleteStaged =
+        ApiException(403, 'no permission to delete this asset');
+    addTearDown(() => session.api = null);
+    var assetsInvalidated = 0;
+    var foldersInvalidated = 0;
+    void onAssets() => assetsInvalidated++;
+    void onFolders() => foldersInvalidated++;
+    RefreshBus.I.addListener('assets:f1', onAssets);
+    RefreshBus.I.addListener('folders', onFolders);
+    addTearDown(() {
+      RefreshBus.I.removeListener('assets:f1', onAssets);
+      RefreshBus.I.removeListener('folders', onFolders);
+    });
+
+    late BuildContext captured;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(builder: (ctx) {
+          captured = ctx;
+          return const SizedBox.shrink();
+        }),
+      ),
+    ));
+    final allFail = deleteSelectedAssets(captured,
+        assets: [_asset('403.jpg')], folderId: 'f1');
+    await tester.pump(); // 弹窗进场
+    await tester.tap(find.text('删除'));
+    expect(await allFail, (0, 1));
+    expect(assetsInvalidated, 0, reason: '全败不失效');
+    await tester.pump(); // SnackBar 进场
+    expect(find.textContaining('删除 0 个文件 · 失败 1 个'), findsOneWidget);
+    expect(find.textContaining('首个失败:no permission to delete this asset'),
+        findsOneWidget, reason: '403 detail 透传入汇总');
+  });
+
+  testWidgets('deleteSelectedAssets:全成功 → (n,0) 并失效两 scope', (tester) async {
+    final api = installFakeApi();
+    addTearDown(() => session.api = null);
+    var assetsInvalidated = 0;
+    var foldersInvalidated = 0;
+    void onAssets() => assetsInvalidated++;
+    void onFolders() => foldersInvalidated++;
+    RefreshBus.I.addListener('assets:f1', onAssets);
+    RefreshBus.I.addListener('folders', onFolders);
+    addTearDown(() {
+      RefreshBus.I.removeListener('assets:f1', onAssets);
+      RefreshBus.I.removeListener('folders', onFolders);
+    });
+
+    late BuildContext captured;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(builder: (ctx) {
+          captured = ctx;
+          return const SizedBox.shrink();
+        }),
+      ),
+    ));
+    final r = deleteSelectedAssets(captured,
+        assets: [_asset('ok1.jpg'), _asset('ok2.jpg')], folderId: 'f1');
+    await tester.pump(); // 弹窗进场
+    await tester.tap(find.text('删除'));
+    expect(await r, (2, 0));
+    expect(api.assets.deleteCalls, ['a-ok1.jpg', 'a-ok2.jpg'],
+        reason: '逐条 DELETE');
+    expect(assetsInvalidated, greaterThan(0));
+    expect(foldersInvalidated, greaterThan(0));
+  });
+
+  testWidgets('deleteSelectedAssets:部分失败(2 ok+1 fail)→ (2,1) 失效一次,'
+      '汇总含首个失败 detail', (tester) async {
+    final api = installFakeApi();
+    api.assets.deleteStagedById['a-403.jpg'] =
+        ApiException(403, 'no permission to delete this asset');
+    addTearDown(() {
+      session.api = null;
+      api.assets.deleteStagedById.clear();
+    });
+    var assetsInvalidated = 0;
+    void onAssets() => assetsInvalidated++;
+    RefreshBus.I.addListener('assets:f1', onAssets);
+    addTearDown(() => RefreshBus.I.removeListener('assets:f1', onAssets));
+
+    late BuildContext captured;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(builder: (ctx) {
+          captured = ctx;
+          return const SizedBox.shrink();
+        }),
+      ),
+    ));
+    final r = deleteSelectedAssets(captured,
+        assets: [_asset('ok1.jpg'), _asset('403.jpg'), _asset('ok2.jpg')],
+        folderId: 'f1');
+    await tester.pump(); // 弹窗进场
+    await tester.tap(find.text('删除'));
+    expect(await r, (2, 1), reason: '失败不中断:ok=2 fail=1');
+    expect(api.assets.deleteCalls,
+        ['a-ok1.jpg', 'a-403.jpg', 'a-ok2.jpg'],
+        reason: '单条失败后继续删完剩余');
+    expect(assetsInvalidated, greaterThan(0),
+        reason: '有任一成功即失效(宫格订阅静默刷新)');
+    await tester.pump(); // SnackBar 进场
+    expect(find.text('删除 2 个文件 · 失败 1 个'
+        '(首个失败:no permission to delete this asset)'), findsOneWidget);
   });
 }

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 
 import 'core/session.dart';
 import 'features/assets/assets_page.dart';
+import 'features/assets/trash_page.dart';
 import 'features/auth/change_password_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/baidu/bind_code_page.dart';
@@ -60,6 +61,12 @@ class _MsAppState extends State<MsApp> {
             return MaterialPageRoute(
                 builder: (_) => AssetsPage(
                     folderId: a.$1, folderName: a.$2, where: a.$3));
+          case '/trash':
+            // B5:文件夹回收站(软删列表+恢复)
+            final a = s.arguments as (String, String); // (folderId, folderName)
+            return MaterialPageRoute(
+                builder: (_) =>
+                    TrashPage(folderId: a.$1, folderName: a.$2));
           case '/preview':
             // B2 §8.2 预览:列表序列+起点+单夹详情下载权
             final args = s.arguments as PreviewArgs;

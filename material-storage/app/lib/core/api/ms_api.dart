@@ -12,11 +12,14 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
 import '../../services/app_log.dart';
+import 'approvals_api.dart';
 import 'assets_api.dart';
+import 'assets_ops_api.dart';
 import 'auth_api.dart';
 import 'baidu_api.dart';
 import 'folders_api.dart';
 import 'projects_api.dart';
+import 'share_api.dart';
 
 class ApiException implements Exception {
   ApiException(this.status, this.message);
@@ -132,7 +135,10 @@ class MsApi {
   late final projects = ProjectsApi(this);
   late final folders = FoldersApi(this);
   late final assets = AssetsApi(this);
+  late final ops = AssetOpsApi(this); // B5:打标/前缀/移动/回收站
   late final baidu = BaiduApi(this);
+  late final share = ShareApi(this);
+  late final approvals = ApprovalsApi(this);
 
   InterceptorsWrapper _logInterceptor({bool withQuery = true}) =>
       InterceptorsWrapper(

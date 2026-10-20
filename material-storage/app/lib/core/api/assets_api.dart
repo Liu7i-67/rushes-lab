@@ -1,8 +1,6 @@
 /// AssetsApi — /api/v1/assets 族薄封装:列表 / 上传三步编排 / 下载 / 删除。
-/// 上传与 web Uppy 同款:sign → 分片 PUT(presigned,必带 Content-Length)
-/// → complete;失败尽力 abort 半成品。
-/// B3 起双轨:[uploadBytes] 仅留 livp 小包;大文件走 [uploadFile] 流式分片
-/// (RandomAccessFile 逐片读,GB 级不 OOM)。
+/// 上传与 web Uppy 同款:sign → 分片 PUT(必带 Content-Length)→ complete,
+/// 失败尽力 abort;B3 起双轨([uploadBytes] livp 小包 / [uploadFile] 流式分片)。
 library;
 
 import 'dart:io';
@@ -97,6 +95,8 @@ class AssetsApi {
     // FastAPI DELETE 默认 204 No Content
     if (r.statusCode != 200 && r.statusCode != 204) throw _api.err(r, '删除失败');
   }
+
+  // B5 操作端点(updateMeta/batchPrefix/batchMove/listTrash/restore)拆至 assets_ops_api.dart(MsApi.ops)。
 
   /// 上传 [bytes] 为 [filename](livp 建议 content_type application/zip)。
   /// onPartsDone(completed, total) 供进度展示。失败时尽力 abort 半成品。

@@ -1,5 +1,6 @@
 /// MetaPanel — 预览底部元数据卡(B2 §8.2):文件名/大小/类型/时间/标签 chips+备注。
-/// 暗色画布上的浮层用 darkSurface;「编辑」按钮 B5 点亮,本批不渲染。
+/// 暗色画布上的浮层用 darkSurface;B5 功能点 3:「编辑」钮点亮 → 打标/改标面板
+/// (AssetTagEditor 移动版;单条不传 labels_mode)。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
@@ -23,9 +24,12 @@ String kindLabel(PreviewKind k) => switch (k) {
     };
 
 class MetaPanel extends StatelessWidget {
-  const MetaPanel({super.key, required this.asset});
+  const MetaPanel({super.key, required this.asset, this.onEdit});
 
   final Asset asset;
+
+  /// 「编辑」动作(B5 点亮;null=不渲染编辑钮)。
+  final VoidCallback? onEdit;
 
   @override
   Widget build(BuildContext context) {
@@ -39,16 +43,28 @@ class MetaPanel extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            asset.filename,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 14,
-              fontWeight: FontWeight.w600,
+          Row(children: [
+            Expanded(
+              child: Text(
+                asset.filename,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
             ),
-          ),
+            if (onEdit != null)
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                color: Tk.subtle,
+                tooltip: '编辑标签与备注',
+                onPressed: onEdit,
+              ),
+          ]),
           const SizedBox(height: 4),
           Text(
             '${fmtBytes(asset.sizeBytes)} · ${kindLabel(kind)} · ${fmtDate(asset.createdAt)}',

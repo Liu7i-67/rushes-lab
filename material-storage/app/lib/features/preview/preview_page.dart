@@ -1,7 +1,7 @@
 /// PreviewPage — 预览页(B2 §8.2):暗色画布(#141210)+ 顶部 ‹n/N› + 胶片条
 /// (列表序列切张、边界即停)+ 底部元数据卡;B4 功能点 4①:下载钮点亮
 /// (入队 TransferQueue kind=download,落盘矩阵见 services/downloads.dart);
-/// 下载权=false 时下载钮禁用+「申请权限」入口样式提示。
+/// B5 功能点 3/4:元数据卡「编辑」打标 + 分享/申请权限钮点亮。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,6 +13,9 @@ import 'filmstrip.dart';
 import 'meta_panel.dart';
 import 'preview_actions.dart';
 import 'preview_media.dart';
+import 'request_access_sheet.dart';
+import '../assets/batch_tag_sheet.dart';
+import '../share/share_create_sheet.dart';
 
 /// 路由参数:进入预览时的列表序列 + 起点 + 宫格页单夹详情的下载权
 /// (三态:bool=详情可信值;null=详情未到/失败,提示退回中性口径)
@@ -65,6 +68,31 @@ class _PreviewPageState extends State<PreviewPage> {
     ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       SnackBar(content: Text('已加入下载队列:${_current.filename}')),
     );
+  }
+
+  /// 分享当前张(B5 功能点 4):单资产 share_create_sheet(有效期四档,
+  /// requires_login 恒 true,无提取码/下载开关)。
+  Future<void> _shareCurrent() => showShareSheet(context,
+      kind: 'asset',
+      targetId: _current.id,
+      targetLabel: _current.filename);
+
+  /// 申请权限(B5 功能点 4):下载权=false 时入口可点(动作在 PreviewActions
+  /// 闸门;后端 403 最终裁决)。
+  Future<void> _requestAccess() => showRequestAccessSheet(context,
+      targetType: 'asset',
+      targetId: _current.id,
+      targetName: _current.filename);
+
+  /// 详情打标(B5 功能点 3):元数据卡「编辑」→ AssetTagEditor 移动版
+  /// (单条不传 labels_mode,后端默认 replace);保存后回填当前张即时生效,
+  /// 宫格侧由 `assets:<folderId>` 失效驱动静默刷新。
+  Future<void> _editMeta() async {
+    final updated = await showTagEditSheet(context,
+        asset: _current, folderId: widget.args.folderId);
+    if (updated != null && mounted) {
+      setState(() => widget.args.items[_pager.index] = updated);
+    }
   }
 
   @override
@@ -121,10 +149,12 @@ class _PreviewPageState extends State<PreviewPage> {
               index: _pager.index,
               onSelect: (i) => setState(() => _pager.moveTo(i)),
             ),
-          MetaPanel(asset: _current),
+          MetaPanel(asset: _current, onEdit: _editMeta),
           PreviewActions(
             canDownload: widget.args.canDownload,
             onDownload: _downloadCurrent,
+            onShare: _shareCurrent,
+            onRequest: _requestAccess,
           ),
         ],
       ),

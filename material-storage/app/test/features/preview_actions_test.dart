@@ -1,7 +1,6 @@
-/// 预览页操作钮单测(B4 功能点 4①):下载钮点亮(onDownload 注入,入队
-/// TransferQueue kind=download);my_can_download=false → 禁用+「申请权限」
-/// 入口样式提示(申请动作 B5 点亮);null=中性放行(详情未到≠无权,后端 403
-/// 最终裁决);分享/申请权限仍占位禁用(B5)。附 RefreshBus 机制件单测(原
+/// 预览页操作钮单测(B4 下载点亮保留;B5 功能点 4:分享/申请权限点亮):
+/// 分享=单资产恒可点(后端 403 最终裁决);申请权限=my_can_download==false 时
+/// 入口可点;canDownload=null 中性(申请不亮)。附 RefreshBus 机制件单测(原
 /// B2 批落位于此,随迁保留)。
 library;
 
@@ -15,10 +14,17 @@ void main() {
     WidgetTester tester, {
     required bool? canDownload,
     VoidCallback? onDownload,
+    VoidCallback? onShare,
+    VoidCallback? onRequest,
   }) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
-        body: PreviewActions(canDownload: canDownload, onDownload: onDownload),
+        body: PreviewActions(
+          canDownload: canDownload,
+          onDownload: onDownload,
+          onShare: onShare,
+          onRequest: onRequest,
+        ),
       ),
     ));
   }
@@ -29,40 +35,63 @@ void main() {
     await tester.tap(find.text('下载'));
     expect(fired, 1);
     expect(find.byTooltip('下载到本机(相册 / Download/浣花视界)'), findsOneWidget);
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
+    expect(find.byTooltip('无下载权限 · 可申请'), findsNothing);
   });
 
-  testWidgets('canDownload=false:下载钮禁用(点按不触发)+ 申请权限提示在位',
+  testWidgets('canDownload=false:下载钮禁用(点按不触发)+ 申请权限点亮可点(B5)',
       (tester) async {
-    var fired = 0;
-    await pump(tester, canDownload: false, onDownload: () => fired++);
+    var downloadFired = 0;
+    var requestFired = 0;
+    await pump(tester,
+        canDownload: false,
+        onDownload: () => downloadFired++,
+        onRequest: () => requestFired++);
     await tester.tap(find.text('下载'), warnIfMissed: false);
     await tester.pump();
-    expect(fired, 0, reason: '已知无权 → 禁用');
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsOneWidget);
+    expect(downloadFired, 0, reason: '已知无权 → 禁用');
+    expect(find.byTooltip('无下载权限 · 可申请'), findsOneWidget);
+    await tester.tap(find.text('申请权限'));
+    await tester.pump();
+    expect(requestFired, 1, reason: 'my_can_download==false → 申请入口可点');
   });
 
-  testWidgets('canDownload=null(夹详情未到/失败,三态):中性放行,不误显可申请',
+  testWidgets('canDownload=null(夹详情未到/失败,三态):下载中性放行,申请入口不亮',
       (tester) async {
-    var fired = 0;
-    await pump(tester, canDownload: null, onDownload: () => fired++);
+    var downloadFired = 0;
+    var requestFired = 0;
+    await pump(tester,
+        canDownload: null,
+        onDownload: () => downloadFired++,
+        onRequest: () => requestFired++);
     await tester.tap(find.text('下载'));
-    expect(fired, 1);
-    expect(find.byTooltip('无下载权限 · 可申请(B5 开放申请入口)'), findsNothing);
-  });
-
-  testWidgets('onDownload 缺省(null):下载钮退占位禁用「后续版本开放」', (tester) async {
-    await pump(tester, canDownload: true);
-    expect(find.byTooltip('后续版本开放'), findsNWidgets(3));
-  });
-
-  testWidgets('分享/申请权限仍占位禁用(B5);禁用态无可交互按钮', (tester) async {
-    var fired = 0;
-    await pump(tester, canDownload: true, onDownload: () => fired++);
-    await tester.tap(find.text('分享'), warnIfMissed: false);
+    expect(downloadFired, 1);
     await tester.tap(find.text('申请权限'), warnIfMissed: false);
     await tester.pump();
-    expect(fired, 0);
+    expect(requestFired, 0, reason: 'null=详情未到,申请入口不亮(详情到了再看)');
+  });
+
+  testWidgets('canDownload=true:申请权限禁用(已有下载权,无需申请)', (tester) async {
+    var requestFired = 0;
+    await pump(tester, canDownload: true, onRequest: () => requestFired++);
+    expect(find.byTooltip('已有下载权限,无需申请'), findsOneWidget);
+    await tester.tap(find.text('申请权限'), warnIfMissed: false);
+    await tester.pump();
+    expect(requestFired, 0);
+  });
+
+  testWidgets('分享钮点亮(B5):回调注入即可点;未注入时退占位「后续版本开放」',
+      (tester) async {
+    var shareFired = 0;
+    await pump(tester,
+        canDownload: true,
+        onShare: () => shareFired++,
+        onDownload: () {},
+        onRequest: () {});
+    await tester.tap(find.text('分享'));
+    expect(shareFired, 1);
+    expect(find.byTooltip('分享链接(需登录访问)'), findsOneWidget);
+    // 全回调缺省:下载/分享退占位
+    await pump(tester, canDownload: true);
     expect(find.byTooltip('后续版本开放'), findsNWidgets(2));
   });
 

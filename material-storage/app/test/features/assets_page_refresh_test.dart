@@ -117,6 +117,45 @@ class _HangingMsApi extends MsApi {
   _FakeFoldersApi get folders => _folders;
 }
 
+/// 他端删除场景(P2-3):第 1 拉(首拉)返回 a1+a2,其后(静默刷新)只剩 a1
+/// ——复现「另一端删掉 a2 后宫格 swap,旧选中集残留失效 id」。
+class _ShrinkingAssetsApi extends AssetsApi {
+  _ShrinkingAssetsApi(super.api);
+
+  final hits = <String, int>{};
+
+  @override
+  Future<AssetPage> list(String folderId, {int limit = 30, int offset = 0}) async {
+    hits[folderId] = (hits[folderId] ?? 0) + 1;
+    final ids = hits[folderId]! == 1 ? ['a1', 'a2'] : ['a1'];
+    final items = [
+      for (final id in ids)
+        {
+          'id': id,
+          'folder_id': folderId,
+          'filename': '$id.livp',
+          'size_bytes': 123,
+          'content_type': 'application/zip',
+          'created_at': '2026-10-20T10:00:00Z',
+        }
+    ];
+    return AssetPage.fromJson({'items': items, 'total': items.length});
+  }
+}
+
+class _ShrinkingMsApi extends MsApi {
+  _ShrinkingMsApi() : super(baseUrl: 'http://b3.test.local');
+
+  late final _ShrinkingAssetsApi _assets = _ShrinkingAssetsApi(this);
+  late final _FakeFoldersApi _folders = _FakeFoldersApi(this);
+
+  @override
+  _ShrinkingAssetsApi get assets => _assets;
+
+  @override
+  _FakeFoldersApi get folders => _folders;
+}
+
 void main() {
   setUp(() {
     session.api = _FakeMsApi();
@@ -176,5 +215,31 @@ void main() {
         reason: '静默 swap 落地即清全屏 loading(旧实现:_loading 被丢弃的全屏路'
             '独占,静默路不清 → 整页 spinner 永久卡死)');
     expect(find.text('a1.livp'), findsOneWidget, reason: '数据已 swap');
+  });
+
+  testWidgets('P2-3:他端删除后静默刷新剪掉失效选中 id,操作栏计数与实际一致',
+      (tester) async {
+    final api = _ShrinkingMsApi();
+    session.api = api;
+    await tester.pumpWidget(
+        MaterialApp(home: AssetsPage(folderId: 'f9', folderName: '夹f9')));
+    await tester.pump();
+    expect(find.text('a1.livp'), findsOneWidget);
+    expect(find.text('a2.livp'), findsOneWidget);
+
+    // 长按两条进多选:已选 2 项
+    await tester.longPress(find.text('a1.livp'));
+    await tester.pump();
+    await tester.longPress(find.text('a2.livp'));
+    await tester.pump();
+    expect(find.text('已选 2 项'), findsOneWidget);
+
+    // 他端删除 a2 → 失效驱动静默刷新,新页只剩 a1
+    RefreshBus.I.invalidate('assets:f9');
+    await tester.pump();
+    expect(find.text('a2.livp'), findsNothing, reason: 'swap 后已删资产消失');
+    expect(find.text('已选 1 项'), findsOneWidget,
+        reason: '失效 id 已剪枝:选中计数=列表实际可操作数');
+    expect(find.text('已选 2 项'), findsNothing);
   });
 }
