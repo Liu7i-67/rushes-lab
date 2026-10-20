@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ms_app/pages/projects_page.dart';
+import 'package:ms_app/features/projects/projects_page.dart';
 
 void main() {
   test('项目页标题:stamp 未注入保持原标题,注入后在「项目」后追加最后编辑时间', () {

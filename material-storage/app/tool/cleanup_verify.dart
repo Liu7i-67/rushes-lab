@@ -4,7 +4,7 @@ library;
 
 import 'dart:io';
 
-import 'package:ms_app/api/ms_api.dart';
+import 'package:ms_app/core/api/ms_api.dart';
 
 Future<void> main(List<String> argv) async {
   var base = 'http://127.0.0.1:8200';
@@ -21,16 +21,16 @@ Future<void> main(List<String> argv) async {
     }
   }
   final api = MsApi(baseUrl: base);
-  await api.login(user, pass);
-  final projects = await api.projects();
+  await api.auth.login(user, pass);
+  final projects = await api.projects.list();
   var n = 0;
   for (final p in projects) {
-    final folders = await api.folders(p.id);
+    final folders = await api.folders.list(p.id);
     for (final f in folders) {
-      final page = await api.assets(f.id, limit: 100);
+      final page = await api.assets.list(f.id, limit: 100);
       for (final a in page.items) {
         if (a.filename.startsWith('msapp_verify_')) {
-          await api.deleteAsset(a.id);
+          await api.assets.delete(a.id);
           n++;
           stdout.writeln('deleted ${p.name}/${f.name}/${a.filename}');
         }

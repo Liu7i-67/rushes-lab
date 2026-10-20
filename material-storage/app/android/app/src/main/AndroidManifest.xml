@@ -6,13 +6,19 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
+    <!-- B0② media_store_plus:API<29 写 Downloads 需要旧版写权限(API 30+ 走
+         MediaStore 免权限);minSdk 跟随 Flutter 默认,真机确认基线前先声明 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
     <application
         android:label="浣花视界"
         android:name="${applicationName}"
         android:usesCleartextTraffic="true"
+        android:requestLegacyExternalStorage="true"
         android:icon="@mipmap/ic_launcher">
         <!-- ↑ 对齐 iOS NSAllowsArbitraryLoads:dev/内网入口是裸 IP 直连 http,
              Android 9+ 默认禁明文且 networkSecurityConfig 不认 IP 字面量,必须全局放开 -->
+        <!-- ↑ requestLegacyExternalStorage:media_store_plus 文档要求(API 29
+             Scoped Storage 兼容,仅影响 Android 10;31+ 系统忽略此标志) -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -50,6 +56,12 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- B0① url_launcher:Android 11+ 包可见性过滤,声明 ACTION_VIEW https
+             才能解析到可打开百度授权链接的浏览器(launchUrl externalApplication) -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="https"/>
         </intent>
     </queries>
 </manifest>
