@@ -59,6 +59,16 @@ def test_pick_photo_only_livp() -> None:
     assert still is not None and video is None
 
 
+def test_pick_dotfile_entries() -> None:
+    """空基名点文件条目('.jpg'/'.mov',App 端相册 title 空串的打包产物):
+    Path.suffix 视点文件为无扩展名,须按 endswith 判类(2026-10-20 真机实锤,
+    prod 上送 '.jpg'+'.mov' 导致「未找到静态图条目」缩略图失败)。"""
+    zf = _zip_from({".jpg": b"j" * 100, ".mov": b"m" * 200})
+    still, video = _pick_livp_entries(zf)
+    assert still is not None and still.filename == ".jpg"
+    assert video is not None and video.filename == ".mov"
+
+
 def test_pick_empty_zip() -> None:
     zf = _zip_from({})
     still, video = _pick_livp_entries(zf)

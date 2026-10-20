@@ -187,6 +187,26 @@ async def test_complete_folder_key_mismatch_is_400(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_upload_empty_stem_filename_is_400(client: AsyncClient) -> None:
+    """空基名点文件('.livp',App 端相册 title 空串拼出的产物)create 期 400:
+    web 显示名为空,且点文件在按扩展名分派的链路(缩略图等)被判无扩展名
+    (2026-10-20 iOS 真机实锤:上传 '.livp' 后缩略图失败、无名称)。"""
+    uniq = uuid.uuid4().hex[:8]
+    folder = await _create_folder(client, PROJECT_EVENT, f"zz_upstem_{uniq}")
+    try:
+        r = await client.post("/api/v1/assets/uploads", json={
+            "folder_id": folder["id"],
+            "filename": ".livp",
+            "content_type": "application/zip",
+            "size_bytes": 8,
+        }, headers=_h())
+        assert r.status_code == 400, r.text
+        assert "空基名" in r.json()["detail"]
+    finally:
+        await _cleanup(client, [], [folder["id"]])
+
+
+@pytest.mark.asyncio
 async def test_complete_same_prefix_across_projects(client: AsyncClient) -> None:
     """原始故障场景回归:两个不同 project 的同名目录(minio_prefix 相同)各自
     complete 都成功且 folder_id 各归各夹 —— 此前按 key 前缀反查 folder 在此

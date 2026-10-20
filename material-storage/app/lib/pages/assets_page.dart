@@ -55,7 +55,8 @@ class _AssetsPageState extends State<AssetsPage> {
         var i = 0;
         for (final e in picked) {
           i++;
-          _say('打包实况 ${e.title ?? e.id}($i/${picked.length})…');
+          _say('打包实况 ${(e.title ?? '').trim().isEmpty ? e.id : e.title}'
+              '($i/${picked.length})…');
           final bytes = await AlbumService.entityToLivp(e);
           final name = _livpNameOf(e);
           _say('上传 $name …');
@@ -97,13 +98,8 @@ class _AssetsPageState extends State<AssetsPage> {
     }
   }
 
-  String _livpNameOf(dynamic e) {
-    final title = (e.title as String?) ?? 'IMG_${e.id}';
-    final base = title.contains('.')
-        ? title.substring(0, title.lastIndexOf('.'))
-        : title;
-    return '$base.livp';
-  }
+  String _livpNameOf(dynamic e) =>
+      '${LivpService.baseNameOf(e.title, 'IMG_${e.id}')}.livp';
 
   // ─── 下载:iOS livp → 存相册;其他 → 存系统临时目录(PC 顺带验证解包)─────
   Future<void> _download(Asset a) async {

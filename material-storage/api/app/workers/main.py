@@ -217,12 +217,15 @@ def _pick_livp_entries(zf: zipfile.ZipFile) -> tuple[zipfile.ZipInfo | None, zip
     for info in zf.infolist():
         if info.is_dir():
             continue
-        ext = Path(info.filename).suffix.lower()
-        if ext in _LIVP_IMAGE_EXTS and info.file_size <= _LIVP_IMAGE_MAX_BYTES and (
+        # endswith 判类而非 Path.suffix:点文件('.jpg' 空基名条目)的 suffix
+        # 是 '' 会被判无扩展名 → 静态图挑不出 → 缩略图失败
+        # (2026-10-20 iOS 真机 livp 上送 '.jpg'/'.mov' 条目实锤)
+        name = info.filename.lower()
+        if name.endswith(_LIVP_IMAGE_EXTS) and info.file_size <= _LIVP_IMAGE_MAX_BYTES and (
             still is None or info.file_size > still.file_size
         ):
             still = info
-        elif ext in _LIVP_VIDEO_EXTS and info.file_size <= _LIVP_VIDEO_MAX_BYTES and (
+        elif name.endswith(_LIVP_VIDEO_EXTS) and info.file_size <= _LIVP_VIDEO_MAX_BYTES and (
             video is None or info.file_size > video.file_size
         ):
             video = info

@@ -98,6 +98,11 @@ async def create_upload(
     if "/" in payload.filename:
         raise HTTPException(400, "filename 不能包含路径分隔符")
 
+    # 空基名点文件(如 App 相册 title 空串拼出的 '.livp'):web 显示名为空,
+    # 且点文件在按扩展名分派的链路(缩略图等)被判无扩展名,create 期一并拦掉
+    if not payload.filename.rsplit(".", 1)[0].strip():
+        raise HTTPException(400, "filename 不能为空基名点文件(如 .livp,缺少主文件名)")
+
     # 同夹同名查重(D1-B 前置,决策 14):系统此前靠「一夹一名」的 key 唯一间接
     # 保证同名互斥;目录树重组(D1-B:物理对象不动、DB 重算 prefix)后该不变量
     # 失去物理支撑,上传侧补应用层查重 —— 与百度导入 (folder_id, filename) 查重

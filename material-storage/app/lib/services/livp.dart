@@ -29,6 +29,18 @@ class LivpParts {
 }
 
 class LivpService {
+  /// 相册资源标题 → livp 基名(去扩展名)。空/纯空白/去扩展名后为空的标题
+  /// 兜底 [fallback]:title 为空串时会拼出 '.livp' 空基名点文件与 '.jpg'/'.mov'
+  /// 点文件条目,后端 pathlib 判不出扩展名(2026-10-20 iOS 真机实锤)。
+  static String baseNameOf(String? title, String fallback) {
+    final t = (title ?? '').trim();
+    final base =
+        (t.contains('.') ? t.substring(0, t.lastIndexOf('.')) : t).trim();
+    // 去扩展名后只剩点号('.')也视为无主名
+    final meaningful = base.replaceAll('.', '').trim();
+    return meaningful.isEmpty ? fallback : base;
+  }
+
   /// 打包:静态帧 + 实况短片 → .livp 字节。
   /// [baseName] 不含扩展名,习惯用相册原始资源名(如 IMG_1234)。
   static List<int> pack({
