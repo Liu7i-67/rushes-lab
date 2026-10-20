@@ -152,8 +152,15 @@ void main() {
     );
     expect(g.isOk, isTrue);
     expect(d.isOk, isFalse);
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-    expect(await okCopy!.exists(), isFalse, reason: '成功路副本已清理');
+    // 副本清理是 fire-and-forget(_cleanupCopy 的 .ignore()),固定 10ms 在重
+    // IO 负载下偶发不可见(B3 全量回归 16MB 分片用例并发写盘时实锤一次);
+    // 改有界轮询兜住,语义不放宽:终态必须删干净
+    var gone = false;
+    for (var i = 0; i < 100 && !gone; i++) {
+      gone = !(await okCopy!.exists());
+      if (!gone) await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    expect(gone, isTrue, reason: '成功路副本已清理');
     expect(await failCopy!.exists(), isTrue, reason: '失败路副本保留供真机取证');
     expect(await File(failCopy!.path).readAsBytes(), const [1, 2, 3, 4]);
   });

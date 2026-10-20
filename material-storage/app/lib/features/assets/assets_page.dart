@@ -1,30 +1,40 @@
 /// 资产宫格页(B2 §8.1):3 列缩略图(缓存+降级色块)、点按=预览、长按=多选
 /// (选择态本批:打勾+底部计数条,批量操作 B4/B5 点亮);进页拉单夹详情取
-/// my_can_download(列表响应恒 False,§11 钉子);上传成功后失效列表+子树计数。
+/// my_can_download / my_can_upload(列表响应恒 False,§11 钉子)。
+/// B3:上传入口唯一化(AppBar「⬆」+空态引导 → 统一上传面板 upload_sheet),
+/// 挂 RefreshBus `assets:<folderId>` 订阅(上传成功自动刷新,B2 预留落地),
+/// 顶部迷你进度条显示活动上传 n/m(§5)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
+import '../../core/transfers/transfer_queue.dart';
 import '../../models/models.dart';
-import '../../services/album.dart';
 import '../../services/app_log.dart';
-import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../preview/preview_page.dart';
-import 'asset_actions.dart';
 import 'asset_tile.dart';
+import 'upload_sheet.dart';
 
 class AssetsPage extends StatefulWidget {
   const AssetsPage({
     super.key,
     required this.folderId,
     required this.folderName,
+    this.where,
+    this.transferQueue,
   });
 
   final String folderId;
   final String folderName;
+
+  /// 上传任务归属显示路径(项目/文件夹;路由未传时退回宫格名)。
+  final String? where;
+
+  /// 传输队列(迷你条数据源);测试注入用,默认全局单例。
+  final TransferQueue? transferQueue;
 
   @override
   State<AssetsPage> createState() => _AssetsPageState();
@@ -41,6 +51,10 @@ class _AssetsPageState extends State<AssetsPage> {
   var _loadingMore = false;
   String? _error;
 
+  /// 刷新代际(P2-2):全屏/静默两路刷新共用,响应落地时对不上最新代际
+  /// (期间又发起了更新的刷新)则丢弃旧结果,防慢响应回写覆盖新数据。
+  var _fetchEpoch = 0;
+
   /// 单夹详情回填;三态(B2 修复 P2-4):true/false=详情可信值,
   /// null=详情未到/拉取失败(≠无权限)——下载钮提示退回中性「后续版本」,
   /// 不误显「可申请」。后端仍最终裁决。
@@ -50,13 +64,27 @@ class _AssetsPageState extends State<AssetsPage> {
   /// 显示口径(B1 上传链路不回归,已知 false 才隐藏)。
   bool? _canUpload;
 
-  late AssetActions _actions;
-
   @override
   void initState() {
     super.initState();
-    _actions = AssetActions(folderId: widget.folderId, say: _say);
+    // 数据新鲜度(B3 功能点 6):上传 complete 成功 → upload_sheet 失效
+    // assets:<folderId> → 本页自动重拉(B2 预留订阅落地,IndexedStack 外的
+    // 常驻上下文也能靠返回+失效保持新鲜)。
+    RefreshBus.I.addListener('assets:${widget.folderId}', _onInvalidated);
     _refresh();
+  }
+
+  @override
+  void dispose() {
+    RefreshBus.I.removeListener('assets:${widget.folderId}', _onInvalidated);
+    super.dispose();
+  }
+
+  void _onInvalidated() {
+    // P2-2:失效驱动路径(上传成功等)改静默刷新——保留旧列表后台重拉后
+    // 整体 swap,不整页 spinner 打断浏览
+    AppLog.info('assets', 'assets:${widget.folderId} 失效 → 宫格静默刷新');
+    _silentRefresh();
   }
 
   void _say(String msg) {
@@ -68,41 +96,69 @@ class _AssetsPageState extends State<AssetsPage> {
     });
   }
 
+  /// 并行拉取列表+单夹详情(P2-10);详情失败独立兜底 null(三态未知,
+  /// ≠false 勿混),不拖累列表渲染。
+  Future<(AssetPage, Folder?)> _fetchPage() async {
+    final results = await Future.wait<Object?>([
+      session.api!.assets.list(widget.folderId, limit: _pageSize),
+      session.api!.folders
+          .get(widget.folderId)
+          .then<Folder?>((f) => f)
+          .catchError((_) => null), // 详情失败 → null(未知),非 false
+    ]);
+    return (results[0] as AssetPage, results[1] as Folder?);
+  }
+
+  /// 回填列表与详情(my_can_* 唯一可信回填点=单夹详情,web useFolder 同源,
+  /// 列表恒 False 勿消费)。只改字段,调用方负责 setState。
+  void _applyPage(AssetPage page, Folder? detail) {
+    _items
+      ..clear()
+      ..addAll(page.items);
+    _total = page.total.toInt();
+    _canDownload = detail?.myCanDownload;
+    _canUpload = detail?.myCanUpload;
+  }
+
+  /// 全屏刷新(首拉/下拉/ErrorView 重试,下拉保留全屏 loading 口径):
+  /// 整页 spinner,失败走整页错误;清选中态。
   Future<void> _refresh() async {
+    final epoch = ++_fetchEpoch;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
-      // P2-10:列表与单夹详情并行拉取;详情失败独立兜底为 null(三态未知),
-      // 不拖累列表渲染,列表失败仍走整页错误(P2-4:null≠false 勿混)。
-      final results = await Future.wait<Object?>([
-        session.api!.assets.list(widget.folderId, limit: _pageSize),
-        session.api!.folders
-            .get(widget.folderId)
-            .then<Folder?>((f) => f)
-            .catchError((_) => null), // 详情失败 → null(未知),非 false
-      ]);
-      final page = results[0] as AssetPage;
-      final detail = results[1] as Folder?;
-      if (!mounted) return;
+      final (page, detail) = await _fetchPage();
+      if (!mounted || epoch != _fetchEpoch) return;
       setState(() {
-        _items
-          ..clear()
-          ..addAll(page.items);
-        _total = page.total.toInt();
-        // my_can_* 唯一可信回填点=单夹详情(web useFolder 同源,列表恒 False 勿消费)
-        _canDownload = detail?.myCanDownload;
-        _canUpload = detail?.myCanUpload;
+        _applyPage(page, detail);
         _selected.clear();
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || epoch != _fetchEpoch) return;
       setState(() {
         _error = '$e';
         _loading = false;
       });
+    }
+  }
+
+  /// 静默刷新(P2-2):RefreshBus 失效驱动路径专用——旧列表原地保留后台重拉,
+  /// 成功后整体 swap 并清错误;失败仅记日志(旧列表仍在,等下次失效/下拉再试),
+  /// 不清选中态(用户多选中收到失效不应被打断)。
+  Future<void> _silentRefresh() async {
+    final epoch = ++_fetchEpoch;
+    try {
+      final (page, detail) = await _fetchPage();
+      if (!mounted || epoch != _fetchEpoch) return;
+      setState(() {
+        _applyPage(page, detail);
+        _error = null;
+      });
+    } catch (e) {
+      AppLog.error('assets', '静默刷新失败,保留旧列表', e);
     }
   }
 
@@ -124,13 +180,11 @@ class _AssetsPageState extends State<AssetsPage> {
     }
   }
 
-  Future<void> _upload() async {
-    if (await _actions.upload(context)) {
-      RefreshBus.I.invalidate('assets:${widget.folderId}');
-      RefreshBus.I.invalidate('folders'); // 子树计数变化
-      await _refresh();
-    }
-  }
+  /// 统一上传面板(入口唯一:B3 功能点 1)。入队即返回;列表刷新由
+  /// RefreshBus 失效驱动(worker 成功回调),不再同步等待上传结果。
+  Future<void> _openUploadSheet() =>
+      showUploadSheet(context,
+          folderId: widget.folderId, where: widget.where ?? widget.folderName);
 
   void _openPreview(int index) {
     Navigator.of(context).pushNamed(
@@ -151,15 +205,19 @@ class _AssetsPageState extends State<AssetsPage> {
   Widget build(BuildContext context) {
     final selecting = _selected.isNotEmpty;
     return Scaffold(
-      appBar: AppBar(title: Text(widget.folderName)),
-      // 上传入口 my_can_upload 显隐(§13):已知无权才隐藏;详情未到保持显示
-      floatingActionButton: _canUpload == false
-          ? null
-          : FloatingActionButton.extended(
-              onPressed: _upload,
-              icon: const Icon(Icons.add_photo_alternate_outlined),
-              label: Text(AlbumService.isSupported ? '上传实况' : '上传 livp'),
+      appBar: AppBar(
+        title: Text(widget.folderName),
+        // 上传入口唯一(AppBar「⬆」,§5);my_can_upload 显隐沿用 §13:
+        // 已知无权才隐藏,详情未到保持显示
+        actions: [
+          if (_canUpload != false)
+            IconButton(
+              onPressed: _openUploadSheet,
+              icon: const Icon(Icons.upload_outlined),
+              tooltip: '上传',
             ),
+        ],
+      ),
       bottomNavigationBar: selecting ? _selectionBar(context) : null,
       body: _body(context),
     );
@@ -195,11 +253,23 @@ class _AssetsPageState extends State<AssetsPage> {
       return ErrorView(message: _error!, onRetry: _refresh);
     }
     if (_items.isEmpty) {
-      return const EmptyState(icon: Icons.image_outlined, message: '空文件夹');
+      // 空态引导=上传第二入口(§5);my_can_upload 已知 false 时只留文案
+      return Column(
+        children: [
+          UploadMiniBar(queue: widget.transferQueue),
+          Expanded(
+            child: UploadEmptyGuide(
+              enabled: _canUpload != false,
+              onTap: _openUploadSheet,
+            ),
+          ),
+        ],
+      );
     }
     final hasMore = _items.length < _total;
     return Column(
       children: [
+        UploadMiniBar(queue: widget.transferQueue),
         if (_log.isNotEmpty)
           Container(
             width: double.infinity,

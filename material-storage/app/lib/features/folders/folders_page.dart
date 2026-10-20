@@ -14,9 +14,16 @@ import 'folder_row.dart';
 import 'folder_tree.dart';
 
 class FoldersPage extends StatefulWidget {
-  const FoldersPage({super.key, required this.projectId});
+  const FoldersPage({
+    super.key,
+    required this.projectId,
+    this.projectName = '',
+  });
 
   final String projectId;
+
+  /// 项目显示名(B3:宫格上传任务 where=「项目/…/文件夹」路径前缀)。
+  final String projectName;
 
   @override
   State<FoldersPage> createState() => _FoldersPageState();
@@ -78,6 +85,25 @@ class _FoldersPageState extends State<FoldersPage> {
     return rows;
   }
 
+  /// 显示路径(项目/…/本夹,§7 where):父链自 flat 列表回溯;
+  /// 环防御=已访问 id 集合,孤儿/断链取已得前缀。
+  String _whereOf(Folder f) {
+    final byId = {for (final x in _all) x.id: x};
+    final names = <String>[f.name];
+    final seen = <String>{f.id};
+    var cur = f.parentFolderId;
+    while (cur != null && seen.add(cur)) {
+      final p = byId[cur];
+      if (p == null) break;
+      names.insert(0, p.name);
+      cur = p.parentFolderId;
+    }
+    return [
+      if (widget.projectName.isNotEmpty) widget.projectName,
+      ...names,
+    ].join('/');
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -120,7 +146,11 @@ class _FoldersPageState extends State<FoldersPage> {
                   : _collapsed.add(node.folder.id);
             }),
             onOpen: () => Navigator.of(context)
-                .pushNamed('/assets', arguments: (node.folder.id, node.folder.name))
+                .pushNamed('/assets', arguments: (
+                  node.folder.id,
+                  node.folder.name,
+                  _whereOf(node.folder),
+                ))
                 .then((_) => _reload()), // 返回按需刷新(子树计数可能变)
           );
         },

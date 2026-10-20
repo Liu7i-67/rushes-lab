@@ -28,7 +28,7 @@ class ThumbnailImage extends StatefulWidget {
 }
 
 class _ThumbnailImageState extends State<ThumbnailImage> {
-  late Future<String> _future;
+  late Future<String>? _future;
 
   @override
   void initState() {
@@ -43,7 +43,10 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
   }
 
   void _resolve() {
-    _future = thumbnailCache.urlOf(widget.asset.id);
+    // web 同门槛:无 thumbnail_key 不发签名请求(B2 遗留:initState 曾无条件
+    // urlOf,无 key 资产也打一发注定 404 的请求;B3 单测暴露 pending timer 顺手修)
+    _future =
+        widget.asset.hasThumbnail ? thumbnailCache.urlOf(widget.asset.id) : null;
   }
 
   Widget get _fallback => TypeBlock(

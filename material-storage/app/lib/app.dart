@@ -50,13 +50,17 @@ class _MsAppState extends State<MsApp> {
             return MaterialPageRoute(
                 builder: (_) => ChangePasswordPage(forced: forced));
           case '/folders':
-            final projectId = s.arguments as String;
+            // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用)
+            final a = s.arguments as (String, String); // (projectId, projectName)
             return MaterialPageRoute(
-                builder: (_) => FoldersPage(projectId: projectId));
+                builder: (_) =>
+                    FoldersPage(projectId: a.$1, projectName: a.$2));
           case '/assets':
-            final a = s.arguments as (String, String); // (folderId, folderName)
+            // B3:附带 where 显示路径(传输任务归属展示)
+            final a = s.arguments as (String, String, String);
             return MaterialPageRoute(
-                builder: (_) => AssetsPage(folderId: a.$1, folderName: a.$2));
+                builder: (_) => AssetsPage(
+                    folderId: a.$1, folderName: a.$2, where: a.$3));
           case '/preview':
             // B2 §8.2 预览:列表序列+起点+单夹详情下载权
             final args = s.arguments as PreviewArgs;

@@ -1,11 +1,12 @@
 /// HomeShell(§2):IndexedStack 四 tab 保状态;底部四格导航。
-/// tab1=项目(现役平移)/ tab2=搜索 / tab3=传输(占位,B2/B3 交付)/ tab4=我的。
+/// tab1=项目(现役平移)/ tab2=搜索 / tab3=传输(B3 交付,§7)/ tab4=我的。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../me/me_page.dart';
 import '../projects/projects_page.dart';
+import '../transfers/transfers_page.dart';
 import 'tab_bar.dart';
 
 class HomeShell extends StatefulWidget {
@@ -28,7 +29,7 @@ class _HomeShellState extends State<HomeShell> {
         children: [
           const ProjectsPage(),
           const ComingSoonPage(icon: Icons.search_outlined, title: '搜索'),
-          const ComingSoonPage(icon: Icons.sync_outlined, title: '传输'),
+          const TransfersPage(),
           MePage(),
         ],
       ),

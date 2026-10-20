@@ -108,7 +108,8 @@ class _ProjectsPageState extends State<ProjectsPage> {
                               ],
                             ),
                             onTap: () => Navigator.of(context)
-                                .pushNamed('/folders', arguments: p.id),
+                                // B3:附带项目名(宫格上传任务 where 显示路径)
+                                .pushNamed('/folders', arguments: (p.id, p.name)),
                           );
                         },
                       ),
