@@ -5,8 +5,8 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../services/app_log.dart';
-import '../services/wecom_push.dart';
+import '../../services/app_log.dart';
+import '../../services/wecom_push.dart';
 
 Future<void> showLogPushDialog(BuildContext context) {
   return showDialog(context: context, builder: (ctx) => const _LogPushDialog());

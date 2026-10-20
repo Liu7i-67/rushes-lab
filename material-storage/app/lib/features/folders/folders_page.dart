@@ -1,9 +1,13 @@
+/// 项目内文件夹树(flat 列表 → 内存建树,ExpansionTile 递归渲染;现役平移)。
+library;
+
 import 'package:flutter/material.dart';
 
-import '../main.dart' show api;
-import '../models.dart';
+import '../../core/session.dart';
+import '../../models/models.dart';
+import '../../widgets/empty_state.dart';
+import '../../widgets/error_view.dart';
 
-/// 项目内文件夹树(flat 列表 → 内存建树,ExpansionTile 递归渲染)。
 class FoldersPage extends StatefulWidget {
   const FoldersPage({super.key, required this.projectId});
 
@@ -19,11 +23,11 @@ class _FoldersPageState extends State<FoldersPage> {
   @override
   void initState() {
     super.initState();
-    _future = api.folders(widget.projectId);
+    _future = session.api!.folders.list(widget.projectId);
   }
 
   void _reload() =>
-      setState(() => _future = api.folders(widget.projectId));
+      setState(() => _future = session.api!.folders.list(widget.projectId));
 
   @override
   Widget build(BuildContext context) {
@@ -41,12 +45,15 @@ class _FoldersPageState extends State<FoldersPage> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snap.hasError) {
-            return Center(child: Text('${snap.error}'));
+            return ErrorView(message: '${snap.error}', onRetry: _reload);
           }
           final all = snap.data ?? const [];
           final roots = _buildTree(all);
           if (roots.isEmpty) {
-            return const Center(child: Text('暂无文件夹'));
+            return const EmptyState(
+              icon: Icons.folder_outlined,
+              message: '暂无文件夹',
+            );
           }
           return ListView(
             children: [
@@ -102,24 +109,21 @@ class _FolderNodeTile extends StatelessWidget {
           ),
       ],
     );
+    void open() =>
+        Navigator.of(context).pushNamed('/assets', arguments: (f.id, f.name));
     if (node.children.isEmpty) {
       return ListTile(
         dense: true,
         leading: const Icon(Icons.folder_outlined),
         title: titleRow,
         trailing: const Icon(Icons.chevron_right),
-        onTap: () => Navigator.of(context)
-            .pushNamed('/assets', arguments: (f.id, f.name)),
+        onTap: open,
       );
     }
     return ExpansionTile(
       dense: true,
       leading: const Icon(Icons.folder_outlined),
-      title: GestureDetector(
-        onTap: () => Navigator.of(context)
-            .pushNamed('/assets', arguments: (f.id, f.name)),
-        child: titleRow,
-      ),
+      title: GestureDetector(onTap: open, child: titleRow),
       children: [for (final c in node.children) _FolderNodeTile(node: c)],
     );
   }

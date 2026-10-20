@@ -13,7 +13,7 @@ library;
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:ms_app/api/ms_api.dart';
+import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/services/livp.dart';
 
 // 1x1 JPEG(合法可解码静态帧,缩略图 worker 可处理)
@@ -55,22 +55,22 @@ Future<void> main(List<String> argv) async {
 
   final api = MsApi(baseUrl: base);
   try {
-    final me = await api.login(user, pass);
+    final me = await api.auth.login(user, pass);
     _ok('login → ${me.name}(${me.id})');
 
-    final meAgain = await api.me();
+    final meAgain = await api.auth.me();
     _ok('me → ${meAgain.name}');
 
-    final projects = await api.projects();
+    final projects = await api.projects.list();
     _ok('projects → ${projects.length} 个:${projects.take(5).map((p) => p.name).join('/')}');
     if (projects.isEmpty) throw StateError('无可见项目');
 
-    final folders = await api.folders(projects.first.id);
+    final folders = await api.folders.list(projects.first.id);
     _ok('folders → ${folders.length} 个');
     final target = folders.isEmpty ? null : folders.first;
     if (target == null) throw StateError('项目无文件夹,无法继续上传验证');
 
-    final before = await api.assets(target.id);
+    final before = await api.assets.list(target.id);
     _ok('assets(${target.name}) → 现有 ${before.total} 个');
 
     final jpg = base64Decode(_jpegB64);
@@ -85,7 +85,7 @@ Future<void> main(List<String> argv) async {
       baseName: 'VERIFY',
     );
 
-    final asset = await api.uploadBytes(
+    final asset = await api.assets.uploadBytes(
       folderId: target.id,
       filename: name,
       bytes: payload,
@@ -93,12 +93,12 @@ Future<void> main(List<String> argv) async {
     );
     _ok('upload → ${asset.filename}(${asset.sizeBytes}B)');
 
-    final after = await api.assets(target.id);
+    final after = await api.assets.list(target.id);
     _ok('assets → ${after.total} 个(+${after.total - before.total})');
 
-    final url = await api.downloadLink(asset.id);
+    final url = await api.assets.downloadLink(asset.id);
     final save = '${Directory.systemTemp.path}/$name';
-    final f = await api.downloadTo(url, save);
+    final f = await api.assets.downloadTo(url, save);
     final back = await f.readAsBytes();
     if (back.length != payload.length) {
       throw StateError('回读字节不符:${back.length} != ${payload.length}');
@@ -117,7 +117,7 @@ Future<void> main(List<String> argv) async {
     _ok('livp unpack → ${parts.image.name}'
         '${parts.video != null ? ' + ${parts.video!.name}' : ''}');
 
-    await api.deleteAsset(asset.id);
+    await api.assets.delete(asset.id);
     _ok('cleanup → 已软删 $name(dev 回收站可彻底清除)');
 
     stdout.writeln('\nALL PASS — dev 环境全链路(登录/浏览/livp 上传下载)验证通过');

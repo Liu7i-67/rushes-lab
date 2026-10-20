@@ -1,9 +1,14 @@
+/// 登录页(B1 简化):只剩 用户名 / 密码 / 登录 + 服务探活状态横幅 +
+/// 右上日志推送出口(登录失败兜底)。维护横幅位留 B9 填充。
+/// 后端地址由 Session 探活决定(§4),dev/prod/custom 切换与手填地址已删除。
+library;
+
 import 'package:flutter/material.dart';
 
-import '../api/ms_api.dart';
-import '../main.dart'
-    show apiOf, initPersistence, kApiPresets, loadBaseUrl, saveBaseUrl;
-import 'log_push.dart';
+import '../../core/api/ms_api.dart';
+import '../../core/session.dart';
+import '../../theme/tokens.dart';
+import '../me/log_push.dart';
 
 class LoginPage extends StatefulWidget {
   const LoginPage({super.key});
@@ -13,41 +18,48 @@ class LoginPage extends StatefulWidget {
 }
 
 class _LoginPageState extends State<LoginPage> {
-  final _baseUrl = TextEditingController();
   final _username = TextEditingController();
   final _password = TextEditingController();
   bool _busy = false;
+  bool _restoring = false;
   String? _error;
 
   @override
   void initState() {
     super.initState();
-    _restore();
+    session.addListener(_onSessionChanged);
+    _onSessionChanged();
   }
 
-  /// 载入持久化的后端地址(无记录回落 dev 预设);已有会话则直接进入。
-  Future<void> _restore() async {
-    _baseUrl.text = await loadBaseUrl();
-    if (!mounted) return;
-    setState(() {}); // 刷新预设选中态
-    await initPersistence();
-    try {
-      final api = apiOf(_baseUrl.text.trim());
-      final me = await api.me();
-      if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed('/projects', arguments: me);
-    } catch (_) {
-      /* 未登录属正常态 */
-    }
+  @override
+  void dispose() {
+    session.removeListener(_onSessionChanged);
+    _username.dispose();
+    _password.dispose();
+    super.dispose();
   }
 
-  /// 当前地址命中哪个预设;不命中 = custom
-  String get _selection {
-    final url = _baseUrl.text.trim();
-    for (final e in kApiPresets.entries) {
-      if (e.value == url) return e.key;
-    }
-    return 'custom';
+  void _onSessionChanged() {
+    if (session.phase == SessionPhase.ready) _onReady();
+    if (mounted) setState(() {});
+  }
+
+  /// 探活命中:先试 cookie 会话恢复(重启免登录);强制改密者直达改密页。
+  Future<void> _onReady() async {
+    if (_restoring || session.me != null || !mounted) return;
+    _restoring = true;
+    final me = await session.restore();
+    _restoring = false;
+    if (!mounted || me == null) return;
+    _goAfterAuth(me.mustChangePassword);
+  }
+
+  void _goAfterAuth(bool mustChange) {
+    Navigator.of(context).pushNamedAndRemoveUntil(
+      mustChange ? '/change-password' : '/home',
+      (r) => false,
+      arguments: mustChange,
+    );
   }
 
   Future<void> _login() async {
@@ -55,14 +67,10 @@ class _LoginPageState extends State<LoginPage> {
       _busy = true;
       _error = null;
     });
-    final url = _baseUrl.text.trim();
     try {
-      final api = apiOf(url);
-      final me = await api.login(_username.text.trim(), _password.text);
-      // 登录成功才落盘,避免误存手滑地址
-      await saveBaseUrl(url);
+      final me = await session.login(_username.text.trim(), _password.text);
       if (!mounted) return;
-      Navigator.of(context).pushReplacementNamed('/projects', arguments: me);
+      _goAfterAuth(me.mustChangePassword);
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
@@ -70,14 +78,6 @@ class _LoginPageState extends State<LoginPage> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
-  }
-
-  @override
-  void dispose() {
-    _baseUrl.dispose();
-    _username.dispose();
-    _password.dispose();
-    super.dispose();
   }
 
   @override
@@ -96,45 +96,17 @@ class _LoginPageState extends State<LoginPage> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Text(
-                      '素材库',
+                      '浣花视界',
                       textAlign: TextAlign.center,
                       style: Theme.of(context).textTheme.headlineMedium,
                     ),
-                    const SizedBox(height: 6),
-                    Text(
-                      '实况照片 livp 通道 · MVP',
-                      textAlign: TextAlign.center,
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
                     const SizedBox(height: 32),
 
-                    // ── 后端环境切换:dev / prod 预设 + 自定义(手填外网/隧道口)──
-                    SegmentedButton<String>(
-                      segments: const [
-                        ButtonSegment(value: 'dev', label: Text('dev')),
-                        ButtonSegment(value: 'prod', label: Text('prod')),
-                        ButtonSegment(value: 'custom', label: Text('自定义')),
-                      ],
-                      selected: {_selection},
-                      onSelectionChanged: (sel) {
-                        final v = sel.first;
-                        setState(() {
-                          if (v != 'custom') _baseUrl.text = kApiPresets[v]!;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: _baseUrl,
-                      onChanged: (_) => setState(() {}), // 手动编辑 → 切到自定义态
-                      decoration: const InputDecoration(
-                        labelText: '服务地址',
-                        prefixIcon: Icon(Icons.dns_outlined),
-                      ),
-                      keyboardType: TextInputType.url,
-                      autocorrect: false,
-                    ),
-                    const SizedBox(height: 12),
+                    // ── 探活状态横幅(§4):探测中 / 不可达可重试 ──
+                    _probeBanner(context),
+                    // 维护横幅位(B9 批填充:公告/Banner 插在此处)
+                    const SizedBox.shrink(),
+
                     TextField(
                       controller: _username,
                       decoration: const InputDecoration(
@@ -155,7 +127,10 @@ class _LoginPageState extends State<LoginPage> {
                     ),
                     const SizedBox(height: 20),
                     FilledButton(
-                      onPressed: _busy ? null : _login,
+                      onPressed:
+                          _busy || session.phase != SessionPhase.ready
+                              ? null
+                              : _login,
                       child: Padding(
                         padding: const EdgeInsets.symmetric(vertical: 12),
                         child: _busy
@@ -187,5 +162,34 @@ class _LoginPageState extends State<LoginPage> {
         ),
       ),
     );
+  }
+
+  Widget _probeBanner(BuildContext context) {
+    switch (session.phase) {
+      case SessionPhase.probing:
+        return const Column(
+          children: [
+            LinearProgressIndicator(minHeight: 2),
+            SizedBox(height: 16),
+          ],
+        );
+      case SessionPhase.unreachable:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Row(
+            children: [
+              const Icon(Icons.wifi_off_outlined, size: 18, color: Tk.red),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('服务不可达')),
+              TextButton(
+                onPressed: session.probe,
+                child: const Text('重试'),
+              ),
+            ],
+          ),
+        );
+      case SessionPhase.ready:
+        return const SizedBox.shrink();
+    }
   }
 }

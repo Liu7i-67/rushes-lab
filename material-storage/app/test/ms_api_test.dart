@@ -1,5 +1,5 @@
 /// MsApi 全链路单测:本地 HttpServer 按后端真实契约 mock,
-/// 验证 登录 cookie 会话 / 列表 / 16MB 分片上传编排 / 下载回读 字节一致性。
+/// 验证 登录 cookie 会话 / 列表 / 16MB 分片上传编排 / 下载回读 / 改密 字节一致性。
 /// 契约以 api/app/routers/{auth,projects,folders,assets}.py 为准。
 library;
 
@@ -7,7 +7,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ms_app/api/ms_api.dart';
+import 'package:ms_app/core/api/ms_api.dart';
 
 const _okUser = 'evan';
 const _okPass = 'secret123';
@@ -72,7 +72,30 @@ void main() {
             'id': 'u-1',
             'name': '测试',
             'must_change_password': false,
+            'is_system_admin': true,
+            'baidu_backup_enabled': false,
           });
+          return;
+        }
+        if (path == '/api/v1/auth/change-password' && req.method == 'POST') {
+          final cookie = req.headers.value(HttpHeaders.cookieHeader) ?? '';
+          if (!cookie.contains('ms_session=tok123')) {
+            _json(req, {'detail': 'session user not found'}, status: 401);
+            return;
+          }
+          final b = await _readJson(req);
+          // 契约:ChangePasswordIn{old_password,new_password}(api/app/models)
+          expect(b.containsKey('old_password'), isTrue, reason: '入参 old_password');
+          expect(b.containsKey('new_password'), isTrue, reason: '入参 new_password');
+          if (b['old_password'] != _okPass) {
+            _json(req, {'detail': '原密码不正确'}, status: 400);
+            return;
+          }
+          _json(req, {'status': 'ok'});
+          return;
+        }
+        if (path == '/api/v1/auth/logout' && req.method == 'POST') {
+          _json(req, {'status': 'ok'});
           return;
         }
 
@@ -211,23 +234,34 @@ void main() {
 
   test('登录失败 → 中文 detail 透出;成功 → cookie 会话 /me 通过', () async {
     await expectLater(
-      api.login('evan', 'wrong'),
+      api.auth.login('evan', 'wrong'),
       throwsA(isA<ApiException>()
           .having((e) => e.message, 'detail', '用户名或密码错误')),
     );
-    final me = await api.login(_okUser, _okPass);
+    final me = await api.auth.login(_okUser, _okPass);
     expect(me.name, '测试');
-    final again = await api.me();
+    final again = await api.auth.me();
     expect(again.id, 'u-1');
+    expect(again.isSystemAdmin, isTrue);
+  });
+
+  test('改密:入参 old_password/new_password;原密码错 400 detail 透出', () async {
+    await expectLater(
+      api.auth.changePassword(oldPassword: 'wrong', newPassword: 'x2'),
+      throwsA(isA<ApiException>()
+          .having((e) => e.message, 'detail', '原密码不正确')),
+    );
+    await api.auth.changePassword(
+        oldPassword: _okPass, newPassword: 'whatever-new');
   });
 
   test('项目/文件夹/文件列表模型解析', () async {
-    final projects = await api.projects();
+    final projects = await api.projects.list();
     expect(projects.single.name, '项目一');
-    final folders = await api.folders('p1');
+    final folders = await api.folders.list('p1');
     expect(folders.length, 2);
     expect(folders[1].parentFolderId, 'f1');
-    final page = await api.assets('f1');
+    final page = await api.assets.list('f1');
     expect(page.items.single.isLivp, isTrue);
   });
 
@@ -235,7 +269,7 @@ void main() {
     // 16MB + 1KB → 2 片,验证与 web Uppy 同款分片大小
     final payload = List<int>.generate(
         MsApi.partSize + 1024, (i) => i % 256);
-    final asset = await api.uploadBytes(
+    final asset = await api.assets.uploadBytes(
       folderId: 'f1',
       filename: 'test.livp',
       bytes: payload,
@@ -248,11 +282,11 @@ void main() {
   });
 
   test('下载链:download-link → downloadTo 回读字节一致;删除资产', () async {
-    final url = await api.downloadLink('a1');
-    final f = await api.downloadTo(url, '${Directory.systemTemp.path}/t.livp');
+    final url = await api.assets.downloadLink('a1');
+    final f = await api.assets.downloadTo(url, '${Directory.systemTemp.path}/t.livp');
     // mock /file 返回的是上一测试上传的分片重组 → 与该载荷一致
     final expected = [...uploadedParts[1] ?? const [], ...uploadedParts[2] ?? const []];
     expect(await f.length(), expected.length);
-    await api.deleteAsset('a2');
+    await api.assets.delete('a2');
   });
 }
