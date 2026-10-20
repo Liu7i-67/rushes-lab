@@ -1,5 +1,7 @@
 ## 2026-10-20
 
+- **百度备份并发改造 部署 hh2 dev+push fork**(用户指令"push➕部署dev";liuqi `ab4f74e` 直发 dev,DEPLOYED.md=ab4f74e;**push fork 完成 1b0ec7c..ab4f74e**):预检全过=工作区净/FGA 零 diff/依赖零 diff(免 rebuild)/dev 原 1cb6db1;**迁移 0017 先行**(deploy_lan.sh 不带 --restart 同步→`docker exec ms-api-dev alembic upgrade head` 0016→0017 于 restart 前)→SPA 本地 build 指纹 `index-CREI9jEt.js`≠线上 BK25rcoE(坑 C 防御过)→分片推送+原子替换+**备份 web.bak-20261020-baiduconc**→restart ms-api-dev/ms-worker-dev(prod 双容器未动);验证全过——①DEPLOYED=ab4f74e ②**双入口指纹一致 index-CREI9jEt.js**(内网 8090+外网 8080) ③auth/me 401 ④容器新代码 grep(uq_baidu_task_running/expire_binding_on_exhaustion)+参数 4/2/8/5+worker max_jobs=8 ⑤索引形态=旧 uq_baidu_task_active 已删/新 running 唯一+非唯一准入索引在位/bindings.vip_type smallint NULL ⑥X-User-Id 业务抽测备份任务列表 200(存量绑定 vip_type=NULL 属预期,随下次 bind/创建/复活自然回填) ⑦双容器近 2min 日志 0 error;**prod 未部署(发版窗口=活动备份任务含 enumerating 清零,待拍板)**;调参提醒=BAIDU_ADMISSION_LIMIT/NONVIP/WORKER_MAX_JOBS 改 .env 后须 force-recreate ms-worker、软上限须 recreate ms-api
+
 - **百度备份并发改造 合并 liuqi+worktree/分支清理**(用户指令"合并liuqi的最新代码"):liuqi `f4a69d2` no-ff 合并 feat/baidu-backup-concurrency(qplan 定稿 7c1d09c+实施 3183137+记账 c98e4ed,18 文件 +2413/-250;唯一冲突 scripts/changelog.md 同日双追加,手工合序=百度条目在前/inapp·W2a 条目原序保留);**与并行周期(inapp/W2a/deploy 修复)文件交集仅 changelog.md,代码零冲突**;周期清理=rushes-lab-feat-baidu-backup-concurrency+rushes-lab-qplan-baidu-backup-multi-task 两 worktree 两分支全删(qplan 分支方案文档与 liuqi 字节一致,无独有内容);**dev/prod 均未部署、liuqi 未 push(均待指令)**;部署提醒=迁移 0017 先行(alembic upgrade head 于 restart 前)+调参按消费方 force-recreate+回滚走方案 §5.4 runbook
 
 ## 2026-10-19
