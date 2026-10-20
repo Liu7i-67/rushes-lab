@@ -24,9 +24,15 @@
 	<string>????</string>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<!-- 实况照片 livp 通道:相册读(选取实况)与写(下载存回相册) -->
+	<key>NSCameraUsageDescription</key>
+	<string>用于拍摄照片或视频并上传到素材库</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>用于读取照片的拍摄位置信息</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>用于选取实况照片并上传到素材库</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
