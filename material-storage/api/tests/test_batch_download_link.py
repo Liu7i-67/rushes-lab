@@ -83,9 +83,34 @@ Seam 说明(契约钉死 / 仓库惯例假设):
     单条 UPDATE,表达式锚定列本身、路径级合并,对方 job 的 key 不丢
                                     → test_merge_asset_tags_jsonb_set_atomic_no_foreign_key_loss
     同 key 同时 set/remove 显式报错 → test_merge_asset_tags_rejects_same_key_set_and_remove
+  遗留缺口补测(2026-10-21,编号对应测试任务清单 A1-A7)
+    A1 信号量 acquire 限时超时快速失败(写 fail 标记 / 清锁 / 不打包)
+                                    → test_worker_semaphore_wait_timeout_fast_fails_with_marker
+    A2 resume 期权限整体回收 → ready 复检全 denied 403(不签 URL 不写签发审计)
+                                    → test_resume_ready_recheck_all_denied_403_no_sign_audit
+    A3 key 收敛:就绪位翻转致应然 key ≠ resume_key
+      新 key head 命中 → 直签 ready + 现算回放补写记录
+                                    → test_resume_key_convergence_new_key_head_hit_ready_backfill
+      新 key miss → 重新入队(新记录新 key)
+                                    → test_resume_key_convergence_new_key_miss_reenqueues
+    A4 批量包内同名 Windows 风格 (1) 去重
+                                    → test_dedupe_entry_name_windows_style
+                                    → test_worker_dedupes_same_name_entries_windows_style
+    A5 打包途中软删/行消失跳过;移动后按重查行当前 minio_key 入包
+                                    → test_worker_skips_soft_deleted_and_vanished_rows_mid_pack
+                                    → test_worker_uses_current_minio_key_of_requeried_row
+    A6 audited 去重键契约(按选中集摘要分键,全 denied 常量 key 场景各自首评)
+                                    → test_audited_key_shape_is_selection_scoped
+                                    → test_all_denied_selections_each_get_first_evaluation
+    A7 P3-1 回写契约(Lua 语义)+ ready 响应 actual 优先/静态回落
+                                    → test_writeback_livp_raw_count_lua_semantics_merge_keeps_ttl
+                                    → test_writeback_livp_raw_count_expired_record_not_revived
+                                    → test_writeback_livp_raw_count_redis_error_returns_false
+                                    → test_ready_response_prefers_livp_raw_count_actual
 """
 from __future__ import annotations
 
+import hashlib
 import inspect
 import io
 import json
@@ -107,7 +132,16 @@ from app.db.tables import Asset, Folder, Project
 from app.routers.assets import BatchDownloadLinkIn
 from app.routers.assets import router as assets_router
 from app.settings import Settings
-from app.workers.batch_download import cleanup_batch_zips, generate_batch_download_zip
+from app.workers.batch_download import (
+    _dedupe_entry_name,
+    batch_audited_key,
+    batch_job_record_key,
+    batch_object_key,
+    cleanup_batch_zips,
+    compute_batch_key,
+    generate_batch_download_zip,
+    writeback_livp_raw_count,
+)
 from app.workers.main import WorkerSettings
 
 # ─── 常量(契约值)─────────────────────────────────────────────────────────────
@@ -1594,3 +1628,404 @@ async def test_merge_asset_tags_rejects_same_key_set_and_remove() -> None:
             FakeSessionmaker([], None), uuid.uuid4(),
             sets={"download_zip_key": "x"}, removes=("download_zip_key",),
         )
+
+
+# ─── 遗留缺口补测(A1-A7,2026-10-21)─────────────────────────────────────────
+async def test_worker_semaphore_wait_timeout_fast_fails_with_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A1:打包信号量(模块级 ≤2)acquire 限时 120s —— 竞争态(2 许可全被在途
+    job 持有)超时快速失败:写 batchzip:fail:{key}、清两键、不取流不打包
+    (不烧 1800s job 预算)。限时值 monkeypatch 压缩为 50ms,语义不变。"""
+    import app.workers.batch_download as bd
+
+    a = mk_batch_asset("a.jpg")
+    key = "0123456789abcdef"
+    token = "tok-sem"
+    user_id = uuid.uuid4()
+    redis = FakeRedis()
+    redis.seed(f"batchzip:active:{user_id}", f"{key}:{token}", KEYGATE_TTL)
+    redis.seed(f"batchzip:keygate:{key}", f"{key}:{token}", KEYGATE_TTL)
+    s3 = FakeS3(objects={a.minio_key: b"\xff\xd8jpeg"})
+    patch_batch_worker(monkeypatch, rows=[a], s3=s3)
+    monkeypatch.setattr(bd, "_SEMAPHORE_WAIT_S", 0.05)
+
+    await bd._PACK_SEMAPHORE.acquire()
+    await bd._PACK_SEMAPHORE.acquire()   # 竞争态:许可全部被占
+    try:
+        out = await generate_batch_download_zip(
+            {"redis": redis}, str(user_id), token, [a.id], "ms-proj", key,
+        )
+    finally:
+        bd._PACK_SEMAPHORE.release()
+        bd._PACK_SEMAPHORE.release()
+
+    assert out == {"status": "failed", "key": key, "error": "semaphore_wait_timeout"}
+    assert redis.alive(f"batchzip:fail:{key}"), "超时快速失败必须写失败标记(衔接 failed/retry)"
+    assert redis.store[f"batchzip:fail:{key}"][0] == "TimeoutError", "标记值为异常类型名"
+    assert not redis.alive(f"batchzip:active:{user_id}"), "快速失败也要清 per-user 锁"
+    assert not redis.alive(f"batchzip:keygate:{key}"), "快速失败也要清 per-key 闸"
+    assert s3.ops == [] and s3.upload_calls == [], "未取得信号量不得取流/打包"
+
+
+async def test_resume_ready_recheck_all_denied_403_no_sign_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A2:resume 轮询期权限整体回收 → head 命中触发 ready 全量复检 → 全 denied
+    → 403;不签发 URL、不写 signed_url_issued 审计(仍写 download_denied 首评);
+    不得回退到 miss 入队通道。"""
+    a = mk_batch_asset("revoked.jpg")
+    w = BatchWorld(monkeypatch, assets=[a])
+
+    first = await w.post([a.id])
+    key = fld(first.out, "key")
+    w.presign.hit(zip_object_key_candidates(key), age_seconds=60)
+    w.permissions.denied = {str(a.id)}   # 轮询期权限整体回收
+
+    with pytest.raises(HTTPException) as ei:
+        await w.post([a.id], resume_key=key)
+
+    assert ei.value.status_code == 403
+    assert w.presign.calls == [], "denied 复检不得签发 URL"
+    assert w.audit.of_type("signed_url_issued") == [], "denied 复检不得写 signed_url_issued"
+    denied_events = [e for e in w.audit.of_type("download_denied")
+                     if str(e.get("target_asset_id")) == str(a.id)]
+    assert len(denied_events) == 1, "仍写 download_denied(该选中集首评一次)"
+    assert w.redis.alive(batch_audited_key(str(w.user.id), [str(a.id)])), (
+        "denied 去重键按选中集摘要落下"
+    )
+    assert len(batch_enqueues(w.pool)) == 1, "denied 短路不得回退入队(仅首 POST 一条)"
+
+
+async def test_resume_key_convergence_new_key_head_hit_ready_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3(命中支):resume 时就绪位翻转 → 应然 key ≠ resume_key;新 key 的包已
+    存在(head 命中)→ 直签 ready,且按当前复检现算回放补写新 key 作业记录
+    (前端照常按响应里的新 key 继续轮询)。"""
+    lv = mk_batch_asset("IMG_0001.livp")   # 未就绪(tags 空)
+    w = BatchWorld(monkeypatch, assets=[lv])
+
+    first = await w.post([lv.id])
+    rk = fld(first.out, "key")
+    assert rk == compute_batch_key({str(lv.id): False}, [str(lv.id)])
+    new_key = compute_batch_key({str(lv.id): True}, [str(lv.id)])
+    assert rk != new_key, "就绪位翻转必须改变应然 key(收敛分支的前提)"
+
+    lv.tags["download_zip_key"] = f"derivatives/{lv.id}/livp.zip"   # 打包期就绪位翻转
+    w.presign.hit(zip_object_key_candidates(rk), age_seconds=60)
+    w.presign.hit(zip_object_key_candidates(new_key), age_seconds=60)
+    w.clear_locks(rk)
+
+    out = await w.post([lv.id], resume_key=rk)
+
+    assert fld(out.out, "status") == "ready"
+    assert fld(out.out, "key") == new_key, "按新 key 交付"
+    assert fld(out.out, "url")
+    assert out.presign.calls[-1]["key"] == batch_object_key(new_key), "URL 签在新 key 对象上"
+    raw = await w.redis.get(batch_job_record_key(str(w.user.id), new_key))
+    assert raw is not None, "必须补写新 key 的作业记录"
+    rec = json.loads(raw)
+    assert rec["selection_ids"] == [str(lv.id)], "现算回放:selection 原样"
+    assert rec["allowed_ids"] == [str(lv.id)]
+    assert rec["bucket"] == "ms-proj"
+    assert rec["livp_raw_count"] == 0, "现算回放:已就绪 livp 不计原始兜底"
+    issued = out.audit.of_type("signed_url_issued")
+    assert len(issued) == 1
+    assert issued[0]["target_minio_key"] == batch_object_key(new_key)
+    assert len(batch_enqueues(w.pool)) == 1, "新 key head 命中免重打包(仅首 POST 一条)"
+
+
+async def test_resume_key_convergence_new_key_miss_reenqueues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A3(miss 支):resume 时就绪位翻转且新 key 的包不存在 → 按新批重新入队
+    (新 key 新作业记录;_job_id epoch 形态;此后同 key 轮询被锁去重不双跑)。"""
+    lv = mk_batch_asset("IMG_0001.livp")
+    w = BatchWorld(monkeypatch, assets=[lv])
+
+    first = await w.post([lv.id])
+    rk = fld(first.out, "key")
+    new_key = compute_batch_key({str(lv.id): True}, [str(lv.id)])
+
+    lv.tags["download_zip_key"] = f"derivatives/{lv.id}/livp.zip"
+    w.presign.hit(zip_object_key_candidates(rk), age_seconds=60)   # 只 seed 旧 key:新 key miss
+    w.clear_locks(rk)
+
+    out = await w.post([lv.id], resume_key=rk)
+
+    assert fld(out.out, "status") == "packing"
+    assert fld(out.out, "key") == new_key, "收敛分支按新 key 继续轮询"
+    raw = await w.redis.get(batch_job_record_key(str(w.user.id), new_key))
+    assert raw is not None, "新 key 必须落新作业记录"
+    rec = json.loads(raw)
+    assert rec["selection_ids"] == [str(lv.id)] and rec["allowed_ids"] == [str(lv.id)]
+    assert rec["livp_raw_count"] == 0
+    enq = batch_enqueues(w.pool)
+    assert len(enq) == 2, "新 key miss → 重新入队"
+    assert [str(x) for x in enq[1]["args"]][-1] == new_key, "新入队落新 key"
+    assert re.fullmatch(re.escape(new_key) + r":\d+", str(enq[1]["kwargs"]["_job_id"])), (
+        f"epoch 后缀形态: {enq[1]['kwargs']['_job_id']!r}"
+    )
+    second = await w.post([lv.id], resume_key=new_key)
+    assert fld(second.out, "status") == "packing"
+    assert len(batch_enqueues(w.pool)) == 2, "新 key 锁已由本次 dispatch 落下 → 不双跑"
+
+
+def test_dedupe_entry_name_windows_style() -> None:
+    """A4(纯函数):批量包内 Windows 风格 `(1)` 重名去重 —— 不同夹同名文件很常见。"""
+    used: set[str] = set()
+    assert _dedupe_entry_name("IMG_0001.jpg", used) == "IMG_0001.jpg"
+    assert _dedupe_entry_name("IMG_0001.jpg", used) == "IMG_0001 (1).jpg"
+    assert _dedupe_entry_name("IMG_0001.jpg", used) == "IMG_0001 (2).jpg"
+    assert _dedupe_entry_name("IMG_0001.mp4", used) == "IMG_0001.mp4", "同名不同扩展名互不影响"
+    used2: set[str] = {"a.jpg", "a (1).jpg"}
+    assert _dedupe_entry_name("a.jpg", used2) == "a (2).jpg", "已被占的编号顺延不撞"
+
+
+async def test_worker_dedupes_same_name_entries_windows_style(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A4(job 组装路径):两个不同资产同名 → zip 内条目 `x.jpg` / `x (1).jpg`。"""
+    a = mk_batch_asset("same.jpg")
+    b = mk_batch_asset("same.jpg")
+    b.minio_key = "folder-b/same.jpg"
+    key = "0123456789abcdef"
+    token = "tok-dedup"
+    user_id = uuid.uuid4()
+    redis = FakeRedis()
+    redis.seed(f"batchzip:active:{user_id}", f"{key}:{token}", KEYGATE_TTL)
+    redis.seed(f"batchzip:keygate:{key}", f"{key}:{token}", KEYGATE_TTL)
+    s3 = FakeS3(objects={a.minio_key: b"AAA", b.minio_key: b"BBB"})
+    patch_batch_worker(monkeypatch, rows=[a, b], s3=s3)
+
+    out = await generate_batch_download_zip(
+        {"redis": redis}, str(user_id), token, [a.id, b.id], "ms-proj", key,
+    )
+
+    assert out["status"] == "ok" and out["entries"] == 2
+    up = s3.upload_calls[0]
+    with zipfile.ZipFile(up["path"]) as zf:
+        entries = sorted(zf.namelist())
+    assert entries == ["same (1).jpg", "same.jpg"], f"Windows 风格去重: {entries!r}"
+
+
+async def test_worker_skips_soft_deleted_and_vanished_rows_mid_pack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A5a:打包途中部分资产软删/行消失 → 逐资产重查行跳过(zip 缺席该资产不崩
+    job),其余照常入包;仍有有效条目 → 正常交付(ok 而非失败收尾)。"""
+    keep = mk_batch_asset("keep.jpg")
+    softdel = mk_batch_asset("gone.jpg")
+    softdel.deleted_at = datetime.now(UTC)          # 打包途中被软删
+    ghost = mk_batch_asset("purged.jpg")            # 打包途中行被 purge(重查无行)
+    key = "0123456789abcdef"
+    token = "tok-skip"
+    user_id = uuid.uuid4()
+    redis = FakeRedis()
+    redis.seed(f"batchzip:active:{user_id}", f"{key}:{token}", KEYGATE_TTL)
+    redis.seed(f"batchzip:keygate:{key}", f"{key}:{token}", KEYGATE_TTL)
+    s3 = FakeS3(objects={keep.minio_key: b"\xff\xd8jpeg"})
+    patch_batch_worker(monkeypatch, rows=[keep, softdel], s3=s3)   # ghost 不在预置集
+
+    out = await generate_batch_download_zip(
+        {"redis": redis}, str(user_id), token, [keep.id, softdel.id, ghost.id],
+        "ms-proj", key,
+    )
+
+    assert out["status"] == "ok" and out["entries"] == 1, "缺席资产跳过,不崩不失败"
+    up = s3.upload_calls[0]
+    with zipfile.ZipFile(up["path"]) as zf:
+        assert zf.namelist() == ["keep.jpg"], "zip 缺席被删资产"
+    fetched = [k for op, k in s3.ops if op in ("get_object", "download_fileobj")]
+    assert set(fetched) == {keep.minio_key}, "被删资产不得取流"
+
+
+async def test_worker_uses_current_minio_key_of_requeried_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A5b:enqueue 后资产被移动 → 按重查行**当前** minio_key 拉流照常入包;
+    旧 key 的陈旧内容不得被取用(job 入参只有 ids,key 以重查行为唯一事实)。"""
+    moved = mk_batch_asset("moved.jpg")
+    old_key, new_key = moved.minio_key, "folder-b/moved-after-move.jpg"
+    moved.minio_key = new_key
+    key = "0123456789abcdef"
+    token = "tok-move"
+    user_id = uuid.uuid4()
+    redis = FakeRedis()
+    redis.seed(f"batchzip:active:{user_id}", f"{key}:{token}", KEYGATE_TTL)
+    redis.seed(f"batchzip:keygate:{key}", f"{key}:{token}", KEYGATE_TTL)
+    s3 = FakeS3(objects={old_key: b"stale-bytes", new_key: b"fresh-bytes"})
+    patch_batch_worker(monkeypatch, rows=[moved], s3=s3)
+
+    out = await generate_batch_download_zip(
+        {"redis": redis}, str(user_id), token, [moved.id], "ms-proj", key,
+    )
+
+    assert out["status"] == "ok"
+    fetched = [k for op, k in s3.ops if op in ("get_object", "download_fileobj")]
+    assert fetched == [new_key], f"必须按重查行当前 minio_key 拉流: {fetched!r}"
+    up = s3.upload_calls[0]
+    with zipfile.ZipFile(up["path"]) as zf:
+        assert zf.read("moved.jpg") == b"fresh-bytes", "入包的是新 key 内容"
+
+
+def test_audited_key_shape_is_selection_scoped() -> None:
+    """A6(纯函数):denied 去重键形态 batchzip:audited:{user}:sel:
+    {sha256(canonical(ids))[:16]} —— 同集不同序/含重复同键;不同选集不同键。
+    全 denied 场景批量缓存 key 恒为常量(允许集空),去重键按选中集分正是
+    「不同选集各自首评」的根基。"""
+    uid = str(uuid.uuid4())
+    i1, i2, i3 = (str(uuid.uuid4()) for _ in range(3))
+
+    k1 = batch_audited_key(uid, [i1, i2])
+    assert k1 == batch_audited_key(uid, [i2, i1]), "同集不同序同键"
+    assert k1 == batch_audited_key(uid, [i1, i1, i2]), "canonical 去重后同键"
+    expected_digest = hashlib.sha256(",".join(sorted({i1, i2})).encode("utf-8")).hexdigest()
+    assert k1 == f"batchzip:audited:{uid}:sel:{expected_digest[:16]}", f"键形态: {k1!r}"
+    assert batch_audited_key(uid, [i1, i3]) != k1, "不同选集不同键"
+
+    const_key = compute_batch_key({}, [])          # 全 denied 的批量缓存 key(常量)
+    assert const_key == compute_batch_key({}, []), "全 denied 下缓存 key 恒常量"
+    assert batch_audited_key(uid, [i1, i2]) != batch_audited_key(uid, [i1, i3]), (
+        "常量 key 场景下去重键仍须按选中集区分(否则异选集首评被折叠少记)"
+    )
+
+
+async def test_all_denied_selections_each_get_first_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A6(端点):全 denied 场景 —— 同集不同序的二次请求去重(不重写审计),
+    不同选集各自首评(各写两条 download_denied;跨选集不互相折叠)。"""
+    a, b, c = (mk_batch_asset(f"{n}.jpg") for n in "abc")
+    audit = StubAudit()
+    redis = FakeRedis()
+    pool = FakeArqPool()
+    user = mk_user("a")
+    # db 预置行与该次请求的 SELECT 匹配(id IN 过滤口径;全 denied 不预置除外项)
+    posts: list[tuple[list[Any], list[Any]]] = [
+        ([a.id, b.id], [a, b]),
+        ([b.id, a.id], [a, b]),   # 同集不同序:去重
+        ([a.id, c.id], [a, c]),   # 不同选集:各自首评
+    ]
+    for ids, preset in posts:
+        payload = BatchDownloadLinkIn(asset_ids=list(ids))
+        with pytest.raises(HTTPException) as ei:
+            await call_batch(
+                monkeypatch, payload, user=user, assets=preset,
+                denied_ids=[x.id for x in preset],
+                audit=audit, redis=redis, pool=pool,
+            )
+        assert ei.value.status_code == 403
+
+    per_asset: dict[str, int] = {}
+    for e in audit.of_type("download_denied"):
+        k = str(e.get("target_asset_id"))
+        per_asset[k] = per_asset.get(k, 0) + 1
+    assert per_asset == {str(a.id): 2, str(b.id): 1, str(c.id): 1}, (
+        f"同集轮询去重、异选集首评: {per_asset!r}"
+    )
+    for sel in ([str(a.id), str(b.id)], [str(a.id), str(c.id)]):
+        assert redis.alive(batch_audited_key(str(user.id), sel)), f"去重键未落下: {sel!r}"
+
+
+class WritebackRedis:
+    """writeback Lua 语义等价桩(仓库无 fakeredis 依赖,不新增 pip 包):
+    实现 writeback 所用命令子集(GET + JSON 字段级合并 + KEEPTTL);eval 先钉
+    实际下发的 Lua 文本(含 GET 门 / KEEPTTL / 字段名,布局变化即显式失败),
+    再按脚本等价语义执行:记录存在才改、TTL 截止时刻原样保留、过期不复活。"""
+
+    def __init__(self) -> None:
+        self.store: dict[str, tuple[str, float]] = {}
+        self.scripts: list[str] = []
+
+    def seed(self, name: str, value: str, ttl: int = 600) -> None:
+        self.store[name] = (value, time.time() + ttl)
+
+    async def eval(self, script: Any, numkeys: int = 0, *keys_and_args: Any, **kw: Any) -> int:
+        text = str(script)
+        self.scripts.append(text)
+        assert "GET" in text, "回写 Lua 必须先 GET(记录存在才写,过期不复活)"
+        assert "KEEPTTL" in text, "回写 Lua 必须 KEEPTTL(不重置回放窗 TTL)"
+        assert "livp_raw_count_actual" in text, "回写 Lua 必须字段级合并实际计数"
+        key, count = str(keys_and_args[0]), int(keys_and_args[1])
+        item = self.store.get(key)
+        if item is None:
+            return 0                                   # 记录已过期:跳过
+        obj = json.loads(item[0])
+        obj["livp_raw_count_actual"] = count
+        self.store[key] = (json.dumps(obj), item[1])   # KEEPTTL:截止时刻不动
+        return 1
+
+
+async def test_writeback_livp_raw_count_lua_semantics_merge_keeps_ttl() -> None:
+    """A7:回写 Lua 语义 —— 记录存在才写;字段级合并(其余字段原样);已有
+    livp_raw_count_actual 被新实际计数覆盖;KEEPTTL 不重置 TTL。"""
+    uid, key = str(uuid.uuid4()), "0123456789abcdef"
+    name = batch_job_record_key(uid, key)
+    r = WritebackRedis()
+    r.seed(name, json.dumps({
+        "livp_raw_count": 1, "selection_ids": ["x"], "livp_raw_count_actual": 1,
+    }), ttl=1000)
+    deadline_before = r.store[name][1]
+
+    ok = await writeback_livp_raw_count(r, uid, key, 3)
+
+    assert ok is True
+    obj = json.loads(r.store[name][0])
+    assert obj["livp_raw_count_actual"] == 3, "新实际计数覆盖旧值"
+    assert obj["livp_raw_count"] == 1 and obj["selection_ids"] == ["x"], "其余字段不丢"
+    assert r.store[name][1] == deadline_before, "KEEPTTL:回写不得重置 TTL"
+    assert len(r.scripts) == 1
+
+
+async def test_writeback_livp_raw_count_expired_record_not_revived() -> None:
+    """A7:记录已过期(打包完成晚于 EX 3600 的常态边缘)→ 返回 False 跳过,
+    不得把过期键复活(SET 复活 = 无 TTL 键永久泄漏)。"""
+    uid, key = str(uuid.uuid4()), "0123456789abcdef"
+    r = WritebackRedis()
+
+    ok = await writeback_livp_raw_count(r, uid, key, 2)
+
+    assert ok is False
+    assert batch_job_record_key(uid, key) not in r.store, "过期记录不得被回写复活"
+
+
+async def test_writeback_livp_raw_count_redis_error_returns_false() -> None:
+    """A7:Redis 故障 → 只 log 不上抛,返回 False(非交付路径,响应退回静态判定)。"""
+
+    class BoomRedis:
+        async def eval(self, *a: Any, **kw: Any) -> int:
+            raise RuntimeError("redis down")
+
+    ok = await writeback_livp_raw_count(BoomRedis(), str(uuid.uuid4()), "0123456789abcdef", 1)
+
+    assert ok is False
+
+
+async def test_ready_response_prefers_livp_raw_count_actual(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A7:ready 响应 livp_raw_count 以 job 回写的 livp_raw_count_actual 优先
+    (§6.2 第 6 步:轮询期就绪位翻转时静态判定与实际包内容有偏差);记录无该
+    字段(job 未回写/记录重建)回落 tags 静态判定值。"""
+    lv = mk_batch_asset("IMG_0001.livp")   # 未就绪 → 静态判定 livp_raw_count=1
+    w = BatchWorld(monkeypatch, assets=[lv])
+
+    first = await w.post([lv.id])
+    key = fld(first.out, "key")
+    assert fld(first.out, "livp_raw_count") == 1, "首响应按 tags 静态判定"
+    rec_name = batch_job_record_key(str(w.user.id), key)
+    record = json.loads(await w.redis.get(rec_name))
+    w.presign.hit(zip_object_key_candidates(key), age_seconds=60)
+    w.clear_locks(key)
+
+    fallback = await w.post([lv.id], resume_key=key)
+    assert fld(fallback.out, "status") == "ready"
+    assert fld(fallback.out, "livp_raw_count") == 1, "无回写字段 → 回落静态判定"
+
+    record["livp_raw_count_actual"] = 3   # 模拟 job 回写(实际打包计数)
+    w.redis.seed(rec_name, json.dumps(record), 3600)
+
+    actual = await w.post([lv.id], resume_key=key)
+    assert fld(actual.out, "livp_raw_count") == 3, "回写后 ready 以实际计数为准"

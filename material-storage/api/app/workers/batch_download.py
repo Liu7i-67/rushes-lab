@@ -6,7 +6,8 @@
     执行开始 token 匹配 Lua 续期两键(失主只 log 不写失败标记);模块级打包信号量 ≤2
     (单进程语义,勿横向扩 worker 副本)acquire 限时 120s 快速失败;job 自管 deadline
     (逐资产检查)+ finally shield 宽限 60s 等待在途线程;逐资产重查行按当前 minio_key
-    拉流(行删 / NoSuchKey 跳过;有效条目 0 → 失败收尾);livp 就绪解开
+    拉流(查行走逐资产短会话,拉流/组包期间零 DB 会话持有;行删 / NoSuchKey 跳过;
+    有效条目 0 → 失败收尾);livp 就绪解开
     derivatives/{id}/livp.zip 取成员按批量包规则重写内名(衍生物缺失/未就绪 → 原始
     .livp 兜底);打包完成把实际 livp_raw_count(原始兜底计数)Lua 回写作业记录
     `batchzip:job:{user}:{key}` 字段 livp_raw_count_actual(存在才改 + KEEPTTL,
@@ -60,7 +61,7 @@ log = logging.getLogger("worker.batch")
 KEYGATE_TTL = 2400          # 两键(per-key 闸 + per-user 锁)TTL,崩溃兜底(§6.2 第 5 步)
 FAIL_TTL = 600              # 失败标记 batchzip:fail:{key} EX(端点 failed 短路窗)
 JOB_RECORD_TTL = 3600       # 作业记录 batchzip:job:{user}:{key} EX(轮询回放窗)
-AUDITED_TTL = 1800          # denied 审计去重 batchzip:audited:{user}:{key}(≥ 前端轮询上限 900s)
+AUDITED_TTL = 1800          # denied 审计去重 batchzip:audited:{user}:sel:{选中集摘要}(≥ 前端轮询上限 900s)
 BATCH_URL_TTL = 21600       # 批量包保留/URL 满额 6h(命中路径按剩余寿命收缩)
 _BATCH_RETENTION = timedelta(hours=6)
 BATCH_ZIP_PREFIX = "derivatives/batch/"
@@ -115,9 +116,15 @@ def batch_job_record_key(user_id: str, key: str) -> str:
     return f"batchzip:job:{user_id}:{key}"
 
 
-def batch_audited_key(user_id: str, key: str) -> str:
-    """denied 审计去重(SETNX EX 1800,窗口 ≥ 前端轮询上限)。"""
-    return f"batchzip:audited:{user_id}:{key}"
+def batch_audited_key(user_id: str, selection: list[str]) -> str:
+    """denied 审计去重键(SETNX EX 1800,窗口 ≥ 前端轮询上限)。
+
+    去重粒度 = 用户 + canonical(请求选中集)摘要,而非批量缓存 key:全 denied
+    选集的 compute_batch_key 恒返同一常量(允许集为空,sha256("<空摘要>|-")),
+    拿它做去重键会把同一用户 30 分钟内**不同选集**的首评折叠成一次少记;按选中集
+    摘要分键,不同选集各自首评,同选集的轮询复评(ready 复检路径)仍被去重。
+    """
+    return f"batchzip:audited:{user_id}:sel:{allowed_digest(selection)[:16]}"
 
 
 def batch_object_key(key: str) -> str:
@@ -444,26 +451,32 @@ async def _pack_and_upload(
     livp_raw = 0
     obj_key = batch_object_key(key)
     try:
-        async with sm() as db:
-            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
-                used: set[str] = set()
-                for aid in asset_ids:
-                    if time.monotonic() > deadline:
-                        raise _BatchZipFailure(
-                            f"打包截止时间已到(已入包 {written} 项,余量不足)"
-                        )
-                    # 逐资产重查行,以重查行的当前 minio_key 为唯一事实拉流(enqueue
-                    # 到执行隔数分钟,资产可能被软删/purge/移动);行删 → 跳过不崩 job
-                    row = await db.get(Asset, uuid.UUID(aid))
-                    if row is None or row.deleted_at is not None:
-                        log.info("batch zip skip vanished asset=%s key=%s", aid, key)
-                        continue
-                    n, raw = await _append_asset(
-                        zf, s3, row, tmpdir, used,
-                        _livp_download_base_name, _pick_livp_entries,
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as zf:
+            used: set[str] = set()
+            for aid in asset_ids:
+                if time.monotonic() > deadline:
+                    raise _BatchZipFailure(
+                        f"打包截止时间已到(已入包 {written} 项,余量不足)"
                     )
-                    written += n
-                    livp_raw += raw
+                # 逐资产重查行,以重查行的当前 minio_key 为唯一事实拉流(enqueue
+                # 到执行隔数分钟,资产可能被软删/purge/移动);行删 → 跳过不崩 job。
+                # 查行走逐资产短会话(查完即关,拉流/组包期间零 DB 会话持有):
+                # 打包最长可耗满 job 预算 29 分钟,全程持单条会话 = idle-in-
+                # transaction 占住连接并拖住 xmin 视界阻塞 vacuum。取到的行是列值
+                # 已加载的 detached 实例(expire_on_commit=False 且 get 不 commit、
+                # 列属性无 lazy load 触发点),会话关闭后读 filename/minio_key/tags
+                # 安全;语义与旧「单会话逐资产 get」一致,只是每行生命周期收窄。
+                async with sm() as db:
+                    row = await db.get(Asset, uuid.UUID(aid))
+                if row is None or row.deleted_at is not None:
+                    log.info("batch zip skip vanished asset=%s key=%s", aid, key)
+                    continue
+                n, raw = await _append_asset(
+                    zf, s3, row, tmpdir, used,
+                    _livp_download_base_name, _pick_livp_entries,
+                )
+                written += n
+                livp_raw += raw
         if written == 0:
             # 有效条目为 0(全选集在打包途中被软删/purge)→ 不产出空 zip,按失败收尾
             raise _BatchZipFailure("有效条目为 0(选集在打包途中全部被删/不存在)")

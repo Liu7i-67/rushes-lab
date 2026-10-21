@@ -9,6 +9,8 @@
  *   pickSaveTarget() / streamToHandle() — 批量下载须在点击瞬间(transient activation
  *   窗口 ~5s 内)先弹保存框,轮询 ready 后再 streamToHandle 写盘;单文件 start()
  *   改调两段式,行为不变。
+ *   streamToHandle 返回结果状态(P2-2):任务照旧落 failed/cancelled(失败记录保留),
+ *   调用方(单文件 livp 解包回落)凭返回值感知失败 — start() 契约不变,仍只返 task id。
  */
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
 import { App } from 'antd';
@@ -16,6 +18,14 @@ import { useDownloadLink } from '../api/hooks';
 import type { DownloadVariant } from './asset-download';
 
 export type DownloadStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
+
+/** streamToHandle 的结果状态:ok = 写盘成功;cancelled = 用户取消(调用方不应据此回落);
+ *  error = 失败摘要(典型 HTTP 404 — 服务端签发后对象被清的竞态)。*/
+export interface StreamResult {
+  ok: boolean;
+  cancelled?: boolean;
+  error?: string;
+}
 
 export interface DownloadTask {
   id: string;
@@ -40,8 +50,9 @@ interface DownloadCtx {
   }) => Promise<string>;  // 返 task id
   /** 批量打包占位(§6.4):仅登记任务记录,不发请求不弹框,返 task id。*/
   addPlaceholder: (filename: string, note?: string) => string;
-  /** 两段式②:向已取的 FSA handle 流式写盘;进度/取消/失败都落在该 task 上。*/
-  streamToHandle: (handle: unknown, url: string, taskId: string) => Promise<void>;
+  /** 两段式②:向已取的 FSA handle 流式写盘;进度/取消/失败都落在该 task 上,
+   *  返回结果状态(成功 / 用户取消 / 失败摘要)供调用方感知 — 任务态照旧落盘。*/
+  streamToHandle: (handle: unknown, url: string, taskId: string) => Promise<StreamResult>;
   /** 局部更新任务(占位 note / 状态推进)。*/
   patchTask: (id: string, p: Partial<DownloadTask>) => void;
   cancel: (id: string) => void;
@@ -89,6 +100,23 @@ export async function pickSaveTarget(filename: string): Promise<unknown> {
 
 const genTaskId = () => `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+// 直连系统下载路径的任务 note 标识(start() 移动分支写入,任务中心据此渲染
+// 「重新下载」入口 — P2-7 火狐/直连被拦降级 §6.4)
+export const DIRECT_DOWNLOAD_NOTE = '已交给系统下载';
+
+/** 程序化 anchor 触发系统下载器(start() 移动直连分支与任务中心「重新下载」共用)。
+ *  单次自动下载一般放行;被拦时由任务中心的「重新下载」手动补一次(§6.4)。*/
+// eslint-disable-next-line react-refresh/only-export-components
+export function triggerAnchorDownload(url: string): void {
+  const a = document.createElement('a');
+  a.href = url;
+  a.target = '_blank';   // 防御:attachment 失效时不顶掉 SPA
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 export function DownloadProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
   const { message } = App.useApp();
@@ -99,8 +127,9 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
   }, []);
 
   // 两段式②:原 start() 内联的 FSA 流式写盘段原样拆出(进度/取消/错误语义不变;
-  // 失败不向调用方抛错,落 task.status — 单文件与批量同口径)
-  const streamToHandle = useCallback(async (handle: unknown, url: string, taskId: string): Promise<void> => {
+  // 失败不向调用方抛错,落 task.status — 单文件与批量同口径),另返结果状态供
+  // 单文件 livp 解包路径感知失败回落(P2-2),批量/非 livp 调用方忽略返回值即可
+  const streamToHandle = useCallback(async (handle: unknown, url: string, taskId: string): Promise<StreamResult> => {
     const ctrl = new AbortController();
     patch(taskId, { url, status: 'running', abort: () => ctrl.abort() });
     try {
@@ -134,10 +163,16 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
 
       await writable.close();
       patch(taskId, { status: 'success' });
+      return { ok: true };
     } catch (e) {
       const err = e as { name?: string; message?: string };
-      if (err.name === 'AbortError') patch(taskId, { status: 'cancelled', error: '已取消' });
-      else patch(taskId, { status: 'failed', error: err.message ?? String(e) });
+      if (err.name === 'AbortError') {
+        patch(taskId, { status: 'cancelled', error: '已取消' });
+        return { ok: false, cancelled: true, error: '已取消' };
+      }
+      const error = err.message ?? String(e);
+      patch(taskId, { status: 'failed', error });
+      return { ok: false, error };
     }
   }, [patch]);
 
@@ -167,17 +202,11 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
         });
         linkUrl = link.url;
       }
-      const a = document.createElement('a');
-      a.href = linkUrl;
-      a.target = '_blank';   // 防御:attachment 失效时不顶掉 SPA
-      a.rel = 'noopener';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
+      triggerAnchorDownload(linkUrl);
       // 立即完成的任务记录 + toast;保持 start(): Promise<string> 契约(任务中心依赖 task id)
       setTasks(ts => [{
         id, filename, url: linkUrl, startedAt: Date.now(),
-        status: 'success', loaded: 0, total: 0, note: '已交给系统下载',
+        status: 'success', loaded: 0, total: 0, note: DIRECT_DOWNLOAD_NOTE,
       }, ...ts]);
       message.success(`「${filename}」已交给系统下载`);
       return id;

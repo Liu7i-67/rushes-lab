@@ -488,14 +488,16 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
 # 下载级规格:全分辨率 JPG + 全长 H.264 MP4 组 zip(预览级是 1024px q80 / 截 3s)
 _LIVP_DL_JPEG_QUALITY = 90
 _LIVP_DL_FFMPEG_TIMEOUT_SEC = 120                # 须低于本 job timeout=300(§2.1 核算)
-# 静态图解码段显式调高 Pillow DecompressionBomb 守卫:预览链路依赖默认值(~1.78 亿
-# 像素),合法超大全景图会被它判死且归入「解码失败=永久失败」;下载级要放行,防滥用
-# 由 livp 200MB 入口上限兜。只在解码段内抬高并恢复(§2.2 第 3 步),不放大预览链路
-# 的守卫口径。⚠ MAX_IMAGE_PIXELS 是模块级全局:并发 livp job 的解码段跑在不同
-# to_thread 线程,裸「捕获→抬高→finally 恢复」会互踩(B 捕获到 A 已抬高的值,A 先
-# 退出恢复默认,B 后退出把全局恢复成 6 亿 —— 预览链路守卫被永久放大,同 worker 进程
-# 的缩略图链路守卫随之失守)。故用模块级锁串行化解码段(单 job 解码互不依赖吞吐,
-# 串行无代价):锁内严格「进抬退恢复」,锁外任何时刻全局值恒为默认
+# 静态图解码段需要放行合法超大全景图:Pillow 默认守卫(~1.78 亿像素)会把它判死
+# 且归入「解码失败=永久失败」,而下载级要交付(§2.2 第 3 步),防滥用由 livp 200MB
+# 入口上限兜。抬高采用**惰性**策略:解码+保存首次恒以环境守卫值(常规即默认)跑、
+# 不持锁不碰全局 —— 常规路径守卫零窗口,预览链路口径完全不受扰动;仅当捕获
+# DecompressionBombError(大全景图)才进重试段:持 _LIVP_DECODE_LOCK 抬高 →
+# 重试一次 → finally 恢复。⚠ MAX_IMAGE_PIXELS 是模块级全局:重试段必须串行,
+# 裸「捕获→抬高→finally 恢复」会互踩(B 捕获到 A 已抬高的值,A 先退出恢复默认,
+# B 后退出把全局恢复成 6 亿 —— 预览链路守卫被永久放大);重试段经锁互斥后严格
+# 「进抬退恢复」,锁外任何时刻全局值只可能是默认或「某次重试正在抬高的瞬间」,
+# 窗口 = 大全景图重试期间,远小于旧方案「每次解码都抬」的常开窗。
 _LIVP_DL_MAX_IMAGE_PIXELS = 600_000_000
 _LIVP_DECODE_LOCK = threading.Lock()
 
@@ -529,6 +531,35 @@ def _livp_download_base_name(filename: str, asset_id: str) -> str:
     return base
 
 
+def _livp_still_decode_and_save(still_bytes: bytes) -> bytes:
+    """解码 + 转正 + 合成 + 保存 JPEG 的可重入内部函数(不含守卫抬落,守卫口径
+    由调用方决定;正常/重试两段共用同一实现,保证重试与首试产出逐字节同口径)。"""
+    img = Image.open(io.BytesIO(still_bytes))
+    img = ImageOps.exif_transpose(img)
+    if img.mode not in ("RGB", "L"):
+        if img.mode in ("RGBA", "LA", "P") or "transparency" in img.info:
+            rgba = img.convert("RGBA")
+            bg = Image.new("RGB", rgba.size, (255, 255, 255))
+            bg.paste(rgba, mask=rgba.getchannel("A"))
+            img = bg
+        else:
+            img = img.convert("RGB")
+    save_kwargs: dict[str, Any] = {
+        "quality": _LIVP_DL_JPEG_QUALITY, "optimize": True,
+    }
+    icc = img.info.get("icc_profile")
+    if icc:
+        save_kwargs["icc_profile"] = icc
+    # transpose 返回对象自带的 exif(已剥 orientation);无则不传(老客户端
+    # 无元数据可丢,好过一个带原 orientation 的 EXIF)
+    exif_bytes = img.info.get("exif")
+    if exif_bytes:
+        save_kwargs["exif"] = exif_bytes
+    out = io.BytesIO()
+    img.save(out, format="JPEG", **save_kwargs)
+    return out.getvalue()
+
+
 def _encode_livp_still_jpeg(still_bytes: bytes) -> bytes:
     """HEIC/PNG 静态图 → 下载级全分辨率 JPEG(纯函数,只碰内存字节)。
 
@@ -538,38 +569,20 @@ def _encode_livp_still_jpeg(still_bytes: bytes) -> bytes:
     - ICC 原样保留(防 P3 色偏);只传 ICC 不传 EXIF 会丢拍摄时间等元数据,「高效」
       iPhone 恰是本方案主场景(§2.2 第 3 步);
     - RGBA/P 透明区贴白底合成(裸 convert("RGB") 会把 alpha 丢成黑底);
-    - DecompressionBomb 守卫解码段内抬高、退出恢复(见 _LIVP_DL_MAX_IMAGE_PIXELS);
-      全局抬抬落落经 _LIVP_DECODE_LOCK 串行,并发 job 的解码段互斥,预览链路守卫
-      口径不受影响。
+    - DecompressionBomb 守卫**惰性抬高**(见 _LIVP_DL_MAX_IMAGE_PIXELS):首试以
+      环境守卫值直接跑(不持锁、零窗口);仅捕获 DecompressionBombError 才持
+      _LIVP_DECODE_LOCK 抬高 → 重试一次 → finally 恢复 —— 常规照片全程不碰全局,
+      大全景图的窗口收窄到重试期间;重试段经锁串行,并发 job 互踩消除。
     """
+    try:
+        return _livp_still_decode_and_save(still_bytes)
+    except Image.DecompressionBombError:
+        pass
     with _LIVP_DECODE_LOCK:
         prev_cap = Image.MAX_IMAGE_PIXELS
         Image.MAX_IMAGE_PIXELS = _LIVP_DL_MAX_IMAGE_PIXELS
         try:
-            img = Image.open(io.BytesIO(still_bytes))
-            img = ImageOps.exif_transpose(img)
-            if img.mode not in ("RGB", "L"):
-                if img.mode in ("RGBA", "LA", "P") or "transparency" in img.info:
-                    rgba = img.convert("RGBA")
-                    bg = Image.new("RGB", rgba.size, (255, 255, 255))
-                    bg.paste(rgba, mask=rgba.getchannel("A"))
-                    img = bg
-                else:
-                    img = img.convert("RGB")
-            save_kwargs: dict[str, Any] = {
-                "quality": _LIVP_DL_JPEG_QUALITY, "optimize": True,
-            }
-            icc = img.info.get("icc_profile")
-            if icc:
-                save_kwargs["icc_profile"] = icc
-            # transpose 返回对象自带的 exif(已剥 orientation);无则不传(老客户端
-            # 无元数据可丢,好过一个带原 orientation 的 EXIF)
-            exif_bytes = img.info.get("exif")
-            if exif_bytes:
-                save_kwargs["exif"] = exif_bytes
-            out = io.BytesIO()
-            img.save(out, format="JPEG", **save_kwargs)
-            return out.getvalue()
+            return _livp_still_decode_and_save(still_bytes)
         finally:
             Image.MAX_IMAGE_PIXELS = prev_cap
 

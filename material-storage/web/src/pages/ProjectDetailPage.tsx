@@ -300,18 +300,19 @@ export default function ProjectDetailPage() {
 
       if (res.status === 'failed') {
         if (placeholderId) downloads.remove(placeholderId);
-        // 失败标记 EX 600;重试带 retry:true 清标记立即重新入队(§6.2 第 5 步)
-        message.error({
+        // 失败标记 EX 600;重试带 retry:true 清标记立即重新入队(§6.2 第 5 步)。
+        // sticky(duration 0)+ 点击即销毁 — 6s 自动消失会让重试入口失联(P2-4)
+        const closer = message.error({
           content: (
             <span>
               打包失败
               <Button size="small" type="link"
-                      onClick={() => { void runBulkDownload(ids, handle, true); }}>
+                      onClick={() => { closer(); void retryBulkDownload(ids, handle); }}>
                 重试
               </Button>
             </span>
           ),
-          duration: 6,
+          duration: 0,
         });
         return;
       }
@@ -349,6 +350,19 @@ export default function ProjectDetailPage() {
     setBulkBusy(true);
     try {
       await runBulkDownload(ids, handle);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  // failed 重试(P2-4):复用统一批量流程 — 闭包里保住已选保存路径的 handle,
+  // 带 retry:true 重新 POST + 继续轮询/写盘,不再弹保存框;全程置 busy,
+  // 与批量按钮 loading 同闸,防止并发再点
+  const retryBulkDownload = async (ids: string[], handle: unknown) => {
+    if (bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      await runBulkDownload(ids, handle, true);
     } finally {
       setBulkBusy(false);
     }

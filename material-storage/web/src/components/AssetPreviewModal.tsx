@@ -73,9 +73,11 @@ export function AssetPreviewModal({
   asset, open, onClose, list, index, onIndexChange, canDownload,
 }: Props) {
   const { message } = App.useApp();
-  // hooks 置顶(见 use-viewports 模块注释)
+  // hooks 置顶(compact 判定唯一源,见 use-viewports 模块注释)
   const compact = useCompactViewport();
   const dlLink = useDownloadLink();
+  // F14 次选项独立 mutation 实例(P2-6):与主下载共用一个实例时任一点击两按钮同时转圈
+  const dlLinkOriginal = useDownloadLink();
   const downloads = useDownloads();
   const [content, setContent] = useState<string | null>(null);
   // livp 实况短片 URL(null = 无/未生成/无权限 — 只显示静态图)
@@ -91,7 +93,12 @@ export function AssetPreviewModal({
   // 403 兜底走组件级提示(与三张降级卡同文案)
   const handleDownload = async (forceOriginal = false) => {
     try {
-      await downloadAsset({ dlLink, downloads, message }, asset, { forceOriginal });
+      await downloadAsset(
+        // 主/次选项各用各的 mutation 实例 — loading 状态互不影响(P2-6)
+        { dlLink: forceOriginal ? dlLinkOriginal : dlLink, downloads, message },
+        asset,
+        { forceOriginal },
+      );
     } catch (e) {
       const err = e as { response?: { status?: number } };
       if (err.response?.status === 403) message.warning('无下载权限,请联系项目管理员');
@@ -219,11 +226,12 @@ export function AssetPreviewModal({
   );
 
   // F14:livp 专属次选项 — 默认下载已是解包 zip,需要回传 iPhone 的用户才拿原始 .livp
+  // loading 用次选项自己的实例(P2-6):与主下载互不影响
   const originalLivpButton = kind === 'livp' && (
     <Button size={compact ? 'large' : 'middle'} type="text"
             icon={<Download size={15} strokeWidth={1.8} />}
             disabled={canDownload === false}
-            loading={dlLink.isPending}
+            loading={dlLinkOriginal.isPending}
             onClick={() => void handleDownload(true)}>
       下载原始 .livp
     </Button>

@@ -7,12 +7,16 @@
  *   永久失败 tag(download_zip_failed)有值 → 直落原始,不误导「生成中」。
  *   非 livp / forceOriginal → 原始下载,现行为零变化;403 一律上抛,由调用方既有分支处理
  *   (申请弹窗 / 提示),helper 不吞权限错误。
+ *   第二道防线(§5.1)双路径齐备:桌面 FSA 走两段式直连 streamToHandle,凭 StreamResult
+ *   感知写盘失败(签发后对象被清的竞态,典型 HTTP 404)→ 复用已取 handle 自动回落原始
+ *   livp(P2-2);移动直连的重签 fetch 报错由 start() 上抛,catch 兜底回落(行为不变)。
  *
  * 批量(PC 单 zip):postBatchDownloadLink 创建/轮询双职能端点的调用封装与响应类型;
  *   编排(两段式 FSA + 3s 轮询 + 各状态分支处置)在 ProjectDetailPage.handleBulkDownload。
  */
 import { http } from '../api/client';
 import type { Asset } from '../api/types';
+import { hasFSA, pickSaveTarget, type DownloadTask, type StreamResult } from './download-store';
 
 export type DownloadVariant = 'original' | 'unpacked';
 
@@ -31,6 +35,10 @@ export interface DownloadAssetDeps {
       assetId?: string;
       variant?: DownloadVariant;
     }) => Promise<string>;
+    /** 桌面 FSA livp 解包路径(两段式 + 失败感知回落)所需的 store 能力 */
+    addPlaceholder: (filename: string, note?: string) => string;
+    streamToHandle: (handle: unknown, url: string, taskId: string) => Promise<StreamResult>;
+    patchTask: (id: string, p: Partial<DownloadTask>) => void;
   };
   message: {
     info: (content: string) => void;
@@ -80,6 +88,41 @@ function notifyUnpackedNotReady(deps: DownloadAssetDeps, a: Asset): void {
 }
 
 /**
+ * 桌面 FSA livp 解包路径(两段式 + 失败感知,§5.1 第二道防线 P2-2):streamToHandle
+ * 内部吞错落任务失败态,这里凭 StreamResult 感知写盘失败(典型:签发后对象被清的
+ * HTTP 404 竞态)→ 自动回落原始 livp。
+ * 回落复用已取的保存框 handle — transient activation 已被首次弹框耗尽,二次弹框必败;
+ * .livp 本就是 zip 容器,原始内容写入 .zip 名下仍可解包/改名回传。失败记录保留
+ * (note 标注已回落),回落写盘另起一条任务记录。用户取消不回落(与原行为一致)。
+ */
+async function startUnpackedFsa(deps: DownloadAssetDeps, a: Asset, zipUrl: string): Promise<void> {
+  const base = sanitizeBasename(a.filename.slice(0, -'.livp'.length), a.id);
+  const suggested = `${base}.zip`;
+  const taskId = deps.downloads.addPlaceholder(suggested);
+  const handle = await pickSaveTarget(suggested);
+  if (!handle) {
+    deps.downloads.patchTask(taskId, { status: 'cancelled', error: '用户取消保存' });
+    return;
+  }
+  const r = await deps.downloads.streamToHandle(handle, zipUrl, taskId);
+  if (r.ok || r.cancelled) return;
+
+  // 回落原始:重签不带 variant → 后端默认 original(403 上抛走申请链路,与既有口径一致)
+  const origLink = await deps.dlLink.mutateAsync(a.id);
+  deps.downloads.patchTask(taskId, {
+    note: `解包版获取失败(${r.error ?? '未知错误'}),已自动改为下载原始 livp`,
+  });
+  const fallbackId = deps.downloads.addPlaceholder(a.filename);
+  const fb = await deps.downloads.streamToHandle(handle, origLink.url, fallbackId);
+  if (fb.ok) {
+    deps.downloads.patchTask(fallbackId, {
+      note: '原始 livp 已写入所选保存位置(文件名带 .zip 后缀,回传 iPhone 可改名为 .livp)',
+    });
+  }
+  deps.message.info(`「${a.filename}」解包版获取失败,已改为下载原始 livp`);
+}
+
+/**
  * 单文件下载统一入口(F12)。403 恒上抛(调用方保留申请弹窗/提示分支);
  * 其余非预期错误同样上抛走调用方通用报错。
  */
@@ -117,13 +160,19 @@ export async function downloadAsset(
     throw e;  // 403 / 其他 → 调用方既有分支
   }
 
+  if (hasFSA()) {
+    // 桌面 FSA:两段式 + 失败感知(第二道防线,回落逻辑自含于 startUnpackedFsa;
+    // 错误直上抛,不进下方移动分支的 catch — 避免回落再失败时误报「已下载原始」)
+    await startUnpackedFsa(deps, a, link.url);
+    return;
+  }
+
   try {
-    // FSA suggestedName = 基名.zip(基名清洗与后端 §2.3 同规则)
+    // 无 FSA(移动/直连):start 内部重签带 variant;报错(首签与重签之间衍生物失效,
+    // 典型 404)→ 兜底原始下载;403 仍上抛走申请链路
     const base = sanitizeBasename(a.filename.slice(0, -'.livp'.length), a.id);
     await deps.downloads.start(link.url, `${base}.zip`, { assetId: a.id, variant: 'unpacked' });
   } catch (e) {
-    // 二道防线(§5.1):移动直连重签若报错(首签与重签之间衍生物失效,典型 404)→
-    // 兜底原始下载;403 仍上抛走申请链路
     const status = httpStatus(e);
     if (status === 403 || status == null) throw e;
     notifyUnpackedNotReady(deps, a);

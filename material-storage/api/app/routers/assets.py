@@ -1740,20 +1740,26 @@ async def _batch_audit_denied(
     redis: Any,
     audit: AuditService,
     user: CurrentUser,
-    key: str,
+    selection: list[str],
     denied_ids: list[str],
     ctx: dict,
 ) -> None:
     """denied 首次逐条审计:Redis SETNX EX 1800 去重(窗口 ≥ 前端轮询上限 900s,
-    轮询不重写);SETNX 异常只 log 跳过,不让审计故障变 5xx。"""
+    轮询不重写)。去重键用 canonical(请求选中集)摘要而非批量缓存 key —— 全
+    denied 时 compute_batch_key 恒返同一常量(允许集为空),按它分键会把同一用户
+    30 分钟内不同选集的首评折叠少记;选中集摘要分键后不同选集各自首评、同选集
+    轮询仍去重。SETNX 异常只 log 跳过,不让审计故障变 5xx。"""
     if not denied_ids:
         return
     try:
         first = await redis.set(
-            batch_audited_key(str(user.id), key), "1", nx=True, ex=AUDITED_TTL,
+            batch_audited_key(str(user.id), selection), "1", nx=True, ex=AUDITED_TTL,
         )
     except Exception as e:
-        log.warning("batch denied audit dedup fail user=%s key=%s err=%s", user.id, key, e)
+        log.warning(
+            "batch denied audit dedup fail user=%s selection=%s err=%s",
+            user.id, selection, e,
+        )
         return
     if not first:
         return
@@ -1978,7 +1984,7 @@ async def batch_download_link(
                 if not fresh.rows:
                     raise HTTPException(400, "所选文件不存在或已删除,无可下载文件")
                 if not fresh.allowed:
-                    await _batch_audit_denied(redis, audit, user, rk, fresh.denied_ids, ctx)
+                    await _batch_audit_denied(redis, audit, user, selection, fresh.denied_ids, ctx)
                     raise HTTPException(403, "所选文件均无下载权限(可对单个文件申请下载)")
                 cur_key = compute_batch_key(fresh.readiness, fresh.allowed_ids)
                 if cur_key == rk:
@@ -2029,7 +2035,7 @@ async def batch_download_link(
     # 无乒乓;就绪位翻转落新 key,旧包不被钉住)。key 是包内容的函数,与请求 id
     # 顺序/重复项无关 —— 同选中集两次点击(前端 selectedIds 插入序差异)同 key。
     key = compute_batch_key(fresh.readiness, fresh.allowed_ids)
-    await _batch_audit_denied(redis, audit, user, key, fresh.denied_ids, ctx)
+    await _batch_audit_denied(redis, audit, user, selection, fresh.denied_ids, ctx)
     if not fresh.allowed:
         raise HTTPException(403, "所选文件均无下载权限(可对单个文件申请下载)")
     bucket = _batch_bucket_of(fresh.allowed)
