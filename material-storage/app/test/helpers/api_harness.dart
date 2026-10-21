@@ -19,6 +19,8 @@ import 'package:ms_app/core/api/share_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/models/models.dart';
 
+import 'fake_apis_b6.dart';
+
 // ── 1. plain-test 本地服务器 ──────────────────────────────────────────────────
 
 Future<Map<String, dynamic>> readJson(HttpRequest req) async {
@@ -95,8 +97,8 @@ Asset fakeAsset(String id, {List<String> labels = const [], String? notes}) =>
         userLabels: labels,
         notes: notes);
 
-/// 结果编排:值为 Exception 则抛(403/422 透传测试),否则原样返回(缺省回退)。
-T _settle<T>(Object? staged, T fallback) {
+/// 结果编排(公开,B6 假 API 族共用):值为 Exception 则抛,否则原样返回(缺省回退)。
+T settleStaged<T>(Object? staged, T fallback) {
   if (staged is Exception) throw staged;
   return (staged ?? fallback) as T;
 }
@@ -123,14 +125,14 @@ class FakeOpsApi extends AssetOpsApi {
       {List<String>? userLabels, String? notes, String? labelsMode}) async {
     metaCalls
         .add((id: assetId, labels: userLabels, notes: notes, mode: labelsMode));
-    return _settle(metaStaged, fakeAsset(assetId));
+    return settleStaged(metaStaged, fakeAsset(assetId));
   }
 
   @override
   Future<AssetBatchPrefixResult> batchPrefix(List<String> assetIds,
       {required String action, required String prefix}) async {
     prefixCalls.add((ids: assetIds, action: action, prefix: prefix));
-    return _settle(prefixStaged,
+    return settleStaged(prefixStaged,
         AssetBatchPrefixResult(renamed: assetIds.length, skipped: 0));
   }
 
@@ -138,7 +140,7 @@ class FakeOpsApi extends AssetOpsApi {
   Future<AssetBatchMoveResult> batchMove(List<String> assetIds,
       {required String targetFolderId}) async {
     moveCalls.add((ids: assetIds, targetFolderId: targetFolderId));
-    return _settle(
+    return settleStaged(
         moveStaged, AssetBatchMoveResult(movedCount: assetIds.length));
   }
 
@@ -146,7 +148,7 @@ class FakeOpsApi extends AssetOpsApi {
   Future<TrashPage> listTrash(String folderId,
       {int limit = 500, int offset = 0}) async {
     trashCalls.add((folderId: folderId, limit: limit, offset: offset));
-    return _settle(trashStaged, TrashPage(items: [], total: 0));
+    return settleStaged(trashStaged, TrashPage(items: [], total: 0));
   }
 
   @override
@@ -189,14 +191,14 @@ class FakeShareApi extends ShareApi {
       {required int expiresInSeconds}) async {
     calls.add(
         (kind: 'asset', id: assetId, expiresInSeconds: expiresInSeconds));
-    return _settle(staged, _fallback());
+    return settleStaged(staged, _fallback());
   }
 
   @override
   Future<ShareLink> shareFolder(String folderId,
       {required int expiresInSeconds}) async {
     calls.add((kind: 'folder', id: folderId, expiresInSeconds: expiresInSeconds));
-    return _settle(staged, _fallback());
+    return settleStaged(staged, _fallback());
   }
 }
 
@@ -262,6 +264,10 @@ class FakeMsApi extends MsApi {
   late final _share = FakeShareApi(this);
   late final _approvals = FakeApprovalsApi(this);
   late final _folders = FakeFoldersApi(this);
+  late final _foldersOps = FakeFolderOpsApi(this);
+  late final _projectsOps = FakeProjectOpsApi(this);
+  late final _adminTemplates = FakeAdminTemplatesApi(this);
+  late final _users = FakeUsersApi(this);
 
   @override
   FakeAssetsApi get assets => _assets;
@@ -277,4 +283,16 @@ class FakeMsApi extends MsApi {
 
   @override
   FakeFoldersApi get folders => _folders;
+
+  @override
+  FakeFolderOpsApi get foldersOps => _foldersOps;
+
+  @override
+  FakeProjectOpsApi get projectsOps => _projectsOps;
+
+  @override
+  FakeAdminTemplatesApi get adminTemplates => _adminTemplates;
+
+  @override
+  FakeUsersApi get users => _users;
 }

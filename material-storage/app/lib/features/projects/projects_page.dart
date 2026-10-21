@@ -1,5 +1,5 @@
-/// 项目页(B2 §8.1):列表 + 权限徽标(ROLE_META 同 web)+ 下拉刷新。
-/// 新建项目/回收站等入口按方案 §16 后续批交付;素材计数后端无字段,不显示。
+/// 项目页(B2 §8.1):列表 + 权限徽标 + 下拉刷新。B6 点亮:新建项目入口
+/// (is_project_creator 闸门)+ 行内「成员」入口(my_roles 含 admin)。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,6 +11,8 @@ import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../me/log_push.dart';
+import 'new_project_sheet.dart';
+import 'project_members_sheet.dart';
 import 'role_badge.dart';
 
 /// 项目页 AppBar 标题:打包注入 stamp 时在「项目」后追加最后编辑时间
@@ -77,6 +79,15 @@ class _ProjectsPageState extends State<ProjectsPage> {
         ),
         actions: [
           logPushButton(context),
+          // B6:新建项目(总闸门 is_project_creator;成功后失效总线自动重拉)
+          if (session.me?.isProjectCreator ?? false)
+            IconButton(
+              tooltip: '新建项目',
+              icon: const Icon(Icons.add_business_outlined),
+              onPressed: () async {
+                await showNewProjectSheet(context);
+              },
+            ),
           IconButton(onPressed: _reload, icon: const Icon(Icons.refresh)),
         ],
       ),
@@ -104,12 +115,25 @@ class _ProjectsPageState extends State<ProjectsPage> {
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 MyRolesBadge(roles: p.myRoles),
+                                // B6:成员管理入口(项目 admin;后端 can_admin 兜底)
+                                if (p.myRoles.contains('admin'))
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: '成员管理',
+                                    icon: const Icon(Icons.people_outline,
+                                        size: 20),
+                                    onPressed: () =>
+                                        showProjectMembersSheet(context,
+                                            project: p),
+                                  ),
                                 const Icon(Icons.chevron_right),
                               ],
                             ),
                             onTap: () => Navigator.of(context)
-                                // B3:附带项目名(宫格上传任务 where 显示路径)
-                                .pushNamed('/folders', arguments: (p.id, p.name)),
+                                // B3:附带项目名(宫格上传任务 where 显示路径);
+                                // B6:附带 my_roles(文件夹页「新建一级」闸门)
+                                .pushNamed('/folders',
+                                    arguments: (p.id, p.name, p.myRoles)),
                           );
                         },
                       ),

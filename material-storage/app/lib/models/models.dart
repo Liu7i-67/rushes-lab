@@ -8,3 +8,5 @@ export 'folder.dart';
 export 'me.dart';
 export 'project.dart';
 export 'share.dart';
+export 'templates.dart';
+export 'user.dart';

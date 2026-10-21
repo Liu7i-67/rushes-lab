@@ -1,5 +1,7 @@
 /// 项目内文件夹页(B2 §8.1):flat 列表自组树、按缩进展示、支持多级下钻,
-/// 行=subtree_file_count 徽标+敏感锁+「⋯」占位菜单;点夹进宫格上下文。
+/// 行=subtree_file_count 徽标+敏感锁+「⋯」菜单(B6 管理动作全量);点夹进宫格
+/// 上下文。B6:AppBar「新建一级文件夹」(my_roles admin/uploader 闸门,敏感
+/// 开关仅此处有义——sensitive 只能直挂项目一级)。
 /// my_can_* 列表响应恒 False,本页不消费(宫格页拉单夹详情,§11 钉子)。
 library;
 
@@ -10,6 +12,7 @@ import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import 'folder_form_sheet.dart';
 import 'folder_row.dart';
 import 'folder_tree.dart';
 
@@ -18,12 +21,17 @@ class FoldersPage extends StatefulWidget {
     super.key,
     required this.projectId,
     this.projectName = '',
+    this.myRoles = const [],
   });
 
   final String projectId;
 
   /// 项目显示名(B3:宫格上传任务 where=「项目/…/文件夹」路径前缀)。
   final String projectName;
+
+  /// 当前用户在本项目的角色(B6;新建一级文件夹闸门:admin/uploader,
+  /// 与 project 级 can_upload 的角色派生同口径)。
+  final List<String> myRoles;
 
   @override
   State<FoldersPage> createState() => _FoldersPageState();
@@ -107,7 +115,23 @@ class _FoldersPageState extends State<FoldersPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('文件夹')),
+      appBar: AppBar(
+        title: const Text('文件夹'),
+        // B6:新建一级文件夹(can_upload ≈ admin/uploader 角色;成功失效总线
+        // 自动重拉;403 detail 由表单透传,无权者后端兜底)
+        actions: [
+          if (widget.myRoles.contains('admin') ||
+              widget.myRoles.contains('uploader'))
+            IconButton(
+              tooltip: '新建一级文件夹',
+              icon: const Icon(Icons.create_new_folder_outlined),
+              onPressed: () => showFolderFormSheet(context,
+                  mode: FolderFormMode.createRoot,
+                  projectId: widget.projectId,
+                  parentLabel: widget.projectName),
+            ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _error != null

@@ -1,4 +1,5 @@
-/// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 诊断(日志推送)+
+/// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 项目管理
+/// (B6:回收站(项目),仅 is_project_deleter 可见)+ 诊断(日志推送)+
 /// 当前服务入口(只读,内网/公网标识)+ 退出登录。B0 批挂载:网盘备份区
 /// (features/baidu/bind_code_page.dart)。B4:B0 落盘 PoC 入口移除(使命完成,
 /// 正式实现=下载线落盘矩阵,决策 #1)。
@@ -54,6 +55,17 @@ class MePage extends StatelessWidget {
                     Navigator.of(context).pushNamed('/change-password',
                         arguments: false),
               ),
+              // B6:已删除项目回收站(恢复);仅 is_project_deleter 可见
+              // (后端 deleted/restore 双端点 require_project_deleter 同口径)
+              if (me?.isProjectDeleter ?? false)
+                ListTile(
+                  leading: const Icon(Icons.delete_sweep_outlined),
+                  title: const Text('回收站(项目)'),
+                  subtitle: const Text('已删除项目的恢复入口'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () =>
+                      Navigator.of(context).pushNamed('/deleted-projects'),
+                ),
               const _SectionLabel('网盘备份'),
               const _BaiduBackupTile(),
               const _SectionLabel('诊断'),

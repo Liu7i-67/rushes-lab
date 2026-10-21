@@ -12,6 +12,7 @@ import 'features/auth/login_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
+import 'features/projects/deleted_projects_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
 
@@ -50,11 +51,12 @@ class _MsAppState extends State<MsApp> {
             return MaterialPageRoute(
                 builder: (_) => ChangePasswordPage(forced: forced));
           case '/folders':
-            // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用)
-            final a = s.arguments as (String, String); // (projectId, projectName)
+            // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用);
+            // B6:附带 my_roles(「新建一级文件夹」闸门=admin/uploader)
+            final a = s.arguments as (String, String, List<String>);
             return MaterialPageRoute(
-                builder: (_) =>
-                    FoldersPage(projectId: a.$1, projectName: a.$2));
+                builder: (_) => FoldersPage(
+                    projectId: a.$1, projectName: a.$2, myRoles: a.$3));
           case '/assets':
             // B3:附带 where 显示路径(传输任务归属展示)
             final a = s.arguments as (String, String, String);
@@ -67,6 +69,10 @@ class _MsAppState extends State<MsApp> {
             return MaterialPageRoute(
                 builder: (_) =>
                     TrashPage(folderId: a.$1, folderName: a.$2));
+          case '/deleted-projects':
+            // B6:已删除项目回收站(列表+恢复;入口闸门 is_project_deleter)
+            return MaterialPageRoute(
+                builder: (_) => const DeletedProjectsPage());
           case '/preview':
             // B2 §8.2 预览:列表序列+起点+单夹详情下载权
             final args = s.arguments as PreviewArgs;

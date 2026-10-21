@@ -13,3 +13,14 @@ String fmtBytes(num n) {
 
 /// ISO 时间戳 → 日期段(YYYY-MM-DD);不足 10 位原样返回。
 String fmtDate(String iso) => iso.length >= 10 ? iso.substring(0, 10) : iso;
+
+/// ISO → 'MM-DD HH:mm'(B6 邀请/授权到期展示;解析失败原样截断)。
+String fmtIsoShort(String iso) {
+  final t = DateTime.tryParse(iso)?.toLocal();
+  if (t == null) {
+    return iso.length >= 16 ? iso.substring(0, 16) : iso;
+  }
+  return '${t.month.toString().padLeft(2, '0')}-'
+      '${t.day.toString().padLeft(2, '0')} '
+      '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
+}

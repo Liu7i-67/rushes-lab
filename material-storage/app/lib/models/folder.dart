@@ -54,3 +54,61 @@ class Folder {
   /// 同源;回收站入口/删除闸门与 my_can_admin 取或;列表响应恒 False 勿消费)。
   final bool? myDeleteGrant;
 }
+
+/// FolderMemberRow — GET /folders/{id}/members 行(sensitive 邀请成员;B6)。
+/// expires_at 后端由 tuple condition 反推,可能缺省。
+class FolderMemberRow {
+  FolderMemberRow({
+    required this.subject,
+    required this.kind,
+    required this.subjectId,
+    required this.name,
+    required this.level,
+    required this.permanent,
+    this.expiresAt,
+  });
+
+  factory FolderMemberRow.fromJson(Map<String, dynamic> j) => FolderMemberRow(
+        subject: j['subject'] as String,
+        kind: j['kind'] as String,
+        subjectId: j['subject_id'] as String,
+        name: j['name'] as String?,
+        level: j['level'] as String,
+        permanent: (j['permanent'] ?? true) as bool,
+        expiresAt: j['expires_at'] as String?,
+      );
+
+  /// 完整 OpenFGA subject(`user:<uuid>` / `group:<gid>#member`);撤销入参原样回传。
+  final String subject;
+  final String kind; // user / group / department(遗留)
+  final String subjectId;
+  final String? name; // 后端 resolve_subject_names 解析,未命中走 id 兜底
+  final String level; // viewer / downloader
+  final bool permanent; // true=invited(永久);false=explicit_invited(临时)
+  final String? expiresAt; // ISO 时间;永久恒 null
+}
+
+/// FolderGrantRow — GET /folders/{id}/grants 行(普通一级夹 explicit grant;B6)。
+class FolderGrantRow {
+  FolderGrantRow({
+    required this.subject,
+    required this.kind,
+    required this.subjectId,
+    required this.name,
+    required this.level,
+  });
+
+  factory FolderGrantRow.fromJson(Map<String, dynamic> j) => FolderGrantRow(
+        subject: j['subject'] as String,
+        kind: j['kind'] as String,
+        subjectId: j['subject_id'] as String,
+        name: j['name'] as String?,
+        level: j['level'] as String,
+      );
+
+  final String subject;
+  final String kind; // user / group / department(遗留)
+  final String subjectId;
+  final String? name;
+  final String level; // viewer / downloader / uploader(恒永久,无有效期)
+}

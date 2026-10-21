@@ -1,0 +1,209 @@
+/// UserPicker — 用户搜索多/单选(B6 §9 pickers;web UserPicker 移动版):
+/// 输入停顿 250ms 搜 GET /users?q=(留空返前 N),空 query 时注入 preset
+/// (自己);stale 响应用自增 tag 丢弃。value = users.id UUID(#150 起)。
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../core/session.dart';
+import '../../models/models.dart';
+
+class UserPicker extends StatefulWidget {
+  const UserPicker({
+    super.key,
+    required this.value,
+    required this.onChanged,
+    this.multiple = true,
+    this.preset,
+    this.hint = '搜姓名 / 邮箱 / 用户名…',
+  });
+
+  /// 已选用户(value = users.id UUID;单选模式至多 1 个)。
+  final List<UserBrief> value;
+  final ValueChanged<List<UserBrief>> onChanged;
+  final bool multiple;
+
+  /// 空 query 时并入候选的预置项(调用方传「自己」;web preset 同语义)。
+  final List<UserBrief>? preset;
+  final String hint;
+
+  @override
+  State<UserPicker> createState() => _UserPickerState();
+}
+
+class _UserPickerState extends State<UserPicker> {
+  final _controller = TextEditingController();
+  final _focus = FocusNode();
+  List<UserBrief> _options = const [];
+  var _fetching = false;
+  var _tag = 0;
+  Timer? _debounce;
+
+  @override
+  void initState() {
+    super.initState();
+    _search('');
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  /// 停顿 250ms 才发请求(web 同款);tag 自增丢弃过期响应。
+  void _search(String q) {
+    _debounce?.cancel();
+    final tag = ++_tag;
+    setState(() => _fetching = true);
+    _debounce = Timer(const Duration(milliseconds: 250), () async {
+      try {
+        final users = await session.api!.users.searchUsers(q: q);
+        if (tag != _tag || !mounted) return;
+        setState(() {
+          _options = users;
+          _fetching = false;
+        });
+      } catch (_) {
+        if (tag != _tag || !mounted) return;
+        setState(() {
+          _options = const [];
+          _fetching = false;
+        });
+      }
+    });
+  }
+
+  List<UserBrief> get _visibleOptions {
+    // query 非空时不注入 preset(#114 修:防 preset 劫持搜索结果,'无匹配' 永不展示)
+    if (_controller.text.trim().isEmpty && widget.preset != null) {
+      final ids = _options.map((u) => u.id).toSet();
+      return [...widget.preset!.where((u) => !ids.contains(u.id)), ..._options];
+    }
+    return _options;
+  }
+
+  void _toggle(UserBrief u) {
+    var next = List<UserBrief>.of(widget.value);
+    final has = next.any((x) => x.id == u.id);
+    if (has) {
+      next.removeWhere((x) => x.id == u.id);
+    } else {
+      // 单选 = 替换语义(新建项目管理员:选一个,再点别个换人)
+      next = widget.multiple ? [...next, u] : [u];
+    }
+    widget.onChanged(next);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final options = _visibleOptions;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        TextField(
+          controller: _controller,
+          focusNode: _focus,
+          decoration: InputDecoration(
+            isDense: true,
+            hintText: widget.hint,
+            prefixIcon: const Icon(Icons.search, size: 20),
+            suffixIcon: _controller.text.isEmpty
+                ? (_fetching
+                    ? const Padding(
+                        padding: EdgeInsets.all(10),
+                        child: SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2)),
+                      )
+                    : null)
+                : IconButton(
+                    icon: const Icon(Icons.clear, size: 18),
+                    onPressed: () {
+                      _controller.clear();
+                      _search('');
+                    },
+                  ),
+            border: const OutlineInputBorder(),
+          ),
+          onChanged: _search,
+        ),
+        const SizedBox(height: 4),
+        ...valueChips(context),
+        Container(
+          constraints: const BoxConstraints(maxHeight: 180),
+          decoration: BoxDecoration(
+            border: Border.all(color: Theme.of(context).dividerColor),
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: options.isEmpty
+              ? Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Center(
+                    child: Text(_fetching ? '搜索中…' : '无匹配',
+                        style: const TextStyle(fontSize: 12.5)),
+                  ),
+                )
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: options.length,
+                  itemBuilder: (context, i) {
+                    final u = options[i];
+                    final selected = widget.value.any((x) => x.id == u.id);
+                    return ListTile(
+                      visualDensity: VisualDensity.compact,
+                      leading: CircleAvatar(
+                        radius: 12,
+                        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                        child: Text(
+                          u.name.isEmpty ? '?' : u.name.characters.first,
+                          style: const TextStyle(fontSize: 11),
+                        ),
+                      ),
+                      title: Text(u.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13.5)),
+                      subtitle: (u.username?.isNotEmpty ?? false)
+                          ? Text(u.username!,
+                              maxLines: 1, overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 11))
+                          : null,
+                      dense: true,
+                      trailing: selected
+                          ? const Icon(Icons.check, size: 18)
+                          : null,
+                      onTap: () => _toggle(u),
+                    );
+                  },
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// 已选回显 chips(单选也展示,便于看清当前值/取消)。
+  List<Widget> valueChips(BuildContext context) {
+    if (widget.value.isEmpty) return const [];
+    return [
+      Wrap(
+        spacing: 6,
+        runSpacing: 2,
+        children: [
+          for (final u in widget.value)
+            InputChip(
+              label: Text(u.name.isEmpty ? u.id : u.name,
+                  style: const TextStyle(fontSize: 12)),
+              visualDensity: VisualDensity.compact,
+              onDeleted: () => _toggle(u),
+            ),
+        ],
+      ),
+      const SizedBox(height: 4),
+    ];
+  }
+}

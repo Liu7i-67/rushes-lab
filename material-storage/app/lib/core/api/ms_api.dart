@@ -12,14 +12,18 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
 import '../../services/app_log.dart';
+import 'admin_templates_api.dart';
 import 'approvals_api.dart';
 import 'assets_api.dart';
 import 'assets_ops_api.dart';
 import 'auth_api.dart';
 import 'baidu_api.dart';
 import 'folders_api.dart';
+import 'folders_ops_api.dart';
 import 'projects_api.dart';
+import 'projects_ops_api.dart';
 import 'share_api.dart';
+import 'users_api.dart';
 
 class ApiException implements Exception {
   ApiException(this.status, this.message);
@@ -136,6 +140,10 @@ class MsApi {
   late final folders = FoldersApi(this);
   late final assets = AssetsApi(this);
   late final ops = AssetOpsApi(this); // B5:打标/前缀/移动/回收站
+  late final foldersOps = FolderOpsApi(this); // B6:文件夹管理动作
+  late final projectsOps = ProjectOpsApi(this); // B6:项目建/删恢复/成员
+  late final adminTemplates = AdminTemplatesApi(this); // B6:模板读端点
+  late final users = UsersApi(this); // B6:选人数据源+登录名预检
   late final baidu = BaiduApi(this);
   late final share = ShareApi(this);
   late final approvals = ApprovalsApi(this);
