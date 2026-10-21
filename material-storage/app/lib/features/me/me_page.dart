@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/session.dart';
+import '../../main.dart' show kAppBuildStamp;
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
@@ -48,14 +49,24 @@ class MePage extends StatelessWidget {
                 title: Text(me?.name ?? '(未登录)'),
                 subtitle: Text(me?.roleLabel ?? ''),
               ),
+              // P6:构建 stamp(打包注入,新包核验锚点自项目页标题迁此);
+              // 本地 run/test 未注入为空 → 整行不渲染
+              if (buildStampLabel(kAppBuildStamp) != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+                  child: Text(
+                    buildStampLabel(kAppBuildStamp)!,
+                    style: const TextStyle(color: Tk.subtle, fontSize: 12),
+                  ),
+                ),
               const _SectionLabel('账号与安全'),
               ListTile(
                 leading: const Icon(Icons.password_outlined),
                 title: const Text('修改密码'),
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () =>
-                    Navigator.of(context).pushNamed('/change-password',
-                        arguments: false),
+                    Navigator.of(context)
+                        .pushNamed('/change-password', arguments: false),
               ),
               // B8:管理区(§8.9)——管理后台仅 is_system_admin;目录模板独立
               // 闸门 is_folder_template_manager(持 flag 非 admin 仅见此入口)。
@@ -90,9 +101,9 @@ class MePage extends StatelessWidget {
               const _SectionLabel('当前服务'),
               ListTile(
                 leading: const Icon(Icons.dns_outlined),
-                title: Text(session.entryLabel.isEmpty
-                    ? '(探测中)'
-                    : session.entryLabel),
+                title: Text(
+                  session.entryLabel.isEmpty ? '(探测中)' : session.entryLabel,
+                ),
                 subtitle: Text(
                   session.baseUrl ?? '',
                   maxLines: 1,
@@ -104,9 +115,7 @@ class MePage extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: FilledButton.tonal(
-                  style: FilledButton.styleFrom(
-                    foregroundColor: Tk.red,
-                  ),
+                  style: FilledButton.styleFrom(foregroundColor: Tk.red),
                   onPressed: () => _logout(context),
                   child: const Padding(
                     padding: EdgeInsets.symmetric(vertical: 12),
@@ -122,6 +131,11 @@ class MePage extends StatelessWidget {
     );
   }
 }
+
+/// P6:构建 stamp 行文案;未注入(空)返回 null → 整行不渲染。
+/// 独立纯函数便于单测(test 环境恒空 stamp,无法经环境变量注入)。
+@visibleForTesting
+String? buildStampLabel(String stamp) => stamp.isEmpty ? null : '构建 $stamp';
 
 class _SectionLabel extends StatelessWidget {
   const _SectionLabel(this.title);

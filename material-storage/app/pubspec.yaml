@@ -32,6 +32,10 @@ dependencies:
   # share_plus — B2 预览:pdf iOS 分享面板(快速预览/存储到文件);仅 iOS 走,
   #   Android pdf 本批色块占位(B4 随落盘矩阵点亮)
   share_plus: ^12.0.2
+  # mobile-ux-polish 批新增(P8,用途+批次):
+  # flutter_local_notifications — P8 传输完成系统级通知(切后台/锁屏时上传下载
+  #   终态发本地通知,channel ms_transfers「传输完成」;前台仍走 SnackBar 现状)
+  flutter_local_notifications: ^22.3.2
 
 dev_dependencies:
   flutter_test:

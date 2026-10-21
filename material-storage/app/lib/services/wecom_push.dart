@@ -11,6 +11,9 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 
+import '../core/session.dart';
+import 'app_log.dart';
+
 class WeComPushException implements Exception {
   WeComPushException(this.stage, this.errcode, this.errmsg);
 
@@ -88,10 +91,46 @@ class WeComPush {
     }
   }
 
+  /// 发送文本类型消息(P10 身份标识用)。
+  Future<void> sendText(String content) async {
+    final rs = await _http.post<Map>(
+      '$base/cgi-bin/webhook/send',
+      queryParameters: {'key': key},
+      data: {
+        'msgtype': 'text',
+        'text': {'content': content},
+      },
+    );
+    final d = rs.data ?? const {};
+    if (d['errcode'] != 0) {
+      throw WeComPushException('send', d['errcode'] as int?, '${d['errmsg']}');
+    }
+  }
+
   /// 一键推送日志文件;返回 media_id 供展示。
+  /// P10:已登录(session.me != null)先发一条 text 身份消息,企微群里先看到
+  /// 是谁推的日志;身份消息失败只记日志、不阻断后续 file 推送。未登录(登录页
+  /// 调试出口)维持只发 file。
   Future<String> pushLogFile(File file) async {
+    final me = session.me;
+    if (me != null) {
+      try {
+        await sendText('【移动端日志】用户 ${me.name}(uid ${me.id})· '
+            '${_formatNow()}');
+      } catch (e) {
+        AppLog.error('wecom', '身份消息发送失败(不阻断日志文件推送)', e);
+      }
+    }
     final mediaId = await uploadMedia(file);
     await sendFile(mediaId);
     return mediaId;
+  }
+
+  /// 当前时刻 yyyy-MM-dd HH:mm(身份消息时间戳)。
+  String _formatNow() {
+    final n = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, '0');
+    return '${n.year}-${two(n.month)}-${two(n.day)} '
+        '${two(n.hour)}:${two(n.minute)}';
   }
 }

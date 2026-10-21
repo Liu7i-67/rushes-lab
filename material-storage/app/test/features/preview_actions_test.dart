@@ -1,13 +1,15 @@
 /// 预览页操作钮单测(B4 下载点亮保留;B5 功能点 4:分享/申请权限点亮):
 /// 分享=单资产恒可点(后端 403 最终裁决);申请权限=my_can_download==false 时
 /// 入口可点;canDownload=null 中性(申请不亮)。附 RefreshBus 机制件单测(原
-/// B2 批落位于此,随迁保留)。
+/// B2 批落位于此,随迁保留)。P1(mobile-ux-polish):带色 Container 包
+/// SafeArea(top:false) 结构 + Row padding 保持,虚拟导航栏区域不露底色。
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/features/preview/preview_actions.dart';
+import 'package:ms_app/theme/tokens.dart';
 
 void main() {
   Future<void> pump(
@@ -93,6 +95,29 @@ void main() {
     // 全回调缺省:下载/分享退占位
     await pump(tester, canDownload: true);
     expect(find.byTooltip('后续版本开放'), findsNWidgets(2));
+  });
+
+  testWidgets('P1(mobile-ux-polish):外层带色 Container + SafeArea(top:false),'
+      'Row padding 保持(虚拟导航栏不遮挡、背景延伸到导航栏区域)', (tester) async {
+    await pump(tester, canDownload: true);
+    // 外层带色 Container(Tk.darkSurface):背景延伸到导航栏区域不露底色
+    final hasDarkSurfaceBg = tester
+        .widgetList<Container>(find.byType(Container))
+        .any((c) => c.color == Tk.darkSurface);
+    expect(hasDarkSurfaceBg, isTrue);
+    // SafeArea 只让位底部(top:false,顶部不动)
+    final safe = tester.widget<SafeArea>(find.byType(SafeArea));
+    expect(safe.top, isFalse);
+    expect(safe.bottom, isTrue);
+    // 原 Row 的 padding 保持 fromLTRB(16,4,16,8),Row 在其中
+    final padding = tester
+        .widgetList<Padding>(find.byType(Padding))
+        .firstWhere((p) => p.padding == const EdgeInsets.fromLTRB(16, 4, 16, 8));
+    expect(
+      find.descendant(
+          of: find.byWidget(padding), matching: find.byType(Row)),
+      findsOneWidget,
+    );
   });
 
   group('RefreshBus(数据新鲜度机制件)', () {

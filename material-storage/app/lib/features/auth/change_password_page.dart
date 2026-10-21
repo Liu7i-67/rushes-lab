@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
+import '../../widgets/password_field.dart';
 
 class ChangePasswordPage extends StatefulWidget {
   const ChangePasswordPage({super.key, this.forced = false});
@@ -101,32 +102,24 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
               ),
               const SizedBox(height: 16),
             ],
-            TextField(
+            // P9:三个密码框均带眼睛切换明文(内容/焦点保持)
+            PasswordField(
               controller: _old,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: '原密码',
-                prefixIcon: Icon(Icons.lock_outline),
-              ),
+              labelText: '原密码',
+              prefixIcon: const Icon(Icons.lock_outline),
             ),
             const SizedBox(height: 12),
-            TextField(
+            PasswordField(
               controller: _new,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: '新密码',
-                prefixIcon: Icon(Icons.lock_reset_outlined),
-              ),
+              labelText: '新密码',
+              prefixIcon: const Icon(Icons.lock_reset_outlined),
             ),
             const SizedBox(height: 12),
-            TextField(
+            PasswordField(
               controller: _confirm,
-              obscureText: true,
+              labelText: '确认新密码',
+              prefixIcon: const Icon(Icons.lock_person_outlined),
               onSubmitted: (_) => _busy ? null : _submit(),
-              decoration: const InputDecoration(
-                labelText: '确认新密码',
-                prefixIcon: Icon(Icons.lock_person_outlined),
-              ),
             ),
             const SizedBox(height: 20),
             FilledButton(

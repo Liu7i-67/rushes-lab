@@ -1,17 +1,23 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/projects/projects_page.dart';
 
-void main() {
-  test('项目页标题:stamp 未注入保持原标题,注入后在「项目」后追加最后编辑时间', () {
-    // 未注入(本地 flutter run/test)→ 与旧标题完全一致
-    expect(projectsTitle(null, ''), '项目');
-    expect(projectsTitle('Evan', ''), '项目 · Evan');
+import 'helpers/api_harness.dart';
 
-    // 打包注入 → 项目 · 最后编辑 YYYY-MM-DD HH:mm [· 用户名]
-    expect(projectsTitle(null, '2026-10-20 14:33'), '项目 · 最后编辑 2026-10-20 14:33');
-    expect(
-      projectsTitle('Evan', '2026-10-20 14:33'),
-      '项目 · 最后编辑 2026-10-20 14:33 · Evan',
-    );
+void main() {
+  test('项目页标题恒为「项目」(P6:不带 stamp 与用户名)', () {
+    expect(projectsTitle(), '项目');
+  });
+
+  testWidgets('P6:项目页 AppBar 标题「项目」,无 debug 日志图标', (tester) async {
+    final api = installFakeApi();
+    api.projects.listStaged = const [];
+    addTearDown(() => session.api = null);
+    await tester.pumpWidget(const MaterialApp(home: ProjectsPage()));
+    await tester.pumpAndSettle();
+    expect(find.text('项目'), findsOneWidget);
+    expect(find.byIcon(Icons.bug_report_outlined), findsNothing,
+        reason: '项目页日志推送入口已移除(登录页/我的页保留)');
   });
 }

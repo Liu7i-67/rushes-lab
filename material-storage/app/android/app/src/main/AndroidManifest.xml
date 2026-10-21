@@ -9,6 +9,10 @@
     <!-- B0② media_store_plus:API<29 写 Downloads 需要旧版写权限(API 30+ 走
          MediaStore 免权限);minSdk 跟随 Flutter 默认,真机确认基线前先声明 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+    <!-- mobile-ux-polish P8 flutter_local_notifications:Android 13+ 传输完成
+         系统通知需要通知权限(运行时弹窗由 Notifier.ensurePermission 首次入队
+         时发起,不在 app 启动即弹) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="浣花视界"
         android:name="${applicationName}"

@@ -1,27 +1,23 @@
 /// 项目页(B2 §8.1):列表 + 权限徽标 + 下拉刷新。B6 点亮:新建项目入口
 /// (is_project_creator 闸门)+ 行内「成员」入口(my_roles 含 admin)。
+/// P6:标题恒「项目」,构建 stamp 迁「我的」页展示;debug 日志入口移除
+/// (登录页右上角与我的页诊断区入口保留)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
-import '../../main.dart' show kAppBuildStamp;
 import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
-import '../me/log_push.dart';
 import '../share/request_link_sheet.dart';
 import 'new_project_sheet.dart';
 import 'project_members_sheet.dart';
 import 'role_badge.dart';
 
-/// 项目页 AppBar 标题:打包注入 stamp 时在「项目」后追加最后编辑时间
-/// (TestFlight 分辨构建新旧用),未注入时保持原标题。
-String projectsTitle(String? userName, String buildStamp) {
-  final tail = userName == null ? '' : ' · $userName';
-  return buildStamp.isEmpty ? '项目$tail' : '项目 · 最后编辑 $buildStamp$tail';
-}
+/// 项目页 AppBar 标题:P6 定稿恒为「项目」,不带 stamp 与用户名。
+String projectsTitle() => '项目';
 
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({super.key});
@@ -73,13 +69,9 @@ class _ProjectsPageState extends State<ProjectsPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        // 标题可能较长(项目 · 最后编辑 YYYY-MM-DD HH:mm · 用户名),缩放防溢出
-        title: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(projectsTitle(session.me?.name, kAppBuildStamp)),
-        ),
+        title: Text(projectsTitle()),
         actions: [
-          logPushButton(context),
+          // P6:项目页 debug 日志入口已移除;登录页/我的页入口保留(P10 依赖)
           // B6:新建项目(总闸门 is_project_creator;成功后失效总线自动重拉)
           if (session.me?.isProjectCreator ?? false)
             IconButton(

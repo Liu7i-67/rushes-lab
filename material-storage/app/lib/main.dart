@@ -13,6 +13,7 @@ import 'core/polling_controller.dart';
 import 'core/session.dart';
 import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
+import 'services/notifier.dart';
 
 /// 源码最后编辑时间(YYYY-MM-DD HH:mm),打包期注入、项目页标题展示,
 /// 用于 TestFlight 肉眼确认装到的是最新构建(取 git HEAD 提交时刻):
@@ -40,6 +41,9 @@ void main() {
   // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
   // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
   AppLog.init();
+  // P8(mobile-ux-polish):传输完成系统通知初始化——失败静默降级为仅应用内
+  // 提示;通知权限不在此请求(首次建传输任务时经 ensurePermission 弹)
+  Notifier.I.init();
   // B9 功能点 4:渲染异常全局兜底(友好页 + 日志,不白屏)
   installErrorBoundary();
   runApp(const MsApp());

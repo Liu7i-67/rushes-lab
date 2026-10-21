@@ -22,12 +22,12 @@ import 'livp.dart';
 class AlbumService {
   static bool get isSupported => !kIsWeb && Platform.isIOS;
 
-  static Future<void> ensurePermission() async {
+  /// P2:相册权限核验,拒绝态不再抛 StateError——返回是否可进选图
+  /// (authorized/limited 都算过);false 由调用方弹中文引导对话框。
+  static Future<bool> ensurePermission() async {
     final state = await PhotoManager.requestPermissionExtend();
     AppLog.info('album', '相册权限 state=$state');
-    if (!state.isAuth) {
-      throw StateError('未获相册权限(需「所有照片/有限」+「添加到照片」授权)');
-    }
+    return state.isAuth;
   }
 
   /// 实况照片 → .livp 字节(静态帧 + 配对视频原文件直接 zip,零转码)。

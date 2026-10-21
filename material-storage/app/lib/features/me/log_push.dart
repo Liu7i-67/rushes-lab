@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/session.dart';
 import '../../services/app_log.dart';
 import '../../services/wecom_push.dart';
 
@@ -71,6 +72,12 @@ class _LogPushDialogState extends State<_LogPushDialog> {
               );
             },
           ),
+          // P10:已登录显示当前用户(推送会携带同款身份,未登录只发文件)
+          if (session.me != null)
+            Text(
+              '当前用户:${session.me!.name}',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
           if (_result != null) ...[
             const SizedBox(height: 12),
             Text(

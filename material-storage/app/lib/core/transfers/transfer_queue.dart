@@ -16,6 +16,7 @@ import '../api/assets_api.dart' show UploadAmbiguousException;
 import '../api/ms_api.dart' show ApiException, errorMessage;
 import '../../services/app_log.dart';
 import '../../services/media_save.dart' show SaveAbortException;
+import '../../services/notifier.dart';
 import 'transfer_task.dart';
 
 class TransferQueue extends ChangeNotifier {
@@ -109,6 +110,9 @@ class TransferQueue extends ChangeNotifier {
         ));
     _requests[id] = req;
     _waiting.add(id);
+    // P8(mobile-ux-polish):首次建传输任务才请求系统通知权限(app 启动不弹;
+    // 幂等 + 失败静默,不阻塞入队)
+    Notifier.I.ensurePermission().ignore();
     _pump();
     notifyListeners();
     return id;
@@ -226,6 +230,20 @@ class TransferQueue extends ChangeNotifier {
         ..doneBytes = status == TransferStatus.done ? task.totalBytes : task.doneBytes;
       if (status == TransferStatus.failed) {
         AppLog.error('transfer', '任务失败 ${task.filename}', error);
+      }
+      // P8(mobile-ux-polish):后台终态系统通知(前台 gate 丢弃,维持应用内
+      // 现状)。上传完成/上传失败/下载失败在队列统一收尾处上报;下载成功在
+      // downloads.dart 收尾处带保存摘要上报,此处不再重复(防双份)。
+      if (status == TransferStatus.failed) {
+        Notifier.I.taskFinished(
+            kind: task.kind,
+            ok: false,
+            filename: task.filename,
+            detail: error ?? '传输失败');
+      } else if (status == TransferStatus.done &&
+          task.kind == TransferKind.upload) {
+        Notifier.I.taskFinished(
+            kind: task.kind, ok: true, filename: task.filename);
       }
     }
     _pump();

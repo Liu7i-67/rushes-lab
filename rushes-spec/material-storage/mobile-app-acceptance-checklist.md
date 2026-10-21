@@ -16,8 +16,9 @@ export JAVA_HOME=E:/qbb/soft/java ANDROID_HOME=E:/qbb/soft/android_sdk
 # 产物 build/app/outputs/flutter-apk/app-release.apk(~61MB)
 ```
 
-- **确认装的是新包**:项目页标题应显示「项目 · 最后编辑 <stamp> · <用户名>」,
-  stamp=上述命令取的 git HEAD 提交时刻(终版 ae31cd9 = **2026-10-21 14:15**);
+- **确认装的是新包(P6 起 stamp 核验点=我的页)**:「我的」页账号信息底部应
+  显示「构建 <stamp>」小字,stamp=上述命令取的 git HEAD 提交时刻
+  (终版 ae31cd9 = **2026-10-21 14:15**);项目页标题固定为「项目」。
   看不到时间段的构建漏带了 dart-define,请重打。
 - 最低支持 Android 10(API 29,安装门槛);iOS 侧待 Mac 同事按
   `ios-livp-app-build-handbook.md` 路线 A 出 TestFlight 后同清单补验。
