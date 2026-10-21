@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
 import '../../services/app_log.dart';
+import '../../widgets/toast.dart';
 import '../preview/request_access_sheet.dart';
 import '../share/share_create_sheet.dart';
 import 'asset_selection_bar.dart';
@@ -25,6 +26,7 @@ Future<bool> shareSingleAsset(BuildContext context, List<Asset> picked) async {
 }
 
 /// 移动:项目固定=单夹详情回填的 projectId(详情未到 → 提示稍后)。
+/// [picked] 选中资产对象(D5:经 assetNames 传给结果视图,跳过行显示文件名)。
 /// 返回 true=已移动,调用方清选中。
 Future<bool> moveSelectedAssets(
   BuildContext context, {
@@ -32,19 +34,20 @@ Future<bool> moveSelectedAssets(
   required String sourceFolderId,
   required Folder? detail,
   required String? whereLabel,
+  Map<String, String>? assetNames,
 }) async {
   final projectId = detail?.projectId;
   if (projectId == null) {
     AppLog.info('assets', '目录详情未加载完成,移动稍后重试');
-    ScaffoldMessenger.maybeOf(context)
-        ?.showSnackBar(const SnackBar(content: Text('目录详情未加载完成,稍后重试')));
+    toast(context, '目录详情未加载完成,稍后重试');
     return false;
   }
   final moved = await showBatchMoveSheet(context,
       selectedIds: selectedIds,
       sourceFolderId: sourceFolderId,
       projectId: projectId,
-      projectLabel: whereLabel ?? projectId);
+      projectLabel: whereLabel ?? projectId,
+      assetNames: assetNames);
   return moved;
 }
 

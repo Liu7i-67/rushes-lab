@@ -119,8 +119,10 @@ void main() {
     expect(post.body['project_id'], 'p1');
     expect(post.body.containsKey('target_folder_id'), isFalse,
         reason: '项目根=不传 target_folder_id(后端自动创建承接夹)');
-    expect(find.text('备份任务已创建,清单准备中;已有任务执行中时,新任务将排队,'
-        '前序完成后约数分钟至一刻钟内自动开始'), findsOneWidget);
+    // app-polish E12:排队预期改「结果卡」弹层(原 SnackBar 文字墙移除)
+    expect(find.text('备份任务已创建'), findsOneWidget);
+    expect(find.textContaining('清单准备中'), findsOneWidget,
+        reason: 'E12:排队预期在结果卡中呈现');
     expect(invalidated, greaterThanOrEqualTo(1), reason: '成功后失效任务列表');
   });
 

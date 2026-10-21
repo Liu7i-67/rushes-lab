@@ -10,6 +10,7 @@ import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/pickers/subject_picker.dart';
+import 'admin_form_skeleton.dart';
 import 'grant_template_row.dart';
 
 /// 主体条数上限(后端 INITIAL_GRANTS_MAX 同一常量;超限 422 文案透传兜底)。
@@ -139,7 +140,7 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '提交失败,请稍后重试');
       });
     }
   }
@@ -147,85 +148,58 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
   @override
   Widget build(BuildContext context) {
     final t = widget.template;
-    return SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.85),
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-              20, 0, 20, 16 + MediaQuery.of(context).viewInsets.bottom),
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_isEdit ? '编辑权限模板 — ${t!.name}' : '新建权限模板',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _name,
-                  autofocus: !_isEdit,
-                  decoration: const InputDecoration(
-                      labelText: '模板名', border: OutlineInputBorder()),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _desc,
-                  maxLength: 1024,
-                  decoration: const InputDecoration(
-                      labelText: '描述(可选)', border: OutlineInputBorder()),
-                ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  dense: true,
-                  title: const Text('设为默认模板',
-                      style: TextStyle(fontSize: 14.5)),
-                  subtitle: const Text(
-                      '默认模板的授权会在项目创建时自动合并;每 org 至多一个默认,'
-                      '设为默认会自动取消原默认',
-                      style: TextStyle(fontSize: 11.5)),
-                  value: _isDefault,
-                  onChanged: (v) => setState(() => _isDefault = v),
-                ),
-                Text('授权条目(${_rows.length}/$kGrantTemplateItemsMax,'
-                    '每行主体各自勾选角色)',
-                    style: const TextStyle(fontSize: 12, color: Tk.muted)),
-                const SizedBox(height: 6),
-                SubjectPicker(
-                  value: _subjects,
-                  onChanged: _applySubjects,
-                ),
-                for (final r in _rows)
-                  GrantTemplateRow(
-                    row: r,
-                    onDelete: () => setState(() {
-                      _rows = _rows.where((x) => x.key != r.key).toList();
-                    }),
-                    onRolesChanged: (roles) =>
-                        setState(() => r.roles = roles),
-                  ),
-                if (_error != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(_error!,
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                            fontSize: 12.5)),
-                  ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _submitting ? null : _submit,
-                    child:
-                        Text(_submitting ? '提交中…' : (_isEdit ? '保存' : '创建')),
-                  ),
-                ),
-              ],
-            ),
-          ),
+    // F5:内联骨架(限高 0.85 + 滚动 + 键盘避让 + 错误行 + 提交键)收口
+    // FormSkeleton,与建号/编辑等表单共用一处实现
+    return FormSkeleton(
+      title: _isEdit ? '编辑权限模板 — ${t!.name}' : '新建权限模板',
+      submitLabel: _isEdit ? '保存' : '创建',
+      submitting: _submitting,
+      onSubmit: _submit,
+      error: _error,
+      maxHeightFactor: 0.85,
+      children: [
+        TextField(
+          controller: _name,
+          autofocus: !_isEdit,
+          decoration: const InputDecoration(
+              labelText: '模板名', border: OutlineInputBorder()),
         ),
-      ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _desc,
+          maxLength: 1024,
+          decoration: const InputDecoration(
+              labelText: '描述(可选)', border: OutlineInputBorder()),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          dense: true,
+          title: const Text('设为默认模板',
+              style: TextStyle(fontSize: Tk.fzBody)),
+          subtitle: const Text(
+              '默认模板的授权会在项目创建时自动合并;每 org 至多一个默认,'
+              '设为默认会自动取消原默认',
+              style: TextStyle(fontSize: Tk.fzXs)),
+          value: _isDefault,
+          onChanged: (v) => setState(() => _isDefault = v),
+        ),
+        Text('授权条目(${_rows.length}/$kGrantTemplateItemsMax,'
+            '每行主体各自勾选角色)',
+            style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
+        const SizedBox(height: 6),
+        SubjectPicker(
+          value: _subjects,
+          onChanged: _applySubjects,
+        ),
+        for (final r in _rows)
+          GrantTemplateRow(
+            row: r,
+            onDelete: () => setState(() {
+              _rows = _rows.where((x) => x.key != r.key).toList();
+            }),
+            onRolesChanged: (roles) => setState(() => r.roles = roles),
+          ),
+      ],
     );
   }
 }

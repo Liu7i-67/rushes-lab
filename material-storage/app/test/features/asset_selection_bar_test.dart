@@ -120,10 +120,15 @@ void main() {
         onDownload: () {},
         onShare: () => shareFired++,
         onRequest: () => requestFired++);
-    await tester.tap(find.byTooltip('仅单选可用'), warnIfMissed: false);
+    // B1 改因:禁用键不再挂 Tooltip(原「仅单选可用」tooltip 移除),点禁用键
+    // 改为 toast 说明原因、回调不触发
+    await tester.tap(find.text('分享'), warnIfMissed: false);
     await tester.pump();
     expect(shareFired, 0, reason: '多选分享置灰');
-    // ⋯ 菜单:申请权限带「仅单选可用」副标题且禁用
+    expect(find.textContaining('仅单选可用'), findsOneWidget,
+        reason: 'B1:点禁用键 toast 说明原因');
+    await tester.pump(const Duration(seconds: 5)); // toast 自动收起,不干扰后续断言
+    await tester.pumpAndSettle();    // ⋯ 菜单:申请权限带「仅单选可用」副标题且禁用
     await tester.tap(find.byTooltip('更多操作'));
     await tester.pumpAndSettle();
     expect(find.text('仅单选可用'), findsOneWidget);
@@ -147,14 +152,20 @@ void main() {
     expect(find.byTooltip('仅单选可用'), findsNothing, reason: '单选不再置灰');
   });
 
-  testWidgets('canDownload=false:下载键禁用 + 无权提示 tooltip(三态口径同预览页)',
-      (tester) async {
+  testWidgets('canDownload=false:下载键禁用 + 点按 toast 提示'
+      '(B1 改因:禁用原因不再依赖 Tooltip,三态口径同预览页)', (tester) async {
     var fired = 0;
     await pumpBar(tester, canDownload: false, onDownload: () => fired++);
-    expect(find.byTooltip('无下载权限 · 可先在预览页申请'), findsOneWidget);
-    await tester.tap(find.byTooltip('无下载权限 · 可先在预览页申请'),
-        warnIfMissed: false);
-    expect(fired, 0);
+    // B1:禁用键无 Tooltip(原「无下载权限 · 可先在预览页申请」tooltip 移除)
+    expect(find.byTooltip('无下载权限 · 可先在预览页申请'), findsNothing);
+    // 点禁用键 → toast 说明原因,回调不触发
+    await tester.tap(find.text('下载'), warnIfMissed: false);
+    await tester.pump(); // toast 进场帧
+    expect(fired, 0, reason: '无下载权限:不入队');
+    expect(find.textContaining('无下载权限'), findsOneWidget,
+        reason: 'B1:点禁用键 toast 说明原因');
+    await tester.pump(const Duration(seconds: 5)); // 排空 toast 计时器
+    await tester.pumpAndSettle();
   });
 
   testWidgets('downloadSelectedAssets:canDownload=false → 提示并不入队', (tester) async {

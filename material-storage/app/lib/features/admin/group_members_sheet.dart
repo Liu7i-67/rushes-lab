@@ -11,7 +11,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/pickers/user_picker.dart';
+import '../../widgets/search_field.dart';
+import '../../widgets/toast.dart';
 
 /// 打开成员管理;增删成功抽屉驻留(web 同款),关闭后调用方刷新组列表。
 Future<void> showGroupMembersSheet(
@@ -60,7 +63,7 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = '$e';
+        _error = errorMessage(e, '加载失败,请稍后重试');
       });
     }
   }
@@ -88,7 +91,7 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
         // doAdd 的首错即停(批量加人尽量完成,失败明细一个 toast 说清)
         firstError ??= e.message;
       } catch (e) {
-        firstError ??= '$e';
+        firstError ??= errorMessage(e, '添加失败,请稍后重试');
       }
     }
     if (!mounted) return;
@@ -96,41 +99,34 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
       _busy = false;
       _selected = const [];
     });
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(firstError ?? '已添加 $ok 名成员')));
+    if (firstError != null) {
+      toast(context, firstError, tone: ToastTone.error);
+    } else {
+      toast(context, '已添加 $ok 名成员', tone: ToastTone.success);
+    }
     // 成功后抽屉驻留:刷新成员列表,不自动关闭(web GroupMembersDrawer 同款)
     await _reload();
   }
 
   Future<void> _remove(GroupMember m) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('把 ${m.name} 移出该组?'),
-        content: const Text('其将立即失去该组授予的全部权限'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-              style: FilledButton.styleFrom(foregroundColor: Tk.red),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('移出')),
-        ],
-      ),
+    // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认
+    final ok = await showAppConfirm(
+      context,
+      title: '把 ${m.name} 移出该组?',
+      content: '其将立即失去该组授予的全部权限',
+      confirmLabel: '移出',
+      danger: true,
     );
     if (ok != true) return;
     try {
       await session.api!.directory.removeMember(widget.group.id, m.userId);
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('已移出 ${m.name}')));
+      toast(context, '已移出 ${m.name}', tone: ToastTone.success);
       // 成功后抽屉驻留:刷新成员列表,不自动关闭(web GroupMembersDrawer 同款)
       await _reload();
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message))); // 404 透传
+      toast(context, e.message, tone: ToastTone.error); // 404 透传
     }
   }
 
@@ -141,20 +137,20 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
       child: SizedBox(
         height: MediaQuery.of(context).size.height * 0.8,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+          padding: const EdgeInsets.fromLTRB(Tk.spaceXl, 0, Tk.spaceXl, Tk.spaceLg),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('成员 — ${widget.group.name}(${_members.length} 人)',
                   style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 12),
+              const SizedBox(height: Tk.spaceMd),
               UserPicker(
                 value: _selected,
                 onChanged: (v) => setState(() => _selected = v),
                 hint: '搜姓名 / 用户名加成员…',
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: Tk.spaceSm),
               SizedBox(
                 width: double.infinity,
                 child: FilledButton(
@@ -162,17 +158,12 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
                   child: Text(_busy ? '添加中…' : '添加所选成员'),
                 ),
               ),
-              const SizedBox(height: 8),
-              TextField(
+              const SizedBox(height: Tk.spaceSm),
+              SearchField(
+                hintText: '在组内搜索 — 用户名 / 姓名 / 邮箱',
                 onChanged: (v) => setState(() => _memberQ = v),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: '在组内搜索 — 用户名 / 姓名 / 邮箱',
-                  prefixIcon: Icon(Icons.search, size: 20),
-                  border: OutlineInputBorder(),
-                ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: Tk.spaceSm),
               Expanded(child: _list(filtered)),
             ],
           ),
@@ -188,12 +179,12 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
     if (_error != null) {
       return Center(
           child: Text(_error!,
-              style: const TextStyle(color: Tk.muted, fontSize: 12.5)));
+              style: const TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
     }
     if (filtered.isEmpty) {
       return const Center(
           child: Text('暂无成员',
-              style: TextStyle(color: Tk.muted, fontSize: 12.5)));
+              style: TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
     }
     return ListView.builder(
       itemCount: filtered.length,
@@ -211,13 +202,13 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
               const Padding(
                 padding: EdgeInsets.only(left: 6),
                 child: Text('已停用',
-                    style: TextStyle(fontSize: 10.5, color: Tk.red)),
+                    style: TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
               ),
           ]),
           subtitle: Text(sub.toString(),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11)),
+              style: const TextStyle(fontSize: Tk.fzXs)),
           trailing: TextButton(
             onPressed: () => _remove(m),
             child: const Text('移出', style: TextStyle(color: Tk.red)),

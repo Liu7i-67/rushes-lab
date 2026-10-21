@@ -56,11 +56,11 @@ class GrantTemplateRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final r = row;
     return Container(
-      margin: const EdgeInsets.only(top: 8),
+      margin: const EdgeInsets.only(top: Tk.spaceSm),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
         color: Tk.fill,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -72,8 +72,8 @@ class GrantTemplateRow extends StatelessWidget {
                 '${r.kind == 'group' ? '(群组)' : '(用户)'}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style:
-                    const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
+                style: const TextStyle(
+                    fontSize: Tk.fzMd, fontWeight: FontWeight.w500),
               ),
             ),
             // 已删主体 amber 标记(P2-3;web TemplateFormModal
@@ -83,7 +83,7 @@ class GrantTemplateRow extends StatelessWidget {
                 padding: EdgeInsets.only(left: 6),
                 child: Text('已删除',
                     style: TextStyle(
-                        fontSize: 10.5,
+                        fontSize: Tk.fzXs,
                         letterSpacing: 0.4,
                         color: Tk.amber)),
               ),
@@ -95,9 +95,9 @@ class GrantTemplateRow extends StatelessWidget {
           ]),
           if (r.missing)
             const Padding(
-              padding: EdgeInsets.only(bottom: 4),
+              padding: EdgeInsets.only(bottom: Tk.spaceXs),
               child: Text('该主体已被删除,保存前请移除此行或替换主体',
-                  style: TextStyle(fontSize: 10.5, color: Tk.amber)),
+                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
             ),
           RoleChips(
             value: r.roles,

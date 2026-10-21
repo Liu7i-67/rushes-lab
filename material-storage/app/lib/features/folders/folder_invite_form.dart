@@ -95,7 +95,7 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             const Text('邀请主体(用户 / 用户组)',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             SubjectPicker(
               value: _subjects,
               onChanged: (v) => setState(() {
@@ -106,7 +106,7 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
             ),
             const SizedBox(height: 12),
             const Text('权限等级',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             const SizedBox(height: 4),
             Wrap(
               spacing: 8,
@@ -122,7 +122,7 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
             ),
             const SizedBox(height: 10),
             const Text('有效期',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             const SizedBox(height: 4),
             Wrap(
               spacing: 8,
@@ -143,13 +143,13 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
                 color: Tk.accentFaint,
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(Tk.rSm),
               ),
               child: Text(
                 '被邀请人将能${_level == 'downloader' ? '查看 + 下载' : '查看'}'
                 '「${widget.folder.name}」内全部文件。'
                 '${kInviteDurationOptions[_durationIndex].$2 > 0 ? '到期自动失效。' : ''}',
-                style: const TextStyle(fontSize: 11.5, color: Tk.muted),
+                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
               ),
             ),
             if (_error != null)
@@ -158,7 +158,7 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
                 child: Text(_error!,
                     style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
-                        fontSize: 12.5)),
+                        fontSize: Tk.fzSm)),
               ),
             const SizedBox(height: 16),
             Row(children: [

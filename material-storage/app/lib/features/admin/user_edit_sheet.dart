@@ -94,7 +94,7 @@ class _EditUserSheetState extends State<_EditUserSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '保存失败,请稍后重试');
       });
     }
   }
@@ -117,7 +117,7 @@ class _EditUserSheetState extends State<_EditUserSheet> {
           )
         else ...[
           Text('登录名:${detail.username ?? '—'}(创建后不可改)',
-              style: const TextStyle(fontSize: 12, color: Tk.muted)),
+              style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
           const SizedBox(height: 10),
           TextField(
             controller: _name,
@@ -141,7 +141,7 @@ class _EditUserSheetState extends State<_EditUserSheet> {
           ),
           const SizedBox(height: 6),
           const Text('保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限',
-              style: TextStyle(fontSize: 11.5, color: Tk.muted)),
+              style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
         ],
       ],
     );

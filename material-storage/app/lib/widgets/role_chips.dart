@@ -45,8 +45,8 @@ class RoleChips extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Wrap(
-          spacing: 8,
-          runSpacing: 4,
+          spacing: Tk.spaceSm,
+          runSpacing: Tk.spaceXs,
           children: [
             for (final r in kProjectRoles)
               FilterChip(
@@ -58,7 +58,7 @@ class RoleChips extends StatelessWidget {
               ),
           ],
         ),
-        const SizedBox(height: 6),
+        const SizedBox(height: Tk.spaceSm), // 6→spaceSm(A2 就近归档)
         Text(
           value.isEmpty
               ? '至少勾选一个角色'
@@ -68,7 +68,7 @@ class RoleChips extends StatelessWidget {
                   '${value.contains('downloader') ? '下载:下载文件,自动含查看。' : ''}'
                   '${value.contains('viewer') ? '查看:仅浏览元数据。' : ''}',
           style: TextStyle(
-            fontSize: 11,
+            fontSize: Tk.fzXs,
             height: 1.6,
             color: value.isEmpty ? Tk.amber : Tk.subtle,
           ),

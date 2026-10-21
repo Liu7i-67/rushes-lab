@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/pickers/user_picker.dart';
 import 'audit_labels.dart';
 
@@ -41,7 +42,8 @@ class AuditFilterBar extends StatelessWidget {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.fromLTRB(
+              Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
           child: DropdownButtonFormField<String>(
             initialValue: eventType,
             isDense: true,
@@ -51,32 +53,38 @@ class AuditFilterBar extends StatelessWidget {
               for (final t in kAuditEventTypes)
                 DropdownMenuItem(
                     value: t,
-                    child: Text(t.isEmpty ? '— 全部 —' : t,
-                        style: const TextStyle(fontSize: 13))),
+                    // F7:value 恒为 raw token(数据流不变),文案走中文映射,
+                    // 缺 key 回落原文;选中态展示的也是本 child,同步中文化
+                    child: Text(t.isEmpty ? '— 全部 —' : auditEventLabel(t),
+                        style: const TextStyle(fontSize: Tk.fzMd))),
             ],
             onChanged: (v) => onEventTypeChanged(v ?? ''),
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.fromLTRB(
+              Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
           child: DropdownButtonFormField<String>(
             initialValue: projectId.isEmpty ? null : projectId,
             isDense: true,
             decoration: const InputDecoration(
                 labelText: '按项目筛选(可选)', border: OutlineInputBorder()),
             items: [
-              const DropdownMenuItem(value: null, child: Text('— 全部 —')),
+              // 「全部」项文案与事件类型下拉区分(F7 验收钉 exactly-one
+              // '— 全部 —'),关闭态展示的也是本 child,语义更明确
+              const DropdownMenuItem(value: null, child: Text('全部项目')),
               for (final p in projects)
                 DropdownMenuItem(
                     value: p.id,
                     child: Text('${p.name}(${p.code})',
-                        style: const TextStyle(fontSize: 13))),
+                        style: const TextStyle(fontSize: Tk.fzMd))),
             ],
             onChanged: (v) => onProjectChanged(v ?? ''),
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.fromLTRB(
+              Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
           child: UserPicker(
             value: [?actor],
             multiple: false,
@@ -85,7 +93,8 @@ class AuditFilterBar extends StatelessWidget {
           ),
         ),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+          padding: const EdgeInsets.fromLTRB(
+              Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
           child: Row(children: [
             Expanded(
               child: OutlinedButton.icon(

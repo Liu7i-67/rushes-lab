@@ -13,7 +13,10 @@ import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/empty_state.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
 import 'baidu_binding_card.dart';
 import 'baidu_task_card.dart';
 
@@ -88,44 +91,37 @@ class _BaiduPageState extends State<BaiduPage> {
         _tasks.addAll(page.items.where((t) => !known.contains(t.id)));
         _total = page.total;
       });
-    } catch (_) {}
+    } catch (e) {
+      // E12:静默失败改可见 toast;点「加载更多」即可重试
+      if (mounted) {
+        toast(context, errorMessage(e, '加载更多失败,请重试'),
+            tone: ToastTone.error);
+      }
+    }
   }
 
   Future<void> _unbind() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('解绑百度网盘账号?'),
-        content:
-            const Text('将取消名下进行中的备份任务并作废全部断点;历史任务记录保留。'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(foregroundColor: Tk.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('解绑'),
-          ),
-        ],
-      ),
+    // E12/E14:确认统一 showAppConfirm(danger)
+    final ok = await showAppConfirm(
+      context,
+      title: '解绑百度网盘账号?',
+      content: '将取消名下进行中的备份任务并作废全部断点;历史任务记录保留。',
+      confirmLabel: '解绑',
+      danger: true,
     );
     if (ok != true) return;
     setState(() => _busy = true);
     try {
       await _api.unbind();
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(const SnackBar(content: Text('已解绑百度网盘账号')));
+      toast(context, '已解绑百度网盘账号');
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text(e.message)));
+      toast(context, e.message, tone: ToastTone.error);
     } catch (e) {
       if (!mounted) return;
       // 传输层异常(断网/超时)中文兜底,勿渲染原始异常对象(§4.1)
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text(errorMessage(e, '解绑失败,请稍后重试'))));
+      toast(context, errorMessage(e, '解绑失败,请稍后重试'), tone: ToastTone.error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -136,27 +132,18 @@ class _BaiduPageState extends State<BaiduPage> {
   Future<void> _rowAction(BaiduTask t, String action) async {
     if (_busy) return;
     // 确认口径同 web Popconfirm:取消(未完成文件停止导入,已完成保留)与
-    // 删除(仅记录,已导入文件不受影响)需确认;全部重试失败直发
+    // 删除(仅记录,已导入文件不受影响)需确认;全部重试失败直发。
+    // E12/E14:确认统一 showAppConfirm(danger)
     if (action == 'cancel' || action == 'delete') {
       final (title, content, okText) = action == 'cancel'
           ? ('取消该任务?', '未完成文件将停止导入(已完成文件保留)。', '取消任务')
           : ('删除该任务记录?', '仅删除任务记录与进度,已导入的文件不受影响。', '删除');
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(title),
-          content: Text(content),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('取消')),
-            FilledButton(
-              style: FilledButton.styleFrom(foregroundColor: Tk.red),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text(okText),
-            ),
-          ],
-        ),
+      final ok = await showAppConfirm(
+        context,
+        title: title,
+        content: content,
+        confirmLabel: okText,
+        danger: true,
       );
       if (ok != true || !mounted) return;
     }
@@ -166,30 +153,25 @@ class _BaiduPageState extends State<BaiduPage> {
         case 'cancel':
           final r = await _api.cancelTask(t.id);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-              content: Text(r.finalized
-                  ? '任务已取消'
-                  : '取消请求已提交,任务将在最近检查点停止')));
+          toast(context, r.finalized
+              ? '任务已取消'
+              : '取消请求已提交,任务将在最近检查点停止');
         case 'retry-failed':
           await _api.retryFailed(t.id);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-              const SnackBar(content: Text('失败文件已全部重新排队')));
+          toast(context, '失败文件已全部重新排队', tone: ToastTone.success);
         case 'delete':
           await _api.deleteTask(t.id);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)
-              ?.showSnackBar(const SnackBar(content: Text('任务记录已删除')));
+          toast(context, '任务记录已删除');
       }
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text(e.message)));
+      toast(context, e.message, tone: ToastTone.error);
     } catch (e) {
       if (!mounted) return;
       // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text(errorMessage(e, '操作失败,请稍后重试'))));
+      toast(context, errorMessage(e, '操作失败,请稍后重试'), tone: ToastTone.error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -210,15 +192,14 @@ class _BaiduPageState extends State<BaiduPage> {
                     padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
                     children: [
                       _bindingCard(),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: Tk.spaceMd),
                       if (_tasks.isEmpty)
+                        // E12:空态统一 EmptyState(原裸文本居中)
                         const Padding(
                           padding: EdgeInsets.symmetric(vertical: 48),
-                          child: Center(
-                            child: Text('暂无备份任务 · 绑定账号后点「新建备份任务」开始',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(
-                                    fontSize: 13, color: Tk.muted)),
+                          child: EmptyState(
+                            icon: Icons.cloud_upload_outlined,
+                            message: '暂无备份任务 · 绑定账号后点「新建备份任务」开始',
                           ),
                         )
                       else
@@ -230,7 +211,7 @@ class _BaiduPageState extends State<BaiduPage> {
                           ),
                       if (_tasks.length < _total)
                         Padding(
-                          padding: const EdgeInsets.only(top: 8),
+                          padding: const EdgeInsets.only(top: Tk.spaceSm),
                           child: OutlinedButton(
                               onPressed: _loadMore,
                               child: const Text('加载更多')),

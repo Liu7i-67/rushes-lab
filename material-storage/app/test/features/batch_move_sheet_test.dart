@@ -116,7 +116,7 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('结果视图:skipped/fga_pending 中文与对账行(moved=0 警示口径)',
+  testWidgets('结果视图:skipped/fga_pending 中文与主行(moved=0 警示口径)',
       (tester) async {
     final api = installFakeApi();
     api.folders.listResult = [_folder('f1', '当前夹'), _folder('f2', '目标夹')];
@@ -149,7 +149,9 @@ void main() {
     await tester.tap(find.text('移动'));
     await tester.pumpAndSettle();
     expect(find.text('本次未移动任何文件(共提交 4 个)'), findsOneWidget);
-    expect(find.textContaining('对账:成功 0 + 跳过 2 + 待同步 1 = 4'), findsOneWidget);
+    // 测试报告 P1-D5:工程「对账:成功 0 + 跳过 2 + 待同步 1 = 4」行删除
+    // (moved/跳过并入主行,待同步单独一行),原恒等式断言拆为主行+待同步行
+    expect(find.textContaining('权限同步待完成 1 个'), findsOneWidget);
     expect(find.textContaining('已在目标位置'), findsOneWidget);
     expect(find.textContaining('目标已有同名文件'), findsOneWidget);
   });

@@ -68,21 +68,27 @@ void main() {
         reason: '终态卡(failed+done)各一个移除钮');
 
     // ── 上传分段:下载卡隐藏 ──
-    await tester.tap(find.text('上传'));
+    // app-polish E7:分段标签带计数(「上传 3」),tap 改 textContaining 锚定
+    await tester.tap(find.textContaining('上传'));
     await tester.pump();
     expect(find.text('r2.livp'), findsNothing);
 
     // ── 下载分段:只剩下载卡 ──
-    await tester.tap(find.text('下载'));
+    await tester.tap(find.textContaining('下载'));
     await tester.pump();
     expect(find.text('r2.livp'), findsOneWidget);
     expect(find.text('r1.mov'), findsNothing);
 
     // ── 回全部,取消一个 running:queue 状态随之变(卡片钮→队列接线)──
-    await tester.tap(find.text('全部'));
+    // app-polish E7:取消走 danger 确认(showAppConfirm)后再入队
+    await tester.tap(find.textContaining('全部'));
     await tester.pump();
     final beforeRunning = q.runningCount;
     await tester.tap(find.byTooltip('取消').first);
+    await tester.pump();
+    expect(find.byType(AlertDialog), findsOneWidget,
+        reason: 'E7:取消带确认层');
+    await tester.tap(find.widgetWithText(FilledButton, '取消任务'));
     await tester.pump();
     expect(q.runningCount, beforeRunning - 1);
     expect(q.tasks.where((t) => t.status == TransferStatus.canceled).length, 1);

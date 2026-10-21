@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart' show kDebugMode, visibleForTesting;
 import 'package:flutter/material.dart';
 
 import '../services/app_log.dart';
+import '../theme/tokens.dart';
 
 /// main() 调用一次;幂等。[debug] 供测试注入 release 路径(P2-7;缺省随
 /// kDebugMode,main() 调用点不变)。
@@ -36,19 +37,20 @@ class FriendlyErrorPage extends StatelessWidget {
     return Container(
       color: Colors.white,
       alignment: Alignment.center,
-      padding: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(Tk.spaceXl),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: const [
-          Icon(Icons.error_outline, size: 48, color: Color(0xFF9F1239)),
-          SizedBox(height: 12),
+          Icon(Icons.error_outline, size: 48, color: Tk.red),
+          SizedBox(height: Tk.spaceMd),
           Text('页面出现了一点问题',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          SizedBox(height: 8),
+              style: TextStyle(
+                  fontSize: Tk.fzTitle, fontWeight: FontWeight.w600)),
+          SizedBox(height: Tk.spaceSm),
           Text(
             '请返回重试;若反复出现,可在「我的 → 日志推送」把诊断日志发给我们。',
             textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 13, color: Color(0xFF6B6B68)),
+            style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted),
           ),
         ],
       ),

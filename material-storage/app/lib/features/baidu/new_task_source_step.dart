@@ -27,7 +27,7 @@ class NewTaskSourceStep extends StatelessWidget {
           Card(
             margin: EdgeInsets.zero,
             shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(Tk.rXl)),
             child: Padding(
               padding: const EdgeInsets.all(16),
               child: Column(
@@ -36,7 +36,7 @@ class NewTaskSourceStep extends StatelessWidget {
                   Text(
                     '从百度网盘选择要备份的目录。将只读拉取文件清单导入所选项目,'
                     '不做修改、删除、分享。',
-                    style: const TextStyle(fontSize: 13, color: Tk.muted),
+                    style: const TextStyle(fontSize: Tk.fzMd, color: Tk.muted),
                   ),
                   const SizedBox(height: 12),
                   Text(
@@ -44,7 +44,7 @@ class NewTaskSourceStep extends StatelessWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        fontSize: 13,
+                        fontSize: Tk.fzMd,
                         color:
                             sourceDir == null ? Tk.subtle : Tk.accentStrong,
                         fontWeight: FontWeight.w600),
@@ -67,7 +67,7 @@ class NewTaskSourceStep extends StatelessWidget {
             '继续下一轮(断点续传)。\n'
             '· 同名文件默认跳过(已存在的不会被改动);之后可在任务详情对跳过文件'
             '执行「覆盖导入」——该操作会永久删除原文件后重新导入,且需要管理权限。',
-            style: TextStyle(fontSize: 12, color: Tk.subtle, height: 1.7),
+            style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle, height: 1.7),
           ),
         ],
       );

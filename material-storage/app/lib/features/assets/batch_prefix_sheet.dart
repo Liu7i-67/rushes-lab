@@ -10,6 +10,8 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/toast.dart';
 import 'asset_writeback.dart';
 
 /// 单批上限(后端 asset_ids ≤1000,超出 422)。
@@ -116,10 +118,8 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
           if (!mounted) return;
           setState(() => _submitting = false);
           Navigator.of(context).pop(false);
-          ScaffoldMessenger.maybeOf(context)
-            ?..hideCurrentSnackBar()
-            ..showSnackBar(const SnackBar(
-                content: Text('提交失败已中止,未提交部分保留选中,可重试')));
+          toast(context, '提交失败已中止,未提交部分保留选中,可重试',
+              tone: ToastTone.error);
           widget.onSettle(ids.sublist(i));
           return;
         }
@@ -133,16 +133,15 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
       if (renamed > 0) notifyAssetMutation(widget.folderId);
       if (!mounted) return;
       Navigator.of(context).pop(true);
-      ScaffoldMessenger.maybeOf(context)
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(
-            content: Text('已重命名 $renamed 个,跳过 $skipped 个'
-                '${reasonText.isEmpty ? '' : '($reasonText)'}')));
+      toast(context,
+          '已重命名 $renamed 个,跳过 $skipped 个'
+          '${reasonText.isEmpty ? '' : '($reasonText)'}',
+          tone: renamed > 0 ? ToastTone.success : ToastTone.info);
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('批量改名失败:$e')));
+      toast(context, errorMessage(e, '批量改名失败,请稍后重试'),
+          tone: ToastTone.error);
     }
   }
 
@@ -162,10 +161,10 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
             crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text('批量前缀(${widget.selectedIds.length} 个文件)',
               style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
+          const SizedBox(height: Tk.spaceXs),
           Text('无批量撤销:加前缀可用「去前缀」按相同前缀反向恢复。',
               style: Theme.of(context).textTheme.bodySmall),
-          const SizedBox(height: 12),
+          const SizedBox(height: Tk.spaceMd),
           SegmentedButton<String>(
             segments: const [
               ButtonSegment(value: 'add', label: Text('加前缀')),
@@ -174,7 +173,7 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
             selected: {_action},
             onSelectionChanged: (s) => setState(() => _action = s.first),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: Tk.spaceMd),
           TextField(
             controller: _prefix,
             maxLength: 160,
@@ -186,7 +185,7 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
             onChanged: (_) => setState(() {}),
           ),
           if (preview.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: Tk.spaceSm),
             ...[
               for (final p in preview)
                 Padding(
@@ -202,7 +201,7 @@ class _BatchPrefixSheetState extends State<_BatchPrefixSheet> {
                 ),
             ],
           ],
-          const SizedBox(height: 16),
+          const SizedBox(height: Tk.spaceLg),
           SizedBox(
             width: double.infinity,
             child: FilledButton(

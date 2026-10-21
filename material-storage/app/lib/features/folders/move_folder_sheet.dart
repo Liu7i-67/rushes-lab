@@ -3,6 +3,8 @@
 /// 后端 400);源自身及其子树整支禁选(防环,需求「目标不含自身子树」)。
 /// 提交 PATCH parent_folder_id(null=项目一级);409(一级夹带 explicit grant
 /// 禁 reparent 等)/400 detail 透传。
+/// app-polish D1:骨架迁移 SheetScaffold(errorText 位/PrimaryXl 吸底);
+/// 错误 errorMessage 兜底(E14)。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,6 +13,9 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
+import '../../widgets/sheet_scaffold.dart';
 import '../assets/batch_move_sheet.dart' show sensitiveCascadeIds;
 import 'folder_tree.dart';
 
@@ -98,62 +103,49 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '移动失败,请稍后重试');
       });
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.75,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('移动「${widget.folder.name}」',
-                  style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
-              Text('目标项目:${widget.projectLabel}(移动限同项目内)',
-                  style: Theme.of(context).textTheme.bodySmall),
-              if (widget.folder.isSensitive)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text('敏感文件夹只能直挂项目一级,不支持移动',
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                          fontSize: 12)),
-                ),
-              const SizedBox(height: 8),
-              Text('移动到哪个目录(自身及其子夹、敏感目录不可选)',
-                  style: Theme.of(context).textTheme.bodySmall),
-              Expanded(child: _folderList()),
-              Text(
-                  '已选目标:${_targetId == null ? (_targetName == null ? '未选择' : '项目根(一级)') : '目录「$_targetName」'}',
-                  style: Theme.of(context).textTheme.bodySmall),
-              if (_error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(_error!,
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                          fontSize: 12)),
-                ),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed:
-                      _targetName == null || _submitting ? null : _submit,
-                  child: Text(_submitting ? '移动中…' : '移动'),
-                ),
-              ),
-            ],
-          ),
+    return SheetScaffold(
+      title: '移动「${widget.folder.name}」',
+      errorText: _error,
+      maxHeightFactor: 0.75,
+      bottomActions: [
+        PrimaryXl(
+          onPressed: _targetName == null || _submitting ? null : _submit,
+          label: _submitting ? '移动中…' : '移动',
         ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('目标项目:${widget.projectLabel}(移动限同项目内)',
+              style: Theme.of(context).textTheme.bodySmall),
+          if (widget.folder.isSensitive)
+            Padding(
+              padding: const EdgeInsets.only(top: Tk.spaceXs),
+              child: Text('敏感文件夹只能直挂项目一级,不支持移动',
+                  style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                      fontSize: Tk.fzSm)),
+            ),
+          const SizedBox(height: Tk.spaceSm),
+          Text('移动到哪个目录(自身及其子夹、敏感目录不可选)',
+              style: Theme.of(context).textTheme.bodySmall),
+          // 夹树定高内滚(外层 SheetScaffold 已管总高与吸底钮)
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.42,
+            child: _folderList(),
+          ),
+          Text(
+              '已选目标:${_targetId == null ? (_targetName == null ? '未选择' : '项目根(一级)') : '目录「$_targetName」'}',
+              style: Theme.of(context).textTheme.bodySmall),
+        ],
       ),
     );
   }
@@ -168,7 +160,7 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
         if (snap.hasError) {
           return Center(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text('目录加载失败:${snap.error}',
+              Text('目录加载失败:${errorMessage(snap.error!, '请下拉重试')}',
                   style: Theme.of(context).textTheme.bodySmall),
               TextButton(
                 onPressed: () => setState(() => _foldersFuture = _load()),

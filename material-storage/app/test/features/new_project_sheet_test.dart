@@ -106,6 +106,41 @@ void main() {
     expect(call['admin_user_id'], 'me1', reason: '默认 admin=创建者');
   });
 
+  testWidgets('bucket 限长 63(测试报告 P2-D2,同后端 max_length):'
+      '输入截断+计数器,提交值=63 字符', (tester) async {
+    tester.view.physicalSize = const Size(900, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    final api = installFakeApi();
+    addTearDown(() => session.api = null);
+    session.me = Me(id: 'me1', name: '甲', isProjectCreator: true);
+
+    await tester.pumpWidget(_host());
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // 展开「高级」折叠露出 bucket 字段;输入 70 字符 → maxLength 截断到 63
+    await tester.tap(find.text('高级'));
+    await tester.pumpAndSettle();
+    const long70 =
+        'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789abcdefgh';
+    await tester.enterText(
+        find.widgetWithText(TextField, 'MinIO bucket(必填)'), long70);
+    await tester.pump();
+    expect(find.text('63/63'), findsOneWidget,
+        reason: 'P2-D2:bucket maxLength=63 计数器可见');
+
+    // 名称/编码合法 → 提交放行,bucket=截断后的 63 字符(不再发给后端吃 422)
+    await tester.enterText(find.widgetWithText(TextField, '项目名称'), '项目A');
+    await tester.enterText(
+        find.widgetWithText(TextField, '项目编码(小写字母/数字/-)'), 'demo-2026');
+    await tester.pump();
+    await tester.tap(find.text('创建'));
+    await tester.pumpAndSettle();
+    expect(api.projectsOps.createCalls.single['minio_bucket'],
+        long70.substring(0, 63));
+  });
+
   testWidgets('权限模板展开为 initial_grants 行(可增删改);目录模板选中提交 id;'
       '成功失效 projects', (tester) async {
     tester.view.physicalSize = const Size(900, 2400);

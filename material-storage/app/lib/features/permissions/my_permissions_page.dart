@@ -3,11 +3,12 @@
 /// approved` 已批准临时授权;**勿按逐夹 grants 拼凑**,后端无聚合端点)。
 library;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../projects/role_badge.dart';
@@ -71,45 +72,53 @@ class _MyPermissionsPageState extends State<MyPermissionsPage> {
         (_projects ?? const []).where((p) => p.myRoles.isEmpty).toList();
     return Scaffold(
       appBar: AppBar(title: const Text('我的权限')),
-      body: (_grants == null && _projects == null)
-          ? const Center(child: CircularProgressIndicator())
-          : ListView(
-              padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
-              children: [
-                if (grants.isNotEmpty) ...[
-                  _sectionTitle('临时授权', desc: '审批通过获得的有时效权限,过期失效'),
-                  for (final g in grants)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: GrantRow(approval: g),
-                    ),
-                  const SizedBox(height: 12),
+      // E11:下拉刷新补齐(loading/内容全分支包 RefreshIndicator)
+      body: RefreshIndicator(
+        onRefresh: _reload,
+        child: (_grants == null && _projects == null)
+            ? ListView(physics: const AlwaysScrollableScrollPhysics(), children: const [
+                SizedBox(height: 200),
+                Center(child: CircularProgressIndicator()),
+              ])
+            : ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+                children: [
+                  if (grants.isNotEmpty) ...[
+                    _sectionTitle('临时授权', desc: '审批通过获得的有时效权限,过期失效'),
+                    for (final g in grants)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: GrantRow(approval: g),
+                      ),
+                    const SizedBox(height: Tk.spaceMd),
+                  ],
+                  _sectionTitle('项目角色',
+                      desc: '个人、用户组或部门继承而来的角色'),
+                  if (owned.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 24),
+                      child: EmptyState(
+                          icon: Icons.shield_outlined, message: '你目前没有任何项目角色'),
+                    )
+                  else
+                    for (final p in owned)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _ProjectRow(project: p),
+                      ),
+                  if (guest.isNotEmpty) ...[
+                    const SizedBox(height: Tk.spaceMd),
+                    _sectionTitle('仅访客可见', desc: 'public 项目,能否下载视 folder 设置'),
+                    for (final p in guest)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: _ProjectRow(project: p, guest: true),
+                      ),
+                  ],
                 ],
-                _sectionTitle('项目角色',
-                    desc: '个人、用户组或部门继承而来的角色'),
-                if (owned.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 24),
-                    child: EmptyState(
-                        icon: Icons.shield_outlined, message: '你目前没有任何项目角色'),
-                  )
-                else
-                  for (final p in owned)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: _ProjectRow(project: p),
-                    ),
-                if (guest.isNotEmpty) ...[
-                  const SizedBox(height: 12),
-                  _sectionTitle('仅访客可见', desc: 'public 项目,能否下载视 folder 设置'),
-                  for (final p in guest)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 6),
-                      child: _ProjectRow(project: p, guest: true),
-                    ),
-                ],
-              ],
-            ),
+              ),
+      ),
     );
   }
 
@@ -121,11 +130,12 @@ class _MyPermissionsPageState extends State<MyPermissionsPage> {
           children: [
             Text(title,
                 style: const TextStyle(
-                    fontSize: 15, fontWeight: FontWeight.w600)),
-            const SizedBox(width: 8),
+                    fontSize: Tk.fzTitle, fontWeight: FontWeight.w600)),
+            const SizedBox(width: Tk.spaceSm),
             Expanded(
               child: Text(desc ?? '',
-                  style: const TextStyle(fontSize: 11.5, color: Tk.subtle),
+                  style: const TextStyle(
+                      fontSize: Tk.fzXs, color: Tk.subtle),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis),
             ),
@@ -134,7 +144,8 @@ class _MyPermissionsPageState extends State<MyPermissionsPage> {
       );
 }
 
-/// 项目角色行:名称(code)+ 角色徽标(复用 B2 MyRolesBadge);guest 弱化。
+/// 项目角色行:名称(code)+ 角色徽标(复用 B2 MyRolesBadge);E11:guest
+/// 不再靠去边框弱化——行尾给「仅访客」neutral 小徽标(边框正常保留)。
 class _ProjectRow extends StatelessWidget {
   const _ProjectRow({required this.project, this.guest = false});
 
@@ -145,11 +156,11 @@ class _ProjectRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = project;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(
+          horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        border: Border.all(
-            color: Tk.border, style: guest ? BorderStyle.none : BorderStyle.solid),
-        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Tk.border),
+        borderRadius: const BorderRadius.all(Radius.circular(Tk.rMd)),
       ),
       child: Row(
         children: [
@@ -159,13 +170,17 @@ class _ProjectRow extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 13.5,
+                fontSize: Tk.fzMd,
                 fontWeight: guest ? FontWeight.w400 : FontWeight.w500,
               ),
             ),
           ),
-          const SizedBox(width: 8),
-          MyRolesBadge(roles: p.myRoles),
+          const SizedBox(width: Tk.spaceSm),
+          // guest 行固定「仅访客」neutral 徽标(MyRolesBadge 空角色同文案,
+          // 显式传入语义更直白);有角色行走角色徽标
+          guest
+              ? const Badge(label: '仅访客', tone: BadgeTone.neutral)
+              : MyRolesBadge(roles: p.myRoles),
         ],
       ),
     );

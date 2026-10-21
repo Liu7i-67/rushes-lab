@@ -1,10 +1,12 @@
-/// NotificationRow — 通知行(B7 §8.7,web NotificationRow 移动版):
-/// 未读橙点 + kind chip + 标题/正文 + 相对时间;点击整行回调(跳转+标已读
+/// NotificationRow — 通知行(B7 §8.7,web NotificationRow 移动版;
+/// app-polish E6 精修):未读橙点 + kind chip + 标题/正文 + 相对时间
+/// (fmtRelativeTime);行距/字号/圆角 token 化;点击整行回调(跳转+标已读
 /// 由页面统一处理)。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
 
+import '../../core/fmt.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
@@ -29,11 +31,13 @@ class NotificationRow extends StatelessWidget {
     final n = item;
     return InkWell(
       onTap: onTap,
+      borderRadius: const BorderRadius.all(Radius.circular(Tk.rMd)),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        padding: const EdgeInsets.symmetric(
+            horizontal: 14, vertical: Tk.spaceMd),
         decoration: BoxDecoration(
           color: n.isUnread ? Tk.accentFaint.withValues(alpha: 0.45) : null,
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: const BorderRadius.all(Radius.circular(Tk.rMd)),
         ),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -58,14 +62,14 @@ class NotificationRow extends StatelessWidget {
                   Row(
                     children: [
                       Badge(label: n.kindLabel, tone: kindTone(n.kind)),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: Tk.spaceSm),
                       Expanded(
                         child: Text(
                           n.title,
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: 13.5,
+                            fontSize: Tk.fzMd,
                             fontWeight:
                                 n.isUnread ? FontWeight.w600 : FontWeight.w400,
                           ),
@@ -74,17 +78,18 @@ class NotificationRow extends StatelessWidget {
                     ],
                   ),
                   if ((n.body ?? '').isNotEmpty) ...[
-                    const SizedBox(height: 4),
+                    const SizedBox(height: Tk.spaceXs),
                     Text(
                       n.body!,
-                      style:
-                          const TextStyle(fontSize: 12.5, color: Tk.muted),
+                      style: const TextStyle(
+                          fontSize: Tk.fzSm, color: Tk.muted),
                     ),
                   ],
-                  const SizedBox(height: 4),
-                  Text(fmtTime(n.createdAt),
+                  const SizedBox(height: Tk.spaceXs),
+                  // E6:相对时间(刚刚/N 分钟前/N 小时前/昨天/日期)
+                  Text(fmtRelativeTime(n.createdAt),
                       style: const TextStyle(
-                          fontSize: 11, color: Tk.subtle)),
+                          fontSize: Tk.fzXs, color: Tk.subtle)),
                 ],
               ),
             ),
@@ -95,7 +100,8 @@ class NotificationRow extends StatelessWidget {
   }
 }
 
-/// ISO → 'YYYY-MM-DD HH:mm'(web 用相对时间,移动列表取绝对短格式免歧义)。
+/// ISO → 'YYYY-MM-DD HH:mm'(绝对短格式保留供他处复用;通知行改用
+/// core/fmt.dart 的 fmtRelativeTime,E6 相对时间口径)。
 String fmtTime(String iso) {
   final t = DateTime.tryParse(iso)?.toLocal();
   if (t == null) return iso;

@@ -2,6 +2,8 @@
 /// 普通夹=my_can_admin 或 my_delete_grant;sensitive 仅系统 admin);列表渲染
 /// (deleted_at/大小)+恢复调用+行移除+失效两 scope;文件夹 ⋯ 菜单入口闸门
 /// (普通夹 admin 可进/敏感夹非系统 admin 禁用文案/系统 admin 可进)。
+/// app-polish E10 交付批:行首图标按 kind 分型(纯函数);「加载更多」按钮改
+/// 滚到底自动加载(交互变化:原按钮格无既有用例,新增自动加载用例)。
 /// FakeApi 族见 helpers/api_harness.dart(widget 测试不落真实 socket)。
 library;
 
@@ -16,6 +18,40 @@ import 'package:ms_app/models/asset.dart' as asset_models show TrashPage;
 import 'package:ms_app/models/models.dart' hide TrashPage;
 
 import '../helpers/api_harness.dart';
+
+/// E10 分页假 API:按 offset 编排两页(首页/第二页,total 独立)。
+class _PagedOpsApi extends FakeOpsApi {
+  _PagedOpsApi(super.api);
+
+  List<Asset> page1 = const [];
+  List<Asset> page2 = const [];
+  int total = 0;
+
+  @override
+  Future<asset_models.TrashPage> listTrash(String folderId,
+      {int limit = 500, int offset = 0}) async {
+    trashCalls.add((folderId: folderId, limit: limit, offset: offset));
+    // 页面组件(features TrashPage)与数据类同名:此处构造数据类,用别名
+    return asset_models.TrashPage(
+        items: offset > 0 ? page2 : page1, total: total);
+  }
+}
+
+class _PagedMsApi extends FakeMsApi {
+  late final _paged = _PagedOpsApi(this);
+
+  @override
+  _PagedOpsApi get ops => _paged;
+}
+
+Asset _trashed(String id) => Asset(
+    id: id,
+    filename: '$id.jpg',
+    sizeBytes: 1,
+    contentType: 'image/jpeg',
+    createdAt: '2026-10-20T10:00:00Z',
+    folderId: 'f1',
+    deletedAt: '2026-10-21T09:30:00Z');
 
 void main() {
   test('canSeeTrash 三态:普通夹 admin∨删除授权;sensitive 仅系统 admin', () {
@@ -198,5 +234,54 @@ void main() {
     await tester.tap(find.text('回收站'));
     await tester.pumpAndSettle();
     expect(find.text('回收站 · 敏感夹'), findsOneWidget);
+  });
+
+  // ── E10(app-polish 交付批)────────────────────────────────────────────────
+  test('E10:回收站行首图标按 kind 分型(原一律 description_outlined)', () {
+    expect(trashKindIcon(filename: 'a.jpg', contentType: 'image/jpeg'),
+        Icons.image_outlined, reason: 'image → image');
+    expect(trashKindIcon(filename: 'a.heic', contentType: 'image/heic'),
+        Icons.image_outlined, reason: 'heic 归 image 分型');
+    expect(trashKindIcon(filename: 'b.mov', contentType: 'video/quicktime'),
+        Icons.videocam_outlined, reason: 'video → videocam');
+    expect(trashKindIcon(filename: 'c.livp', contentType: 'application/zip'),
+        Icons.photo_camera_outlined, reason: 'livp → 实况(相机)意象');
+    expect(trashKindIcon(filename: 'd.mp3'),
+        Icons.graphic_eq, reason: '音频 → graphic_eq(扩展名补判)');
+    expect(trashKindIcon(filename: 'e.m4a', contentType: 'audio/x-m4a'),
+        Icons.graphic_eq, reason: '音频 → graphic_eq(content_type 补判)');
+    expect(trashKindIcon(filename: 'f.pdf', contentType: 'application/pdf'),
+        Icons.description_outlined, reason: 'pdf → doc 分型');
+    expect(trashKindIcon(filename: 'g.md', contentType: 'text/markdown'),
+        Icons.description_outlined, reason: 'markdown → doc 分型');
+    expect(trashKindIcon(filename: 'h.bin'),
+        Icons.insert_drive_file_outlined, reason: '未识别 → 通用文件');
+  });
+
+  testWidgets('E10:滚动到底自动加载第二页(offset=首页条数),无需点按', (tester) async {
+    final api = installFakeApi(_PagedMsApi()) as _PagedMsApi;
+    api.ops.page1 = [for (var i = 1; i <= 30; i++) _trashed('a$i')];
+    api.ops.total = 33;
+    api.ops.page2 = [_trashed('a31'), _trashed('a32'), _trashed('a33')];
+    addTearDown(() => session.api = null);
+
+    await tester
+        .pumpWidget(MaterialApp(home: TrashPage(folderId: 'f1', folderName: '档案夹')));
+    await tester.pumpAndSettle();
+    expect(api.ops.trashCalls.single.offset, 0, reason: '首轮只拉第一页');
+
+    // 只滚动,不点任何按钮——E10 验收点:到底即自动加载(原「加载更多」
+    // 按钮格移除,交互变化;该格无既有用例,本用例即其替代)
+    for (var i = 0; i < 6; i++) {
+      await tester.drag(find.byType(ListView), const Offset(0, -800));
+      await tester.pumpAndSettle();
+    }
+    expect(api.ops.trashCalls.length, 2,
+        reason: 'E10:滚动到底自动发起第二页请求');
+    expect(api.ops.trashCalls.last.offset, 30, reason: 'E10:offset=首页条数');
+    expect(find.text('a31.jpg'), findsOneWidget,
+        reason: 'E10:第二页内容拼接渲染');
+    expect(find.textContaining('加载更多'), findsNothing,
+        reason: 'E10:「加载更多」格子移除,改底部线性加载指示');
   });
 }

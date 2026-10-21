@@ -9,7 +9,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/fmt.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/badge.dart';
+import '../../widgets/toast.dart';
 import 'temp_password_sheet.dart';
 import 'user_edit_sheet.dart';
 
@@ -18,12 +21,6 @@ class AdminUserRow extends StatelessWidget {
 
   final DirectoryUser user;
   final VoidCallback onChanged;
-
-  void _toast(BuildContext context, String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
-  }
 
   Future<void> _openActions(BuildContext context) async {
     final action = await showModalBottomSheet<String>(
@@ -79,7 +76,7 @@ class AdminUserRow extends StatelessWidget {
           final ok = await showEditUserSheet(context, user);
           if (!context.mounted) return;
           if (ok) {
-            _toast(context, '已保存 $name 的资料');
+            toast(context, '已保存 $name 的资料', tone: ToastTone.success);
             onChanged();
           }
         case 'disable':
@@ -90,7 +87,7 @@ class AdminUserRow extends StatelessWidget {
           }
           await api.disableUser(user.id);
           if (!context.mounted) return;
-          _toast(context, '已停用 $name — 其全部权限已撤销');
+          toast(context, '已停用 $name — 其全部权限已撤销', tone: ToastTone.success);
           onChanged();
         case 'enable':
           if (!await _confirm(
@@ -100,7 +97,7 @@ class AdminUserRow extends StatelessWidget {
           }
           await api.enableUser(user.id);
           if (!context.mounted) return;
-          _toast(context, '已重新启用 $name');
+          toast(context, '已重新启用 $name', tone: ToastTone.success);
           onChanged();
         case 'reset':
           if (!await _confirm(context, '重置 $name 的密码?',
@@ -122,20 +119,21 @@ class AdminUserRow extends StatelessWidget {
           }
           final r = await api.unlockUser(user.id);
           if (!context.mounted) return;
-          _toast(
+          toast(
               context,
               r.wasLocked
                   ? '已解锁 $name(清 ${r.clearedUserForms.length} 个登录名形态 / '
                       '${r.clearedIps.length} 个 IP 锁)'
-                  : '$name 当前无登录锁,已顺手清理失败计数');
+                  : '$name 当前无登录锁,已顺手清理失败计数',
+              tone: ToastTone.success);
           onChanged();
       }
     } on ApiException catch (e) {
       if (!context.mounted) return;
-      _toast(context, e.message); // 409 已禁用/已启用等 detail 透传
+      toast(context, e.message, tone: ToastTone.error); // 409 已禁用/已启用等透传
     } catch (e) {
       if (!context.mounted) return;
-      _toast(context, '$e');
+      toast(context, errorMessage(e, '操作失败,请稍后重试'), tone: ToastTone.error);
     }
   }
 
@@ -159,7 +157,7 @@ class AdminUserRow extends StatelessWidget {
             const Badge(label: '待改密', tone: BadgeTone.amber),
           if (user.loginLocked)
             const Padding(
-              padding: EdgeInsets.only(left: 4),
+              padding: EdgeInsets.only(left: Tk.spaceXs),
               child: Badge(label: '登录已锁定', tone: BadgeTone.red),
             ),
         ],
@@ -167,28 +165,15 @@ class AdminUserRow extends StatelessWidget {
       subtitle: Text(subtitle.toString(),
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 11.5)),
+          style: const TextStyle(fontSize: Tk.fzXs)),
       trailing: const Icon(Icons.more_horiz),
       onTap: () => _openActions(context),
     );
   }
 }
 
-Future<bool> _confirm(BuildContext context, String title, String content) async {
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: Text(title),
-      content: Text(content),
-      actions: [
-        TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text('取消')),
-        FilledButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('确认')),
-      ],
-    ),
-  );
-  return ok ?? false;
-}
+/// 操作确认(F3 收口 showAppConfirm):取消 false / 遮罩关闭 null 均 = false,
+/// 与原 `ok ?? false` 口径一致;四个调用点(停用/启用/重置密码/解锁)均非危险态。
+Future<bool> _confirm(BuildContext context, String title, String content) =>
+    showAppConfirm(context, title: title, content: content)
+        .then((ok) => ok ?? false);

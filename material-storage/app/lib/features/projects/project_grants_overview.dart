@@ -8,6 +8,8 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
+import '../../widgets/toast.dart';
 
 /// 打开项目成员管理面板时挂载;刷新经 [reloadKey] 变化驱动(父侧 setState)。
 class ProjectGrantsOverview extends StatefulWidget {
@@ -34,22 +36,14 @@ class _ProjectGrantsOverviewState extends State<ProjectGrantsOverview> {
 
   Future<void> _revokeGrant(ProjectGrantRow g) async {
     final scope = g.objectName ?? _objectLabel(g.objectType);
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('撤回此授权?'),
-        content: Text('将撤回 ${g.name ?? g.subjectId} 对「$scope」的'
-            '${g.level} 授权${g.permanent ? ',对方将立即失去访问' : ''}'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-              style: FilledButton.styleFrom(foregroundColor: Tk.red),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('撤回')),
-        ],
-      ),
+    // E14:确认统一 showAppConfirm(danger)
+    final ok = await showAppConfirm(
+      context,
+      title: '撤回此授权?',
+      content: '将撤回 ${g.name ?? g.subjectId} 对「$scope」的'
+          '${g.level} 授权${g.permanent ? ',对方将立即失去访问' : ''}',
+      confirmLabel: '撤回',
+      danger: true,
     );
     if (ok != true) return;
     try {
@@ -63,12 +57,11 @@ class _ProjectGrantsOverviewState extends State<ProjectGrantsOverview> {
       setState(() => _grants = _load());
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('撤回失败:${e.message}')));
+      toast(context, '撤回失败:${e.message}', tone: ToastTone.error);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('撤回失败:$e')));
+      toast(context, errorMessage(e, '撤回失败,请稍后重试'),
+          tone: ToastTone.error);
     }
   }
 
@@ -81,17 +74,18 @@ class _ProjectGrantsOverviewState extends State<ProjectGrantsOverview> {
           return const Padding(
             padding: EdgeInsets.all(16),
             child: Text('加载中…',
-                style: TextStyle(fontSize: 12.5, color: Tk.subtle)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle)),
           );
         }
         if (snap.hasError) {
-          return Text('加载失败:${snap.error}',
-              style: const TextStyle(fontSize: 12.5, color: Tk.red));
+          return Text(
+              errorMessage(snap.error ?? '', '授权列表加载失败'),
+              style: const TextStyle(fontSize: Tk.fzSm, color: Tk.red));
         }
         final grants = snap.data ?? const <ProjectGrantRow>[];
         if (grants.isEmpty) {
           return const Text('暂无额外授权 · 审批通过/文件夹邀请的授权会出现在这里',
-              style: TextStyle(fontSize: 12.5, color: Tk.subtle));
+              style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle));
         }
         return Column(
           children: [
@@ -105,10 +99,10 @@ class _ProjectGrantsOverviewState extends State<ProjectGrantsOverview> {
                     '${_objectLabel(g.objectType)}${g.objectName == null ? '' : '「${g.objectName}」'}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13)),
+                    style: const TextStyle(fontSize: Tk.fzMd)),
                 subtitle: Text(
                   '${g.level}${g.permanent ? ' · 长期' : g.expiresAt == null ? ' · 临时' : ' · 到期 ${g.expiresAt}'}',
-                  style: const TextStyle(fontSize: 11, color: Tk.subtle),
+                  style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle),
                 ),
                 trailing: IconButton(
                   icon: const Icon(Icons.delete_outline, size: 18),

@@ -28,10 +28,11 @@ class BaiduTaskCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = task;
     return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      margin: const EdgeInsets.only(bottom: Tk.spaceSm),
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.all(Radius.circular(Tk.rLg))),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(14, 12, 14, 6),
+        padding: const EdgeInsets.fromLTRB(14, Tk.spaceMd, 14, 6),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -41,20 +42,21 @@ class BaiduTaskCard extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 13.5, fontWeight: FontWeight.w600)),
+                        fontSize: Tk.fzMd, fontWeight: FontWeight.w600)),
               ),
               const SizedBox(width: 6),
               Badge(label: taskStatusText(t.displayStatus),
                   tone: baiduTaskTone(t.displayStatus)),
             ]),
-            const SizedBox(height: 4),
+            const SizedBox(height: Tk.spaceXs),
             Text('→ ${t.targetLabel}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
-            const SizedBox(height: 8),
+                style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
+            const SizedBox(height: Tk.spaceSm),
             ClipRRect(
-              borderRadius: BorderRadius.circular(4),
+              // 4px 高进度条的圆角(radius 按条高缩放渲染,视觉=胶囊不变)
+              borderRadius: BorderRadius.circular(Tk.rSm),
               child: LinearProgressIndicator(
                 value: t.progressPct / 100,
                 minHeight: 4,
@@ -68,60 +70,75 @@ class BaiduTaskCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Wrap(
-              spacing: 12,
+              spacing: Tk.spaceMd,
               runSpacing: 2,
               children: [
                 Text('${t.doneFiles ?? 0} / ${t.totalFiles ?? 0} 个文件',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                    style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
                 Text(
                     '${fmtBytes(t.doneBytes)}'
                     '${t.totalBytes == null ? '' : ' / ${fmtBytes(t.totalBytes!)}'}',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                    style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
                 if (t.isActive)
                   Text(
                       t.etaSeconds != null
                           ? '预计剩余 ${fmtEtaShort(t.etaSeconds!)}'
                           : '估算中',
                       style:
-                          const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                          const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
                 if (t.status == 'failed' && t.failReason != null)
                   Text(kFailReasonLabels[t.failReason!] ?? t.failReason!,
-                      style: const TextStyle(fontSize: 11.5, color: Tk.red)),
+                      style: const TextStyle(fontSize: Tk.fzSm, color: Tk.red)),
                 if (t.status == 'completed' && (t.totalFiles ?? 0) == 0)
                   const Text('源目录为空',
-                      style: TextStyle(fontSize: 11.5, color: Tk.muted)),
+                      style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
                 if (t.status == 'cancelled' && (t.cancelledFiles ?? 0) > 0)
                   Text('已取消 ${t.cancelledFiles} 个文件',
                       style:
-                          const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                          const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
               ],
             ),
+            // E12:操作行触控加高(≥44 逻辑高;保留文字钮——可读性优于裸图标)
             Row(mainAxisAlignment: MainAxisAlignment.end, children: [
-              TextButton(
-                onPressed: () => Navigator.of(context)
-                    .pushNamed('/baidu-task', arguments: t.id),
-                child: const Text('查看'),
-              ),
+              _cardAction(context, '查看',
+                  onPressed: () => Navigator.of(context)
+                      .pushNamed('/baidu-task', arguments: t.id)),
               if (t.isActive)
-                TextButton(
-                  onPressed: busy ? null : () => onAction('cancel'),
-                  child: const Text('取消',
-                      style: TextStyle(color: Tk.red)),
-                ),
+                _cardAction(context, '取消',
+                    foreground: Tk.red,
+                    onPressed: busy ? null : () => onAction('cancel')),
               if (t.canRetryFailed)
-                TextButton(
-                  onPressed: busy ? null : () => onAction('retry-failed'),
-                  child: const Text('全部重试失败'),
-                ),
+                _cardAction(context, '全部重试失败',
+                    onPressed: busy ? null : () => onAction('retry-failed')),
               if (t.isTerminal)
-                TextButton(
-                  onPressed: busy ? null : () => onAction('delete'),
-                  child: const Text('删除', style: TextStyle(color: Tk.red)),
-                ),
+                _cardAction(context, '删除',
+                    foreground: Tk.red,
+                    onPressed: busy ? null : () => onAction('delete')),
             ]),
           ],
         ),
       ),
     );
   }
+
+  /// E12:任务卡文字钮(加高触控:44 逻辑高 + 左间距,替代紧凑默认档)。
+  Widget _cardAction(
+    BuildContext context,
+    String label, {
+    VoidCallback? onPressed,
+    Color? foreground,
+  }) =>
+      Padding(
+        padding: const EdgeInsets.only(left: Tk.spaceXs),
+        child: TextButton(
+          style: TextButton.styleFrom(
+            foregroundColor: foreground,
+            minimumSize: const Size(44, 44),
+            padding: const EdgeInsets.symmetric(horizontal: Tk.spaceSm),
+            visualDensity: VisualDensity.standard,
+          ),
+          onPressed: onPressed,
+          child: Text(label, style: const TextStyle(fontSize: Tk.fzSm)),
+        ),
+      );
 }

@@ -111,17 +111,17 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
             final templates = snap.data ?? const <GrantTemplate>[];
             return Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: Tk.spaceMd),
               decoration: BoxDecoration(
                 border: Border.all(color: Theme.of(context).dividerColor),
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(Tk.rSm),
               ),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<GrantTemplate?>(
                   value: _selectedTemplate(templates),
                   isExpanded: true,
                   hint: const Text('权限模板(可选)',
-                      style: TextStyle(fontSize: 13.5)),
+                      style: TextStyle(fontSize: Tk.fzMd)),
                   items: [
                     const DropdownMenuItem(
                         value: null, child: Text('不使用模板')),
@@ -131,7 +131,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
                         child: Text(
                           '${t.name}${t.isDefault ? '(默认)' : ''}',
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5),
+                          style: const TextStyle(fontSize: Tk.fzMd),
                         ),
                       ),
                   ],
@@ -144,10 +144,10 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
             );
           },
         ),
-        const SizedBox(height: 8),
-        Text('选模板预填后可增删行/改角色,或直接手选主体:',
-            style: const TextStyle(fontSize: 11, color: Tk.subtle)),
-        const SizedBox(height: 4),
+        const SizedBox(height: Tk.spaceSm),
+        const Text('选模板预填后可增删行/改角色,或直接手选主体:',
+            style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+        const SizedBox(height: Tk.spaceXs),
         SubjectPicker(
           value: [
             for (final r in widget.value)
@@ -162,7 +162,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
         if (widget.value.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text('${widget.value.length}/$kInitialGrantsMax 行',
-              style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
           for (final r in widget.value)
             _RowCard(
               row: r,
@@ -214,11 +214,11 @@ class _RowCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = row.kind == 'user';
     return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      margin: const EdgeInsets.only(top: Tk.spaceSm),
+      padding: const EdgeInsets.fromLTRB(Tk.spaceMd, Tk.spaceSm, Tk.spaceMd, 10),
       decoration: BoxDecoration(
         border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -232,23 +232,23 @@ class _RowCard extends StatelessWidget {
                     ? (name.isEmpty ? '?' : name.characters.first.toUpperCase())
                     : '群',
                 style:
-                    TextStyle(fontSize: 11, color: isUser ? Tk.surface : Tk.muted),
+                    TextStyle(fontSize: Tk.fzXs, color: isUser ? Tk.surface : Tk.muted),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: Tk.spaceSm),
             Expanded(
               child: Text(name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w500)),
+                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500)),
             ),
             Text(isUser ? '用户' : '群组',
-                style: const TextStyle(fontSize: 9.5, color: Tk.subtle)),
+                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             if (row.missing) ...[
               const SizedBox(width: 6),
               const Text('已删除',
-                  style: TextStyle(fontSize: 9.5, color: Tk.amber)),
+                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
             ],
             IconButton(
               visualDensity: VisualDensity.compact,

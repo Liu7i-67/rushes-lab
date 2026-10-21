@@ -74,7 +74,7 @@ class _CreateUserSheetState extends State<_CreateUserSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '创建失败,请稍后重试');
       });
     }
   }
@@ -117,7 +117,7 @@ class _CreateUserSheetState extends State<_CreateUserSheet> {
         ),
         const SizedBox(height: 6),
         const Text('创建成功后会显示一次性临时密码,用户首次登录需改密。',
-            style: TextStyle(fontSize: 11.5, color: Tk.muted)),
+            style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
       ],
     );
   }

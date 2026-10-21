@@ -1,5 +1,7 @@
 /// 上传选择器与面板(从 upload_sheet.dart 拆出,B3 遗留 348 行拆分件):
-/// 统一上传面板两入口(相册多选/文件多选)+ 逐项打包入队 + 汇总 toast。
+/// 统一上传面板两入口(相册多选/文件多选)+ 逐项打包入队 + 汇总 toast
+/// (app-polish D6:汇总走 [enqueueNamedBatchAndReport]——带名收集跳过明细,
+/// toast 带「查看」打开跳过清单)。
 /// 入队与纯函数主体仍在 upload_sheet.dart(enqueueLocalUpload/enqueueBatch)。
 library;
 
@@ -11,55 +13,63 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
+import '../../core/api/ms_api.dart' show errorMessage;
 import '../../services/album.dart';
 import '../../services/app_log.dart';
 import '../../services/livp.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/sheet_scaffold.dart';
+import '../../widgets/toast.dart';
 import 'upload_sheet.dart';
 
 /// P2:相册权限被拒引导对话框的用户动作。
 enum AlbumPermissionAction { openSettings, retry }
 
-/// 打开统一上传面板(宫格页两入口共用)。
+/// B8:相册单次选择上限(与 wechat_assets_picker maxAssets 同源,勿再散写)。
+const kAlbumPickLimit = 99;
+
+/// 打开统一上传面板(宫格页两入口共用;app-polish B8:标题「上传到 <文件夹>」)。
 Future<void> showUploadSheet(
   BuildContext context, {
   required String folderId,
   required String where,
 }) {
-  return showModalBottomSheet<void>(
+  // where=「项目/夹」归属路径,取末段即文件夹名
+  final folderName = where.split('/').last;
+  return showAppSheet<void>(
     context: context,
-    showDragHandle: true,
-    builder: (sheetCtx) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.photo_library_outlined),
-            title: const Text('从相册选择'),
-            subtitle: const Text('实况照片自动打包 .livp;图/视频传原文件'),
-            onTap: () {
-              Navigator.pop(sheetCtx);
-              _pickFromAlbum(context, folderId: folderId, where: where);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.folder_open_outlined),
-            title: const Text('选择文件'),
-            subtitle: const Text('原文件直传,支持多选(含 .livp)'),
-            onTap: () {
-              Navigator.pop(sheetCtx);
-              _pickFiles(context, folderId: folderId, where: where);
-            },
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
+    title: '上传到 $folderName',
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ListTile(
+          leading: const Icon(Icons.photo_library_outlined),
+          title: const Text('从相册选择'),
+          subtitle: const Text(
+              '实况照片自动打包 .livp;图/视频传原文件,单次最多 $kAlbumPickLimit 个'),
+          onTap: () {
+            Navigator.pop(context);
+            _pickFromAlbum(context, folderId: folderId, where: where);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.folder_open_outlined),
+          title: const Text('选择文件'),
+          subtitle: const Text('原文件直传,支持多选(含 .livp)'),
+          onTap: () {
+            Navigator.pop(context);
+            _pickFiles(context, folderId: folderId, where: where);
+          },
+        ),
+        const SizedBox(height: Tk.spaceSm),
+      ],
     ),
   );
 }
 
 /// 相册多选(RequestType.all;iOS 实况 → livp 小包轨,其余原文件流式轨;
-/// Android 全原文件)。逐项打包+入队收进 [enqueueBatch] 内层 try/catch
-/// (P1-1:单个失败只跳过,不中断剩余),完事汇总 toast。
+/// Android 全原文件)。逐项打包+入队收进 [enqueueNamedBatchAndReport]
+/// (D6:带名收集,单点失败只跳过不中断剩余),完事汇总 toast。
 Future<void> _pickFromAlbum(
   BuildContext context, {
   required String folderId,
@@ -67,12 +77,50 @@ Future<void> _pickFromAlbum(
 }) async {
   final picked = await _pickAssets(context);
   if (picked == null || picked.isEmpty) return; // 用户取消:不算上传
-  final (enqueued, skipped) = await enqueueBatch(
-    picked.map((e) => () => _enqueueAlbumAsset(e, folderId: folderId, where: where)),
-    onError: (e) => AppLog.error('upload', '单项入队失败,已跳过', e),
+  // B8:相册上限提示(选择器已硬顶 99,选满即提示分批)
+  if (picked.length >= kAlbumPickLimit && context.mounted) {
+    toast(context,
+        '单次最多上传 $kAlbumPickLimit 个,本次已选满;更多素材请分批上传');
+  }
+  // D6:改带名收集(文件名+跳过原因),汇总 toast 有跳过带「查看」action
+  // 打开跳过清单(语义不变:入队数/跳过数同口径,单点失败不中断)。
+  // 展示名取 title(兜底 `IMG_<id>`);实际入队名在 title 为空时取原文件
+  // basename,清单展示的边缘差异可接受(逐项闭包内才拿得到 originFile)。
+  if (!context.mounted) return;
+  await enqueueNamedBatchAndReport(
+    context,
+    where: where,
+    items: picked.map((e) => (
+      _albumDisplayName(e),
+      () => _enqueueAlbumAsset(e, folderId: folderId, where: where),
+    )),
+  );
+}
+
+/// D6:相册资产展示名(跳过清单用;兜底 `IMG_<id>`)。实际入队名见
+/// [_enqueueAlbumAsset]——title 为空时取原文件 basename,此处未取 originFile
+/// (避免逐项预读),仅该边缘场景两者不同。
+String _albumDisplayName(AssetEntity e) =>
+    sanitizeUploadName(e.title ?? 'IMG_${e.id}', fallback: 'IMG_${e.id}');
+
+/// D6 接线缝(相册/文件两路汇总位共用;@visibleForTesting 供用例直打):
+/// 带名批量入队([enqueueBatchNamed],P1-1 单点失败不中断、失败项记文件名
+/// +errorMessage 中文原因)→ [showUploadBatchToast] 汇总(有跳过带「查看」
+/// action 打开跳过清单,标题带目标文件夹名)。where=「项目/夹」归属路径,
+/// 取末段即文件夹名(showUploadSheet 标题同式)。
+@visibleForTesting
+Future<void> enqueueNamedBatchAndReport(
+  BuildContext context, {
+  required Iterable<(String filename, Future<void> Function() enqueue)> items,
+  required String where,
+}) async {
+  final (enqueued, skips) = await enqueueBatchNamed(
+    items,
+    onError: (f, e) => AppLog.error('upload', '单项入队失败,已跳过:$f', e),
   );
   if (!context.mounted) return;
-  sayToast(context, batchSummary(enqueued, skipped));
+  showUploadBatchToast(context,
+      enqueued: enqueued, skips: skips, where: where.split('/').last);
 }
 
 /// P2 权限引导循环(拒绝态不再抛 StateError):授权/limited 返回 true;
@@ -118,7 +166,9 @@ Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
     return await AssetPicker.pickAssets(context, pickerConfig: albumPickerConfig());
   } catch (e) {
     AppLog.error('upload', '相册选择失败', e);
-    if (context.mounted) sayToast(context, '相册选择失败:$e');
+    if (context.mounted) {
+      toast(context, errorMessage(e, '相册选择失败,请稍后重试'), tone: ToastTone.error);
+    }
     return null;
   }
 }
@@ -129,7 +179,7 @@ Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
 @visibleForTesting
 AssetPickerConfig albumPickerConfig() => AssetPickerConfig(
       requestType: RequestType.all,
-      maxAssets: 99,
+      maxAssets: kAlbumPickLimit,
       textDelegate: const AssetPickerTextDelegate(),
     );
 
@@ -248,7 +298,8 @@ Future<void> _enqueueAlbumAsset(
 }
 
 /// 文件多选直传(any:livp 无注册 Mime,custom 过滤会抛,现役钉子)。
-/// 逐项入队收进 [enqueueBatch] 内层 try/catch(P1-1 同款),完事汇总 toast。
+/// 逐项入队收进 [enqueueNamedBatchAndReport](D6:带名收集,P1-1 同款
+/// 单点失败不中断),完事汇总 toast(有跳过带「查看」)。
 Future<void> _pickFiles(
   BuildContext context, {
   required String folderId,
@@ -256,23 +307,26 @@ Future<void> _pickFiles(
 }) async {
   final files = await _pickPlatformFiles(context);
   if (files.isEmpty) return; // 用户取消:不算上传
-  final (enqueued, skipped) = await enqueueBatch(
-    files.map((f) => () async {
-      final p = f.path;
-      if (p == null) {
-        throw StateError('无本地路径 file=${f.name}');
-      }
-      await enqueueLocalUpload(
-        folderId: folderId,
-        where: where,
-        filename: sanitizeUploadName(f.name),
-        path: p,
-      );
-    }),
-    onError: (e) => AppLog.error('upload', '单项入队失败,已跳过', e),
-  );
   if (!context.mounted) return;
-  sayToast(context, batchSummary(enqueued, skipped));
+  await enqueueNamedBatchAndReport(
+    context,
+    where: where,
+    items: files.map((f) => (
+      sanitizeUploadName(f.name),
+      () async {
+        final p = f.path;
+        if (p == null) {
+          throw StateError('无本地路径 file=${f.name}');
+        }
+        await enqueueLocalUpload(
+          folderId: folderId,
+          where: where,
+          filename: sanitizeUploadName(f.name),
+          path: p,
+        );
+      },
+    )),
+  );
 }
 
 /// file_picker 选择(用户取消返回空;选择器失败补 toast 后返回空——
@@ -287,14 +341,9 @@ Future<List<PlatformFile>> _pickPlatformFiles(BuildContext context) async {
     return result?.files ?? const <PlatformFile>[];
   } catch (e) {
     AppLog.error('upload', '文件选择失败', e);
-    if (context.mounted) sayToast(context, '文件选择失败:$e');
+    if (context.mounted) {
+      toast(context, errorMessage(e, '文件选择失败,请稍后重试'), tone: ToastTone.error);
+    }
     return const <PlatformFile>[];
   }
-}
-
-/// 面板/选择链路共用 toast(session 根 messenger 兜底;B3 拆分时收拢于此)。
-void sayToast(BuildContext context, String msg) {
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  if (messenger == null) return;
-  messenger.showSnackBar(SnackBar(content: Text(msg)));
 }

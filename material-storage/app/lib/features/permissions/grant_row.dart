@@ -128,9 +128,9 @@ class _GrantCountdownState extends State<GrantCountdown> {
           ),
         ),
         const SizedBox(width: 6),
-        Text(spec.label, style: const TextStyle(fontSize: 12)),
+        Text(spec.label, style: const TextStyle(fontSize: Tk.fzSm)),
         const SizedBox(width: 4),
-        const Text('剩余', style: TextStyle(fontSize: 11, color: Tk.subtle)),
+        const Text('剩余', style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
       ],
     );
   }
@@ -165,7 +165,7 @@ class GrantRow extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         border: Border.all(color: Tk.border),
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(Tk.rMd),
       ),
       child: Row(
         children: [
@@ -183,7 +183,7 @@ class GrantRow extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 13.5, fontWeight: FontWeight.w500),
+                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500),
                 ),
                 const SizedBox(height: 4),
                 Row(
@@ -197,7 +197,7 @@ class GrantRow extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                fontSize: 11, color: Tk.subtle)),
+                                fontSize: Tk.fzXs, color: Tk.subtle)),
                       ),
                     ],
                   ],

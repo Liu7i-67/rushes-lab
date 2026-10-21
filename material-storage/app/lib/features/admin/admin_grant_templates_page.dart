@@ -10,10 +10,12 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../../widgets/role_chips.dart' show joinedRoleLabels;
+import '../../widgets/toast.dart';
 import 'apply_default_sheet.dart';
 import 'grant_template_form_sheet.dart';
 
@@ -55,47 +57,31 @@ class _AdminGrantTemplatesPageState extends State<AdminGrantTemplatesPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '加载失败,请稍后重试');
         _loading = false;
       });
     }
   }
 
   Future<void> _delete(GrantTemplate t) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('删除权限模板「${t.name}」?'),
-        content: Text('${t.items.length} 条授权条目将一并删除;已建项目不受影响'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(foregroundColor: Tk.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认
+    final ok = await showAppConfirm(
+      context,
+      title: '删除权限模板「${t.name}」?',
+      content: '${t.items.length} 条授权条目将一并删除;已建项目不受影响',
+      confirmLabel: '删除',
+      danger: true,
     );
     if (ok != true) return;
     try {
       await session.api!.adminTemplates.deleteTemplate(t.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已删除权限模板「${t.name}」')));
+      toast(context, '已删除权限模板「${t.name}」', tone: ToastTone.success);
       _reload();
     } on ApiException catch (e) {
-      _toast(e.message); // 404/403 detail 透传
+      if (!mounted) return;
+      toast(context, e.message, tone: ToastTone.error); // 404/403 detail 透传
     }
-  }
-
-  void _toast(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _openActions(GrantTemplate t) async {
@@ -136,14 +122,20 @@ class _AdminGrantTemplatesPageState extends State<AdminGrantTemplatesPage> {
       appBar: AppBar(
         title: const Text('权限模板'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.refresh, size: 22),
-            tooltip: hasDefault
+          // F4:「应用默认」非刷新语义 → published_with_changes + 行内文字标签,
+          // 与相邻「新建」add 图标明确区分(位置不变,仅图标/标签语义化)
+          Tooltip(
+            message: hasDefault
                 ? '应用默认:为存量项目补齐默认模板授权(叠加不删)'
                 : '应用默认:需先设一个默认模板',
-            onPressed: hasDefault && !_loading
-                ? () => showApplyDefaultSheet(context)
-                : null,
+            child: TextButton.icon(
+              onPressed: hasDefault && !_loading
+                  ? () => showApplyDefaultSheet(context)
+                  : null,
+              icon: const Icon(Icons.published_with_changes, size: 20),
+              label: const Text('应用默认',
+                  style: TextStyle(fontSize: Tk.fzSm)),
+            ),
           ),
           IconButton(
             icon: const Icon(Icons.add),
@@ -188,7 +180,8 @@ class _AdminGrantTemplatesPageState extends State<AdminGrantTemplatesPage> {
                 ),
               const SizedBox(width: 6),
               Text('${t.items.length} 个主体',
-                  style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ]),
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -197,7 +190,7 @@ class _AdminGrantTemplatesPageState extends State<AdminGrantTemplatesPage> {
                   Text(t.description!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5)),
+                      style: const TextStyle(fontSize: Tk.fzXs)),
                 // 条目一览(最多 6 条,余量折叠;web TemplateRow 同口径)
                 for (final it in t.items.take(6))
                   Text(
@@ -206,13 +199,13 @@ class _AdminGrantTemplatesPageState extends State<AdminGrantTemplatesPage> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                        fontSize: 11,
+                        fontSize: Tk.fzXs,
                         color: it.missing ? Tk.amber : Tk.muted),
                   ),
                 if (t.items.length > 6)
                   Text('+${t.items.length - 6}',
-                      style:
-                          const TextStyle(fontSize: 11, color: Tk.subtle)),
+                      style: const TextStyle(
+                          fontSize: Tk.fzXs, color: Tk.subtle)),
               ],
             ),
             isThreeLine: t.items.length > 3,

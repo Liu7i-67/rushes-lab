@@ -1,5 +1,7 @@
-/// 改密页(§2 强制改密流):me.must_change_password=true 时全 App 只放行此页
-/// (改密/退出可走,无返回);非强制入口(我的页)改完即回。
+/// 改密页(§2 强制改密流 + app-polish E2 精修):me.must_change_password=true
+/// 时全 App 只放行此页(改密/退出可走,无返回);非强制入口(我的页)改完即回。
+/// E2:复杂度规则前置 hint(至少 8 位,含字母与数字=后端 local_auth 策略);
+/// 成功 toast「密码已更新,请重新登录」反馈后再跳转;错误固定高度区不跳动。
 /// 契约:POST /api/v1/auth/change-password {old_password,new_password}(auth.py)。
 library;
 
@@ -7,7 +9,9 @@ import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/password_field.dart';
+import '../../widgets/toast.dart';
 
 class ChangePasswordPage extends StatefulWidget {
   const ChangePasswordPage({super.key, this.forced = false});
@@ -56,6 +60,9 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
     try {
       await session.changePassword(oldPw, newPw);
       if (!mounted) return;
+      // E2:先出成功反馈(含「重新登录」口径)再跳转——改密后旧会话失效,
+      // 强制流进首页由路由守卫接管,非强制流返回上一页
+      toast(context, '密码已更新,请重新登录', tone: ToastTone.success);
       if (widget.forced) {
         Navigator.of(context).pushNamedAndRemoveUntil('/home', (r) => false);
       } else {
@@ -64,7 +71,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
-      setState(() => _error = '网络错误:$e');
+      setState(() => _error = errorMessage(e, '网络错误,请稍后重试'));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -88,7 +95,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
         ],
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(Tk.spaceXl),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -100,7 +107,7 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
                     .bodySmall
                     ?.copyWith(color: Theme.of(context).colorScheme.primary),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: Tk.spaceLg),
             ],
             // P9:三个密码框均带眼睛切换明文(内容/焦点保持)
             PasswordField(
@@ -108,20 +115,22 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
               labelText: '原密码',
               prefixIcon: const Icon(Icons.lock_outline),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: Tk.spaceMd),
+            // E2:复杂度规则前置(后端 local_auth 策略:≥8 位且含字母与数字)
             PasswordField(
               controller: _new,
               labelText: '新密码',
+              hintText: '至少 8 位,需包含字母与数字',
               prefixIcon: const Icon(Icons.lock_reset_outlined),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: Tk.spaceMd),
             PasswordField(
               controller: _confirm,
               labelText: '确认新密码',
               prefixIcon: const Icon(Icons.lock_person_outlined),
               onSubmitted: (_) => _busy ? null : _submit(),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: Tk.spaceLg),
             FilledButton(
               onPressed: _busy ? null : _submit,
               child: Padding(
@@ -135,15 +144,27 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
                     : const Text('确认修改'),
               ),
             ),
-            if (_error != null) ...[
-              const SizedBox(height: 16),
-              Text(
-                _error!,
-                textAlign: TextAlign.center,
-                style:
-                    TextStyle(color: Theme.of(context).colorScheme.error),
+            // E2:错误固定高度区(空态占位,校验/请求失败均落这里不跳动)
+            SizedBox(
+              height: 48,
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Padding(
+                  padding: const EdgeInsets.only(top: Tk.spaceMd),
+                  child: _error == null
+                      ? null
+                      : Text(
+                          _error!,
+                          textAlign: TextAlign.center,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: Theme.of(context).colorScheme.error,
+                          ),
+                        ),
+                ),
               ),
-            ],
+            ),
           ],
         ),
       ),

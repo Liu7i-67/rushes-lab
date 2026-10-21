@@ -96,8 +96,8 @@ class _ArtistAccountFieldsState extends State<ArtistAccountFields> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('开通艺人账号(可选,两项都留空 = 仅创建项目)',
-            style: TextStyle(fontSize: 12, color: Tk.muted)),
-        const SizedBox(height: 4),
+            style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
+        const SizedBox(height: Tk.spaceXs),
         TextField(
           controller: _username,
           decoration: InputDecoration(
@@ -110,7 +110,7 @@ class _ArtistAccountFieldsState extends State<ArtistAccountFields> {
           ),
           onChanged: _onUsernameChanged,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: Tk.spaceSm),
         TextField(
           controller: _name,
           maxLength: 128,
@@ -152,18 +152,18 @@ class ArtistResultView extends StatelessWidget {
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           const Icon(Icons.check_circle_outline, size: 36, color: Tk.green),
-          const SizedBox(height: 8),
+          const SizedBox(height: Tk.spaceSm),
           const Text('项目与艺人账号已创建',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 12),
+              style: TextStyle(fontSize: Tk.fzTitle, fontWeight: FontWeight.w600)),
+          const SizedBox(height: Tk.spaceMd),
           _copyRow(context, '登录名', username),
           _copyRow(context, '初始密码', password),
-          const SizedBox(height: 4),
+          const SizedBox(height: Tk.spaceXs),
           Text(
               '密码仅展示这一次,关闭后无法再查;请复制并转交艺人($name),'
               '首次登录将要求修改密码。',
-              style: const TextStyle(fontSize: 11.5, color: Tk.amber)),
-          const SizedBox(height: 16),
+              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
+          const SizedBox(height: Tk.spaceLg),
           SizedBox(
             width: double.infinity,
             child: FilledButton(
@@ -178,11 +178,12 @@ class ArtistResultView extends StatelessWidget {
 
   Widget _copyRow(BuildContext context, String label, String value) {
     return Row(children: [
-      Text('$label:', style: const TextStyle(fontSize: 13.5)),
-      const SizedBox(width: 6),
+      Text('$label:', style: const TextStyle(fontSize: Tk.fzMd)),
+      const SizedBox(width: Tk.spaceSm - 2),
       Expanded(
         child: Text(value,
-            style: const TextStyle(fontSize: 13.5, fontFamily: 'monospace')),
+            style: const TextStyle(
+              fontSize: Tk.fzMd, fontFamily: 'monospace')),
       ),
       // R1:每行独立 CopyButton,成功就地名变 ✓(原「已复制」SnackBar 删除)
       CopyButton(

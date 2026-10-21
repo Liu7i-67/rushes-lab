@@ -10,8 +10,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
 import 'approval_card.dart';
 
 enum _Scope { pending, mine }
@@ -74,21 +76,31 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
     setState(() => _decidingId = a.id);
     try {
       final ops = session.api!.approvalsOps;
-      if (approve) {
-        await ops.approve(a.id, decisionNote: note.isEmpty ? null : note);
-      } else {
-        await ops.reject(a.id, decisionNote: note.isEmpty ? null : note);
-      }
+      final updated = approve
+          ? await ops.approve(a.id, decisionNote: note.isEmpty ? null : note)
+          : await ops.reject(a.id, decisionNote: note.isEmpty ? null : note);
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text(approve ? '已批准' : '已拒绝')));
+      // E8:决策成功局部更新(按 id 原地改状态/移除),不整列表重拉——
+      // 滚动位置天然保持;「待我审批」段移除已决策项,「我发起的」段就地换新
+      setState(() {
+        final items = _items;
+        if (items != null) {
+          _items = [
+            for (final x in items)
+              if (x.id == a.id)
+                // 待审段:已决策项不再出现在待办里(mine 段:就地更新状态)
+                (_scope == _Scope.pending) ? null : updated
+              else
+                x,
+          ].whereType<Approval>().toList();
+        }
+      });
+      toast(context, approve ? '已批准' : '已拒绝', tone: ToastTone.success);
       RefreshBus.I.invalidate('approvals'); // MePage 待审 badge 即时同步
-      await _reload(); // 决策成功刷新列表(功能点 1)
     } catch (e) {
       if (!mounted) return;
       // 403(非目标管理者)/409/422:后端 detail 透传
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text(errorMessage(e, '操作失败'))));
+      toast(context, errorMessage(e, '操作失败'), tone: ToastTone.error);
     } finally {
       if (mounted) setState(() => _decidingId = null);
     }
@@ -131,9 +143,19 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
             child: SegmentedButton<_Scope>(
-              segments: const [
-                ButtonSegment(value: _Scope.pending, label: Text('待我审批')),
-                ButtonSegment(value: _Scope.mine, label: Text('我发起的')),
+              // E8:两段计数(当前段已拉条数;标签 Text 保持裸词,计数独立小字,
+              // 兼顾可读与既有锚点)
+              segments: [
+                ButtonSegment(
+                  value: _Scope.pending,
+                  label: _segLabel('待我审批',
+                      _scope == _Scope.pending ? items?.length : null),
+                ),
+                ButtonSegment(
+                  value: _Scope.mine,
+                  label: _segLabel('我发起的',
+                      _scope == _Scope.mine ? items?.length : null),
+                ),
               ],
               selected: {_scope},
               onSelectionChanged: (s) {
@@ -153,6 +175,19 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
     );
   }
 
+  /// 分段标签:裸词 + 弱色计数(计数未加载/不属于当前段时不显示)。
+  Widget _segLabel(String text, int? count) => Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(text),
+          if (count != null) ...[
+            const SizedBox(width: Tk.spaceXs),
+            Text('$count',
+                style: const TextStyle(color: Tk.subtle, fontSize: Tk.fzSm)),
+          ],
+        ],
+      );
+
   Widget _buildList(List<Approval>? items) {
     if (_loading && items == null) {
       return const Center(child: CircularProgressIndicator());
@@ -170,9 +205,10 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
       ]);
     }
     return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      padding: const EdgeInsets.fromLTRB(
+          Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceXl),
       itemCount: items.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 10),
+      separatorBuilder: (_, _) => const SizedBox(height: Tk.spaceSm),
       itemBuilder: (context, i) {
         final a = items[i];
         return ApprovalCard(

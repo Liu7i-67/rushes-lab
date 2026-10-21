@@ -47,9 +47,10 @@ void main() {
     for (final label in ['1 小时', '24 小时', '7 天', '30 天']) {
       expect(find.text(label), findsOneWidget);
     }
-    final radios =
-        tester.widgetList<RadioListTile<int>>(find.byType(RadioListTile<int>));
-    expect(radios.length, 4);
+    // app-polish D3:有效期 RadioListTile×4 改 ChoiceChip 横排单选
+    // (原 RadioListTile 计数断言随交互迁移同步改写,断言条数语义不变)
+    final chips = tester.widgetList<ChoiceChip>(find.byType(ChoiceChip));
+    expect(chips.length, 4);
     // 无提取码/下载开关表单项(ShareCreateIn 无此字段)
     expect(find.textContaining('提取码'), findsNothing);
     expect(find.textContaining('允许下载'), findsNothing);

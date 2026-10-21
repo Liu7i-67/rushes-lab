@@ -49,11 +49,12 @@ class ApprovalCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final a = approval;
     return Container(
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      padding: const EdgeInsets.fromLTRB(14, Tk.spaceMd, 14, Tk.spaceMd),
+      // E8:白底改 token(surface,与传输/百度任务卡同语言)
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Tk.surface,
         border: Border.all(color: Tk.border),
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(Tk.rMd),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -61,14 +62,14 @@ class ApprovalCard extends StatelessWidget {
           Row(
             children: [
               Badge(label: a.statusLabel, tone: statusTone(a.status)),
-              const SizedBox(width: 8),
+              const SizedBox(width: Tk.spaceSm),
               Expanded(
                 child: Text(
                   '${a.targetTypeLabel} · ${a.targetLabel}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 13.5, fontWeight: FontWeight.w500),
+                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500),
                 ),
               ),
             ],
@@ -77,23 +78,23 @@ class ApprovalCard extends StatelessWidget {
           Text(
             '${a.requesterName ?? '用户'} 申请${a.actionLabel}'
             ' · ${fmtDuration(a.durationSeconds)}',
-            style: const TextStyle(fontSize: 12.5, color: Tk.muted),
+            style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
           ),
           const SizedBox(height: 6),
           Text(
             a.reason,
             maxLines: 3,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 13, height: 1.45),
+            style: const TextStyle(fontSize: Tk.fzMd, height: 1.45),
           ),
           if ((a.decisionNote ?? '').isNotEmpty) ...[
             const SizedBox(height: 6),
             Text('说明:${a.decisionNote}',
                 style: const TextStyle(
-                    fontSize: 12, color: Tk.subtle, fontStyle: FontStyle.italic)),
+                    fontSize: Tk.fzSm, color: Tk.subtle, fontStyle: FontStyle.italic)),
           ],
           if (decidable) ...[
-            const SizedBox(height: 10),
+            const SizedBox(height: Tk.spaceMd),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: [
@@ -101,7 +102,7 @@ class ApprovalCard extends StatelessWidget {
                   onPressed: busy ? null : onReject,
                   child: const Text('拒绝'),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: Tk.spaceSm),
                 FilledButton(
                   onPressed: busy ? null : onApprove,
                   child: const Text('批准'),

@@ -3,16 +3,17 @@
 /// 导出钉子:dio 带会话(AuditApi.exportCsv)→ 落盘矩阵 other 列;禁 url_launcher。
 library;
 
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
 import '../../core/api/audit_api.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
+import 'admin_auto_load.dart';
 import 'audit_event_card.dart';
 import 'audit_export.dart';
 import 'audit_filter_bar.dart';
@@ -26,7 +27,8 @@ class AdminAuditPage extends StatefulWidget {
   State<AdminAuditPage> createState() => _AdminAuditPageState();
 }
 
-class _AdminAuditPageState extends State<AdminAuditPage> {
+class _AdminAuditPageState extends State<AdminAuditPage>
+    with AutoLoadScroll<AdminAuditPage> {
   String _eventType = '';
   UserBrief? _actor; // null=全部(操作者筛选;value=users.id UUID)
   String _projectId = '';
@@ -38,6 +40,9 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
   String? _error;
   var _reloadTag = 0;
   var _projects = <Project>[];
+
+  /// 审计无 total 字段:单页不足 _kAuditPageSize 即视为取完,停止触发(F6)。
+  var _exhausted = false;
 
   AuditFilter get _filter => AuditFilter(
         eventType: _eventType,
@@ -54,6 +59,9 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
                 .toUtc()
                 .toIso8601String(),
       );
+
+  @override
+  void onAutoLoad() => _loadMore();
 
   @override
   void initState() {
@@ -81,7 +89,10 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
 
   Future<void> _reload() async {
     final tag = ++_reloadTag;
-    setState(() => _loading = _items.isEmpty);
+    setState(() {
+      _loading = _items.isEmpty;
+      _exhausted = false;
+    });
     try {
       final items = await session.api!.audit
           .list(filter: _filter, limit: _kAuditPageSize, offset: 0);
@@ -90,16 +101,18 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
         _items = items;
         _loading = false;
         _error = null;
+        _exhausted = items.length < _kAuditPageSize;
       });
     } on ApiException catch (e) {
       _fail(tag, e.message);
     } catch (e) {
-      _fail(tag, '$e');
+      _fail(tag, errorMessage(e, '加载失败,请稍后重试'));
     }
   }
 
+  /// 到底自动加载(F6):守卫在途/未满页;失败 toast,滚动可再次触发。
   Future<void> _loadMore() async {
-    if (_loadingMore || _items.length < _kAuditPageSize) return;
+    if (_loadingMore || _loading || _exhausted) return;
     setState(() => _loadingMore = true);
     final tag = _reloadTag;
     try {
@@ -109,9 +122,13 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
       setState(() {
         _items = [..._items, ...items];
         _loadingMore = false;
+        if (items.length < _kAuditPageSize) _exhausted = true;
       });
-    } catch (_) {
-      if (mounted) setState(() => _loadingMore = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingMore = false);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'),
+          tone: ToastTone.error);
     }
   }
 
@@ -132,29 +149,23 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
           await session.api!.audit.exportCsv(filter: _filter);
       if (!mounted) return;
       if (!looksLikeCsv(bytes)) {
-        _toast('导出响应异常(非 CSV),请稍后再试');
+        toast(context, '导出响应异常(非 CSV),请稍后再试', tone: ToastTone.error);
         return;
       }
       // 文件名取响应头 Content-Disposition,解析失败回落时间戳名(P2-5)
       final filename = csvFilenameFromDisposition(disposition, DateTime.now());
       final summary = await saveExportedCsv(bytes, filename);
       if (!mounted) return;
-      _toast('已导出 $filename:$summary');
+      toast(context, '已导出 $filename:$summary', tone: ToastTone.success);
     } on ApiException catch (e) {
       if (!mounted) return;
-      _toast(e.message); // 403/422 detail 透传
+      toast(context, e.message, tone: ToastTone.error); // 403/422 detail 透传
     } catch (e) {
       if (!mounted) return;
-      _toast('$e');
+      toast(context, errorMessage(e, '导出失败,请稍后重试'), tone: ToastTone.error);
     } finally {
       if (mounted) setState(() => _exporting = false);
     }
-  }
-
-  void _toast(String message) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 单日筛选:选完即重查(00:00/23:59:59.999 本地→UTC 折算在 _filter)。
@@ -214,7 +225,7 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
               _reload();
             },
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: Tk.spaceXs),
           Expanded(child: _body()),
         ],
       ),
@@ -232,17 +243,13 @@ class _AdminAuditPageState extends State<AdminAuditPage> {
       return const EmptyState(message: '无匹配记录');
     }
     return ListView.builder(
+      controller: scrollController,
       itemCount: _items.length + 1,
       itemBuilder: (context, i) {
         if (i >= _items.length) {
-          if (_items.length < _kAuditPageSize) return const SizedBox(height: 24);
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child: OutlinedButton(
-              onPressed: _loadingMore ? null : _loadMore,
-              child: Text(_loadingMore ? '加载中…' : '加载更多'),
-            ),
-          );
+          // 首页未满页 = 已取完:仅留收尾缝;否则 F6 自动加载指示器
+          if (_exhausted) return const SizedBox(height: Tk.spaceXl);
+          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
         }
         return AuditEventCard(event: _items[i]);
       },

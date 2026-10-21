@@ -62,10 +62,11 @@ class TypeBlock extends StatelessWidget {
           children: [
             Icon(kindIcon(kind), color: fg, size: iconSize ?? 32),
             if (label.isNotEmpty) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: Tk.spaceXs),
               Text(
                 label,
-                style: TextStyle(color: fg, fontSize: 10, letterSpacing: 0.4),
+                style: TextStyle(
+                    color: fg, fontSize: Tk.fzXs, letterSpacing: 0.4),
               ),
             ],
           ],

@@ -11,7 +11,8 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
-import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
+import '../../widgets/toast.dart';
 
 /// key_conflict 前缀(后端 KEY_CONFLICT_PREFIX;last_error 格式
 /// `{key} 已被 {names}占用`,F1 点名占用者)。
@@ -124,25 +125,16 @@ Future<bool> runFileAction(
   final plan = fileRowActionPlan(taskStatus, row);
   if (!plan.hasAny) return false;
   // 确认仅覆盖导入类破坏性操作(web Popconfirm 同口径);retry / random-suffix
-  // 直发(web 同款——换 key 不删任何已有文件)
+  // 直发(web 同款——换 key 不删任何已有文件)。
+  // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认。
   if (action == 'overwrite') {
     final (title, content) = confirmText(row, plan);
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Text(content),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(foregroundColor: Tk.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('确认'),
-          ),
-        ],
-      ),
+    final ok = await showAppConfirm(
+      context,
+      title: title,
+      content: content,
+      confirmLabel: '确认',
+      danger: true,
     );
     if (ok != true || !context.mounted) return false;
   }
@@ -162,21 +154,18 @@ Future<bool> runFileAction(
   try {
     await call(action);
     if (!context.mounted) return true;
-    ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已提交,任务复活入队(清单准备中)')));
+    toast(context, '已提交,任务复活入队(清单准备中)', tone: ToastTone.success);
     return true;
   } on ApiException catch (e) {
     // 404(他人任务,_own_task 守门)/409(non_retryable/状态不满足)/
     // 502 百度侧错误:detail 原样透传
     if (!context.mounted) return false;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text(e.message)));
+    toast(context, e.message, tone: ToastTone.error);
     return false;
   } catch (e) {
     if (!context.mounted) return false;
     // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(errorMessage(e, '操作失败,请稍后重试'))));
+    toast(context, errorMessage(e, '操作失败,请稍后重试'), tone: ToastTone.error);
     return false;
   }
 }

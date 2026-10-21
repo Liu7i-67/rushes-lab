@@ -24,16 +24,17 @@ class Badge extends StatelessWidget {
       BadgeTone.neutral => (Tk.muted, Tk.fill),
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(
+          horizontal: Tk.spaceSm, vertical: 3), // 3=<4 视觉微缝,保留
       decoration: BoxDecoration(
         color: bg,
-        borderRadius: BorderRadius.circular(999),
+        borderRadius: BorderRadius.circular(Tk.rPill),
       ),
       child: Text(
         label,
         style: TextStyle(
           color: fg,
-          fontSize: 12,
+          fontSize: Tk.fzSm,
           fontWeight: FontWeight.w500,
         ),
       ),

@@ -1,19 +1,22 @@
-/// 项目页(B2 §8.1):列表 + 权限徽标 + 下拉刷新。B6 点亮:新建项目入口
-/// (is_project_creator 闸门)+ 行内「成员」入口(my_roles 含 admin)。
-/// P6:标题恒「项目」,构建 stamp 迁「我的」页展示;debug 日志入口移除
-/// (登录页右上角与我的页诊断区入口保留)。
-/// R3(mobile-ux-polish-2):AppBar 刷新钮删除(与下拉刷新冗余);
-/// RefreshIndicator 上提包住 loading/error/empty/列表全部分支,
-/// 非列表三分支经全高可滚动包装(AlwaysScrollableScrollPhysics)支持下拉。
+/// 项目页(B2 §8.1;app-polish E3 精修):列表 + 权限徽标 + 下拉刷新。
+/// E3:trailing 收敛=角色徽标+chevron;「成员管理/请求链接」管理动作移入
+/// 长按菜单(Haptics.light 进菜单);图标 create_new_folder;首载骨架屏;
+/// 空态有 project_creator 权限时给「新建项目」引导钮;错误走 errorMessage。
+/// R3(mobile-ux-polish-2):RefreshIndicator 包住 loading/error/empty/列表
+/// 全部分支,非列表分支经全高可滚动包装(AlwaysScrollableScrollPhysics)。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/api/ms_api.dart';
+import '../../core/haptics.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/list_skeleton.dart';
 import '../share/request_link_sheet.dart';
 import 'new_project_sheet.dart';
 import 'project_members_sheet.dart';
@@ -31,7 +34,7 @@ class ProjectsPage extends StatefulWidget {
 
 class _ProjectsPageState extends State<ProjectsPage> {
   var _items = const <Project>[];
-  var _loading = true; // 仅首轮整页 spinner;刷新在旧数据上原地等(B2 修复 P2-9)
+  var _loading = true; // 仅首轮整页骨架;刷新在旧数据上原地等(B2 修复 P2-9)
   String? _error;
 
   @override
@@ -62,9 +65,60 @@ class _ProjectsPageState extends State<ProjectsPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '项目列表加载失败');
         _loading = false;
       });
+    }
+  }
+
+  /// E3:项目行管理动作长按菜单(admin:「成员管理/请求链接」,与 web
+  /// 行尾双图标钮同闸门;整行 onTap 进宫格语义不变)。
+  Future<void> _showRowMenu(Project p) async {
+    Haptics.light(); // G2:长按菜单进入
+    final canAdmin = p.myRoles.contains('admin');
+    if (!canAdmin || !mounted) return;
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceSm),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  '${p.name} · 管理',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Tk.muted, fontSize: Tk.fzMd),
+                ),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.people_outline),
+              title: const Text('成员管理'),
+              onTap: () => Navigator.of(sheetCtx).pop('members'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.link_outlined),
+              title: const Text('请求链接'),
+              onTap: () => Navigator.of(sheetCtx).pop('link'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null || !mounted) return;
+    switch (action) {
+      case 'members':
+        await showProjectMembersSheet(context, project: p);
+      case 'link':
+        await showRequestLinkSheet(context,
+            targetType: 'project', targetId: p.id, targetLabel: p.name);
     }
   }
 
@@ -82,18 +136,41 @@ class _ProjectsPageState extends State<ProjectsPage> {
     );
   }
 
+  /// E3:空态 + 新建引导(is_project_creator 闸门;与 AppBar 同闸门)。
+  Widget _emptyWithCta() {
+    final canCreate = session.me?.isProjectCreator ?? false;
+    return _scrollable(
+      Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const EmptyState(
+            icon: Icons.folder_copy_outlined,
+            message: '暂无可见项目',
+          ),
+          if (canCreate) ...[
+            const SizedBox(height: Tk.spaceLg),
+            FilledButton.icon(
+              onPressed: () => showNewProjectSheet(context),
+              icon: const Icon(Icons.create_new_folder_outlined, size: 18),
+              label: const Text('新建项目'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: Text(projectsTitle()),
         actions: [
-          // P6:项目页 debug 日志入口已移除;登录页/我的页入口保留(P10 依赖)
           // B6:新建项目(总闸门 is_project_creator;成功后失效总线自动重拉)
           if (session.me?.isProjectCreator ?? false)
             IconButton(
               tooltip: '新建项目',
-              icon: const Icon(Icons.add_business_outlined),
+              icon: const Icon(Icons.create_new_folder_outlined),
               onPressed: () async {
                 await showNewProjectSheet(context);
               },
@@ -104,53 +181,39 @@ class _ProjectsPageState extends State<ProjectsPage> {
       body: RefreshIndicator(
         onRefresh: _reload,
         child: _loading
-            ? _scrollable(const CircularProgressIndicator())
+            ? _scrollable(const ListSkeleton(rows: 5))
             : _error != null
                 ? _scrollable(ErrorView(message: _error!, onRetry: _reload))
                 : _items.isEmpty
-                    ? _scrollable(const EmptyState(
-                        icon: Icons.folder_copy_outlined,
-                        message: '暂无可见项目',
-                      ))
+                    ? _emptyWithCta()
                     : ListView.separated(
                         itemCount: _items.length,
                         separatorBuilder: (_, _) => const Divider(height: 1),
                         itemBuilder: (context, i) {
                           final p = _items[i];
+                          // E3:trailing 收敛=角色徽标+chevron;管理动作入长按菜单
                           return ListTile(
-                            leading: const Icon(Icons.folder_copy_outlined),
+                            leading: Container(
+                              width: 44,
+                              height: 44,
+                              decoration: const BoxDecoration(
+                                color: Tk.surface2,
+                                borderRadius:
+                                    BorderRadius.all(Radius.circular(Tk.rMd)),
+                              ),
+                              child: const Icon(Icons.folder_copy_outlined,
+                                  color: Tk.accent, size: 22),
+                            ),
                             title: Text(p.name),
                             subtitle: Text(p.code),
+                            // E3:trailing 收敛=角色徽标+chevron(管理动作入长按菜单)
                             trailing: Row(
                               mainAxisSize: MainAxisSize.min,
                               children: [
                                 MyRolesBadge(roles: p.myRoles),
-                                // B6:成员管理入口(项目 admin;后端 can_admin 兜底)
-                                if (p.myRoles.contains('admin'))
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: '成员管理',
-                                    icon: const Icon(Icons.people_outline,
-                                        size: 20),
-                                    onPressed: () =>
-                                        showProjectMembersSheet(context,
-                                            project: p),
-                                  ),
-                                // B9 §8.11:请求链接入口(项目页发起位=
-                                // my_roles 含 admin,web 同闸门;非 admin 不露出)
-                                if (p.myRoles.contains('admin'))
-                                  IconButton(
-                                    visualDensity: VisualDensity.compact,
-                                    tooltip: '请求链接',
-                                    icon: const Icon(Icons.link_outlined,
-                                        size: 20),
-                                    onPressed: () => showRequestLinkSheet(
-                                        context,
-                                        targetType: 'project',
-                                        targetId: p.id,
-                                        targetLabel: p.name),
-                                  ),
-                                const Icon(Icons.chevron_right),
+                                const SizedBox(width: Tk.spaceXs),
+                                const Icon(Icons.chevron_right,
+                                    size: 20, color: Tk.subtle),
                               ],
                             ),
                             onTap: () => Navigator.of(context)
@@ -158,10 +221,11 @@ class _ProjectsPageState extends State<ProjectsPage> {
                                 // B6:附带 my_roles(文件夹页「新建一级」闸门)
                                 .pushNamed('/folders',
                                     arguments: (p.id, p.name, p.myRoles)),
+                            onLongPress: () => _showRowMenu(p),
                           );
                         },
                       ),
-                    ),
+      ),
     );
   }
 }

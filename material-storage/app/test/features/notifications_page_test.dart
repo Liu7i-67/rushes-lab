@@ -42,7 +42,7 @@ void main() {
     expect(find.text('全部已读'), findsOneWidget);
   });
 
-  testWidgets('B9 分页:加载更多按 offset 追加,不整页替换;不重复拉已加载条目',
+  testWidgets('B9 分页(app-polish E6 改自动加载):滚到底按 offset 追加,不整页替换',
       (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
@@ -68,13 +68,15 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: NotificationsPage()));
     await tester.pumpAndSettle();
     expect(find.text('标题n1'), findsOneWidget);
-    expect(find.text('加载更多'), findsOneWidget);
+    // E6:「加载更多」按钮已移除,改滚动到底自动加载
+    expect(find.text('加载更多'), findsNothing);
 
-    await tester.tap(find.text('加载更多'));
+    // 内容不足一屏(extentAfter=0<200 阈值)也允许首次滚动触发预取
+    await tester.drag(find.byType(ListView), const Offset(0, -200));
+    await tester.pump();
     await tester.pumpAndSettle();
     expect(find.text('标题n3'), findsOneWidget);
-    expect(find.text('加载更多'), findsNothing, reason: '3/3 已取尽入口收起');
-    expect(calls, 2);
+    expect(calls, 2, reason: '3/3 已取尽不再发请求');
   });
 
   testWidgets('白名单 approval_*:点击跳审批中心并标已读(红点即时减一)',

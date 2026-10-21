@@ -11,6 +11,9 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
+import '../../widgets/search_field.dart';
+import '../../widgets/toast.dart';
 import 'apply_default_result_view.dart';
 
 /// 接口单批上限(ApplyDefaultIn project_ids 1..100)。
@@ -79,29 +82,20 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = e is ApiException ? e.message : '$e';
+        _error = errorMessage(e, '加载失败,请稍后重试');
       });
     }
   }
 
   Future<void> _apply() async {
     if (_selected.isEmpty || _applying) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('刷新 ${_selected.length} 个项目的默认权限?'),
-        content: const Text(
-            '将逐项目合并默认模板授权(叠加不删,不移除现有授权)。'
-            '项目较多时耗时较长(满批可达数分钟),建议每批 20–30 个项目分次提交。'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('开始刷新')),
-        ],
-      ),
+    // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认
+    final ok = await showAppConfirm(
+      context,
+      title: '刷新 ${_selected.length} 个项目的默认权限?',
+      content: '将逐项目合并默认模板授权(叠加不删,不移除现有授权)。'
+          '项目较多时耗时较长(满批可达数分钟),建议每批 20–30 个项目分次提交。',
+      confirmLabel: '开始刷新',
     );
     if (ok != true) return;
     setState(() => _applying = true);
@@ -126,7 +120,7 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
       if (!mounted) return;
       setState(() {
         _applying = false;
-        _error = '$e';
+        _error = errorMessage(e, '刷新失败,请稍后重试');
       });
     }
   }
@@ -135,9 +129,8 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     setState(() {
       if (!_selected.remove(id)) {
         if (_selected.length >= kApplyDefaultBatchMax) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-              content: Text('单批最多 $kApplyDefaultBatchMax 个项目(接口上限),'
-                  '请分批刷新')));
+          toast(context,
+              '单批最多 $kApplyDefaultBatchMax 个项目(接口上限),请分批刷新');
           return;
         }
         _selected.add(id);
@@ -170,31 +163,27 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
               const Text(
                 '叠加不删:只补缺失的默认模板授权,不移除项目现有授权;'
                 '单批最多 100 个项目(接口上限),满批可达数分钟,建议每批 20–30 个分次提交。',
-                style: TextStyle(fontSize: 11.5, color: Tk.muted, height: 1.5),
+                style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted, height: 1.5),
               ),
-              const SizedBox(height: 8),
-              TextField(
+              const SizedBox(height: Tk.spaceSm),
+              SearchField(
+                hintText: '搜项目名 / 编码…',
                 onChanged: (v) => setState(() => _q = v),
-                decoration: const InputDecoration(
-                  isDense: true,
-                  hintText: '搜项目名 / 编码…',
-                  prefixIcon: Icon(Icons.search, size: 20),
-                  border: OutlineInputBorder(),
-                ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: Tk.spaceSm),
               if (_error != null)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
+                  padding: const EdgeInsets.only(bottom: Tk.spaceSm),
                   child: Text(_error!,
                       style: TextStyle(
                           color: Theme.of(context).colorScheme.error,
-                          fontSize: 12.5)),
+                          fontSize: Tk.fzSm)),
                 ),
               Expanded(child: _projectList()),
               Row(children: [
                 Text('已选 ${_selected.length}/$kApplyDefaultBatchMax',
-                    style: const TextStyle(fontSize: 12, color: Tk.muted)),
+                    style:
+                        const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
                 const Spacer(),
                 TextButton(
                   onPressed: _selected.isEmpty
@@ -223,12 +212,12 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     if (list.isEmpty) {
       return const Center(
           child: Text('暂无可刷新的项目(归档项目不支持)',
-              style: TextStyle(color: Tk.muted, fontSize: 12.5)));
+              style: TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
     }
     return Container(
       decoration: BoxDecoration(
         border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: ListView.builder(
         itemCount: list.length,
@@ -245,7 +234,7 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: 13.5, color: disabled ? Tk.subtle : Tk.fg)),
+                    fontSize: Tk.fzMd, color: disabled ? Tk.subtle : Tk.fg)),
           );
         },
       ),

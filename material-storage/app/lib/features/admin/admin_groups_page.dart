@@ -12,9 +12,12 @@ import '../../core/fmt.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/search_field.dart';
+import '../../widgets/toast.dart';
 import 'group_form_sheet.dart';
 import 'group_members_sheet.dart';
 
@@ -65,41 +68,30 @@ class _AdminGroupsPageState extends State<AdminGroupsPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '加载失败,请稍后重试');
         _loading = false;
       });
     }
   }
 
   Future<void> _delete(DirectoryGroup g) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('删除用户组「${g.name}」?'),
-        content: Text('组内 ${g.memberCount} 名成员将立即失去该组授予的全部权限'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(foregroundColor: Tk.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认
+    final ok = await showAppConfirm(
+      context,
+      title: '删除用户组「${g.name}」?',
+      content: '组内 ${g.memberCount} 名成员将立即失去该组授予的全部权限',
+      confirmLabel: '删除',
+      danger: true,
     );
     if (ok != true) return;
     try {
       await session.api!.directory.deleteGroup(g.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已删除用户组「${g.name}」')));
+      toast(context, '已删除用户组「${g.name}」', tone: ToastTone.success);
       _reload();
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message))); // detail 透传
+      toast(context, e.message, tone: ToastTone.error); // detail 透传
     }
   }
 
@@ -160,20 +152,15 @@ class _AdminGroupsPageState extends State<AdminGroupsPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-            child: TextField(
+            padding: const EdgeInsets.fromLTRB(
+                Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceSm),
+            child: SearchField(
               controller: _search,
+              hintText: '搜用户组名…',
               onChanged: (v) {
                 _debounce?.cancel();
-                _debounce =
-                    Timer(const Duration(milliseconds: 300), _reload);
+                _debounce = Timer(const Duration(milliseconds: 300), _reload);
               },
-              decoration: const InputDecoration(
-                isDense: true,
-                hintText: '搜用户组名…',
-                prefixIcon: Icon(Icons.search, size: 20),
-                border: OutlineInputBorder(),
-              ),
             ),
           ),
           Expanded(child: _body()),
@@ -222,23 +209,23 @@ class _GroupRow extends StatelessWidget {
           ),
           const SizedBox(width: 6),
           Text('${g.memberCount} 人',
-              style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
           const SizedBox(width: 6),
           if (g.canCreateProject)
             const Badge(label: '可建项目', tone: BadgeTone.accent),
           if (g.canDeleteProject)
             const Padding(
-              padding: EdgeInsets.only(left: 4),
+              padding: EdgeInsets.only(left: Tk.spaceXs),
               child: Badge(label: '可删项目', tone: BadgeTone.red),
             ),
           if (g.canManageFolderTemplates)
             const Padding(
-              padding: EdgeInsets.only(left: 4),
+              padding: EdgeInsets.only(left: Tk.spaceXs),
               child: Badge(label: '可管模板', tone: BadgeTone.accent),
             ),
           if (g.canDeleteFiles)
             const Padding(
-              padding: EdgeInsets.only(left: 4),
+              padding: EdgeInsets.only(left: Tk.spaceXs),
               child: Badge(label: '可删文件', tone: BadgeTone.red),
             ),
         ],
@@ -247,7 +234,7 @@ class _GroupRow extends StatelessWidget {
         '${g.description ?? ''} · 创建于 ${fmtDate(g.createdAt)}',
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: 11.5),
+        style: const TextStyle(fontSize: Tk.fzXs),
       ),
       trailing: const Icon(Icons.more_horiz),
       onTap: onOpen,

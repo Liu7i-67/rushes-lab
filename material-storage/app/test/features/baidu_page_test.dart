@@ -161,13 +161,15 @@ void main() {
     expect(find.text('删除该任务记录?'), findsOneWidget);
     await tester.tap(find.widgetWithText(FilledButton, '删除'));
     await tester.pumpAndSettle();
-    // 前一条 toast(重试)尚在展示期,删除 toast 排队其后:推进假时钟让队列前进
-    await tester.pump(const Duration(seconds: 5));
-    await tester.pumpAndSettle();
+    // app-polish E14:反馈统一 toast()(latest-wins,即时替换前一条重试
+    // toast,原「推进假时钟等旧条排队」不再需要)
     expect(find.text('任务记录已删除'), findsOneWidget);
     expect(adapter.calls.any((c) =>
         c.method == 'DELETE' && c.path == '/api/v1/baidu/backup/tasks/t2'),
         isTrue);
+    // 收尾:排空 toast SnackBar 的 duration Timer
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('加载更多:offset=已拉条数追加', (tester) async {

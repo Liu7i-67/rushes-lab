@@ -36,7 +36,7 @@ class ApplyDefaultResultView extends StatelessWidget {
             children: [
               Text('刷新默认权限 — 结果',
                   style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: 8),
+              const SizedBox(height: Tk.spaceSm),
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(10),
@@ -44,7 +44,7 @@ class ApplyDefaultResultView extends StatelessWidget {
                   color: failed > 0
                       ? Tk.accentFaint
                       : Tk.green.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(Tk.rSm),
                 ),
                 child: Text(
                   failed > 0
@@ -54,12 +54,12 @@ class ApplyDefaultResultView extends StatelessWidget {
                       : '刷新完成:共补写 ${result.totalApplied} 条授权,'
                           '跳过 ${result.totalSkipped} 条过期条目',
                   style: TextStyle(
-                      fontSize: 12.5,
+                      fontSize: Tk.fzSm,
                       color: failed > 0 ? Tk.amber : Tk.green,
                       height: 1.5),
                 ),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: Tk.spaceSm),
               Expanded(
                 child: ListView.builder(
                   itemCount: result.results.length,
@@ -80,14 +80,15 @@ class ApplyDefaultResultView extends StatelessWidget {
                           horizontal: 10, vertical: 6),
                       decoration: BoxDecoration(
                         color: Tk.fill,
-                        borderRadius: BorderRadius.circular(6),
+                        borderRadius: BorderRadius.circular(Tk.rSm),
                       ),
                       child: Row(children: [
                         Expanded(
                           child: Text(name,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 12.5)),
+                              style:
+                                  const TextStyle(fontSize: Tk.fzSm)),
                         ),
                         if (r.isFailed)
                           Flexible(
@@ -95,16 +96,16 @@ class ApplyDefaultResultView extends StatelessWidget {
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 style: const TextStyle(
-                                    fontSize: 11, color: Tk.red)),
+                                    fontSize: Tk.fzXs, color: Tk.red)),
                           )
                         else ...[
                           Text('补写 ${r.applied ?? 0}',
                               style: const TextStyle(
-                                  fontSize: 11.5, color: Tk.muted)),
-                          const SizedBox(width: 8),
+                                  fontSize: Tk.fzXs, color: Tk.muted)),
+                          const SizedBox(width: Tk.spaceSm),
                           Text('跳过过期 ${r.skippedStale ?? 0}',
                               style: const TextStyle(
-                                  fontSize: 11.5, color: Tk.muted)),
+                                  fontSize: Tk.fzXs, color: Tk.muted)),
                         ],
                       ]),
                     );

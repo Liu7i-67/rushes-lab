@@ -13,8 +13,10 @@ import '../../core/fmt.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
 import '../admin/baidu_task_labels.dart';
 import 'baidu_task_files.dart';
 
@@ -59,27 +61,18 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
 
   Future<void> _taskAction(String action) async {
     if (_busy || _task == null) return;
-    // 确认口径同列表卡(web Popconfirm 同款:取消/删除确认,重试直发)
+    // 确认口径同列表卡(web Popconfirm 同款:取消/删除确认,重试直发)。
+    // E12/E14:确认统一 showAppConfirm(danger)
     if (action == 'cancel' || action == 'delete') {
       final (title, content, okText) = action == 'cancel'
           ? ('取消该任务?', '未完成文件将停止导入(已完成文件保留)。', '取消任务')
           : ('删除该任务记录?', '仅删除任务记录与进度,已导入的文件不受影响。', '删除');
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(title),
-          content: Text(content),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.of(ctx).pop(false),
-                child: const Text('取消')),
-            FilledButton(
-              style: FilledButton.styleFrom(foregroundColor: Tk.red),
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: Text(okText),
-            ),
-          ],
-        ),
+      final ok = await showAppConfirm(
+        context,
+        title: title,
+        content: content,
+        confirmLabel: okText,
+        danger: true,
       );
       if (ok != true || !mounted) return;
     }
@@ -89,32 +82,27 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
         case 'cancel':
           final r = await _api.cancelTask(widget.taskId);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-              content: Text(r.finalized
-                  ? '任务已取消'
-                  : '取消请求已提交,任务将在最近检查点停止')));
+          toast(context, r.finalized
+              ? '任务已取消'
+              : '取消请求已提交,任务将在最近检查点停止');
         case 'retry-failed':
           await _api.retryFailed(widget.taskId);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-              const SnackBar(content: Text('失败文件已全部重新排队')));
+          toast(context, '失败文件已全部重新排队', tone: ToastTone.success);
         case 'delete':
           await _api.deleteTask(widget.taskId);
           if (!mounted) return;
-          ScaffoldMessenger.maybeOf(context)
-              ?.showSnackBar(const SnackBar(content: Text('任务记录已删除')));
+          toast(context, '任务记录已删除');
           Navigator.of(context).pop(true);
           return;
       }
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text(e.message)));
+      toast(context, e.message, tone: ToastTone.error);
     } catch (e) {
       if (!mounted) return;
       // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text(errorMessage(e, '操作失败,请稍后重试'))));
+      toast(context, errorMessage(e, '操作失败,请稍后重试'), tone: ToastTone.error);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -130,16 +118,17 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
           ? ErrorView(message: _error!, onRetry: _reload)
           : t == null
               ? const Center(child: CircularProgressIndicator())
+              // E12:概要卡自适应内容高(SingleChildScrollView 收缩,不再写死
+              // 360 定高挤压小屏);文件明细区 Expanded 吃剩余空间
               : Column(
                   children: [
-                    Expanded(
-                      child: ListView(
+                    Flexible(
+                      child: SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                        children: [_summaryCard(t)],
+                        child: _summaryCard(t),
                       ),
                     ),
-                    SizedBox(
-                      height: 360,
+                    Expanded(
                       child: BaiduTaskFiles(
                         key: ValueKey('${t.id}:${t.status}'),
                         taskId: t.id,
@@ -156,7 +145,7 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
   Widget _summaryCard(BaiduTask t) {
     return Card(
       margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Tk.rLg)),
       child: Padding(
         padding: const EdgeInsets.all(14),
         child: Column(
@@ -176,17 +165,18 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 13, fontWeight: FontWeight.w600)),
+                        fontSize: Tk.fzMd, fontWeight: FontWeight.w600)),
               ),
             ]),
             const SizedBox(height: 6),
             Text('目标:${t.targetLabel}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: Tk.muted)),
+                style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             const SizedBox(height: 8),
             ClipRRect(
-              borderRadius: BorderRadius.circular(4),
+              // 4px 高进度条的圆角(radius 按条高缩放渲染,视觉=胶囊不变)
+              borderRadius: BorderRadius.circular(Tk.rSm),
               child: LinearProgressIndicator(
                 value: t.progressPct / 100,
                 minHeight: 4,
@@ -204,27 +194,27 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
               runSpacing: 2,
               children: [
                 Text('${t.doneFiles ?? 0} / ${t.totalFiles ?? 0} 个文件',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                    style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
                 Text(
                     '${fmtBytes(t.doneBytes)}'
                     '${t.totalBytes == null ? '' : ' / ${fmtBytes(t.totalBytes!)}'}',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                    style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
                 if (t.isActive)
                   Text(
                       t.etaSeconds != null
                           ? '预计剩余 ${fmtEtaShort(t.etaSeconds!)}'
                           : '估算中',
                       style:
-                          const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                          const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
                 if (t.status == 'failed' && t.failReason != null)
                   Text(kFailReasonLabels[t.failReason!] ?? t.failReason!,
-                      style: const TextStyle(fontSize: 11.5, color: Tk.red)),
+                      style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
                 if (t.isTerminal && (t.failedFiles ?? 0) > 0)
                   Text('失败 ${t.failedFiles}',
-                      style: const TextStyle(fontSize: 11.5, color: Tk.red)),
+                      style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
                 if (t.isTerminal && (t.skippedFiles ?? 0) > 0)
                   Text('跳过 ${t.skippedFiles}',
-                      style: const TextStyle(fontSize: 11.5, color: Tk.muted)),
+                      style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
               ],
             ),
             if (t.status == 'failed' || t.status == 'completed')
@@ -233,7 +223,7 @@ class _BaiduTaskDetailPageState extends State<BaiduTaskDetailPage> {
                 child: Text(
                   '「覆盖导入」会永久删除原文件后重新导入(需管理权限);'
                   '同一任务同时只能有一个覆盖在途。',
-                  style: TextStyle(fontSize: 11.5, color: Tk.amber),
+                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber),
                 ),
               ),
             Row(mainAxisAlignment: MainAxisAlignment.end, children: [

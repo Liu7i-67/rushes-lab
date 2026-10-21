@@ -2,7 +2,8 @@
 /// 登录页与改密页 4 处密码框替换 PasswordField 后——
 /// - 每处都有眼睛切换,切换明文/遮挡且 controller 内容保持;
 /// - 改密页三框遮挡态互相独立;
-/// - 表单提交行为不回退(改密校验链原样;登录页提交钮/日志入口结构不变)。
+/// - 表单提交行为不回退(改密校验链原样;登录页提交钮结构不变;app-polish
+///   E1 起登录页右上角日志入口移除,断言已同步翻转)。
 library;
 
 import 'package:flutter/material.dart';
@@ -45,13 +46,14 @@ void main() {
       expect(fieldState(tester, 1).obscure, isTrue);
       expect(fieldState(tester, 1).text, 's3cret!');
 
-      // 表单结构回归:登录钮存在(探活未就绪禁用),右上角日志推送入口保留
+      // 表单结构回归:登录钮存在(探活未就绪禁用);E1 起右上角日志推送
+      // 入口移除(功能保留在「我的」诊断区,pages_polish E1 验收同口径)
       final loginBtn =
           tester.widget<FilledButton>(find.widgetWithText(FilledButton, '登录'));
       expect(loginBtn.onPressed, isNull,
           reason: '探活未就绪(probing)时禁用——提交闸门行为不变');
-      expect(find.byIcon(Icons.bug_report_outlined), findsOneWidget,
-          reason: 'P6:登录页日志推送入口保留');
+      expect(find.byIcon(Icons.bug_report_outlined), findsNothing,
+          reason: 'app-polish E1:登录页日志推送入口移除(并入我的页诊断组)');
     });
   });
 

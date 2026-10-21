@@ -53,17 +53,17 @@ class _FolderTemplateFieldState extends State<FolderTemplateField> {
           children: [
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: Tk.spaceMd),
               decoration: BoxDecoration(
                 border: Border.all(color: Theme.of(context).dividerColor),
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(Tk.rSm),
               ),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<String?>(
                   value: effectiveValue,
                   isExpanded: true,
                   hint: const Text('不使用模板(默认)',
-                      style: TextStyle(fontSize: 13.5)),
+                      style: TextStyle(fontSize: Tk.fzMd)),
                   items: [
                     // P2-3:「不使用模板(默认)」显式项(value=null):选中模板
                     // 后可回退(web 同款;value=null 时按钮显示该项而非 hint,
@@ -71,14 +71,14 @@ class _FolderTemplateFieldState extends State<FolderTemplateField> {
                     const DropdownMenuItem<String?>(
                       value: null,
                       child: Text('不使用模板(默认)',
-                          style: TextStyle(fontSize: 13.5)),
+                          style: TextStyle(fontSize: Tk.fzMd)),
                     ),
                     for (final t in templates)
                       DropdownMenuItem(
                         value: t.id,
                         child: Text('${t.name}(${t.entryCount} 个目录)',
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 13.5)),
+                            style: const TextStyle(fontSize: Tk.fzMd)),
                       ),
                   ],
                   onChanged: (v) => widget.onChanged(v),
@@ -87,18 +87,18 @@ class _FolderTemplateFieldState extends State<FolderTemplateField> {
             ),
             if (selected != null)
               Container(
-                margin: const EdgeInsets.only(top: 6),
+                margin: const EdgeInsets.only(top: Tk.spaceSm - 2),
                 padding: const EdgeInsets.all(10),
                 constraints: const BoxConstraints(maxHeight: 140),
                 width: double.infinity,
                 decoration: BoxDecoration(
                   color: Tk.surface2,
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(Tk.rSm),
                 ),
                 child: SingleChildScrollView(
                   child: Text(
                     '目录树预览:${selected.entries.map((e) => e.path).join('\n')}',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.muted),
+                    style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
                   ),
                 ),
               ),

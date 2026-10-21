@@ -68,7 +68,7 @@ class MyRolesBadge extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             '+${s.extraCount}',
-            style: const TextStyle(color: Tk.subtle, fontSize: 11),
+            style: const TextStyle(color: Tk.subtle, fontSize: Tk.fzXs),
           ),
         ],
       ],
