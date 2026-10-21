@@ -1,0 +1,251 @@
+/// AdminAuditPage — 审计(B8 功能点 4;web AdminAuditPage 移动版):
+/// 筛选=事件类型/项目/操作者(UserPicker 单选)/单日时间 + 分页列表 + CSV 导出。
+/// 导出钉子:dio 带会话(AuditApi.exportCsv)→ 落盘矩阵 other 列;禁 url_launcher。
+library;
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+
+import '../../core/api/audit_api.dart';
+import '../../core/api/ms_api.dart';
+import '../../core/session.dart';
+import '../../models/models.dart';
+import '../../widgets/empty_state.dart';
+import '../../widgets/error_view.dart';
+import 'audit_event_card.dart';
+import 'audit_export.dart';
+import 'audit_filter_bar.dart';
+
+const _kAuditPageSize = 30; // 页大小(web AdminAuditPage PAGE_SIZE 同款)
+
+class AdminAuditPage extends StatefulWidget {
+  const AdminAuditPage({super.key});
+
+  @override
+  State<AdminAuditPage> createState() => _AdminAuditPageState();
+}
+
+class _AdminAuditPageState extends State<AdminAuditPage> {
+  String _eventType = '';
+  UserBrief? _actor; // null=全部(操作者筛选;value=users.id UUID)
+  String _projectId = '';
+  DateTime? _day;
+  var _items = <AuditEvent>[];
+  var _loading = true;
+  var _loadingMore = false;
+  var _exporting = false;
+  String? _error;
+  var _reloadTag = 0;
+  var _projects = <Project>[];
+
+  AuditFilter get _filter => AuditFilter(
+        eventType: _eventType,
+        actorUserId: _actor?.id ?? '',
+        projectId: _projectId,
+        from: _day == null
+            ? null
+            : DateTime(_day!.year, _day!.month, _day!.day)
+                .toUtc()
+                .toIso8601String(),
+        to: _day == null
+            ? null
+            : DateTime(_day!.year, _day!.month, _day!.day, 23, 59, 59, 999)
+                .toUtc()
+                .toIso8601String(),
+      );
+
+  @override
+  void initState() {
+    super.initState();
+    _reload();
+    _loadProjects();
+  }
+
+  /// 全量项目(web useAllProjects 循环翻页拉全;limit=100 单页)。
+  Future<void> _loadProjects() async {
+    final out = <Project>[];
+    try {
+      for (var offset = 0;; offset += 100) {
+        final page =
+            await session.api!.projects.listPaged(limit: 100, offset: offset);
+        out.addAll(page);
+        if (page.length < 100) break;
+      }
+      if (!mounted) return;
+      setState(() => _projects = out);
+    } catch (_) {
+      // 项目筛选选项加载失败不阻塞审计列表(选项缺失而已)
+    }
+  }
+
+  Future<void> _reload() async {
+    final tag = ++_reloadTag;
+    setState(() => _loading = _items.isEmpty);
+    try {
+      final items = await session.api!.audit
+          .list(filter: _filter, limit: _kAuditPageSize, offset: 0);
+      if (tag != _reloadTag || !mounted) return;
+      setState(() {
+        _items = items;
+        _loading = false;
+        _error = null;
+      });
+    } on ApiException catch (e) {
+      _fail(tag, e.message);
+    } catch (e) {
+      _fail(tag, '$e');
+    }
+  }
+
+  Future<void> _loadMore() async {
+    if (_loadingMore || _items.length < _kAuditPageSize) return;
+    setState(() => _loadingMore = true);
+    final tag = _reloadTag;
+    try {
+      final items = await session.api!.audit
+          .list(filter: _filter, limit: _kAuditPageSize, offset: _items.length);
+      if (tag != _reloadTag || !mounted) return;
+      setState(() {
+        _items = [..._items, ...items];
+        _loadingMore = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loadingMore = false);
+    }
+  }
+
+  void _fail(int tag, String message) {
+    if (tag != _reloadTag || !mounted) return;
+    setState(() {
+      _error = message; // 403 detail 透传(非 admin 深链兜底)
+      _loading = false;
+    });
+  }
+
+  /// CSV 导出:dio 带会话拉字节 → 落盘矩阵(禁 url_launcher);结果 toast。
+  Future<void> _exportCsv() async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final (bytes, disposition) =
+          await session.api!.audit.exportCsv(filter: _filter);
+      if (!mounted) return;
+      if (!looksLikeCsv(bytes)) {
+        _toast('导出响应异常(非 CSV),请稍后再试');
+        return;
+      }
+      // 文件名取响应头 Content-Disposition,解析失败回落时间戳名(P2-5)
+      final filename = csvFilenameFromDisposition(disposition, DateTime.now());
+      final summary = await saveExportedCsv(bytes, filename);
+      if (!mounted) return;
+      _toast('已导出 $filename:$summary');
+    } on ApiException catch (e) {
+      if (!mounted) return;
+      _toast(e.message); // 403/422 detail 透传
+    } catch (e) {
+      if (!mounted) return;
+      _toast('$e');
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 单日筛选:选完即重查(00:00/23:59:59.999 本地→UTC 折算在 _filter)。
+  Future<void> _pickDay() async {
+    final d = await showDatePicker(
+      context: context,
+      initialDate: _day ?? DateTime.now(),
+      firstDate: DateTime(2024),
+      lastDate: DateTime.now(),
+    );
+    if (d == null) return;
+    setState(() => _day = d);
+    _reload();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('审计'),
+        actions: [
+          IconButton(
+            icon: _exporting
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.download_outlined),
+            tooltip: '导出 CSV',
+            onPressed: _exporting ? null : _exportCsv,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          AuditFilterBar(
+            eventType: _eventType,
+            projectId: _projectId,
+            actor: _actor,
+            day: _day,
+            projects: _projects,
+            onEventTypeChanged: (v) {
+              setState(() => _eventType = v);
+              _reload();
+            },
+            onProjectChanged: (v) {
+              setState(() => _projectId = v);
+              _reload();
+            },
+            onActorChanged: (v) {
+              setState(() => _actor = v.isEmpty ? null : v.first);
+              _reload();
+            },
+            onPickDate: _pickDay,
+            onClearDate: () {
+              setState(() => _day = null);
+              _reload();
+            },
+          ),
+          const SizedBox(height: 4),
+          Expanded(child: _body()),
+        ],
+      ),
+    );
+  }
+
+  Widget _body() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return ErrorView(message: _error!, onRetry: _reload);
+    }
+    if (_items.isEmpty) {
+      return const EmptyState(message: '无匹配记录');
+    }
+    return ListView.builder(
+      itemCount: _items.length + 1,
+      itemBuilder: (context, i) {
+        if (i >= _items.length) {
+          if (_items.length < _kAuditPageSize) return const SizedBox(height: 24);
+          return Padding(
+            padding: const EdgeInsets.all(12),
+            child: OutlinedButton(
+              onPressed: _loadingMore ? null : _loadMore,
+              child: Text(_loadingMore ? '加载中…' : '加载更多'),
+            ),
+          );
+        }
+        return AuditEventCard(event: _items[i]);
+      },
+    );
+  }
+}

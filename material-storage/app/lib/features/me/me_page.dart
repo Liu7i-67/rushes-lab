@@ -1,18 +1,18 @@
-/// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 诊断(日志推送)+
-/// 当前服务入口(只读,内网/公网标识)+ 退出登录。
-/// B0 批挂载:网盘备份区(features/baidu/bind_code_page.dart)与
-/// 诊断区「B0 落盘验证」入口(features/me/b0_download_poc_page.dart,仅 Android)。
+/// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 协作(B7:
+/// 审批中心/通知/我的权限)+ 项目管理(B6:回收站(项目),仅 is_project_deleter
+/// 可见)+ 诊断(日志推送)+ 当前服务入口(只读,内网/公网标识)+ 退出登录。
+/// B0 批挂载:网盘备份区(features/baidu/bind_code_page.dart)。B4:B0 落盘
+/// PoC 入口移除(使命完成,正式实现=下载线落盘矩阵,决策 #1)。
 library;
 
-import 'dart:io' show Platform;
-
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
+import 'admin_tiles.dart';
+import 'collab_tiles.dart';
 import 'log_push.dart';
 
 class MePage extends StatelessWidget {
@@ -57,6 +57,27 @@ class MePage extends StatelessWidget {
                     Navigator.of(context).pushNamed('/change-password',
                         arguments: false),
               ),
+              // B8:管理区(§8.9)——管理后台仅 is_system_admin;目录模板独立
+              // 闸门 is_folder_template_manager(持 flag 非 admin 仅见此入口)。
+              ...adminSectionTiles(context),
+              // B7:协作区(审批中心 badge 仅 admin;通知红点=全局未读)
+              const _SectionLabel('协作'),
+              // badge 从严:仅 is_system_admin 挂待审数(§8.6 钉子;
+              // 入口人人可见——scope=self「我发起的」对普通用户有效)
+              ApprovalsTile(badgeEnabled: me?.isSystemAdmin ?? false),
+              const NotificationsTile(),
+              const MyPermissionsTile(),
+              // B6:已删除项目回收站(恢复);仅 is_project_deleter 可见
+              // (后端 deleted/restore 双端点 require_project_deleter 同口径)
+              if (me?.isProjectDeleter ?? false)
+                ListTile(
+                  leading: const Icon(Icons.delete_sweep_outlined),
+                  title: const Text('回收站(项目)'),
+                  subtitle: const Text('已删除项目的恢复入口'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () =>
+                      Navigator.of(context).pushNamed('/deleted-projects'),
+                ),
               const _SectionLabel('网盘备份'),
               const _BaiduBackupTile(),
               const _SectionLabel('诊断'),
@@ -66,16 +87,6 @@ class MePage extends StatelessWidget {
                 trailing: const Icon(Icons.chevron_right),
                 onTap: () => showLogPushDialog(context),
               ),
-              // B0② 技术验证入口:iOS 无 media_store_plus,仅 Android 显示
-              if (!kIsWeb && Platform.isAndroid)
-                ListTile(
-                  leading: const Icon(Icons.download_outlined),
-                  title: const Text('B0 落盘验证'),
-                  subtitle: const Text('图库 + Downloads 双路技术验证(PoC)'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () =>
-                      Navigator.of(context).pushNamed('/b0-download-poc'),
-                ),
               const _SectionLabel('当前服务'),
               ListTile(
                 leading: const Icon(Icons.dns_outlined),
@@ -200,8 +211,9 @@ class _BaiduBackupTileState extends State<_BaiduBackupTile> {
       enabled: enabled,
       onTap: enabled
           ? () async {
-              await Navigator.of(context).pushNamed('/baidu-bind');
-              _load(); // 返回即刷新(绑定成功后入口行显示已绑定状态)
+              // B9:完整用户侧页(绑定状态+任务列表+新建任务;绑定页页内进入)
+              await Navigator.of(context).pushNamed('/baidu');
+              _load(); // 返回即刷新(绑定/解绑后入口行显示最新状态)
             }
           : null,
     );

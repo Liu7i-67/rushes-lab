@@ -1,130 +1,184 @@
-/// 项目内文件夹树(flat 列表 → 内存建树,ExpansionTile 递归渲染;现役平移)。
+/// 项目内文件夹页(B2 §8.1):flat 列表自组树、按缩进展示、支持多级下钻,
+/// 行=subtree_file_count 徽标+敏感锁+「⋯」菜单(B6 管理动作全量);点夹进宫格
+/// 上下文。B6:AppBar「新建一级文件夹」(my_roles admin/uploader 闸门,敏感
+/// 开关仅此处有义——sensitive 只能直挂项目一级)。
+/// my_can_* 列表响应恒 False,本页不消费(宫格页拉单夹详情,§11 钉子)。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import 'folder_form_sheet.dart';
+import 'folder_row.dart';
+import 'folder_tree.dart';
 
 class FoldersPage extends StatefulWidget {
-  const FoldersPage({super.key, required this.projectId});
+  const FoldersPage({
+    super.key,
+    required this.projectId,
+    this.projectName = '',
+    this.myRoles = const [],
+  });
 
   final String projectId;
+
+  /// 项目显示名(B3:宫格上传任务 where=「项目/…/文件夹」路径前缀)。
+  final String projectName;
+
+  /// 当前用户在本项目的角色(B6;新建一级文件夹闸门:admin/uploader,
+  /// 与 project 级 can_upload 的角色派生同口径)。
+  final List<String> myRoles;
 
   @override
   State<FoldersPage> createState() => _FoldersPageState();
 }
 
 class _FoldersPageState extends State<FoldersPage> {
-  late Future<List<Folder>> _future;
+  var _all = const <Folder>[];
+  var _loading = true; // 仅首轮整页 spinner;刷新在旧数据上原地等(B2 修复 P2-9)
+  String? _error;
+  final _collapsed = <String>{};
 
   @override
   void initState() {
     super.initState();
-    _future = session.api!.folders.list(widget.projectId);
+    // 数据新鲜度:上传等写操作成功后失效 'folders',本页自动重拉子树计数
+    RefreshBus.I.addListener('folders', _reload);
+    _reload();
   }
 
-  void _reload() =>
-      setState(() => _future = session.api!.folders.list(widget.projectId));
+  @override
+  void dispose() {
+    RefreshBus.I.removeListener('folders', _reload);
+    super.dispose();
+  }
+
+  /// 拉取并落态(失效总线/下拉刷新/返回重拉同路);返回真 future,
+  /// RefreshIndicator 的圈等完成后才收,旧树在刷新期间继续展示不整页替换。
+  Future<void> _reload() async {
+    try {
+      final folders = await session.api!.folders.list(widget.projectId);
+      if (!mounted) return;
+      setState(() {
+        _all = folders;
+        _error = null;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _loading = false;
+      });
+    }
+  }
+
+  /// 深度优先铺平可见行(折叠的子树跳过);roots 顺序保持后端返回序。
+  List<(FolderNode, int)> _visibleRows(List<FolderNode> roots) {
+    final rows = <(FolderNode, int)>[];
+    void walk(List<FolderNode> nodes, int depth) {
+      for (final n in nodes) {
+        rows.add((n, depth));
+        if (n.children.isNotEmpty && !_collapsed.contains(n.folder.id)) {
+          walk(n.children, depth + 1);
+        }
+      }
+    }
+
+    walk(roots, 0);
+    return rows;
+  }
+
+  /// 显示路径(项目/…/本夹,§7 where):父链自 flat 列表回溯;
+  /// 环防御=已访问 id 集合,孤儿/断链取已得前缀。
+  String _whereOf(Folder f) {
+    final byId = {for (final x in _all) x.id: x};
+    final names = <String>[f.name];
+    final seen = <String>{f.id};
+    var cur = f.parentFolderId;
+    while (cur != null && seen.add(cur)) {
+      final p = byId[cur];
+      if (p == null) break;
+      names.insert(0, p.name);
+      cur = p.parentFolderId;
+    }
+    return [
+      if (widget.projectName.isNotEmpty) widget.projectName,
+      ...names,
+    ].join('/');
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('文件夹'),
+        // B6:新建一级文件夹(can_upload ≈ admin/uploader 角色;成功失效总线
+        // 自动重拉;403 detail 由表单透传,无权者后端兜底)
         actions: [
-          IconButton(onPressed: _reload, icon: const Icon(Icons.refresh)),
+          if (widget.myRoles.contains('admin') ||
+              widget.myRoles.contains('uploader'))
+            IconButton(
+              tooltip: '新建一级文件夹',
+              icon: const Icon(Icons.create_new_folder_outlined),
+              onPressed: () => showFolderFormSheet(context,
+                  mode: FolderFormMode.createRoot,
+                  projectId: widget.projectId,
+                  parentLabel: widget.projectName),
+            ),
         ],
       ),
-      body: FutureBuilder<List<Folder>>(
-        future: _future,
-        builder: (context, snap) {
-          if (snap.connectionState != ConnectionState.done) {
-            return const Center(child: CircularProgressIndicator());
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? ErrorView(message: _error!, onRetry: _reload)
+              : _buildTree(context),
+    );
+  }
+
+  Widget _buildTree(BuildContext context) {
+    final roots = buildFolderTree(_all);
+    if (roots.isEmpty) {
+      // 含全被过滤(孤儿/环不可达)的情况:与 web 同口径,空即空
+      return const EmptyState(
+        icon: Icons.folder_outlined,
+        message: '暂无文件夹',
+      );
+    }
+    final rows = _visibleRows(roots);
+    return RefreshIndicator(
+      onRefresh: _reload,
+      child: ListView.separated(
+        itemCount: rows.length + 1,
+        separatorBuilder: (_, _) => const Divider(height: 1),
+        itemBuilder: (context, i) {
+          if (i == rows.length) {
+            return const SizedBox(height: 24); // 底部呼吸空间
           }
-          if (snap.hasError) {
-            return ErrorView(message: '${snap.error}', onRetry: _reload);
-          }
-          final all = snap.data ?? const [];
-          final roots = _buildTree(all);
-          if (roots.isEmpty) {
-            return const EmptyState(
-              icon: Icons.folder_outlined,
-              message: '暂无文件夹',
-            );
-          }
-          return ListView(
-            children: [
-              for (final n in roots) _FolderNodeTile(node: n),
-            ],
+          final (node, depth) = rows[i];
+          return FolderRow(
+            node: node,
+            depth: depth,
+            expanded: !_collapsed.contains(node.folder.id),
+            onToggle: () => setState(() {
+              _collapsed.contains(node.folder.id)
+                  ? _collapsed.remove(node.folder.id)
+                  : _collapsed.add(node.folder.id);
+            }),
+            onOpen: () => Navigator.of(context)
+                .pushNamed('/assets', arguments: (
+                  node.folder.id,
+                  node.folder.name,
+                  _whereOf(node.folder),
+                ))
+                .then((_) => _reload()), // 返回按需刷新(子树计数可能变)
           );
         },
       ),
-    );
-  }
-}
-
-class _Node {
-  _Node(this.folder);
-
-  final Folder folder;
-  final List<_Node> children = [];
-}
-
-List<_Node> _buildTree(List<Folder> all) {
-  final byId = <String, _Node>{};
-  for (final f in all) {
-    byId[f.id] = _Node(f);
-  }
-  final roots = <_Node>[];
-  for (final n in byId.values) {
-    final parent =
-        n.folder.parentFolderId != null ? byId[n.folder.parentFolderId] : null;
-    if (parent != null) {
-      parent.children.add(n);
-    } else {
-      roots.add(n);
-    }
-  }
-  return roots;
-}
-
-class _FolderNodeTile extends StatelessWidget {
-  const _FolderNodeTile({required this.node});
-
-  final _Node node;
-
-  @override
-  Widget build(BuildContext context) {
-    final f = node.folder;
-    final titleRow = Row(
-      children: [
-        Expanded(child: Text(f.name, overflow: TextOverflow.ellipsis)),
-        if (f.isSensitive)
-          const Padding(
-            padding: EdgeInsets.only(left: 6),
-            child: Icon(Icons.lock_outline, size: 14),
-          ),
-      ],
-    );
-    void open() =>
-        Navigator.of(context).pushNamed('/assets', arguments: (f.id, f.name));
-    if (node.children.isEmpty) {
-      return ListTile(
-        dense: true,
-        leading: const Icon(Icons.folder_outlined),
-        title: titleRow,
-        trailing: const Icon(Icons.chevron_right),
-        onTap: open,
-      );
-    }
-    return ExpansionTile(
-      dense: true,
-      leading: const Icon(Icons.folder_outlined),
-      title: GestureDetector(onTap: open, child: titleRow),
-      children: [for (final c in node.children) _FolderNodeTile(node: c)],
     );
   }
 }

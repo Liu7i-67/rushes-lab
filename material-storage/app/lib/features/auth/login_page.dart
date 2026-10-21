@@ -104,8 +104,8 @@ class _LoginPageState extends State<LoginPage> {
 
                     // ── 探活状态横幅(§4):探测中 / 不可达可重试 ──
                     _probeBanner(context),
-                    // 维护横幅位(B9 批填充:公告/Banner 插在此处)
-                    const SizedBox.shrink(),
+                    // 维护横幅(B9 §8.12)全局挂 MaterialApp.builder,覆盖
+                    // 登录页(见 core/maintenance/maintenance_overlay.dart)
 
                     TextField(
                       controller: _username,

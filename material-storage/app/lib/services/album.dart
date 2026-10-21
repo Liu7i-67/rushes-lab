@@ -5,14 +5,14 @@
 ///   - 写:PhotoManager.editor.saveLivePhoto(imageFile, videoFile, title)
 ///     (底层 PHAssetCreationRequest + .pairedVideo;原配对文件可靠,
 ///      任意照片+视频硬凑不保证成功 — flutter_photo_manager#1009)
-/// 选择器 UI 用 wechat_assets_picker(微信风格,onlyLivePhotos 过滤)。
+/// 选择器 UI 在 upload_sheet(wechat_assets_picker RequestType.all 多选,
+/// 逐项判 isLivePhoto 决定打包轨,不用 onlyLivePhotos 过滤)。
 library;
 
 import 'dart:io';
 
 import 'package:archive/archive.dart' show Archive, ArchiveFile, ZipEncoder;
 import 'package:flutter/foundation.dart' show kIsWeb;
-import 'package:flutter/widgets.dart' show BuildContext;
 import 'package:path_provider/path_provider.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
@@ -28,19 +28,6 @@ class AlbumService {
     if (!state.isAuth) {
       throw StateError('未获相册权限(需「所有照片/有限」+「添加到照片」授权)');
     }
-  }
-
-  /// 微信风格选图(仅实况照片,多选)。需要 BuildContext 开选择器路由。
-  static Future<List<AssetEntity>> pickLivePhotos(BuildContext context) async {
-    final picked = await AssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        requestType: RequestType.image,
-        maxAssets: 99,
-        filterOptions: FilterOptionGroup(onlyLivePhotos: true),
-      ),
-    );
-    return picked ?? const [];
   }
 
   /// 实况照片 → .livp 字节(静态帧 + 配对视频原文件直接 zip,零转码)。
@@ -72,26 +59,33 @@ class AlbumService {
   }
 
   /// .livp 字节 → 存回 iOS 相册(恢复为实况照片)。
+  /// 当前无 app 内调用点,**B4 消费**(下载线「存到相册」接入);勿删。
   static Future<void> saveLivpToAlbum(List<int> livpBytes) async {
     final tmp = await getTemporaryDirectory();
-    final parts = await LivpService.unpackToFiles(
-        livpBytes, Directory('${tmp.path}/livp_in'));
-    final imageFile = parts.image;
-    final videoFile = parts.video;
-    final baseName = _stripExt(_baseNameOf(imageFile.path));
-    if (videoFile == null) {
-      // 无视频部分 → 按普通照片存
-      await PhotoManager.editor
-          .saveImageWithPath(imageFile.path, title: baseName);
-      return;
+    // 每次唯一子目录(P2-3:固定 livp_in 跨调用会互相覆盖/串包)+ 用后清理
+    final dir = Directory(
+        '${tmp.path}/livp_in_${DateTime.now().microsecondsSinceEpoch}');
+    try {
+      final parts = await LivpService.unpackToFiles(livpBytes, dir);
+      final imageFile = parts.image;
+      final videoFile = parts.video;
+      final baseName = _stripExt(_baseNameOf(imageFile.path));
+      if (videoFile == null) {
+        // 无视频部分 → 按普通照片存
+        await PhotoManager.editor
+            .saveImageWithPath(imageFile.path, title: baseName);
+        return;
+      }
+      AppLog.info('album', 'saveLivePhoto: image=${imageFile.path.split('/').last}'
+          ' video=${videoFile.path.split('/').last} title=$baseName');
+      await PhotoManager.editor.darwin.saveLivePhoto(
+        imageFile: imageFile,
+        videoFile: videoFile,
+        title: baseName,
+      );
+    } finally {
+      dir.delete(recursive: true).ignore(); // 用后清理;失败静默(临时区自回收)
     }
-    AppLog.info('album', 'saveLivePhoto: image=${imageFile.path.split('/').last}'
-        ' video=${videoFile.path.split('/').last} title=$baseName');
-    await PhotoManager.editor.darwin.saveLivePhoto(
-      imageFile: imageFile,
-      videoFile: videoFile,
-      title: baseName,
-    );
   }
 
   static String _extOf(String path, String fallback) {

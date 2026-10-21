@@ -14,7 +14,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api/baidu_api.dart';
-import '../../core/api/ms_api.dart' show ApiException;
+import '../../core/api/ms_api.dart' show ApiException, errorMessage;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
@@ -88,7 +88,8 @@ class _BindCodePageState extends State<BindCodePage> {
     } on ApiException catch (e) {
       _say(e.status == 404 ? '网盘备份未启用' : e.message, ok: false);
     } catch (e) {
-      _say('生成授权链接失败:$e', ok: false);
+      // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
+      _say(errorMessage(e, '生成授权链接失败,请稍后重试'), ok: false);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -126,7 +127,8 @@ class _BindCodePageState extends State<BindCodePage> {
         ok: false,
       );
     } catch (e) {
-      _say('绑定失败:$e', ok: false);
+      // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
+      _say(errorMessage(e, '绑定失败,请稍后重试'), ok: false);
     } finally {
       if (mounted) setState(() => _busy = false);
     }
