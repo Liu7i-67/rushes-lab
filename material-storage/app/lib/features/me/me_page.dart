@@ -11,6 +11,7 @@ import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
+import 'admin_tiles.dart';
 import 'collab_tiles.dart';
 import 'log_push.dart';
 
@@ -56,6 +57,9 @@ class MePage extends StatelessWidget {
                     Navigator.of(context).pushNamed('/change-password',
                         arguments: false),
               ),
+              // B8:管理区(§8.9)——管理后台仅 is_system_admin;目录模板独立
+              // 闸门 is_folder_template_manager(持 flag 非 admin 仅见此入口)。
+              ...adminSectionTiles(context),
               // B7:协作区(审批中心 badge 仅 admin;通知红点=全局未读)
               const _SectionLabel('协作'),
               // badge 从严:仅 is_system_admin 挂待审数(§8.6 钉子;

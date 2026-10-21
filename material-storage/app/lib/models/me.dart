@@ -1,4 +1,5 @@
-/// Me — /api/v1/auth/me 契约(auth.py 实际返回;B6 补三组级旗标)。
+/// Me — /api/v1/auth/me 契约(auth.py 实际返回;B6 补三组级旗标,
+/// B8 补 is_folder_template_manager 管理入口例外闸门)。
 library;
 
 class Me {
@@ -11,9 +12,11 @@ class Me {
     bool? isProjectCreator,
     bool? isProjectDeleter,
     bool? isArtistAccountCreator,
+    bool? isFolderTemplateManager,
   })  : isProjectCreator = isProjectCreator ?? isSystemAdmin,
         isProjectDeleter = isProjectDeleter ?? isSystemAdmin,
-        isArtistAccountCreator = isArtistAccountCreator ?? isSystemAdmin;
+        isArtistAccountCreator = isArtistAccountCreator ?? isSystemAdmin,
+        isFolderTemplateManager = isFolderTemplateManager ?? isSystemAdmin;
 
   factory Me.fromJson(Map<String, dynamic> j) {
     final sysAdmin = (j['is_system_admin'] ?? false) as bool;
@@ -28,6 +31,9 @@ class Me {
       isProjectCreator: j['is_project_creator'] as bool?,
       isProjectDeleter: j['is_project_deleter'] as bool?,
       isArtistAccountCreator: j['is_artist_account_creator'] as bool?,
+      // B8:目录模板入口独立闸门(web AppHeader `?? is_system_admin` 同口径;
+      // auth.py 恒回填,持组 flag 非 admin 亦为 true;缺省回落 sysAdmin)。
+      isFolderTemplateManager: j['is_folder_template_manager'] as bool?,
     );
   }
 
@@ -37,7 +43,7 @@ class Me {
   /// 首登/重置后强制改密(§2 路由守卫闸门;后端仅在已设本地密码时为 true)。
   final bool mustChangePassword;
 
-  /// 管理后台入口闸门(B 后续批用;我的页角色展示)。
+  /// 管理后台入口闸门(B8 管理区;我的页角色展示)。
   final bool isSystemAdmin;
 
   /// 百度网盘备份菜单显隐开关(B0① 入口置灰判断;关闭时后端 /baidu/* 统一 404)。
@@ -54,6 +60,10 @@ class Me {
   /// 内嵌开通艺人账号闸门(B6 新建项目表单区块显隐;构造时缺省回落
   /// [isSystemAdmin];username-available 预检守门是组合弱门,此处仅做显隐)。
   final bool isArtistAccountCreator;
+
+  /// 目录模板入口独立闸门(B8;`is_folder_template_manager ?? is_system_admin`
+  /// web 同口径;持组 flag 非 admin 仅见目录模板入口,见不到其余管理子页)。
+  final bool isFolderTemplateManager;
 
   String get roleLabel => isSystemAdmin ? '系统管理员' : '成员';
 }

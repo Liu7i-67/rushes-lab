@@ -5,6 +5,13 @@ library;
 import 'package:flutter/material.dart';
 
 import 'core/session.dart';
+import 'features/admin/admin_audit_page.dart';
+import 'features/admin/admin_baidu_tasks_page.dart';
+import 'features/admin/admin_folder_templates_page.dart';
+import 'features/admin/admin_grant_templates_page.dart';
+import 'features/admin/admin_groups_page.dart';
+import 'features/admin/admin_home.dart';
+import 'features/admin/admin_users_page.dart';
 import 'features/assets/assets_page.dart';
 import 'features/assets/trash_page.dart';
 import 'features/auth/change_password_page.dart';
@@ -93,6 +100,25 @@ class _MsAppState extends State<MsApp> {
           case '/baidu-bind':
             // B0① 百度绑定 oob 复制码流程(§8.10)
             return MaterialPageRoute(builder: (_) => const BindCodePage());
+          case '/admin':
+            // B8:管理后台入口页(页内深链兜底二次闸 is_system_admin)
+            return MaterialPageRoute(builder: (_) => const AdminHomePage());
+          case '/admin/users':
+            return MaterialPageRoute(builder: (_) => const AdminUsersPage());
+          case '/admin/groups':
+            return MaterialPageRoute(builder: (_) => const AdminGroupsPage());
+          case '/admin/audit':
+            return MaterialPageRoute(builder: (_) => const AdminAuditPage());
+          case '/admin/grant-templates':
+            return MaterialPageRoute(
+                builder: (_) => const AdminGrantTemplatesPage());
+          case '/admin/folder-templates':
+            // 目录模板例外闸门(持 flag 非 admin 直达;页内 403 提示兜底)
+            return MaterialPageRoute(
+                builder: (_) => const AdminFolderTemplatesPage());
+          case '/admin/baidu-tasks':
+            return MaterialPageRoute(
+                builder: (_) => const AdminBaiduTasksPage());
         }
         return null;
       },

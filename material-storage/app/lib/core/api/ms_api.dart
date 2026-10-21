@@ -12,13 +12,16 @@ import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
 import '../../services/app_log.dart';
+import 'admin_baidu_api.dart';
 import 'admin_templates_api.dart';
 import 'approvals_api.dart';
 import 'approvals_ops_api.dart';
 import 'assets_api.dart';
 import 'assets_ops_api.dart';
+import 'audit_api.dart';
 import 'auth_api.dart';
 import 'baidu_api.dart';
+import 'directory_api.dart';
 import 'folders_api.dart';
 import 'folders_ops_api.dart';
 import 'notifications_api.dart';
@@ -156,6 +159,9 @@ class MsApi {
   late final approvals = ApprovalsApi(this);
   late final approvalsOps = ApprovalOpsApi(this); // B7:审批列表+决策
   late final notifications = NotificationsApi(this); // B7:通知列表+已读
+  late final directory = DirectoryApi(this); // B8:用户/组管理后台
+  late final audit = AuditApi(this); // B8:审计查询+CSV 导出
+  late final adminBaidu = AdminBaiduApi(this); // B8:备份任务 admin 观测+文件三操作
 
   InterceptorsWrapper _logInterceptor({bool withQuery = true}) =>
       InterceptorsWrapper(
