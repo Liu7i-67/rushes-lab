@@ -11,6 +11,7 @@ import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../me/log_push.dart';
+import '../share/request_link_sheet.dart';
 import 'new_project_sheet.dart';
 import 'project_members_sheet.dart';
 import 'role_badge.dart';
@@ -125,6 +126,20 @@ class _ProjectsPageState extends State<ProjectsPage> {
                                     onPressed: () =>
                                         showProjectMembersSheet(context,
                                             project: p),
+                                  ),
+                                // B9 §8.11:请求链接入口(项目页发起位=
+                                // my_roles 含 admin,web 同闸门;非 admin 不露出)
+                                if (p.myRoles.contains('admin'))
+                                  IconButton(
+                                    visualDensity: VisualDensity.compact,
+                                    tooltip: '请求链接',
+                                    icon: const Icon(Icons.link_outlined,
+                                        size: 20),
+                                    onPressed: () => showRequestLinkSheet(
+                                        context,
+                                        targetType: 'project',
+                                        targetId: p.id,
+                                        targetLabel: p.name),
                                   ),
                                 const Icon(Icons.chevron_right),
                               ],

@@ -7,6 +7,8 @@ library;
 import 'package:flutter/material.dart';
 
 import 'app.dart';
+import 'core/error_boundary.dart';
+import 'core/maintenance/banner_controller.dart';
 import 'core/polling_controller.dart';
 import 'core/session.dart';
 import 'features/assets/thumbnail_image.dart' show thumbnailCache;
@@ -31,8 +33,14 @@ void main() {
   // Session 门控(登录/登出/401 清会话即经 syncGate 起停,仅前台+已登录才轮)
   unreadPoller.attach();
   session.addListener(unreadPoller.syncGate);
+  // B9 维护横幅轮询(§8.12):同一节拍器,**门控不同——前台即轮、不分登录态**
+  // (仅要求探活就绪;登录页同样轮询展示)
+  maintenanceBanner.attach();
+  session.addListener(maintenanceBanner.syncGate);
   // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
   // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
   AppLog.init();
+  // B9 功能点 4:渲染异常全局兜底(友好页 + 日志,不白屏)
+  installErrorBoundary();
   runApp(const MsApp());
 }

@@ -5,10 +5,12 @@ library;
 
 import '../../widgets/badge.dart';
 
-/// 任务状态 → 文案(web BAIDU_TASK_STATUS_LABEL,不含派生态 queued)。
+/// 任务状态 → 文案(web BAIDU_TASK_STATUS_LABEL 同映射;queued 为接口派生
+/// 展示态,用户侧任务卡消费,B9)。
 const kTaskStatusLabels = <String, String>{
   'enumerating': '清单准备中',
   'running': '进行中',
+  'queued': '排队中',
   'completed': '已完成',
   'cancelled': '已取消',
   'failed': '失败',

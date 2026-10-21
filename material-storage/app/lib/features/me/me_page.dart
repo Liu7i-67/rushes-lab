@@ -211,8 +211,9 @@ class _BaiduBackupTileState extends State<_BaiduBackupTile> {
       enabled: enabled,
       onTap: enabled
           ? () async {
-              await Navigator.of(context).pushNamed('/baidu-bind');
-              _load(); // 返回即刷新(绑定成功后入口行显示已绑定状态)
+              // B9:完整用户侧页(绑定状态+任务列表+新建任务;绑定页页内进入)
+              await Navigator.of(context).pushNamed('/baidu');
+              _load(); // 返回即刷新(绑定/解绑后入口行显示最新状态)
             }
           : null,
     );

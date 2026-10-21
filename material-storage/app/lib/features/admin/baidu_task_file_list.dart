@@ -99,8 +99,13 @@ class _BaiduTaskFileListState extends State<BaiduTaskFileList> {
 
   Future<void> _runAction(AdminBaiduTaskFile row, String action) async {
     if (!fileOpsAllowed(widget.task, session.me?.id)) return;
-    final ok =
-        await runFileAction(context, task: widget.task, row: row, action: action);
+    final ok = await runFileAction(
+      context,
+      taskId: widget.task.id,
+      taskStatus: widget.task.status,
+      row: row,
+      action: action,
+    );
     if (ok && mounted) widget.onChanged();
   }
 

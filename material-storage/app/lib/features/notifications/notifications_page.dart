@@ -1,7 +1,9 @@
-/// NotificationsPage — 通知中心(B7 §8.7):时间倒序列表(未读橙点)+
-/// 全部已读;点击按 **kind 白名单** 跳转(approval_*→审批中心,folder_invite
-/// →对应项目文件夹;未知 kind 显通用详情,不崩溃、不把任意 URL 交导航器),
-/// 未读行点击即标已读并即时同步全局红点(功能点 5)。
+/// NotificationsPage — 通知中心(B7 §8.7;B9 遗留清偿分页):时间倒序列表
+/// (未读橙点)+ 服务端分页「加载更多」(offset 递增,B7 期固定 limit=100
+/// 的截断收口)+ **「全部已读」按钮恒显**(all=true 服务端全量已读,不依赖
+/// 当前已拉到的前 100 条);点击按 **kind 白名单** 跳转(approval_*→审批中心,
+/// folder_invite→对应项目文件夹;未知 kind 显通用详情,不崩溃、不把任意 URL
+/// 交导航器),未读行点击即标已读并即时同步全局红点(功能点 5)。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,6 +15,9 @@ import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import 'notification_row.dart';
+
+/// 单页条目(与 web NOTIFICATIONS_PAGE_SIZE 对齐的轻量口径)。
+const _kPageSize = 100;
 
 class NotificationsPage extends StatefulWidget {
   const NotificationsPage({super.key, this.poller});
@@ -28,6 +33,7 @@ class _NotificationsPageState extends State<NotificationsPage> {
   NotificationsList? _data;
   String? _error;
   bool _markingAll = false;
+  bool _loadingMore = false;
 
   UnreadPoller get _poller => widget.poller ?? unreadPoller;
 
@@ -37,9 +43,10 @@ class _NotificationsPageState extends State<NotificationsPage> {
     _reload();
   }
 
+  /// 拉第一页并落态(下拉刷新/重试同路);返回真 future 供 RefreshIndicator。
   Future<void> _reload() async {
     try {
-      final r = await session.api!.notifications.list(limit: 100);
+      final r = await session.api!.notifications.list(limit: _kPageSize);
       if (!mounted) return;
       setState(() {
         _data = r;
@@ -49,6 +56,33 @@ class _NotificationsPageState extends State<NotificationsPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = errorMessage(e, '通知加载失败'));
+    }
+  }
+
+  /// 加载更多(B9 分页清偿):offset=已拉条数,追加;失败静默留按钮重试。
+  Future<void> _loadMore() async {
+    final data = _data;
+    if (data == null || _loadingMore || data.items.length >= data.total) return;
+    setState(() => _loadingMore = true);
+    try {
+      final r = await session.api!
+          .notifications.list(limit: _kPageSize, offset: data.items.length);
+      if (!mounted) return;
+      final known = data.items.map((n) => n.id).toSet();
+      setState(() {
+        _data = NotificationsList(
+          items: [
+            ...data.items,
+            ...r.items.where((n) => !known.contains(n.id)), // 翻页间隙新读防重
+          ],
+          total: r.total,
+          unreadCount: r.unreadCount,
+        );
+        _loadingMore = false;
+      });
+      _poller.unreadCount = r.unreadCount;
+    } catch (_) {
+      if (mounted) setState(() => _loadingMore = false);
     }
   }
 
@@ -155,16 +189,16 @@ class _NotificationsPageState extends State<NotificationsPage> {
   @override
   Widget build(BuildContext context) {
     final data = _data;
-    final unread = data?.items.where((n) => n.isUnread).length ?? 0;
     return Scaffold(
       appBar: AppBar(
         title: const Text('通知'),
+        // 全部已读恒显(B9 分页清偿:all=true 服务端全量已读,不依赖当前
+        // 已拉到的条目;无未读时仍可点,幂等无害)
         actions: [
-          if (unread > 0)
-            TextButton(
-              onPressed: _markingAll ? null : _markAll,
-              child: const Text('全部已读'),
-            ),
+          TextButton(
+            onPressed: _markingAll ? null : _markAll,
+            child: const Text('全部已读'),
+          ),
         ],
       ),
       body: _buildBody(data),
@@ -184,16 +218,28 @@ class _NotificationsPageState extends State<NotificationsPage> {
         EmptyState(icon: Icons.notifications_none_outlined, message: '暂无通知'),
       ]);
     }
+    final hasMore = data.items.length < data.total;
     return RefreshIndicator(
       onRefresh: _reload,
       child: ListView.separated(
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-        itemCount: data.items.length,
+        itemCount: data.items.length + (hasMore ? 1 : 0),
         separatorBuilder: (_, _) => const SizedBox(height: 4),
-        itemBuilder: (context, i) => NotificationRow(
-          item: data.items[i],
-          onTap: () => _open(data.items[i]),
-        ),
+        itemBuilder: (context, i) {
+          if (i >= data.items.length) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: OutlinedButton(
+                onPressed: _loadingMore ? null : _loadMore,
+                child: Text(_loadingMore ? '加载中…' : '加载更多'),
+              ),
+            );
+          }
+          return NotificationRow(
+            item: data.items[i],
+            onTap: () => _open(data.items[i]),
+          );
+        },
       ),
     );
   }

@@ -329,9 +329,15 @@ class FakeNotificationsApi extends NotificationsApi {
       NotificationsList(items: const [], total: 0, unreadCount: 0);
   Object? markReadStaged;
 
+  /// B9 分页编排钩子:非 null 时按 (limit, offset) 返回,优先于 [listStaged]。
+  NotificationsList Function({required int limit, required int offset})?
+      onListOverride;
+
   @override
   Future<NotificationsList> list({int limit = 50, int offset = 0}) async {
     listCalls.add((limit: limit, offset: offset));
+    final ovr = onListOverride;
+    if (ovr != null) return ovr(limit: limit, offset: offset);
     return listStaged;
   }
 
@@ -386,8 +392,9 @@ class FakeProjectsApi extends ProjectsApi {
 }
 
 /// 装配并注入全局 session;测试收尾 `session.api = null`(addTearDown)。
-FakeMsApi installFakeApi() {
-  final api = FakeMsApi();
+/// [override] 供域覆写变体(B9 向导:FakeMsApi 子类覆写 baidu 域)注入。
+FakeMsApi installFakeApi([FakeMsApi? override]) {
+  final api = override ?? FakeMsApi();
   session.api = api;
   return api;
 }

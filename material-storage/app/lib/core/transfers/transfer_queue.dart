@@ -13,8 +13,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 import '../api/assets_api.dart' show UploadAmbiguousException;
-import '../api/ms_api.dart' show ApiException;
+import '../api/ms_api.dart' show ApiException, errorMessage;
 import '../../services/app_log.dart';
+import '../../services/media_save.dart' show SaveAbortException;
 import 'transfer_task.dart';
 
 class TransferQueue extends ChangeNotifier {
@@ -231,8 +232,13 @@ class TransferQueue extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 任务 error 字段文案(B9 P2-5 收敛):用户可见 detail 类异常透传 message
+  /// (ApiException=后端 detail;SaveAbortException=下载落盘分路中文文案);
+  /// 其余(DioException 断网/超时、StateError 等)统一落中文兜底——传输队列
+  /// 卡片不再出现「DioException …」英文裸渲染。
   static String _errMsg(Object e) => switch (e) {
         ApiException(:final message) => message,
-        _ => '$e',
+        SaveAbortException(:final message) => message,
+        _ => errorMessage(e, '传输失败,请稍后重试'),
       };
 }

@@ -1,9 +1,8 @@
 /// AssetOpsApi — /api/v1/assets 操作族薄封装(B5 素材操作线;与上传/列表
 /// assets_api.dart 分文件守 300 行硬顶)。契约以 api/app/models/__init__.py +
-/// routers/assets.py 实码为准;4xx detail 透传由 [MsApi.err] 渲染;**5xx 不经
-/// guard5xx**:validateStatus 只放行 <500,5xx 在 dio 层抛 DioException.
-/// badResponse 原样上抛,调用方 catch 渲染;全 API 层 5xx 统一兜底=已知技术债,
-/// B9 收尾批处理。
+/// routers/assets.py 实码为准;4xx/5xx detail 透传由 [MsApi.err] 渲染(B9 起
+/// validateStatus 全放行,5xx 同走 `_api.err` 中文 fallback 路径,全 API 层
+/// 统一兜底已收口)。
 library;
 
 import '../../models/models.dart';

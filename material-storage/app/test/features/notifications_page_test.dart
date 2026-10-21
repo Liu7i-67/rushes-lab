@@ -13,7 +13,7 @@ import 'package:ms_app/models/models.dart';
 import '../helpers/api_harness.dart';
 
 void main() {
-  testWidgets('列表:未读行+kind chip;全部已读调 mark-read all 且按钮消失',
+  testWidgets('列表:未读行+kind chip;全部已读调 mark-read all 且恒显(B9)',
       (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
@@ -37,8 +37,44 @@ void main() {
     await tester.tap(find.text('全部已读'));
     await tester.pumpAndSettle();
     expect(api.notifications.markReadCalls.single.all, isTrue);
-    // 重拉后 unread_count=0 → 全部已读入口消失
-    expect(find.text('全部已读'), findsNothing);
+    // B9 遗留清偿:全部已读按钮恒显(all=true 服务端全量已读,不依赖
+    // 当前已拉到的条目;无未读时仍可见)
+    expect(find.text('全部已读'), findsOneWidget);
+  });
+
+  testWidgets('B9 分页:加载更多按 offset 追加,不整页替换;不重复拉已加载条目',
+      (tester) async {
+    final api = installFakeApi();
+    addTearDown(() => session.api = null);
+    var calls = 0;
+    api.notifications.onListOverride = ({required limit, required offset}) {
+      calls++;
+      expect(limit, 100);
+      if (offset == 0) {
+        return NotificationsList(
+          items: [notificationOf('n1'), notificationOf('n2')],
+          total: 3,
+          unreadCount: 2,
+        );
+      }
+      expect(offset, 2, reason: '加载更多按已拉条数取 offset');
+      return NotificationsList(
+        items: [notificationOf('n3')],
+        total: 3,
+        unreadCount: 3,
+      );
+    };
+
+    await tester.pumpWidget(const MaterialApp(home: NotificationsPage()));
+    await tester.pumpAndSettle();
+    expect(find.text('标题n1'), findsOneWidget);
+    expect(find.text('加载更多'), findsOneWidget);
+
+    await tester.tap(find.text('加载更多'));
+    await tester.pumpAndSettle();
+    expect(find.text('标题n3'), findsOneWidget);
+    expect(find.text('加载更多'), findsNothing, reason: '3/3 已取尽入口收起');
+    expect(calls, 2);
   });
 
   testWidgets('白名单 approval_*:点击跳审批中心并标已读(红点即时减一)',
@@ -106,8 +142,9 @@ void main() {
       FontWeight.w400,
       reason: '行内未读样式即时消除(原地替换 readAt,无重拉也不复原)',
     );
-    expect(find.text('全部已读', skipOffstage: false), findsNothing,
-        reason: '页内未读清零,全部已读入口即时消失');
+    // B9 起恒显:未读清零仅解除高亮诉求,入口不再随之消失
+    expect(find.text('全部已读', skipOffstage: false), findsOneWidget,
+        reason: '全部已读恒显(不依赖页内未读数)');
     expect(poller.unreadCount, 0, reason: '全局红点同步减一');
   });
 

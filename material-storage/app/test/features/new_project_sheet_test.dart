@@ -236,27 +236,30 @@ void main() {
       expect(projectCreateFailCopy(e), isNot(contains('登录名')));
     });
 
-    test('username_taken 预检:409 对象 detail(to String 含码)→ 登录名引导', () {
-      // 后端对象 detail 经 extractDetail 退化 toString,形如
-      // `{code: username_taken, username: evan}`(projects.py :262-266)
+    test('username_taken 预检:409 对象 detail 渲染 code token → 登录名引导', () {
+      // B9 起对象型 detail 经 extractDetail 渲染为友好文案:无 message 字段时
+      // 只保留 code token(projects.py :262-266;归因判据走 raw 兜底)
       final msg = extractDetail(const {
         'detail': {'code': 'username_taken', 'username': 'evan'},
       }, 'fallback');
+      expect(msg, 'username_taken');
       final copy = projectCreateFailCopy(ApiException(409, msg));
       expect(copy, contains('登录名已被占用'));
       expect(copy, contains('更换登录名'));
       expect(copy, isNot(contains('项目已创建')), reason: '预检阶段项目未建');
     });
 
-    test('竞态 409(对象 detail 含 project_id)→ 项目已建/艺人未建引导', () {
-      final msg = extractDetail(const {
-        'detail': {
-          'code': 'username_taken',
-          'username': 'evan',
-          'project_id': 'p1',
-        },
-      }, 'fallback');
-      final copy = projectCreateFailCopy(ApiException(409, msg));
+    test('竞态 409(raw detail 含 project_id)→ 项目已建/艺人未建引导', () {
+      // B9:project_id 归因判据改读 ApiException.raw(渲染文案只留 code token,
+      // 不再携带结构化字段名)
+      final copy = projectCreateFailCopy(ApiException(409, 'username_taken',
+          raw: const {
+            'detail': {
+              'code': 'username_taken',
+              'username': 'evan',
+              'project_id': 'p1',
+            },
+          }));
       expect(copy, contains('项目已创建'));
       expect(copy, contains('艺人账号未能建立'));
     });

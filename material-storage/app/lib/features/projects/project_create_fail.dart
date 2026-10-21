@@ -5,17 +5,25 @@ library;
 
 import '../../core/api/ms_api.dart';
 
-/// 创建失败文案归因(P1-1:web NewProjectModal 三分口径,勿按状态码一刀切)。
-/// 后端 409 两语义:detail 字符串「项目 code 已存在」(projects.py code 冲突)
-/// 与结构化 {code: username_taken[, project_id]}(预检零副作用段 / 竞态
-/// rollback 重抛带 project_id,残留态=项目已建+艺人未建);500 为艺人段或
-/// 项目段异常(密码未返回)。对象 detail 经 extractDetail 退化 toString,
-/// 按子串收窄判定。纯函数,便于单测。
+/// B9 起对象型 detail 经 extractDetail 渲染为友好文案(无 message/code 字段
+/// 的结构化体只保留 code token),`project_id` 归因判据改读 [ApiException.raw]
+/// 原始响应体(文本子串 contains 作为旧口径兜底)。
+/// 归因三分口径(P1-1,web NewProjectModal 同源,勿按状态码一刀切):
+/// 后端 409 两语义=detail 字符串「项目 code 已存在」(code 冲突)与结构化
+/// {code: username_taken[, project_id]}(预检零副作用段 / 竞态 rollback 重抛
+/// 带 project_id,残留态=项目已建+艺人未建);500 为艺人段或项目段异常
+/// (密码未返回)。纯函数,便于单测。
 String projectCreateFailCopy(ApiException e) {
   if (e.status == 409) {
     if (e.message.contains('username_taken')) {
       // 结构化 409(登录名冲突):按 detail.project_id 区分两种残留态
-      return e.message.contains('project_id')
+      // (raw=err() 存的整个响应体,兼容直接传 detail 体)
+      final raw = e.raw;
+      final detail = raw is Map ? (raw['detail'] ?? raw) : null;
+      final hasProjectId =
+          (detail is Map && detail['project_id'] != null) ||
+              e.message.contains('project_id');
+      return hasProjectId
           ? '项目已创建,但艺人账号未能建立(登录名刚被占用);可联系管理员在后台'
               '开通账号后在项目成员中添加;或由管理员删除该项目后用新登录名重建'
           : '登录名已被占用;若该艺人此前已开通请勿重复开通(可联系管理员将其加入'

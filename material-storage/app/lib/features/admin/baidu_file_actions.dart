@@ -1,7 +1,9 @@
-/// 百度任务文件级三操作入口判定与确认文案(B8 功能点 7;web BaiduTaskDetail
-/// 处置手册语义移动版):key_conflict 失败行分流为【覆盖导入】【随机后缀导入】
-/// (原样重试必然再撞同一冲突);普通失败行走【重试】,non_retryable 置灰
-/// (结构性失败重试无法自愈)。端点=用户侧 /backup/tasks/{id}/files/{fid}/*。
+/// 百度任务文件级三操作入口判定与确认文案(B8 功能点 7;B9 起域中立复用:
+/// admin 明细行与用户侧 manifest 行经 BaiduFileOpRow 最小契约共用本文件,
+/// web BaiduTaskDetail 处置手册语义移动版):key_conflict 失败行分流为
+/// 【覆盖导入】【随机后缀导入】(原样重试必然再撞同一冲突);普通失败行走
+/// 【重试】,non_retryable 置灰(结构性失败重试无法自愈)。端点=用户侧
+/// /backup/tasks/{id}/files/{fid}/*,默认经 AdminBaiduApi,用户页注入 invoke。
 library;
 
 import 'package:flutter/material.dart';
@@ -35,18 +37,21 @@ class FileActionPlan {
   bool get hasAny => canRetry || canOverwrite || canResolveConflict;
 }
 
-FileActionPlan fileActionPlan(AdminBaiduTask task, AdminBaiduTaskFile row) {
+/// 域中立判定(用户侧/明细页共用):taskStatus=任务当前状态。
+FileActionPlan fileRowActionPlan(String taskStatus, BaiduFileOpRow row) {
   final isKeyConflict = row.isKeyConflict;
-  final taskResolvable =
-      task.status == 'failed' || task.status == 'completed';
+  final taskResolvable = taskStatus == 'failed' || taskStatus == 'completed';
   return FileActionPlan(
-    canRetry: task.status == 'failed' &&
-        row.status == 'failed' &&
-        !isKeyConflict,
+    canRetry:
+        taskStatus == 'failed' && row.status == 'failed' && !isKeyConflict,
     canOverwrite: taskResolvable && row.status == 'skipped_exists',
     canResolveConflict: isKeyConflict && taskResolvable,
   );
 }
+
+/// admin 明细行口径(B8 调用面不变)。
+FileActionPlan fileActionPlan(AdminBaiduTask task, AdminBaiduTaskFile row) =>
+    fileRowActionPlan(task.status, row);
 
 /// 文件级三操作归属者闸门(P2-4):三端点挂用户侧 _own_task 守门,admin 仅对
 /// 本人任务可操作、他人任务必 404;UI 渲染操作前先比对任务归属者与当前登录者,
@@ -80,8 +85,7 @@ List<String>? keyConflictHolders(String? lastError) {
 }
 
 /// 行操作确认文案(标题, 内容):key_conflict 行点名将被删除的占用者文件。
-(String, String) confirmText(
-    AdminBaiduTaskFile row, FileActionPlan plan) {
+(String, String) confirmText(BaiduFileOpRow row, FileActionPlan plan) {
   if (plan.canResolveConflict) {
     final holders = keyConflictHolders(row.lastError);
     return (
@@ -107,13 +111,17 @@ const kNonRetryableTip = '结构性失败(路径/文件名超限等),重试无�
 
 /// 执行行操作(确认 → 调用户侧端点 → toast;404=非本人任务 / 409 状态或
 /// 准入不满足,detail 原样透传)。返回是否成功(调用方据此刷新明细)。
+/// [invoke] 缺省走 AdminBaiduApi(B8 admin 明细页);用户侧页(B9)注入
+/// BaiduApi 同端点封装,语义与路径一致。
 Future<bool> runFileAction(
   BuildContext context, {
-  required AdminBaiduTask task,
-  required AdminBaiduTaskFile row,
+  required String taskId,
+  required String taskStatus,
+  required BaiduFileOpRow row,
   required String action, // retry / overwrite / random-suffix
+  Future<void> Function(String action)? invoke,
 }) async {
-  final plan = fileActionPlan(task, row);
+  final plan = fileRowActionPlan(taskStatus, row);
   if (!plan.hasAny) return false;
   // 确认仅覆盖导入类破坏性操作(web Popconfirm 同口径);retry / random-suffix
   // 直发(web 同款——换 key 不删任何已有文件)
@@ -138,15 +146,21 @@ Future<bool> runFileAction(
     );
     if (ok != true || !context.mounted) return false;
   }
-  try {
-    switch (action) {
+  Future<void> call(String a) async {
+    final inv = invoke;
+    if (inv != null) return inv(a);
+    switch (a) {
       case 'retry':
-        await session.api!.adminBaidu.retryFile(task.id, row.id);
+        await session.api!.adminBaidu.retryFile(taskId, row.id);
       case 'overwrite':
-        await session.api!.adminBaidu.overwriteFile(task.id, row.id);
+        await session.api!.adminBaidu.overwriteFile(taskId, row.id);
       case 'random-suffix':
-        await session.api!.adminBaidu.randomSuffixFile(task.id, row.id);
+        await session.api!.adminBaidu.randomSuffixFile(taskId, row.id);
     }
+  }
+
+  try {
+    await call(action);
     if (!context.mounted) return true;
     ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('已提交,任务复活入队(清单准备中)')));
@@ -160,8 +174,9 @@ Future<bool> runFileAction(
     return false;
   } catch (e) {
     if (!context.mounted) return false;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('$e')));
+    // 传输层异常中文兜底(§4.1 勿渲染原始异常对象)
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(errorMessage(e, '操作失败,请稍后重试'))));
     return false;
   }
 }

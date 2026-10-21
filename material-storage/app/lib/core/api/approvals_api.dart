@@ -1,9 +1,9 @@
 /// ApprovalsApi — POST /api/v1/approvals 薄封装(B5 申请权限;契约
 /// api/app/routers/approvals.py + models ApprovalCreateIn)。
 /// action 枚举实况仅 download|access(**后端无「编辑」动作**);duration_seconds
-/// ge=60(仅 download 必填,access 可空=永久);reason 4~2000 字,422/400
-/// detail 由 [MsApi.err] 透传;**5xx 不经 guard5xx**:DioException.badResponse
-/// 原样上抛,调用方 catch 渲染;全 API 层 5xx 统一兜底=已知技术债,B9 收尾批处理。
+/// ge=60(仅 download 必填,access 可空=永久);reason 4~2000 字,422/400/5xx
+/// detail 由 [MsApi.err] 透传(B9 起 validateStatus 全放行,5xx 同走中文
+/// fallback 路径,全 API 层统一兜底已收口)。
 library;
 
 import 'ms_api.dart';

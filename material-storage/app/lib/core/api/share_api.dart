@@ -1,9 +1,8 @@
 /// ShareApi — /api/v1/share 族薄封装(B5 分享;契约 api/app/routers/share.py)。
 /// ShareCreateIn 实况:expires_in_seconds(默认 86400,60s~30 天)+ requires_login
 /// (默认 True);**无提取码/下载开关字段**,App requires_login 恒 true(web 硬编码)。
-/// 4xx detail 透传由 [MsApi.err] 渲染;**5xx 不经 guard5xx**:DioException.
-/// badResponse 原样上抛,调用方 catch 渲染;全 API 层 5xx 统一兜底=已知技术债,
-/// B9 收尾批处理。
+/// 4xx/5xx detail 透传由 [MsApi.err] 渲染(B9 起 validateStatus 全放行,5xx
+/// 同走 `_api.err` 中文 fallback 路径,全 API 层统一兜底已收口)。
 library;
 
 import '../../models/models.dart';

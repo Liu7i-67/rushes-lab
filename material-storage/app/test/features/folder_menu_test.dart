@@ -66,6 +66,10 @@ void main() {
     expect(enabledOf(tester, '授权管理'), isTrue, reason: '普通一级夹→grants 入口');
     expect(enabledOf(tester, '删除'), isTrue);
     expect(find.text('邀请管理'), findsNothing, reason: '敏感夹才有邀请入口');
+    // B9 P2-4 定稿(qplan 口径「项目内发起位=my_can_admin」):folder admin
+    // 可见可点发起请求链接
+    expect(enabledOf(tester, '请求链接'), isTrue,
+        reason: 'folder admin(my_can_admin=true)可见可点,勿置灰');
   });
 
   testWidgets('普通子夹仅 upload(无 admin):子夹/重命名/移动/删除可,授权管理不出现;'
@@ -84,6 +88,8 @@ void main() {
     expect(enabledOf(tester, '移动'), isTrue);
     expect(enabledOf(tester, '删除'), isTrue, reason: '普通夹删除=upload');
     expect(find.text('授权管理'), findsNothing, reason: '仅一级夹有 grants 入口');
+    expect(find.text('请求链接'), findsNothing,
+        reason: 'my_can_admin=false 完全不渲染(P2-4:勿置灰)');
   });
 
   testWidgets('敏感夹(admin):邀请管理入口出现,移动禁用;非 admin 删除禁用',
@@ -104,6 +110,8 @@ void main() {
     expect(enabledOf(tester, '重命名'), isTrue, reason: '敏感夹重命名=admin');
     expect(find.text('授权管理'), findsNothing, reason: '敏感夹无 grants 入口');
     expect(enabledOf(tester, '删除'), isTrue);
+    expect(enabledOf(tester, '请求链接'), isTrue,
+        reason: '敏感夹 admin 亦可见请求链接(target=sensitive_folder)');
   });
 
   testWidgets('删除空夹成功 → 失效 folders + 409 detail 透传(非空夹)',

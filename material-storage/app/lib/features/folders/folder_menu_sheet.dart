@@ -4,6 +4,8 @@
 /// 重命名 sensitive?admin:upload;移动=普通夹+upload(sensitive 源禁移动);
 /// 邀请管理仅敏感夹(admin);授权管理仅普通一级夹(admin);删除
 /// sensitive?admin:(upload||delete_grant);回收站 canSeeTrash(B5 实码平移)。
+/// 请求链接发起位(folder menu)=单夹详情 my_can_admin:P2-4 qplan 定稿口径
+/// 「项目内发起位=my_can_admin」——有权限可见可点,无权限完全不渲染(勿置灰)。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,6 +15,7 @@ import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../assets/trash_page.dart' show canSeeTrash;
+import '../share/request_link_sheet.dart';
 import 'folder_form_sheet.dart';
 import 'folder_grants_sheet.dart';
 import 'folder_invite_sheet.dart';
@@ -23,7 +26,8 @@ import 'move_folder_sheet.dart';
 /// 实况:新建子夹 my_can_upload;重命名 sensitive?admin:upload;移动=普通夹
 /// +upload(sensitive 源禁移动);邀请管理仅敏感夹(admin);授权管理仅普通
 /// 一级夹(admin);删除 sensitive?admin:(upload||delete_grant);
-/// 回收站 canSeeTrash(B5 实码平移)。
+/// 回收站 canSeeTrash(B5 实码平移)。请求链接=folder admin 可见
+/// (my_can_admin,无权限不渲染,勿置灰)。
 void showFolderMenu(BuildContext context, {required Folder folder}) {
   showModalBottomSheet<void>(
     context: context,
@@ -173,6 +177,25 @@ class _FolderMenuSheetState extends State<_FolderMenuSheet> {
                       onTap: () {
                         _close();
                         showFolderGrantsSheet(context, folder: d);
+                      },
+                    ),
+                  // B9 §8.11 请求链接(P2-4 qplan 定稿:项目内发起位=
+                  // 单夹详情 my_can_admin,数据源即本 FutureBuilder 已拉的
+                  // get_folder 回填,可得性无虞):有权限可见可点发起;
+                  // 无权限/未知=完全不渲染(勿置灰)。敏感夹
+                  // target=sensitive_folder 可申请 access。
+                  if (d.myCanAdmin ?? false)
+                    _actionTile(
+                      icon: Icons.link_outlined,
+                      title: '请求链接',
+                      enabled: true,
+                      onTap: () {
+                        _close();
+                        showRequestLinkSheet(context,
+                            targetType:
+                                d.isSensitive ? 'sensitive_folder' : 'folder',
+                            targetId: d.id,
+                            targetLabel: d.name);
                       },
                     ),
                   _actionTile(

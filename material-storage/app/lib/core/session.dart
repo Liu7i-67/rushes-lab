@@ -76,6 +76,13 @@ class Session extends ChangeNotifier {
   bool _probing = false;
   final _expiredGate = SingleFlightGate(const Duration(seconds: 1));
 
+  /// Me 缓存标脏(B9 遗留清偿):改密成功但紧随的 me() 刷新失败时置 true——
+  /// 缓存里的 must_change_password 已不可信,下次 [restore] 强制重拉兜底,
+  /// 成功即清。观察入口 [meStale] 供测试。
+  bool _meStale = false;
+
+  bool get meStale => _meStale;
+
   /// 会话清空钩子(B2 遗留解耦:core 不再 import features——缩略图 URL 缓存
   /// 等特性侧资源经此挂清理回调,main.dart 注册,logout/401 统一触发)。
   final _clearHooks = <void Function()>[];
@@ -137,9 +144,11 @@ class Session extends ChangeNotifier {
   }
 
   /// cookie 会话恢复(重启免登录);失败=未登录,属正常态。
+  /// 标脏时强制重拉(改密后刷新失败缓存的 must_change_password 不可信)。
   Future<Me?> restore() async {
     try {
       me = await api!.auth.me();
+      _meStale = false;
     } catch (_) {
       me = null;
     }
@@ -150,17 +159,24 @@ class Session extends ChangeNotifier {
   Future<Me> login(String username, String password) async {
     final m = await api!.auth.login(username, password);
     me = m;
+    _meStale = false; // 登录响应即新鲜 Me,标脏态一并解除
     notifyListeners();
     return m;
   }
 
   /// 改密成功后刷新 Me(must_change_password 置否,cookie 会话不失效)。
+  /// 刷新失败不吞(B9 遗留清偿):日志留痕 + 会话标脏,下次 [restore] 强制
+  /// 重拉兜底;改密本身已生效,此处失败不向调用方报错(页面语义=改密成功)。
   Future<void> changePassword(String oldPassword, String newPassword) async {
     await api!.auth.changePassword(
         oldPassword: oldPassword, newPassword: newPassword);
     try {
       me = await api!.auth.me();
-    } catch (_) {}
+      _meStale = false;
+    } catch (e) {
+      AppLog.error('session', '改密成功但刷新 Me 失败(缓存标脏,下次访问兜底)', e);
+      _meStale = true;
+    }
     notifyListeners();
   }
 

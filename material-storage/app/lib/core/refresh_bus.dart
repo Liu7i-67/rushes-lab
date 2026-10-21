@@ -4,10 +4,11 @@
 /// 的页面收到回调后自行 reload——解决 IndexedStack 常驻页(项目 tab)与常驻态
 /// 列表挂陈旧数据的问题。scope 命名约定:`projects` / `folders` / `assets:<folderId>`。
 ///
-/// 当前订阅现状(B2 修复 P2-5 如实注):仅 `projects` / `folders` 两 scope 有订阅方
-/// (项目 tab 常驻 + folders 子树计数重拉);`assets:<folderId>` 现仅失效无订阅方
-/// ——宫格页进出即整拉,不挂常驻监听,scope 属预留(B4 批量操作点亮时消费)。
-/// 纯回调注册表,无框架依赖,可单测。
+/// 当前订阅现状(B9 P2-3 修后如实注):`projects` / `folders` / `baidu-tasks`
+/// 三 scope 有订阅方(项目 tab 常驻 + folders 子树计数重拉 + 网盘备份页任务
+/// 列表刷新);`assets:<folderId>` 现仅失效无订阅方——宫格页进出即整拉,不挂
+/// 常驻监听,scope 属预留(B4 批量操作点亮时消费)。纯回调注册表,无框架
+/// 依赖,可单测。
 library;
 
 import 'dart:ui' show VoidCallback;

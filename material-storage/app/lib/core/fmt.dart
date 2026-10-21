@@ -24,3 +24,14 @@ String fmtIsoShort(String iso) {
       '${t.day.toString().padLeft(2, '0')} '
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
+
+/// ETA 人类可读(web fmtEta 同口径;B9 P2-6 收敛为单一实现——网盘备份任务
+/// 详情页与列表卡共用,勿再各自内联)。
+String fmtEtaShort(int seconds) {
+  if (seconds < 60) return '不足 1 分钟';
+  final m = (seconds / 60).round();
+  if (m < 60) return '约 $m 分钟';
+  final h = m ~/ 60;
+  final rm = m % 60;
+  return rm == 0 ? '约 $h 小时' : '约 $h 小时 $rm 分';
+}

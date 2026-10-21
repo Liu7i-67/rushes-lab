@@ -81,7 +81,9 @@ void main() {
     await drain();
     expect(leaked, isNull, reason: '同步异常不得炸穿入队方');
     expect(q.byId(q.tasks.single.id)!.status, TransferStatus.failed);
-    expect(q.tasks.single.error, contains('同步抛'));
+    // P2-5:非 ApiException 异常统一中文兜底,不再裸渲染英文异常对象文案
+    expect(q.tasks.single.error, '传输失败,请稍后重试',
+        reason: 'StateError 等传输层异常落中文兜底(无英文异常字样)');
     // 队列状态机未破:后续任务正常跑满生命周期
     final ok = q.enqueue(req('ok', worker: (p, t) async {}));
     await drain();

@@ -3,6 +3,8 @@
 /// 聚合列 enumerating 阶段为 NULL → 序列化统一 0 兜底,模型直接吃 int。
 library;
 
+import 'baidu_task.dart' show BaiduFileOpRow;
+
 /// 任务所属用户(username 可空:飞书老账号无本地用户名)。
 class AdminTaskUser {
   AdminTaskUser({required this.id, required this.username, required this.name});
@@ -211,8 +213,10 @@ class AdminBaiduTasksPage {
   final int total;
 }
 
-/// AdminBaiduTaskFileOut(文件明细行;last_error 已截 200)。
-class AdminBaiduTaskFile {
+/// AdminBaiduTaskFileOut(文件明细行;last_error 已截 200)。extends
+/// BaiduFileOpRow(B9:与用户侧 manifest 行共用文件级三操作判定/文案/执行链,
+/// isKeyConflict 判定继承同源)。
+class AdminBaiduTaskFile extends BaiduFileOpRow {
   AdminBaiduTaskFile({
     required this.id,
     required this.sourcePath,
@@ -240,21 +244,20 @@ class AdminBaiduTaskFile {
         updatedAt: (j['updated_at'] ?? '') as String,
       );
 
+  @override
   final String id;
   final String sourcePath;
   final String relPath;
+  @override
   final String status;
   final int bytesDone;
   final int attempts;
+  @override
   final bool nonRetryable;
+  @override
   final String? lastError;
   final String? assetId;
   final String updatedAt;
-
-  /// key_conflict 失败行(web isKeyConflictRow 同口径:last_error 以
-  /// `key_conflict:` 开头,后端 format_key_conflict_message F1 格式)。
-  bool get isKeyConflict =>
-      status == 'failed' && (lastError?.startsWith('key_conflict:') ?? false);
 }
 
 /// 文件明细分页(AdminBaiduTaskFilesPage;排序固定 rel_path, id)。
