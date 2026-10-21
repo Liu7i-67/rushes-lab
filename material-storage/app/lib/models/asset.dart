@@ -175,3 +175,30 @@ class AssetBatchMoveResult {
   final List<AssetBatchMoveSkip> skipped;
   final List<String> fgaPending;
 }
+
+/// GET /assets/search 行(B7 §8.8;SearchResultOut = AssetOut + 归属 enrich:
+/// folder_name / project_id / project_name)。asset 本体完整可复用
+/// (缩略图门槛 tags.thumbnail_key、预览跳转 folder_id 均在)。
+class SearchResult {
+  SearchResult({
+    required this.asset,
+    required this.folderName,
+    required this.projectId,
+    required this.projectName,
+  });
+
+  factory SearchResult.fromJson(Map<String, dynamic> j) => SearchResult(
+        asset: Asset.fromJson(j),
+        folderName: (j['folder_name'] ?? '') as String,
+        projectId: j['project_id'] as String,
+        projectName: (j['project_name'] ?? '') as String,
+      );
+
+  final Asset asset;
+  final String folderName;
+  final String projectId;
+  final String projectName;
+
+  /// 预览页路径段(下载任务归属显示)。
+  String get where => '$projectName/$folderName';
+}

@@ -1,11 +1,12 @@
-/// Badge — 徽标 pill 四色(accent/green/neutral/amber,§10)。
+/// Badge — 徽标 pill 五色(accent/green/neutral/amber/red,§10;red=B7
+/// 审批「已拒绝」补,web STATUS_META crimson 同源)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../theme/tokens.dart';
 
-enum BadgeTone { accent, green, neutral, amber }
+enum BadgeTone { accent, green, neutral, amber, red }
 
 class Badge extends StatelessWidget {
   const Badge({super.key, required this.label, this.tone = BadgeTone.neutral});
@@ -19,6 +20,7 @@ class Badge extends StatelessWidget {
       BadgeTone.accent => (Tk.accentStrong, Tk.accentFaint),
       BadgeTone.green => (Tk.green, Tk.green.withValues(alpha: 0.10)),
       BadgeTone.amber => (Tk.amber, Tk.amber.withValues(alpha: 0.10)),
+      BadgeTone.red => (Tk.red, Tk.red.withValues(alpha: 0.10)),
       BadgeTone.neutral => (Tk.muted, Tk.fill),
     };
     return Container(

@@ -19,9 +19,12 @@ final thumbnailCache = ThumbnailCache(signer: (assetId) async {
 });
 
 class ThumbnailImage extends StatefulWidget {
-  const ThumbnailImage({super.key, required this.asset});
+  const ThumbnailImage({super.key, required this.asset, this.fallbackIconSize});
 
   final Asset asset;
+
+  /// 降级色块图标边长(缺省 32;B7 搜索结果小格 48px 用 20 防 overflow)。
+  final double? fallbackIconSize;
 
   @override
   State<ThumbnailImage> createState() => _ThumbnailImageState();
@@ -54,6 +57,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
             filename: widget.asset.filename,
             contentType: widget.asset.contentType),
         filename: widget.asset.filename,
+        iconSize: widget.fallbackIconSize,
       );
 
   @override

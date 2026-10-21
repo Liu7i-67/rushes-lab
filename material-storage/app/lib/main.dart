@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import 'app.dart';
+import 'core/polling_controller.dart';
 import 'core/session.dart';
 import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
@@ -26,6 +27,10 @@ void main() {
   // 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
   // 特性侧缓存在此挂载,core 不再反向 import features)
   session.addSessionClearHook(thumbnailCache.clear);
+  // B7 通知未读轮询(§8.7 单一 PollingController):挂 App 生命周期 +
+  // Session 门控(登录/登出/401 清会话即经 syncGate 起停,仅前台+已登录才轮)
+  unreadPoller.attach();
+  session.addListener(unreadPoller.syncGate);
   // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
   // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
   AppLog.init();

@@ -14,12 +14,14 @@ import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 import '../../services/app_log.dart';
 import 'admin_templates_api.dart';
 import 'approvals_api.dart';
+import 'approvals_ops_api.dart';
 import 'assets_api.dart';
 import 'assets_ops_api.dart';
 import 'auth_api.dart';
 import 'baidu_api.dart';
 import 'folders_api.dart';
 import 'folders_ops_api.dart';
+import 'notifications_api.dart';
 import 'projects_api.dart';
 import 'projects_ops_api.dart';
 import 'share_api.dart';
@@ -59,6 +61,11 @@ String extractDetail(dynamic data, String fallback) {
   }
   return fallback;
 }
+
+/// 任意异常 → 用户可读文案(B7 共用):ApiException 透传后端 detail
+/// (403/409/422 透传钉子),网络/其余异常落中文 fallback。
+String errorMessage(Object e, String fallback) =>
+    e is ApiException ? e.message : fallback;
 
 class MsApi {
   MsApi({
@@ -147,6 +154,8 @@ class MsApi {
   late final baidu = BaiduApi(this);
   late final share = ShareApi(this);
   late final approvals = ApprovalsApi(this);
+  late final approvalsOps = ApprovalOpsApi(this); // B7:审批列表+决策
+  late final notifications = NotificationsApi(this); // B7:通知列表+已读
 
   InterceptorsWrapper _logInterceptor({bool withQuery = true}) =>
       InterceptorsWrapper(

@@ -8,10 +8,13 @@ import 'core/session.dart';
 import 'features/assets/assets_page.dart';
 import 'features/assets/trash_page.dart';
 import 'features/auth/change_password_page.dart';
+import 'features/approvals/approvals_page.dart';
 import 'features/auth/login_page.dart';
 import 'features/baidu/bind_code_page.dart';
+import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
+import 'features/permissions/my_permissions_page.dart';
 import 'features/projects/deleted_projects_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
@@ -69,6 +72,15 @@ class _MsAppState extends State<MsApp> {
             return MaterialPageRoute(
                 builder: (_) =>
                     TrashPage(folderId: a.$1, folderName: a.$2));
+          case '/approvals':
+            // B7:审批中心(scope=all&pending / scope=self 双段)
+            return MaterialPageRoute(builder: (_) => const ApprovalsPage());
+          case '/notifications':
+            // B7:通知中心(kind 白名单跳转)
+            return MaterialPageRoute(builder: (_) => const NotificationsPage());
+          case '/my-permissions':
+            // B7:我的权限(项目角色 + 已批准临时授权)
+            return MaterialPageRoute(builder: (_) => const MyPermissionsPage());
           case '/deleted-projects':
             // B6:已删除项目回收站(列表+恢复;入口闸门 is_project_deleter)
             return MaterialPageRoute(

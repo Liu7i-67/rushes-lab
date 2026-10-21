@@ -10,11 +10,16 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
+
 import 'package:ms_app/core/api/approvals_api.dart';
+import 'package:ms_app/core/api/approvals_ops_api.dart';
 import 'package:ms_app/core/api/assets_api.dart';
 import 'package:ms_app/core/api/assets_ops_api.dart';
 import 'package:ms_app/core/api/folders_api.dart';
 import 'package:ms_app/core/api/ms_api.dart';
+import 'package:ms_app/core/api/notifications_api.dart';
+import 'package:ms_app/core/api/projects_api.dart';
 import 'package:ms_app/core/api/share_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/models/models.dart';
@@ -165,6 +170,18 @@ class FakeAssetsApi extends AssetsApi {
   final deleteCalls = <String>[];
   Object? deleteStaged;
 
+  // B7:盲搜记录+桩(逐次排队;空则回 [])。
+  final searchCalls = <({String q, int limit})>[];
+  final searchStaged = <Object?>[];
+
+  @override
+  Future<List<SearchResult>> search(String q,
+      {int limit = 50, CancelToken? cancelToken}) async {
+    searchCalls.add((q: q, limit: limit));
+    final staged = searchStaged.isNotEmpty ? searchStaged.removeAt(0) : null;
+    return settleStaged(staged, const <SearchResult>[]);
+  }
+
   /// 按 assetId 精确编排(P2-6 部分失败用例);命中优先于全局 [deleteStaged]。
   final deleteStagedById = <String, Object?>{};
 
@@ -249,6 +266,125 @@ class FakeFoldersApi extends FoldersApi {
   }
 }
 
+/// B7:审批列表+决策假 API(对应 MsApi.approvalsOps)。list 记录
+/// (scope,status) 口径;决策记录 (id, approve, note) 且可挂异常测 403 透传。
+class FakeApprovalOpsApi extends ApprovalOpsApi {
+  FakeApprovalOpsApi(super.api);
+
+  final listCalls = <({String scope, String? status})>[];
+  final decideCalls = <({String id, bool approve, String? note})>[];
+  List<Approval> listResult = const [];
+  Object? decideStaged;
+
+  /// list 逐次排队编排(空则回 [listResult]):元素为 `List<Approval>` /
+  /// Exception / `Completer<List<Approval>>`(挂起该次响应,P2-3 代际用例
+  /// 「切段后放行旧段」编排)。与 searchStaged 同款队列语义。
+  List<Object?> listStaged = <Object?>[];
+
+  @override
+  Future<List<Approval>> list(
+      {String scope = 'self', String? status, int limit = 50, int offset = 0}) async {
+    listCalls.add((scope: scope, status: status));
+    final staged = listStaged.isNotEmpty ? listStaged.removeAt(0) : null;
+    if (staged is Completer<List<Approval>>) return staged.future;
+    return settleStaged(staged, listResult);
+  }
+
+  @override
+  Future<Approval> approve(String id, {String? decisionNote}) =>
+      _decide(id, approve: true, decisionNote: decisionNote);
+
+  @override
+  Future<Approval> reject(String id, {String? decisionNote}) =>
+      _decide(id, approve: false, decisionNote: decisionNote);
+
+  Future<Approval> _decide(String id,
+      {required bool approve, String? decisionNote}) async {
+    decideCalls.add((id: id, approve: approve, note: decisionNote));
+    if (decideStaged is Exception) throw decideStaged!;
+    return _approvalOf(id, approve);
+  }
+}
+
+Approval _approvalOf(String id, bool approved) => Approval(
+      id: id,
+      applicantUserId: 'u9',
+      targetType: 'asset',
+      targetId: 'a1',
+      action: 'download',
+      durationSeconds: 3600,
+      reason: '关单需要',
+      status: approved ? 'approved' : 'rejected',
+      createdAt: '2026-10-20T09:00:00Z',
+      requesterName: '申请人',
+    );
+
+/// B7:通知假 API(对应 MsApi.notifications)。
+class FakeNotificationsApi extends NotificationsApi {
+  FakeNotificationsApi(super.api);
+
+  final listCalls = <({int limit, int offset})>[];
+  final markReadCalls = <({List<String>? ids, bool all})>[];
+  NotificationsList listStaged =
+      NotificationsList(items: const [], total: 0, unreadCount: 0);
+  Object? markReadStaged;
+
+  @override
+  Future<NotificationsList> list({int limit = 50, int offset = 0}) async {
+    listCalls.add((limit: limit, offset: offset));
+    return listStaged;
+  }
+
+  @override
+  Future<int> markRead({List<String>? ids, bool all = false}) async {
+    markReadCalls.add((ids: ids, all: all));
+    if (markReadStaged is Exception) throw markReadStaged!;
+    // 模拟已读语义:listStaged 原地置已读 + unread_count 同步(badge 对账断言用)
+    final readAt = '2026-10-20T10:00:00Z';
+    final items = listStaged.items
+        .map((n) => (all || (ids ?? const []).contains(n.id))
+            ? NotificationItem(
+                id: n.id, kind: n.kind, title: n.title, body: n.body,
+                link: n.link, readAt: n.readAt ?? readAt, createdAt: n.createdAt)
+            : n)
+        .toList();
+    final unread = items.where((n) => n.readAt == null).length;
+    listStaged = NotificationsList(
+        items: items, total: listStaged.total, unreadCount: unread);
+    return ids?.length ?? listStaged.items.where((n) => n.readAt != null).length;
+  }
+}
+
+NotificationItem notificationOf(String id,
+        {String kind = 'approval_pending',
+        bool unread = true,
+        String? link}) =>
+    NotificationItem(
+      id: id,
+      kind: kind,
+      title: '标题$id',
+      body: '正文$id',
+      link: link,
+      readAt: unread ? null : '2026-10-20T09:00:00Z',
+      createdAt: '2026-10-20T09:00:00Z',
+    );
+
+/// B7:项目列表假 API(对应 MsApi.projects;通知 folder_invite 跳转反查
+/// 项目名/my_roles 用)。
+class FakeProjectsApi extends ProjectsApi {
+  FakeProjectsApi(super.api);
+
+  int listCalls = 0;
+  Object? listStaged;
+
+  @override
+  Future<List<Project>> list() async {
+    listCalls++;
+    if (listStaged is Exception) throw listStaged!;
+    return (listStaged as List<Project>?) ?? const [];
+  }
+}
+
 /// 装配并注入全局 session;测试收尾 `session.api = null`(addTearDown)。
 FakeMsApi installFakeApi() {
   final api = FakeMsApi();
@@ -268,6 +404,9 @@ class FakeMsApi extends MsApi {
   late final _projectsOps = FakeProjectOpsApi(this);
   late final _adminTemplates = FakeAdminTemplatesApi(this);
   late final _users = FakeUsersApi(this);
+  late final _approvalsOps = FakeApprovalOpsApi(this);
+  late final _notifications = FakeNotificationsApi(this);
+  late final _projects = FakeProjectsApi(this);
 
   @override
   FakeAssetsApi get assets => _assets;
@@ -295,4 +434,13 @@ class FakeMsApi extends MsApi {
 
   @override
   FakeUsersApi get users => _users;
+
+  @override
+  FakeApprovalOpsApi get approvalsOps => _approvalsOps;
+
+  @override
+  FakeNotificationsApi get notifications => _notifications;
+
+  @override
+  FakeProjectsApi get projects => _projects;
 }
