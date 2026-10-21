@@ -73,7 +73,8 @@ void main() {
         findsOneWidget);
   });
 
-  testWidgets('切 30 天档 → expires_in_seconds=2592000;复制链接进剪贴板',
+  testWidgets('切 30 天档 → expires_in_seconds=2592000;复制链接进剪贴板;'
+      '成功反馈=CopyButton 就地 ✓(R1:原 SnackBar 在 modal 态被遮挡,删除)',
       (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
@@ -100,7 +101,35 @@ void main() {
     await tester.tap(find.text('复制链接'));
     await tester.pump();
     expect(clipboard, 'https://ms.test/s/tok');
-    expect(find.text('链接已复制'), findsOneWidget);
+    // R1:成功=按钮图标就地切 ✓(无 SnackBar;1.5s 后回切)
+    expect(find.text('链接已复制'), findsNothing);
+    expect(find.byIcon(Icons.check), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 1600));
+    expect(find.byIcon(Icons.copy_outlined), findsOneWidget);
+  });
+
+  testWidgets('R1:复制失败降级保留——通道抛错弹「长按手动复制」SnackBar,'
+      '按钮不进反馈态', (tester) async {
+    installFakeApi();
+    addTearDown(() => session.api = null);
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') {
+        throw PlatformException(code: 'channel-error');
+      }
+      return null;
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(SystemChannels.platform, null));
+
+    await _pumpOpener(tester);
+    await tester.tap(find.text('生成分享链接'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('复制链接'));
+    await tester.pump();
+    expect(find.text('复制失败,请长按链接手动复制'), findsOneWidget);
+    expect(find.byIcon(Icons.check), findsNothing,
+        reason: '失败保持原图标,立即可重试');
   });
 
   testWidgets('403 detail 透传(无 can_download 时分享被后端拒绝),停留表单态',

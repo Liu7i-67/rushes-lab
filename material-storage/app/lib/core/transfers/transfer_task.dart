@@ -1,7 +1,8 @@
 /// TransferTask — 传输中心数据模型(方案 §7,B3 功能点 3)。
 ///
-/// 任务仅内存不持久化(杀 App 即清,与 web Uppy 刷新丢任务同语义,已定稿);
-/// 下载类型本批先入模型(B4 预览页下载钮点亮时接入队方)。
+/// mobile-ux-polish-2 R4c 起任务快照持久化(应用支持目录 transfers.json,
+/// 见 transfer_store.dart):终态记录跨进程保留展示,非终态恢复标「进程中断」;
+/// worker 闭包不入快照(源信息不可序列化),恢复记录重试降级为提示重新发起。
 library;
 
 import 'package:dio/dio.dart';

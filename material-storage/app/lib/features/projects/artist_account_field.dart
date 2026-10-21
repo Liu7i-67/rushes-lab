@@ -3,15 +3,17 @@
 /// 判定后挂载;登录名停顿 500ms 预检 GET /users/username-available(形状不合
 /// 法不打请求,防 422;预检异常静默,提交期 409 兜底);两项全空 = 纯项目创建。
 /// 结果面板:一次性初始密码回显可复制,仅此一次(F3-②)。
+/// R1:面板处于新建项目 sheet 内,复制反馈改 CopyButton 就地图标切换
+/// (SnackBar 被 sheet 遮挡不可见),登录名/初始密码两行就地生效。
 library;
 
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../core/session.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/copy_button.dart';
 
 /// 登录名字符集(users.py username-available / ArtistAccountIn 同款)。
 final RegExp kUsernamePattern = RegExp(r'^[a-zA-Z0-9._-]+$');
@@ -143,12 +145,6 @@ class ArtistResultView extends StatelessWidget {
   final String password;
   final VoidCallback onFinish;
 
-  void _copy(BuildContext context, String text, String label) {
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.maybeOf(context)
-        ?.showSnackBar(SnackBar(content: Text('$label已复制')));
-  }
-
   @override
   Widget build(BuildContext context) {
     return SafeArea(
@@ -188,11 +184,12 @@ class ArtistResultView extends StatelessWidget {
         child: Text(value,
             style: const TextStyle(fontSize: 13.5, fontFamily: 'monospace')),
       ),
-      IconButton(
-        visualDensity: VisualDensity.compact,
-        icon: const Icon(Icons.copy, size: 16),
+      // R1:每行独立 CopyButton,成功就地名变 ✓(原「已复制」SnackBar 删除)
+      CopyButton(
+        text: value,
         tooltip: '复制$label',
-        onPressed: () => _copy(context, value, label),
+        iconSize: 16,
+        visualDensity: VisualDensity.compact,
       ),
     ]);
   }

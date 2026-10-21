@@ -1,20 +1,28 @@
-/// Notifier — 传输完成系统级本地通知(mobile-ux-polish P8)。
+/// Notifier — 传输完成系统级本地通知(mobile-ux-polish P8)+ 通知权限可达
+/// (mobile-ux-polish-2 R4a)。
 ///
 /// 口径(用户拍板):**后台(生命周期非 resumed)才发系统通知,前台维持应用内
 /// SnackBar/无提示现状**;同窗口多条终态聚合为一条汇总(防批量 99 张逐条轰炸,
 /// 短窗口 ~3s);通知权限**首次建传输任务时**才请求(app 启动不弹,幂等)。
+/// R4a:请求结果消费入内存(被拒不再全链路静默),请求后仍被拒 → 弹一次中文
+/// 引导框(标题「开启系统通知」,「去设置」跳应用详情设置页,会话内至多一次);
+/// 「我的」页「传输通知」状态行经 [queryPermission] 实时查询。
 ///
 /// 降级哲学(与 AppLog 同款):插件初始化/权限/发送任何一步失败都静默,系统
 /// 通知整体不可用只损失「后台感知」,不影响业务流。单测注入 sink/schedule/
-/// gate/permission,零平台通道、零真实等待。
+/// gate/permission/guide/queryPermission,零平台通道、零真实等待。
 library;
 
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
+import 'package:flutter/material.dart' show AlertDialog, BuildContext, FilledButton, Navigator, Text, TextButton, showDialog;
 import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:photo_manager/photo_manager.dart' show PhotoManager;
+import 'package:url_launcher/url_launcher.dart' show LaunchMode, launchUrl;
 
+import '../core/session.dart' show session;
 import '../core/transfers/transfer_task.dart' show TransferKind;
 import 'app_log.dart';
 
@@ -133,10 +141,6 @@ class Notifier {
 
   Notifier._();
 
-  /// 测试构造:注入聚合批(自带 sink/gate/schedule)与权限桩,零平台通道。
-  @visibleForTesting
-  Notifier.test({required this._batcher, this._permission});
-
   /// Android 通知渠道(传输完成)。
   static const _channelId = 'ms_transfers';
   static const _channelName = '传输完成';
@@ -148,8 +152,14 @@ class Notifier {
   /// taskFinished/ensurePermission 直接 no-op,业务流零感知)。
   TransferNotifyBatcher? _batcher;
 
-  /// 权限请求实现(注入点;null=真实平台通道)。
-  Future<void> Function()? _permission;
+  /// 权限请求实现(注入点;null=真实平台通道;返回 null=系统未给结论)。
+  Future<bool?> Function()? _permission;
+
+  /// 授权态查询实现(注入点;null=真实平台通道)。
+  Future<bool> Function()? _queryPermission;
+
+  /// 被拒引导实现(注入点;null=真实弹窗)。
+  Future<void> Function()? _guide;
 
   /// 本会话已请求过权限(幂等:至多请求一次;系统侧「未决才弹」由 OS 保证)。
   var _permissionAsked = false;
@@ -157,7 +167,33 @@ class Notifier {
   @visibleForTesting
   bool get permissionAsked => _permissionAsked;
 
+  /// R4a:最近一次请求的授权态(null=未请求/请求链路失败——失败 ≠ 拒绝,
+  /// 不据此弹引导);「请求后仍被拒 → 引导一次」以此判定。
+  bool? _permissionGranted;
+
+  @visibleForTesting
+  bool? get permissionGranted => _permissionGranted;
+
+  /// R4a:被拒引导本会话是否已弹过(至多一次,防骚扰)。
+  @visibleForTesting
+  bool get guideShown => _guideShown;
+  var _guideShown = false;
+
   var _notifyId = 0;
+
+  /// 测试构造:注入聚合批(自带 sink/gate/schedule)与权限/引导/查询桩,
+  /// 零平台通道。
+  @visibleForTesting
+  Notifier.test({
+    required this._batcher,
+    Future<bool?> Function()? permission,
+    Future<bool> Function()? queryPermission,
+    Future<void> Function()? guide,
+  }) {
+    _permission = permission;
+    _queryPermission = queryPermission;
+    _guide = guide;
+  }
 
   /// main 挂接一次:插件初始化 + Android 渠道创建。iOS 侧启动**不弹**权限
   /// (Darwin 初始化全 false),权限统一在 [ensurePermission](首次入队)。
@@ -193,27 +229,109 @@ class Notifier {
   }
 
   /// 通知权限(Android 13+ 运行时权限 / iOS 授权):幂等,本会话至多请求一次;
-  /// 首次建传输任务时调用(不在 app 启动即弹)。失败静默——无权限只损失后台
-  /// 通知,不影响业务流。
+  /// 首次建传输任务时调用(不在 app 启动即弹)。
+  /// R4a:消费请求结果记入 [permissionGranted];**请求后仍被拒 → 弹一次中文
+  /// 引导框**(标题「开启系统通知」,「去设置」跳应用详情设置页,会话内至多
+  /// 一次,已授权不弹);请求链路失败 ≠ 拒绝,静默降级不弹引导——无权限只损失
+  /// 后台通知,不影响业务流。
   Future<void> ensurePermission() async {
     if (_permissionAsked || _batcher == null) return;
     _permissionAsked = true;
+    bool? granted;
     try {
       final injected = _permission;
-      if (injected != null) {
-        await injected();
-        return;
-      }
-      await _plugin
-          .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.requestNotificationsPermission();
-      await _plugin
-          .resolvePlatformSpecificImplementation<
-              IOSFlutterLocalNotificationsPlugin>()
-          ?.requestPermissions(alert: true, badge: true, sound: true);
+      granted = injected != null
+          ? await injected()
+          : await _requestRealPermission();
     } catch (e) {
       AppLog.error('notifier', '通知权限请求失败(静默降级,不影响任务)', e);
+      return; // 链路失败不视为拒绝,不弹引导
+    }
+    _permissionGranted = granted ?? true; // null=系统未给结论(<13/iOS)视为可用
+    if (!_permissionGranted!) {
+      _guideShown = true; // 会话内至多一次(注入桩与真实弹窗同口径记一次)
+      final guide = _guide;
+      if (guide != null) {
+        await guide();
+      } else {
+        await _showDeniedGuide();
+      }
+    }
+  }
+
+  /// 真实权限请求:Android 13+ 运行时权限(返回授权与否);Android <13 走
+  /// null(视为可用,系统本就不拦);iOS 请求 alert/badge/sound。
+  Future<bool?> _requestRealPermission() async {
+    final android = _plugin.resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin>();
+    if (android != null) return android.requestNotificationsPermission();
+    final granted = await _plugin
+        .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin>()
+        ?.requestPermissions(alert: true, badge: true, sound: true);
+    return granted;
+  }
+
+  /// R4a:被拒引导(会话内至多一次)。经全局 navigator 挂弹窗(队列收尾侧
+  /// 无 BuildContext);无 navigator(极早期)静默放弃——_permissionAsked 已挡
+  /// 重入,本会话不再弹。
+  Future<void> _showDeniedGuide() async {
+    if (_guideShown) return;
+    _guideShown = true;
+    final ctx = session.navigatorKey.currentState?.context;
+    if (ctx == null || !ctx.mounted) return;
+    await showNotificationGuideDialog(ctx);
+  }
+
+  /// R4a:通知权限被拒的中文引导框(标题「开启系统通知」;正文说明后台传输
+  /// 完成提醒用途;「去设置」跳应用详情设置页 + 「取消」)。独立公开便于
+  /// widget 测试钉文案。
+  @visibleForTesting
+  Future<void> showNotificationGuideDialog(BuildContext context) {
+    return showDialog<void>(
+      context: context,
+      builder: (dialogCtx) => AlertDialog(
+        title: const Text('开启系统通知'),
+        content: const Text(
+            '后台上传/下载完成后,需要系统通知权限才能收到完成提醒。'
+            '建议开启,避免错过传输结果。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogCtx).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.of(dialogCtx).pop();
+              openNotificationSettings();
+            },
+            child: const Text('去设置'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// R4a:查询系统通知授权态(「我的」页「传输通知」状态行实时查询):
+  /// Android areNotificationsEnabled(13+ 真实反映,<13 恒 true)/iOS
+  /// checkPermissions;插件不可用或查询失败恒返回 true(降级口径:查不出
+  /// 就不误报「未开启」)。
+  Future<bool> queryPermission() async {
+    final injected = _queryPermission;
+    if (injected != null) return injected();
+    try {
+      final android = _plugin.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      final enabled = await android?.areNotificationsEnabled();
+      if (enabled != null) return enabled;
+      final ios = await _plugin
+          .resolvePlatformSpecificImplementation<
+              IOSFlutterLocalNotificationsPlugin>()
+          ?.checkPermissions();
+      return ios?.isEnabled ?? true;
+    } catch (e) {
+      AppLog.error('notifier', '通知授权态查询失败,按已开启呈现', e);
+      return true;
     }
   }
 
@@ -255,4 +373,25 @@ class Notifier {
       AppLog.error('notifier', '通知发送失败:$title $body', e);
     }
   }
+}
+
+/// Android 应用包名(构建 applicationId;跳应用详情设置页用)。与 upload_pick
+/// 的 kAndroidAppPackage 同值——各自独立常量,避免 services→features 反向依赖。
+const kNotifierAndroidAppPackage = 'com.rushes.lab.tx';
+
+/// R4a:「去设置」跳应用详情设置页(一期 upload_pick.openAlbumPermissionSettings
+/// 同款:url_launcher 走 ACTION_VIEW+package: data,系统设置对该意图即应用详情
+/// 页;启动失败/异常回退 photo_manager 的 openSetting,同为应用设置页且 iOS 可用)。
+Future<void> openNotificationSettings() async {
+  try {
+    final launched = await launchUrl(
+      Uri.parse('package:$kNotifierAndroidAppPackage'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (launched) return;
+    AppLog.info('notifier', 'package: 意图未启动,回退 openSetting');
+  } catch (e) {
+    AppLog.error('notifier', '跳应用详情设置页失败,回退 openSetting', e);
+  }
+  await PhotoManager.openSetting();
 }

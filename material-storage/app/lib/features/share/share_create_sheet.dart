@@ -3,16 +3,18 @@
 /// 默认 24 小时);requires_login 恒 true 不做开关;**无提取码/下载开关**
 /// (ShareCreateIn 无此字段);创建 → 结果态=landing_url 复制 + 可选系统浏览器
 /// 打开 + 「访问需登录」提示(纯链接分享,#154)。
+/// R1:复制成功反馈改 CopyButton 就地图标切换(「链接已复制」SnackBar 删除,
+/// modal 态下本不可见);失败降级(引导长按手动复制)保留,经 onResult 触发。
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/api/share_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
+import '../../widgets/copy_button.dart';
 
 /// 打开分享面板;[kind]='asset'|'folder'(share.py 双端点同形)。
 Future<void> showShareSheet(
@@ -67,24 +69,17 @@ class _ShareSheetState extends State<_ShareSheet> {
     }
   }
 
-  Future<void> _copyLink() async {
-    final url = _result?.landingUrl;
-    if (url == null) return;
-    try {
-      await Clipboard.setData(ClipboardData(text: url));
+  /// R1:剪贴板写入由 CopyButton 组件自理;此处仅接结果——成功记业务日志,
+  /// 失败保留 web 同款降级语义(通道不可用时不静默吞,引导长按手动复制,
+  /// landing_url 已是 SelectableText 可长按全选)。
+  void _onCopyResult(bool ok) {
+    if (ok) {
       AppLog.info('share', '链接已复制:${widget.targetLabel}');
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text('链接已复制')));
-    } catch (_) {
-      // web 同款降级语义:剪贴板通道不可用(平台异常/权限拒绝)时不静默吞,
-      // 引导手动复制(landing_url 已是 SelectableText 可长按全选)
-      AppLog.error('share', '剪贴板复制失败:${widget.targetLabel}');
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          const SnackBar(content: Text('复制失败,请长按链接手动复制')));
+      return;
     }
+    AppLog.error('share', '剪贴板复制失败:${widget.targetLabel}');
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+        const SnackBar(content: Text('复制失败,请长按链接手动复制')));
   }
 
   Future<void> _openBrowser() async {
@@ -166,10 +161,12 @@ class _ShareSheetState extends State<_ShareSheet> {
       const SizedBox(height: 12),
       SizedBox(
         width: double.infinity,
-        child: FilledButton.icon(
-          onPressed: _copyLink,
-          icon: const Icon(Icons.copy_outlined),
-          label: const Text('复制链接'),
+        // R1:复制成功就地 ✓ 反馈(原成功 SnackBar 在 modal 态被本 sheet 遮挡)
+        child: CopyButton(
+          text: r.landingUrl,
+          label: '复制链接',
+          tooltip: '复制链接',
+          onResult: _onCopyResult,
         ),
       ),
       const SizedBox(height: 8),

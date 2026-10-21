@@ -36,6 +36,16 @@ dependencies:
   # flutter_local_notifications — P8 传输完成系统级通知(切后台/锁屏时上传下载
   #   终态发本地通知,channel ms_transfers「传输完成」;前台仍走 SnackBar 现状)
   flutter_local_notifications: ^22.3.2
+  # mobile-ux-polish-2 批新增(R4d,用途+批次):
+  # flutter_foreground_task — R4d 传输前台服务保活(队列存在 queued/running 任务
+  #   时启前台服务常驻通知「传输进行中」,提进程优先级防杀;全终态即停不留常驻;
+  #   channel ms_transfer_fg「传输进行中」与 P8 完成通知并存;仅 Android,iOS 跳过)
+  #   选型理由(定稿):① 只需「保活+常驻通知」,无需后台 isolate 通信/自绘 UI,
+  #   fft 的 init/startService/stopService 一对 API 接入面最小;② 自带独立通知
+  #   channel 配置,与 P8 channel 并存零冲突;③ 11.0.3 与本仓工具链(Flutter
+  #   3.47.7/Dart 3.13/AGP 9.1/Kotlin 2.4/Gradle 9.3.1)兼容。备选
+  #   flutter_background_service 需手写 service 配置与通信协议,接入成本更高。
+  flutter_foreground_task: ^11.0.3
 
 dev_dependencies:
   flutter_test:

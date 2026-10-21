@@ -8,6 +8,7 @@
 library;
 
 import 'dart:async';
+import 'dart:io' show Directory;
 
 import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
@@ -73,6 +74,10 @@ class Session extends ChangeNotifier {
   Me? me;
 
   CookieJar? _persistentJar;
+
+  /// cookie 落盘目录(R4b:restore 失败日志要核「目录是否存在」,存下路径
+  /// 供存在性检查;null=持久化未初始化或初始化失败)。
+  String? _cookieDirPath;
   bool _probing = false;
   final _expiredGate = SingleFlightGate(const Duration(seconds: 1));
 
@@ -149,7 +154,26 @@ class Session extends ChangeNotifier {
     try {
       me = await api!.auth.me();
       _meStale = false;
-    } catch (_) {
+    } catch (e) {
+      // R4b(mobile-ux-polish-2):恢复失败不再静默吞——日志留痕(异常、持久化
+      // jar 是否就绪、cookie 目录是否存在、statusCode 若可用),供企微日志推送
+      // 定位「切出重开要求重登」(最可能=冷启动恢复链路失败)。恢复语义不变:
+      // 失败仍 me=null 留登录页。
+      final jarReady = _persistentJar != null;
+      var cookieDirExists = false;
+      final dirPath = _cookieDirPath;
+      if (dirPath != null) {
+        try {
+          cookieDirExists = Directory(dirPath).existsSync();
+        } catch (_) {/* 目录状态查不出也照记日志 */}
+      }
+      final status = e is ApiException ? e.status : null;
+      AppLog.error(
+        'session',
+        '会话恢复失败(jar就绪=$jarReady, cookie目录存在=$cookieDirExists, '
+            'status=$status)',
+        e,
+      );
       me = null;
     }
     notifyListeners();
@@ -214,10 +238,15 @@ class Session extends ChangeNotifier {
     if (_persistentJar != null) return;
     try {
       final dir = await getApplicationSupportDirectory();
+      _cookieDirPath = '${dir.path}/.cookies';
       _persistentJar =
-          PersistCookieJar(storage: FileStorage('${dir.path}/.cookies'));
-    } catch (_) {
+          PersistCookieJar(storage: FileStorage(_cookieDirPath!));
+    } catch (e) {
+      // R4b:失败不再静默——插件通道失败是「重启要求重登」的候选根因之一,
+      // 留日志(降级语义不变:走内存 jar)。
       _persistentJar = null; // 走内存 jar
+      _cookieDirPath = null;
+      AppLog.error('session', 'cookie 持久化初始化失败,降级内存 jar(重启需重登)', e);
     }
   }
 

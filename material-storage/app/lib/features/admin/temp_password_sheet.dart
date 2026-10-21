@@ -1,11 +1,13 @@
 /// 一次性临时密码展示(B8;web TempPasswordModal 移动版,创建/重置共用):
 /// 「唯一一次展示」文案 + 密码本体 + 复制(不写日志/审计,关闭即不再持有)。
+/// R1:modal 态 SnackBar 被本 sheet 遮挡不可见,复制反馈改 CopyButton
+/// 就地图标切换(「已复制」SnackBar 删除)。
 library;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/copy_button.dart';
 
 /// 打开一次性临时密码展示。
 Future<void> showTempPasswordSheet(
@@ -58,17 +60,8 @@ class _TempPasswordSheet extends StatelessWidget {
                             letterSpacing: 1,
                             fontWeight: FontWeight.w600)),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.copy_outlined, size: 20),
-                    tooltip: '复制',
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: password));
-                      if (context.mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已复制')));
-                      }
-                    },
-                  ),
+                  // R1:复制反馈就地化(✓ 1.5s),替代被 sheet 遮挡的 SnackBar
+                  CopyButton(text: password, tooltip: '复制'),
                 ],
               ),
             ),
