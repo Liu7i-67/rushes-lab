@@ -22,12 +22,28 @@ import 'livp.dart';
 class AlbumService {
   static bool get isSupported => !kIsWeb && Platform.isIOS;
 
-  static Future<void> ensurePermission() async {
-    final state = await PhotoManager.requestPermissionExtend();
+  /// P2:相册权限核验,拒绝态不再抛 StateError——返回是否可进选图
+  /// (authorized/limited 都算过);false 由调用方弹中文引导对话框。
+  /// R2(mobile-ux-polish-2):显式传 AndroidPermission(type: RequestType.all)
+  /// ——与选图器内部请求口径一致(wechat_assets_picker 按 pickerConfig.requestType
+  /// 构造同一 option),系统授权弹窗一次展示「照片和视频 / 音乐和音频」全部
+  /// 权限组;此前默认 common(仅图+视频)与 picker 的 all 两次口径不一致,
+  /// Android 13 上 picker 内部请求含 audio 而 Manifest 未申明时直接 DENY。
+  /// mediaLocation 显式 false(与 picker 内部默认一致,不申明定位元数据)。
+  /// R2 PM 裁决:判定改 hasAccess(authorized||limited)——对齐本注释一期
+  /// 语义与「limited 路径正常」验收;此前 isAuth 仅认 authorized,Android 14+
+  /// partial(部分照片)归并 limited 会被误拒进不了选图(P2 潜在 bug)。
+  static Future<bool> ensurePermission() async {
+    final state = await PhotoManager.requestPermissionExtend(
+      requestOption: const PermissionRequestOption(
+        androidPermission: AndroidPermission(
+          type: RequestType.all,
+          mediaLocation: false,
+        ),
+      ),
+    );
     AppLog.info('album', '相册权限 state=$state');
-    if (!state.isAuth) {
-      throw StateError('未获相册权限(需「所有照片/有限」+「添加到照片」授权)');
-    }
+    return state.hasAccess;
   }
 
   /// 实况照片 → .livp 字节(静态帧 + 配对视频原文件直接 zip,零转码)。

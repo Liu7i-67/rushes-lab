@@ -34,40 +34,47 @@ class PreviewActions extends StatelessWidget {
   Widget build(BuildContext context) {
     final noDownload = canDownload == false; // 仅已知无权才亮申请入口
     final downloadEnabled = onDownload != null && !noDownload;
+    // P1(mobile-ux-polish):带色 Container 包 SafeArea(top:false)——darkSurface
+    // 背景延伸到虚拟导航栏区域,三钮不被遮挡;无导航栏设备视觉不变。
     return Container(
       color: Tk.darkSurface,
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-        children: [
-          _btn(
-            icon: Icons.download_outlined,
-            label: '下载',
-            tooltip: noDownload
-                ? '无下载权限 · 可申请'
-                : (downloadEnabled ? '下载到本机(相册 / Download/浣花视界)' : '后续版本开放'),
-            enabled: downloadEnabled,
-            onTap: downloadEnabled ? onDownload : null,
-            highlighted: noDownload, // 无下载权 →「申请权限」入口样式提示
+      child: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              _btn(
+                icon: Icons.download_outlined,
+                label: '下载',
+                tooltip: noDownload
+                    ? '无下载权限 · 可申请'
+                    : (downloadEnabled ? '下载到本机(相册 / Download/浣花视界)' : '后续版本开放'),
+                enabled: downloadEnabled,
+                onTap: downloadEnabled ? onDownload : null,
+                highlighted: noDownload, // 无下载权 →「申请权限」入口样式提示
+              ),
+              _btn(
+                icon: Icons.ios_share_outlined,
+                label: '分享',
+                tooltip: onShare == null ? '后续版本开放' : '分享链接(需登录访问)',
+                enabled: onShare != null,
+                onTap: onShare,
+              ),
+              _btn(
+                icon: Icons.verified_user_outlined,
+                label: '申请权限',
+                tooltip: noDownload
+                    ? '发起下载权限申请'
+                    : (canDownload == null ? '下载权未知 · 详情加载后可申请' : '已有下载权限,无需申请'),
+                enabled: noDownload && onRequest != null,
+                onTap: noDownload ? onRequest : null,
+                highlighted: noDownload,
+              ),
+            ],
           ),
-          _btn(
-            icon: Icons.ios_share_outlined,
-            label: '分享',
-            tooltip: onShare == null ? '后续版本开放' : '分享链接(需登录访问)',
-            enabled: onShare != null,
-            onTap: onShare,
-          ),
-          _btn(
-            icon: Icons.verified_user_outlined,
-            label: '申请权限',
-            tooltip: noDownload
-                ? '发起下载权限申请'
-                : (canDownload == null ? '下载权未知 · 详情加载后可申请' : '已有下载权限,无需申请'),
-            enabled: noDownload && onRequest != null,
-            onTap: noDownload ? onRequest : null,
-            highlighted: noDownload,
-          ),
-        ],
+        ),
       ),
     );
   }

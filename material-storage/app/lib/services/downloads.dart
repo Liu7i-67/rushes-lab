@@ -23,6 +23,7 @@ import '../models/models.dart';
 import 'app_log.dart';
 import 'download_savers.dart';
 import 'media_save.dart';
+import 'notifier.dart';
 
 export 'download_savers.dart'
     show
@@ -179,6 +180,13 @@ Future<void> runDownloadJob({
   temp.delete().ignore(); // 落盘成功后删临时(D1 双落盘共用一次下载)
   AppLog.info('download', '✓ ${asset.filename} → ${saveSummary(outcomes)}');
   channel.toast?.call('${asset.filename}:${saveSummary(outcomes)}');
+  // P8(mobile-ux-polish):后台时系统通知「下载完成」(保存摘要进正文;
+  // 前台维持 toast 现状,通知侧 gate 丢弃;同窗多任务由 Notifier 聚合)
+  Notifier.I.taskFinished(
+      kind: TransferKind.download,
+      ok: true,
+      filename: asset.filename,
+      detail: saveSummary(outcomes));
 }
 
 /// 入队一个下载任务(预览页/宫格批量共用;重试=同 worker 从头来)。

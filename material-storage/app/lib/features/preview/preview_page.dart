@@ -1,7 +1,8 @@
 /// PreviewPage — 预览页(B2 §8.2):暗色画布(#141210)+ 顶部 ‹n/N› + 胶片条
 /// (列表序列切张、边界即停)+ 底部元数据卡;B4 功能点 4①:下载钮点亮
 /// (入队 TransferQueue kind=download,落盘矩阵见 services/downloads.dart);
-/// B5 功能点 3/4:元数据卡「编辑」打标 + 分享/申请权限钮点亮。
+/// B5 功能点 3/4:元数据卡「编辑」打标 + 分享/申请权限钮点亮;
+/// P3(mobile-ux-polish):去顶部左右切换钮,单指横滑切张。
 library;
 
 import 'package:flutter/material.dart';
@@ -53,9 +54,42 @@ class _PreviewPageState extends State<PreviewPage> {
 
   Asset get _current => widget.args.items[_pager.index];
 
+  // P3(mobile-ux-polish):横滑切张的位移累计与放大态(PreviewMedia 回报)
+  var _swipeDx = 0.0;
+  var _mediaZoomed = false;
+
   void _go(bool forward) {
     final moved = forward ? _pager.next() : _pager.prev(); // 边界即停
-    if (moved) setState(() {});
+    if (moved) _onPageSwitched();
+  }
+
+  /// P1-1(测试实证缺陷修复):切张(横滑/胶片条跳张)统一复位横滑与缩放态。
+  /// 新 PreviewMedia 的 _zoomed 从 false 起步、不会再触发 onZoomChanged,若不
+  /// 清 _mediaZoomed,外层拖动回调保持置空,跳张后横滑永久失活(复现:放大
+  /// 图片张 → 胶片条跳非图片张 → 单指横滑不切页)。
+  void _onPageSwitched() {
+    _swipeDx = 0;
+    if (_mediaZoomed) {
+      setState(() => _mediaZoomed = false);
+    } else {
+      setState(() {});
+    }
+  }
+
+  /// P3 横滑切张(外层路):单指左滑→next/右滑→prev(位移或速度过阈值任一
+  /// 即触发,阈值口径与内层 InteractiveViewer 协作路一致);放大态不切
+  /// (双保险);边界即停由 pager 保证。图片分支的横滑被 InteractiveViewer
+  /// 的 scale 识别器持有,经 [PreviewMedia.onSwipe] 内层路上报,两路不双触发。
+  void _onSwipeEnd(DragEndDetails d) {
+    final dx = _swipeDx;
+    _swipeDx = 0;
+    if (_mediaZoomed) return;
+    final v = d.velocity.pixelsPerSecond.dx;
+    if (dx < -kSwipeDistanceThreshold || v < -kSwipeVelocityThreshold) {
+      _go(true);
+    } else if (dx > kSwipeDistanceThreshold || v > kSwipeVelocityThreshold) {
+      _go(false);
+    }
   }
 
   /// 下载当前张(B4 功能点 4①):入队即回(进度/取消/重试在传输页),
@@ -106,22 +140,12 @@ class _PreviewPageState extends State<PreviewPage> {
         foregroundColor: Colors.white,
         title: Row(
           children: [
-            if (multi) ...[
-              IconButton(
-                onPressed: _pager.canPrev ? () => _go(false) : null,
-                icon: const Icon(Icons.chevron_left),
-                tooltip: '上一个',
-              ),
+            // P3:去顶部左右切换钮(改横滑手势),保留 n / N 计数 + 文件名
+            if (multi)
               Text(
                 '${_pager.index + 1} / $total',
                 style: const TextStyle(fontSize: 13),
               ),
-              IconButton(
-                onPressed: _pager.canNext ? () => _go(true) : null,
-                icon: const Icon(Icons.chevron_right),
-                tooltip: '下一个',
-              ),
-            ],
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -137,17 +161,37 @@ class _PreviewPageState extends State<PreviewPage> {
       body: Column(
         children: [
           Expanded(
-            // 换 key 切张重建:预览态(视频/文本/失败卡)不串张(web 同哲学)
-            child: PreviewMedia(
-              key: ValueKey(_current.id),
-              asset: _current,
+            // P3:横滑切张挂 PreviewMedia 外层(视频/文档/失败卡等分支统一走
+            // 这条路;单指横滑外层 HorizontalDrag 识别器先于内层 scale 识别器
+            // 过 slop,arena 归外层)。放大态置空拖动回调(不注册识别器,不进
+            // arena)——单指拖动完整交给 InteractiveViewer 平移;双指捏合缩放
+            // 由内层 scale 识别器处理,不受影响。换 key 切张重建:预览态
+            // (视频/文本/失败卡)不串张。
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onHorizontalDragStart:
+                  _mediaZoomed ? null : (_) => _swipeDx = 0,
+              onHorizontalDragUpdate:
+                  _mediaZoomed ? null : (d) => _swipeDx += d.delta.dx,
+              onHorizontalDragEnd: _mediaZoomed ? null : _onSwipeEnd,
+              child: PreviewMedia(
+                key: ValueKey(_current.id),
+                asset: _current,
+                onSwipe: _go,
+                onZoomChanged: (z) {
+                  if (_mediaZoomed != z) setState(() => _mediaZoomed = z);
+                },
+              ),
             ),
           ),
           if (multi)
             Filmstrip(
               items: widget.args.items,
               index: _pager.index,
-              onSelect: (i) => setState(() => _pager.moveTo(i)),
+              onSelect: (i) {
+                _pager.moveTo(i);
+                _onPageSwitched(); // P1-1:跳张同走切张收口,复位缩放态
+              },
             ),
           MetaPanel(asset: _current, onEdit: _editMeta),
           PreviewActions(

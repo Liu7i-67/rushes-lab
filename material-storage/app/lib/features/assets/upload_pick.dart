@@ -3,14 +3,21 @@
 /// 入队与纯函数主体仍在 upload_sheet.dart(enqueueLocalUpload/enqueueBatch)。
 library;
 
+import 'dart:async' show Completer, Timer;
+import 'dart:io' show Platform;
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 import '../../services/album.dart';
 import '../../services/app_log.dart';
 import '../../services/livp.dart';
 import 'upload_sheet.dart';
+
+/// P2:相册权限被拒引导对话框的用户动作。
+enum AlbumPermissionAction { openSettings, retry }
 
 /// 打开统一上传面板(宫格页两入口共用)。
 Future<void> showUploadSheet(
@@ -68,24 +75,144 @@ Future<void> _pickFromAlbum(
   sayToast(context, batchSummary(enqueued, skipped));
 }
 
+/// P2 权限引导循环(拒绝态不再抛 StateError):授权/limited 返回 true;
+/// 用户取消/关闭或「去设置」超时未回前台返回 false(均不算上传)。
+/// 循环语义:未授权 → 弹中文引导 → Android「去设置」跳系统页,等回前台
+/// (resumed)再续判——授权返回→直接进选图;未授权返回→再弹引导。
+/// [checkPermission]/[openSettings]/[waitResume] 注入供单测编排(生产用
+/// AlbumService / 系统设置跳转 / AppLifecycle resumed 等待的默认实现)。
+@visibleForTesting
+Future<bool> ensureAlbumPermissionGuided(
+  BuildContext context, {
+  bool? isAndroid,
+  Future<bool> Function()? checkPermission,
+  Future<void> Function()? openSettings,
+  Future<bool> Function()? waitResume,
+}) async {
+  while (true) {
+    if (await (checkPermission?.call() ?? AlbumService.ensurePermission())) {
+      return true;
+    }
+    if (!context.mounted) return false;
+    final action =
+        await showAlbumPermissionDialog(context, isAndroid: isAndroid);
+    if (action == null) return false; // 取消/关闭:不算上传
+    if (action == AlbumPermissionAction.openSettings) {
+      await (openSettings?.call() ?? openAlbumPermissionSettings());
+      // P2-1:launchUrl 毫秒级返回,若立刻重判会在用户仍停留系统设置页时
+      // 弹出陈旧引导框(授权返回反而要再点一次取消)。等回前台(resumed)
+      // 才续判;超时未回前台放弃本次(下次点上传重走完整流程)。
+      if (!await (waitResume?.call() ?? waitForAppResume())) return false;
+    }
+  }
+}
+
 /// 相册权限+选择器(用户取消返回 null;选择器/权限失败 toast 后返回 null,
 /// 不与逐项入队失败混为一谈)。
+/// P2:拒绝态不再抛 StateError——经 [ensureAlbumPermissionGuided] 中文引导
+/// 循环;其余异常仍走通用「相册选择失败」toast。
 Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
   try {
-    await AlbumService.ensurePermission();
+    if (!await ensureAlbumPermissionGuided(context)) return null;
     if (!context.mounted) return null;
-    return await AssetPicker.pickAssets(
-      context,
-      pickerConfig: AssetPickerConfig(
-        requestType: RequestType.all,
-        maxAssets: 99,
-      ),
-    );
+    return await AssetPicker.pickAssets(context, pickerConfig: albumPickerConfig());
   } catch (e) {
     AppLog.error('upload', '相册选择失败', e);
     if (context.mounted) sayToast(context, '相册选择失败:$e');
     return null;
   }
+}
+
+/// P2:选图配置——wechat_assets_picker 9.8 无全局静态 delegate 入口,在唯一
+/// 调用点显式传中文 delegate(基类 AssetPickerTextDelegate 即 zh-Hans),
+/// 选择器内置界面(含「权限引导」覆盖层)全中文化。
+@visibleForTesting
+AssetPickerConfig albumPickerConfig() => AssetPickerConfig(
+      requestType: RequestType.all,
+      maxAssets: 99,
+      textDelegate: const AssetPickerTextDelegate(),
+    );
+
+/// P2:相册权限被拒引导对话框(自绘中文)。Android:「去设置」跳应用详情
+/// 设置页;iOS:仅「重新尝试」重走 requestPermissionExtend(系统授权弹窗)。
+/// 返回用户动作;取消/点外部关闭返回 null。
+@visibleForTesting
+Future<AlbumPermissionAction?> showAlbumPermissionDialog(
+  BuildContext context, {
+  bool? isAndroid,
+}) {
+  final android = isAndroid ?? Platform.isAndroid;
+  return showDialog<AlbumPermissionAction>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('需要相册访问权限'),
+      content: const Text('选择照片、视频上传时需要访问相册,请授权后重试。'),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(ctx).pop(
+            android
+                ? AlbumPermissionAction.openSettings
+                : AlbumPermissionAction.retry,
+          ),
+          child: Text(android ? '去设置' : '重新尝试'),
+        ),
+      ],
+    ),
+  );
+}
+
+/// Android 应用包名(构建 applicationId;跳应用详情设置页用)。
+const kAndroidAppPackage = 'com.rushes.lab.tx';
+
+/// P2:「去设置」跳应用详情设置页(ACTION_APPLICATION_DETAILS_SETTINGS)。
+/// url_launcher 走 ACTION_VIEW+data,系统设置对 `package:` scheme 的 VIEW
+/// 意图即应用详情页;启动失败(未解析到处理方)回退 photo_manager 的
+/// openSetting(同为应用设置页)。
+@visibleForTesting
+Uri androidAppDetailsSettingsUri({String packageName = kAndroidAppPackage}) =>
+    Uri.parse('package:$packageName');
+
+Future<void> openAlbumPermissionSettings() async {
+  try {
+    final launched = await launchUrl(
+      androidAppDetailsSettingsUri(),
+      mode: LaunchMode.externalApplication,
+    );
+    if (launched) return;
+    AppLog.info('upload', 'package: 意图未启动,回退 openSetting');
+  } catch (e) {
+    AppLog.error('upload', '跳应用详情设置页失败,回退 openSetting', e);
+  }
+  await PhotoManager.openSetting();
+}
+
+/// P2-1:等待 App 回到前台(resumed)再续判。「去设置」跳系统页后 App 转后台,
+/// 须等用户操作完毕返回(授权与否都回)才重判真实权限态;已在前台(桌面端/
+/// 测试环境/未真正切走)直接放行。等待带 [timeout] 上限防死等,[binding] 供
+/// 测试注入;返回是否真的回到了前台(超时=false)。超时 Timer 在退出时必取
+/// 消(不残留挂起定时器,widget 测试 FakeAsync 亦干净)。
+@visibleForTesting
+Future<bool> waitForAppResume({
+  Duration timeout = const Duration(minutes: 5),
+  WidgetsBinding? binding,
+}) async {
+  final b = binding ?? WidgetsBinding.instance;
+  if (b.lifecycleState == AppLifecycleState.resumed) return true;
+  final resumed = Completer<void>();
+  final listener = AppLifecycleListener(binding: b, onResume: resumed.complete);
+  final timedOut = Completer<void>();
+  final timer = Timer(timeout, timedOut.complete);
+  try {
+    await Future.any(<Future<void>>[resumed.future, timedOut.future]);
+  } finally {
+    timer.cancel();
+    listener.dispose();
+  }
+  return resumed.isCompleted;
 }
 
 /// 单个相册资产打包+入队(iOS 实况 → livp 小包轨,其余原文件流式轨;

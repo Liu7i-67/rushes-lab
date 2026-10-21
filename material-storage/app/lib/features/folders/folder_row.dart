@@ -33,6 +33,9 @@ class FolderRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final f = node.folder;
     final hasChildren = node.children.isNotEmpty;
+    // P5:含文件(子树计数>0)的夹实心深色图标,对齐 web「实心=含文件」语义;
+    // 空夹维持橙色空心
+    final hasFiles = f.subtreeFileCount > 0;
     return InkWell(
       onTap: onOpen,
       child: Padding(
@@ -56,7 +59,11 @@ class FolderRow extends StatelessWidget {
                     )
                   : const SizedBox.shrink(),
             ),
-            const Icon(Icons.folder_outlined, size: 20, color: Tk.accent),
+            Icon(
+              hasFiles ? Icons.folder : Icons.folder_outlined,
+              size: 20,
+              color: hasFiles ? Tk.fg : Tk.accent,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(

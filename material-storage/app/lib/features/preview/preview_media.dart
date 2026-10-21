@@ -22,10 +22,29 @@ import 'preview_player.dart';
 import 'preview_plan.dart';
 import 'preview_text_load.dart';
 
+/// P3(mobile-ux-polish)横滑切页阈值(位移 px / 速度 px·s⁻¹):
+/// 内层(InteractiveViewer 交互回调)与外层(preview_page GestureDetector)
+/// 两路判定共用同一口径;一次滑动手势只会被 arena 判给其中一路,不双触发。
+const kSwipeDistanceThreshold = 60.0;
+const kSwipeVelocityThreshold = 500.0;
+
 class PreviewMedia extends StatefulWidget {
-  const PreviewMedia({super.key, required this.asset});
+  const PreviewMedia({
+    super.key,
+    required this.asset,
+    this.onSwipe,
+    this.onZoomChanged,
+  });
 
   final Asset asset;
+
+  /// P3:未放大态单指横滑切页(仅图片分支经 InteractiveViewer 交互回调上报,
+  /// true=下一张/false=上一张;其余分支由外层 GestureDetector 统一处理)。
+  final ValueChanged<bool>? onSwipe;
+
+  /// P3(mobile-ux-polish):图片放大态(scale>1)回报——外层横滑切页据此让位
+  /// (放大后拖动归 InteractiveViewer 平移,不切页;null=调用方不关心)。
+  final ValueChanged<bool>? onZoomChanged;
 
   @override
   State<PreviewMedia> createState() => _PreviewMediaState();
@@ -40,6 +59,19 @@ class _PreviewMediaState extends State<PreviewMedia> {
   var _playerDead = false; // 起播/解码失败后停挂播放器(重试时复位)
   String? _liveUrl; // livp 实况短片(非空才有回切按钮,web 同口径)
   var _playingLive = false; // livp 在播实况短片;video 类就绪即 true
+
+  // P3:图片放大态与变换控制——放大后单指拖动为平移(内层吃掉手势),
+  // 捏回原大复位并交还横滑切页。
+  var _zoomed = false;
+  final _transform = TransformationController();
+
+  // P3:未放大态横滑切页的位移累计——图片分支的手势被 InteractiveViewer 的
+  // scale 识别器持有(panEnabled:false 只是让它忽略平移,arena 仍归它),
+  // 故在交互回调里按焦距位移/速度手动判切页,阈值口径与外层一致。
+  var _swipeDx = 0.0;
+
+  // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字提示)。
+  var _thumbFallback = false;
 
   Asset get _a => widget.asset;
 
@@ -57,6 +89,42 @@ class _PreviewMediaState extends State<PreviewMedia> {
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _transform.dispose();
+    super.dispose();
+  }
+
+  /// P3:交互中按当前缩放分流——未放大(scale≈1)累计横滑位移(供切页判定),
+  /// 放大后位移归 InteractiveViewer 平移,不再累计。
+  void _onInteractionUpdate(ScaleUpdateDetails d) {
+    if (_transform.value.getMaxScaleOnAxis() <= 1.01) {
+      _swipeDx += d.focalPointDelta.dx;
+    }
+  }
+
+  /// P3:交互结束分流——未放大则复位变换并按位移/速度判切页(边界即停由
+  /// 父级 pager 保证);缩放过则维护放大态(拖动交给 panEnabled:true 平移)。
+  void _onInteractionEnd(ScaleEndDetails d) {
+    final dx = _swipeDx;
+    _swipeDx = 0;
+    final zoomedNow = _transform.value.getMaxScaleOnAxis() > 1.01;
+    if (!zoomedNow) {
+      _transform.value = Matrix4.identity();
+      final v = d.velocity.pixelsPerSecond.dx;
+      if (dx < -kSwipeDistanceThreshold || v < -kSwipeVelocityThreshold) {
+        widget.onSwipe?.call(true);
+      } else if (dx > kSwipeDistanceThreshold ||
+          v > kSwipeVelocityThreshold) {
+        widget.onSwipe?.call(false);
+      }
+    }
+    if (zoomedNow != _zoomed) {
+      setState(() => _zoomed = zoomedNow);
+      widget.onZoomChanged?.call(zoomedNow);
+    }
   }
 
   Future<void> _load() async {
@@ -93,13 +161,25 @@ class _PreviewMediaState extends State<PreviewMedia> {
   }
 
   /// download-link(inline)原图/媒体 URL;失败置 _fail。
+  /// P7(mobile-ux-polish):失败(403 无下载权/网络错)时若有缩略图则回退
+  /// 缩略图预览(叠不打断的小字提示,不阻断查看);无缩略图维持原失败卡。
+  /// 视频 inline 失败同口径降级(渲染侧按静态图处理,不再挂播放器)。
   Future<void> _loadInlineUrl() async {
     try {
       final url =
           await session.api!.assets.downloadLink(_a.id, asAttachment: false);
       if (mounted) _url = url;
     } catch (_) {
-      if (mounted) _fail = '预览加载失败';
+      if (!mounted) return;
+      if (_a.hasThumbnail) {
+        await _loadThumb(); // 缩略图也失败会置 _fail(既有两态文案)
+        // P1-2(测试实证缺陷修复):缩略图确实可用(未置 _fail)才降级提示条;
+        // 双失败(原图+缩略图签名/加载都失败)维持失败卡,不再叠自相矛盾的
+        // 「当前为缩略图预览」提示。
+        if (_fail == null) _thumbFallback = true;
+      } else {
+        _fail = '预览加载失败';
+      }
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -170,16 +250,48 @@ class _PreviewMediaState extends State<PreviewMedia> {
     if (_kind == PreviewKind.pdf && !Platform.isIOS) {
       return _block('PDF 需下载后打开(保存在 Download/浣花视界)');
     }
-    return Center(
+    final core = Center(
       child: _loading
           ? const CircularProgressIndicator(color: Colors.white70)
           : _render(),
     );
+    // P7:缩略图降级时叠加不打断的小字提示(纯展示,手势穿透不阻断查看)
+    if (!_thumbFallback) return core;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        core,
+        Positioned(
+          left: 16,
+          right: 16,
+          bottom: 12,
+          child: Center(
+            child: Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.black54,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Text(
+                '原图不可用(无下载权限或加载失败),当前为缩略图预览',
+                style: TextStyle(color: Tk.subtle, fontSize: 11),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
   }
 
   Widget _render() {
+    // P7:视频 inline 失败回退缩略图 → 不挂播放器,按静态图渲染(可放大看帧)
+    final planKind = _thumbFallback && _kind == PreviewKind.video
+        ? PreviewKind.image
+        : _kind;
     final body = previewBodyPlan(
-      kind: _kind,
+      kind: planKind,
       videoReady: _videoReady,
       hasFail: _fail != null,
       hasUrl: _url != null,
@@ -235,7 +347,14 @@ class _PreviewMediaState extends State<PreviewMedia> {
   Widget _image() {
     final stack = <Widget>[
       InteractiveViewer(
+        // P3(mobile-ux-polish):未放大关 pan(交互回调判横滑切页),放大后
+        // 开(拖图平移不切页);缩回 ~1 由 _onInteractionEnd 复位交还横滑。
+        transformationController: _transform,
+        panEnabled: _zoomed,
+        minScale: 1,
         maxScale: 4,
+        onInteractionUpdate: _onInteractionUpdate,
+        onInteractionEnd: _onInteractionEnd,
         child: Image.network(
           _url!,
           fit: BoxFit.contain,

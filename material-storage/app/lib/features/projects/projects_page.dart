@@ -1,27 +1,26 @@
 /// 项目页(B2 §8.1):列表 + 权限徽标 + 下拉刷新。B6 点亮:新建项目入口
 /// (is_project_creator 闸门)+ 行内「成员」入口(my_roles 含 admin)。
+/// P6:标题恒「项目」,构建 stamp 迁「我的」页展示;debug 日志入口移除
+/// (登录页右上角与我的页诊断区入口保留)。
+/// R3(mobile-ux-polish-2):AppBar 刷新钮删除(与下拉刷新冗余);
+/// RefreshIndicator 上提包住 loading/error/empty/列表全部分支,
+/// 非列表三分支经全高可滚动包装(AlwaysScrollableScrollPhysics)支持下拉。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
-import '../../main.dart' show kAppBuildStamp;
 import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
-import '../me/log_push.dart';
 import '../share/request_link_sheet.dart';
 import 'new_project_sheet.dart';
 import 'project_members_sheet.dart';
 import 'role_badge.dart';
 
-/// 项目页 AppBar 标题:打包注入 stamp 时在「项目」后追加最后编辑时间
-/// (TestFlight 分辨构建新旧用),未注入时保持原标题。
-String projectsTitle(String? userName, String buildStamp) {
-  final tail = userName == null ? '' : ' · $userName';
-  return buildStamp.isEmpty ? '项目$tail' : '项目 · 最后编辑 $buildStamp$tail';
-}
+/// 项目页 AppBar 标题:P6 定稿恒为「项目」,不带 stamp 与用户名。
+String projectsTitle() => '项目';
 
 class ProjectsPage extends StatefulWidget {
   const ProjectsPage({super.key});
@@ -69,17 +68,27 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
+  /// R3:非列表内容(loading/error/empty)包成全高可滚动,使 RefreshIndicator
+  /// 在这些状态也能下拉(AlwaysScrollableScrollPhysics + 全高撑起,
+  /// ErrorView/EmptyState 自带居中,布局观感不变)。
+  Widget _scrollable(Widget child) {
+    return LayoutBuilder(
+      builder: (context, constraints) => ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          SizedBox(height: constraints.maxHeight, child: Center(child: child)),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        // 标题可能较长(项目 · 最后编辑 YYYY-MM-DD HH:mm · 用户名),缩放防溢出
-        title: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(projectsTitle(session.me?.name, kAppBuildStamp)),
-        ),
+        title: Text(projectsTitle()),
         actions: [
-          logPushButton(context),
+          // P6:项目页 debug 日志入口已移除;登录页/我的页入口保留(P10 依赖)
           // B6:新建项目(总闸门 is_project_creator;成功后失效总线自动重拉)
           if (session.me?.isProjectCreator ?? false)
             IconButton(
@@ -89,21 +98,21 @@ class _ProjectsPageState extends State<ProjectsPage> {
                 await showNewProjectSheet(context);
               },
             ),
-          IconButton(onPressed: _reload, icon: const Icon(Icons.refresh)),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? ErrorView(message: _error!, onRetry: _reload)
-              : _items.isEmpty
-                  ? const EmptyState(
-                      icon: Icons.folder_copy_outlined,
-                      message: '暂无可见项目',
-                    )
-                  : RefreshIndicator(
-                      onRefresh: _reload,
-                      child: ListView.separated(
+      // R3:下拉刷新覆盖全部状态(原仅非空列表分支;AppBar 刷新钮已删)
+      body: RefreshIndicator(
+        onRefresh: _reload,
+        child: _loading
+            ? _scrollable(const CircularProgressIndicator())
+            : _error != null
+                ? _scrollable(ErrorView(message: _error!, onRetry: _reload))
+                : _items.isEmpty
+                    ? _scrollable(const EmptyState(
+                        icon: Icons.folder_copy_outlined,
+                        message: '暂无可见项目',
+                      ))
+                    : ListView.separated(
                         itemCount: _items.length,
                         separatorBuilder: (_, _) => const Divider(height: 1),
                         itemBuilder: (context, i) {

@@ -9,6 +9,20 @@
     <!-- B0② media_store_plus:API<29 写 Downloads 需要旧版写权限(API 30+ 走
          MediaStore 免权限);minSdk 跟随 Flutter 默认,真机确认基线前先声明 -->
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
+    <!-- mobile-ux-polish P8 flutter_local_notifications:Android 13+ 传输完成
+         系统通知需要通知权限(运行时弹窗由 Notifier.ensurePermission 首次入队
+         时发起,不在 app 启动即弹) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- mobile-ux-polish-2 R2:相册音频申明 —— photo_manager RequestType.all
+         含 audio,picker 内部权限请求在 Android 13 整机要求 READ_MEDIA_AUDIO,
+         未申明会被系统直接 DENY → 整体判 Denied →「相册选择失败」;
+         READ_MEDIA_VISUAL_USER_SELECTED:Android 14+ limited(部分照片)授权态 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED"/>
+    <!-- mobile-ux-polish-2 R4d:传输前台服务保活(flutter_foreground_task,
+         dataSync 类型;Android 14+ 起必须申明 type 级权限,服务才能 startForeground) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <application
         android:label="浣花视界"
         android:name="${applicationName}"
@@ -41,6 +55,20 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- mobile-ux-polish-2 R4d flutter_foreground_task:传输前台服务
+             (dataSync 类型,Android 14+ 必须显式 foregroundServiceType;
+             stopWithTask 在 ForegroundTaskOptions 运行时置 true——滑掉任务即停,
+             不留常驻;类名不可改,插件按此解析) -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+        <!-- R4d:服务常驻通知的小图标(meta-data 名与
+             transfer_foreground.dart 的 kForegroundIconMetaData 一致;
+             复用 P8 的单色 drawable,通知栏小图标只认 drawable 资源) -->
+        <meta-data
+            android:name="ms_transfer_fg_notification_icon"
+            android:resource="@drawable/ic_notification" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/password_field.dart';
 import '../me/log_push.dart';
 
 class LoginPage extends StatefulWidget {
@@ -116,14 +117,12 @@ class _LoginPageState extends State<LoginPage> {
                       autocorrect: false,
                     ),
                     const SizedBox(height: 12),
-                    TextField(
+                    // P9:密码框眼睛切换明文(内容/焦点保持)
+                    PasswordField(
                       controller: _password,
-                      obscureText: true,
+                      labelText: '密码',
+                      prefixIcon: const Icon(Icons.lock_outline),
                       onSubmitted: (_) => _busy ? null : _login(),
-                      decoration: const InputDecoration(
-                        labelText: '密码',
-                        prefixIcon: Icon(Icons.lock_outline),
-                      ),
                     ),
                     const SizedBox(height: 20),
                     FilledButton(

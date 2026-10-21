@@ -116,7 +116,14 @@ class _FoldersPageState extends State<FoldersPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('文件夹'),
+        // P4:顶部显示项目名(宫格下钻语义),空回退「文件夹」;
+        // FittedBox 缩放防长项目名溢出(projects_page 同款用法)
+        title: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            widget.projectName.isEmpty ? '文件夹' : widget.projectName,
+          ),
+        ),
         // B6:新建一级文件夹(can_upload ≈ admin/uploader 角色;成功失效总线
         // 自动重拉;403 detail 由表单透传,无权者后端兜底)
         actions: [
