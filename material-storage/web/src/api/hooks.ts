@@ -2,6 +2,7 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 import { http } from './client';
+import type { DownloadVariant } from '../lib/asset-download';
 import type {
   AdminBaiduTask,
   AdminBaiduTaskDetail,
@@ -398,11 +399,23 @@ export const useLocateAsset = (folderId?: string, assetId?: string | null) =>
 
 // §3.5:可选 as_attachment —— 移动端直连系统下载器时签 attachment 头(后端可选 body,
 // 响应结构不变)。传 assetId 字符串(既有调用)或不传 as_attachment,语义均为内联,零影响。
+// livp-download-unpack §3:可选 variant —— 'unpacked' = livp 解包 zip;不传时 body 不带
+// variant(后端默认 original),旧语义零变化。404 = 解包版未就绪(由 helper 回落原始)。
 export const useDownloadLink = () =>
   useMutation({
-    mutationFn: async (vars: string | { assetId: string; as_attachment?: boolean }) => {
+    mutationFn: async (vars: string | {
+      assetId: string;
+      as_attachment?: boolean;
+      variant?: DownloadVariant;
+    }) => {
       const assetId = typeof vars === 'string' ? vars : vars.assetId;
-      const body = typeof vars === 'object' && vars.as_attachment ? { as_attachment: true } : {};
+      // 不传的字段不进 body:as_attachment / variant 缺省时与旧请求体完全一致
+      const body = typeof vars === 'object'
+        ? {
+            ...(vars.as_attachment ? { as_attachment: true as const } : {}),
+            ...(vars.variant ? { variant: vars.variant } : {}),
+          }
+        : {};
       return (await http.post<DownloadLink>(`/api/v1/assets/${assetId}/download-link`, body)).data;
     },
   });

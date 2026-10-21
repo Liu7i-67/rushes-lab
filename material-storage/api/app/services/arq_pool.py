@@ -50,3 +50,24 @@ async def enqueue_livp_thumbnail(pool: ArqRedis, asset_id: str) -> None:
         await pool.enqueue_job("generate_livp_thumbnail", asset_id)
     except Exception as e:  # noqa: BLE001
         log.warning("enqueue_livp_thumbnail fail asset=%s err=%s", asset_id, e)
+
+
+async def enqueue_livp_download(pool: ArqRedis, asset_id: str) -> None:
+    """livp 下载级解包派发(livp-download-unpack 方案 §2.1);fire-and-forget。
+
+    入队带确定性 _job_id=f"livpdl:{asset_id}" + _expires≈3600 在途去重 —— 自愈 404
+    重派与上传派发并发时同一资产不双跑;_expires 把崩溃残留的墓碑键(arq:job:{id},
+    默认残留最长 24h)盲窗从默认压到 1h。返回 None(job id 撞墓碑/结果键被吞)只记
+    warning 供排查,不抛 —— 调用方均为 fire-and-forget 口径。
+    """
+    try:
+        job = await pool.enqueue_job(
+            "generate_livp_download", asset_id,
+            _job_id=f"livpdl:{asset_id}", _expires=3600,
+        )
+        if job is None:
+            log.warning(
+                "enqueue_livp_download 静默去重(墓碑键盲窗?)asset=%s", asset_id,
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("enqueue_livp_download fail asset=%s err=%s", asset_id, e)

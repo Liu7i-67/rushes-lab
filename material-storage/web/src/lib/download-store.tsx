@@ -5,10 +5,15 @@
  *   `<a target=_blank>` 直连系统下载器,登记一条立即完成的任务记录 + toast。
  *   原 fetch→Blob 全量内存路径已删除(GB 级原片把移动 Safari 顶爆的元凶);
  *   直连路径无 blob,blobUrl 字段与清理逻辑一并移除。
+ *   两段式(livp-download-unpack §6.4):start() 内联的「弹保存框 → 流式写盘」拆为
+ *   pickSaveTarget() / streamToHandle() — 批量下载须在点击瞬间(transient activation
+ *   窗口 ~5s 内)先弹保存框,轮询 ready 后再 streamToHandle 写盘;单文件 start()
+ *   改调两段式,行为不变。
  */
 import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
 import { App } from 'antd';
 import { useDownloadLink } from '../api/hooks';
+import type { DownloadVariant } from './asset-download';
 
 export type DownloadStatus = 'pending' | 'running' | 'success' | 'failed' | 'cancelled';
 
@@ -29,7 +34,16 @@ export interface DownloadTask {
 
 interface DownloadCtx {
   tasks: DownloadTask[];
-  start: (url: string, filename: string, opts?: { assetId?: string }) => Promise<string>;  // 返 task id
+  start: (url: string, filename: string, opts?: {
+    assetId?: string;
+    variant?: DownloadVariant;
+  }) => Promise<string>;  // 返 task id
+  /** 批量打包占位(§6.4):仅登记任务记录,不发请求不弹框,返 task id。*/
+  addPlaceholder: (filename: string, note?: string) => string;
+  /** 两段式②:向已取的 FSA handle 流式写盘;进度/取消/失败都落在该 task 上。*/
+  streamToHandle: (handle: unknown, url: string, taskId: string) => Promise<void>;
+  /** 局部更新任务(占位 note / 状态推进)。*/
+  patchTask: (id: string, p: Partial<DownloadTask>) => void;
   cancel: (id: string) => void;
   remove: (id: string) => void;
 }
@@ -45,10 +59,35 @@ export function useDownloads() {
 }
 
 // File System Access API 检测(有 = 桌面;无 = 移动端直连路径)
-function hasFSA(): boolean {
+// eslint-disable-next-line react-refresh/only-export-components
+export function hasFSA(): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return typeof (window as any).showSaveFilePicker === 'function';
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function showSavePicker(filename: string): Promise<any> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (window as any).showSaveFilePicker({ suggestedName: filename });
+}
+
+/**
+ * 两段式①(F13/§6.4)— 弹保存框取落盘 handle。必须在用户手势的 transient activation
+ * 窗口内调用(Chromium ~5s):「轮询分钟级 ready 再弹」必抛 SecurityError,批量路径
+ * 因此点击瞬间先调它。用户取消(AbortError)/无 FSA/其他失败 → null。
+ * createWritable() 不需要激活 — 拿到 handle 后何时写盘不受窗口约束。
+ */
+// eslint-disable-next-line react-refresh/only-export-components
+export async function pickSaveTarget(filename: string): Promise<unknown> {
+  if (!hasFSA()) return null;
+  try {
+    return await showSavePicker(filename);
+  } catch {
+    return null;
+  }
+}
+
+const genTaskId = () => `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 export function DownloadProvider({ children }: { children: ReactNode }) {
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
@@ -59,16 +98,73 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
     setTasks(ts => ts.map(t => t.id === id ? { ...t, ...p } : t));
   }, []);
 
+  // 两段式②:原 start() 内联的 FSA 流式写盘段原样拆出(进度/取消/错误语义不变;
+  // 失败不向调用方抛错,落 task.status — 单文件与批量同口径)
+  const streamToHandle = useCallback(async (handle: unknown, url: string, taskId: string): Promise<void> => {
+    const ctrl = new AbortController();
+    patch(taskId, { url, status: 'running', abort: () => ctrl.abort() });
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const total = parseInt(res.headers.get('content-length') ?? '0', 10);
+      patch(taskId, { total });
+
+      const reader = res.body!.getReader();
+      let loaded = 0;
+      let lastTick = Date.now();
+      let lastLoaded = 0;
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const writable = await (handle as any).createWritable();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        await writable.write(value);
+        loaded += value.length;
+
+        const now = Date.now();
+        if (now - lastTick > 500) {
+          const speedBps = ((loaded - lastLoaded) * 1000) / (now - lastTick);
+          patch(taskId, { loaded, speedBps });
+          lastTick = now; lastLoaded = loaded;
+        }
+      }
+      patch(taskId, { loaded });
+
+      await writable.close();
+      patch(taskId, { status: 'success' });
+    } catch (e) {
+      const err = e as { name?: string; message?: string };
+      if (err.name === 'AbortError') patch(taskId, { status: 'cancelled', error: '已取消' });
+      else patch(taskId, { status: 'failed', error: err.message ?? String(e) });
+    }
+  }, [patch]);
+
+  const addPlaceholder = useCallback((filename: string, note?: string): string => {
+    const id = genTaskId();
+    setTasks(ts => [{
+      id, filename, url: '', startedAt: Date.now(),
+      status: 'pending', loaded: 0, total: 0, note,
+    }, ...ts]);
+    return id;
+  }, []);
+
   const start = useCallback(async (
-    url: string, filename: string, opts?: { assetId?: string },
+    url: string, filename: string, opts?: { assetId?: string; variant?: DownloadVariant },
   ): Promise<string> => {
     // ── 移动端直连(§3.5):attachment 链接 → 系统下载器,无 JS 内存占用 ──
     if (!hasFSA()) {
-      const id = `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const id = genTaskId();
       let linkUrl = url;
       if (opts?.assetId) {
-        // 403 在此抛出,沿用调用方既有 catch → 申请弹窗链路(与 PC 同)
-        const link = await dlLink.mutateAsync({ assetId: opts.assetId, as_attachment: true });
+        // 403 在此抛出,沿用调用方既有 catch → 申请弹窗链路(与 PC 同);
+        // 重签必须带 variant(livp 直连也要拿解包 zip;404 由 helper 兜底回落原始)
+        const link = await dlLink.mutateAsync({
+          assetId: opts.assetId,
+          as_attachment: true,
+          ...(opts.variant ? { variant: opts.variant } : {}),
+        });
         linkUrl = link.url;
       }
       const a = document.createElement('a');
@@ -87,66 +183,21 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
       return id;
     }
 
-    // ── 桌面:FSA 零内存 stream(原逻辑;fetch→Blob fallback 已删)──
-    const id = `dl-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const ctrl = new AbortController();
-    const task: DownloadTask = {
+    // ── 桌面:FSA 零内存 stream(两段式;与原内联版行为一致)──
+    const id = genTaskId();
+    setTasks(ts => [{
       id, filename, url, startedAt: Date.now(),
       status: 'pending', loaded: 0, total: 0,
-      abort: () => ctrl.abort(),
-    };
-    setTasks(ts => [task, ...ts]);
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    let fileHandle: any;
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      fileHandle = await (window as any).showSaveFilePicker({ suggestedName: filename });
-    } catch {
-      // user cancel
+    }, ...ts]);
+    const handle = await pickSaveTarget(filename);
+    if (!handle) {
+      // user cancel(SecurityError 等同样落取消,不阻断)
       patch(id, { status: 'cancelled', error: '用户取消保存' });
       return id;
     }
-
-    try {
-      patch(id, { status: 'running' });
-      const res = await fetch(url, { signal: ctrl.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const total = parseInt(res.headers.get('content-length') ?? '0', 10);
-      patch(id, { total });
-
-      const reader = res.body!.getReader();
-      let loaded = 0;
-      let lastTick = Date.now();
-      let lastLoaded = 0;
-
-      const writable = await fileHandle.createWritable();
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        await writable.write(value);
-        loaded += value.length;
-
-        const now = Date.now();
-        if (now - lastTick > 500) {
-          const speedBps = ((loaded - lastLoaded) * 1000) / (now - lastTick);
-          patch(id, { loaded, speedBps });
-          lastTick = now; lastLoaded = loaded;
-        }
-      }
-      patch(id, { loaded });
-
-      await writable.close();
-      patch(id, { status: 'success' });
-    } catch (e) {
-      const err = e as { name?: string; message?: string };
-      if (err.name === 'AbortError') patch(id, { status: 'cancelled', error: '已取消' });
-      else patch(id, { status: 'failed', error: err.message ?? String(e) });
-    }
-
+    await streamToHandle(handle, url, id);
     return id;
-  }, [patch, dlLink, message]);
+  }, [patch, streamToHandle, dlLink, message]);
 
   const cancel = useCallback((id: string) => {
     setTasks(ts => {
@@ -160,5 +211,9 @@ export function DownloadProvider({ children }: { children: ReactNode }) {
     setTasks(ts => ts.filter(x => x.id !== id));
   }, []);
 
-  return <Ctx.Provider value={{ tasks, start, cancel, remove }}>{children}</Ctx.Provider>;
+  return (
+    <Ctx.Provider value={{ tasks, start, addPlaceholder, streamToHandle, patchTask: patch, cancel, remove }}>
+      {children}
+    </Ctx.Provider>
+  );
 }

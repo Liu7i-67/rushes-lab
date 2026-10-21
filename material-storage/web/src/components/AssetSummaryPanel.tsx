@@ -11,6 +11,7 @@ import { useState } from 'react';
 import type { Asset, Folder, Me } from '../api/types';
 import { useDownloadLink, useUpdateAssetMeta } from '../api/hooks';
 import { useDownloads } from '../lib/download-store';
+import { downloadAsset } from '../lib/asset-download';
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
 import { ShareModal } from './ShareModal';
@@ -86,11 +87,10 @@ export function AssetSummaryPanel({
   if (selected.length === 1) {
     const a = selected[0];
 
+    // F12:统一走共享 helper(livp 默认请求解包 zip,未就绪回落原始 + 提示;非 livp 零变化)
     const handleDownload = async () => {
       try {
-        const link = await dlLink.mutateAsync(a.id);
-        // assetId 供无 FSA 环境(移动端/桌面 Firefox)直连路径换 as_attachment 链接
-        await downloads.start(link.url, a.filename, { assetId: a.id });
+        await downloadAsset({ dlLink, downloads, message }, a);
       } catch (e) {
         const err = e as { response?: { status?: number } };
         if (err.response?.status === 403) {
