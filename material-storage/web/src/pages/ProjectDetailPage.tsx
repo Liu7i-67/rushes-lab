@@ -37,7 +37,11 @@ import { useCompactViewport } from '../lib/use-viewports';
 import { scrollMainToTop } from '../lib/main-scroll';
 import { useKeyboardVisible, useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { useUpload } from '../lib/upload-store';
-import { useDownloads } from '../lib/download-store';
+import { hasFSA, pickSaveTarget, useDownloads } from '../lib/download-store';
+import {
+  BULK_UNLOADED_EST_BYTES, bulkPollCapMs, downloadAsset, isLinkPendingFor, postBatchDownloadLink,
+  sanitizeBasename, type BatchDownloadResult,
+} from '../lib/asset-download';
 import { errorMessage } from '../api/client';
 import type { Asset, Folder } from '../api/types';
 
@@ -176,6 +180,8 @@ export default function ProjectDetailPage() {
   const [batchMoveOpen, setBatchMoveOpen] = useState(false);
   // #151: 批量打标 — 选中多个文件时统一加标签
   const [bulkTagOpen, setBulkTagOpen] = useState(false);
+  // F15:批量下载进行中(弹保存框/POST/轮询期间下载按钮 loading)
+  const [bulkBusy, setBulkBusy] = useState(false);
   // #129: folder admin 才显"申请链接"按钮 — folder 级精细化授权入口
   const [linkOpen, setLinkOpen] = useState(false);
   // 回收站:普通夹 folder admin 或持组织级删除授权(my_delete_grant)者可管理;
@@ -194,9 +200,9 @@ export default function ProjectDetailPage() {
 
   const handleDownload = async (a: Asset) => {
     try {
-      const link = await dlLink.mutateAsync(a.id);
-      // assetId 供无 FSA 环境的直连路径换 as_attachment 链接(Chromium FSA 路径忽略)
-      await downloads.start(link.url, a.filename, { assetId: a.id });
+      // F12:统一走共享 helper(livp 默认请求解包 zip,未就绪回落原始 + 提示;
+      // 非 livp 行为零变化)。403 上抛 → 申请弹窗(既有行为)
+      await downloadAsset({ dlLink, downloads, message }, a);
     } catch (e: unknown) {
       const err = e as { response?: { status?: number } };
       if (err.response?.status === 403) setApplyAsset(a);
@@ -204,43 +210,173 @@ export default function ProjectDetailPage() {
     }
   };
 
-  // 批量下载:切 selectedIds 全量口径(跨页保留后含未加载页的 id)—
-  // 已加载项沿用原 filename;未加载 id 无 Asset 对象,用占位名 asset_<id 前 8 位>.bin。
-  // 403 分流:已加载项弹申请弹窗(既有行为);未加载项缺完整 Asset,只计入「需申请」聚合计数。
-  // 其余失败:已加载项逐条报错,未加载项按 id 聚合计数,避免长列表刷屏
-  const handleBulkDownload = async () => {
-    let needApply = 0, unloadedFail = 0;
-    for (const id of selectedIds) {
-      const a = assetById.get(id);
-      const filename = a?.filename ?? `asset_${id.slice(0, 8)}.bin`;
-      try {
-        const link = await dlLink.mutateAsync(id);
-        // assetId 供无 FSA 环境的直连路径换 as_attachment 链接(Chromium FSA 路径忽略)
-        await downloads.start(link.url, filename, { assetId: id });
-      } catch (e: unknown) {
-        const err = e as { response?: { status?: number } };
-        if (err.response?.status === 403) {
-          if (a) setApplyAsset(a);
-          else needApply++;
-        } else if (a) {
-          message.error(`${a.filename}: ${errorMessage(e, '下载失败')}`);
-        } else {
-          unloadedFail++;
-        }
-      }
+  // ── 批量下载(F15,定稿 §6.4):单 zip 一次保存框 ─────────────────────────
+  // 跳过项聚合提示:服务端只回 id 不回文件名(防侧信道),用前端已加载的 Asset 名渲染,
+  // 未加载 id 只计入总数;livp 原始兜底单独计数提示
+  const notifyBulkSkipped = (res: BatchDownloadResult) => {
+    const skipped = res.skipped_no_permission ?? [];
+    if (skipped.length > 0) {
+      const names = skipped
+        .map(id => assetById.get(id)?.filename)
+        .filter((n): n is string => !!n);
+      const shown = names.slice(0, 3);
+      const rest = skipped.length - shown.length;
+      const head = shown.length > 0
+        ? `${shown.map(n => `「${n}」`).join('、')}${rest > 0 ? ` 等 ${skipped.length} 个文件` : ''}`
+        : `${skipped.length} 个文件`;
+      message.warning(`${head}无下载权限已跳过,可单个申请下载`);
     }
-    if (needApply > 0) message.warning(`${needApply} 个未加载文件无下载权限,请翻页后逐个申请`);
-    if (unloadedFail > 0) message.error(`${unloadedFail} 个未加载文件下载失败`);
+    if (res.skipped_missing_count > 0) {
+      message.warning(`${res.skipped_missing_count} 个文件已不存在,已跳过`);
+    }
+    if (res.livp_raw_count > 0) {
+      message.info(`${res.livp_raw_count} 个实况照片暂以原始格式保留`);
+    }
   };
 
-  // 批量下载 >20 加确认:逐条 presigned 循环,连续多下载易被浏览器拦截
+  // 批量主流程:POST 创建/轮询(3s,附 resume_key = 最近响应 key)→ ready 一次写盘。
+  // retry = failed 后手动重试(带 retry:true 清服务端失败标记重新入队);
+  // handle 由点击瞬间的 pickSaveTarget 提供(FSA 主路径),null = 无 FSA 直连路径
+  const runBulkDownload = async (ids: string[], handle: unknown, retry = false) => {
+    const fsa = handle != null;
+    // 轮询上限自适应:已加载项按真实 size,未加载页资产无 size 按 50MB/个 计入(混选不提前假超时)
+    let estBytes = 0;
+    for (const id of ids) estBytes += assetById.get(id)?.size_bytes ?? BULK_UNLOADED_EST_BYTES;
+    const capMs = bulkPollCapMs(estBytes);
+
+    // FSA:占位任务(「正在打包」)先插任务中心;ready 后 streamToHandle 复用同一 task 显进度
+    const placeholderId = fsa
+      ? downloads.addPlaceholder(`批量下载_${ids.length}个文件.zip`, `正在服务端打包 ${ids.length} 个文件…`)
+      : null;
+
+    let resumeKey: string | null = null;
+    let wantRetry = retry;
+    const startedAt = Date.now();
+
+    for (;;) {
+      const sentResumeKey = resumeKey;
+      let res: BatchDownloadResult;
+      try {
+        res = await postBatchDownloadLink({
+          asset_ids: ids,
+          as_attachment: !fsa,   // 无 FSA(火狐等)直连路径签 attachment
+          ...(sentResumeKey ? { resume_key: sentResumeKey } : {}),
+          ...(wantRetry ? { retry: true } : {}),
+        });
+      } catch (e: unknown) {
+        const status = (e as { response?: { status?: number } }).response?.status;
+        if (status === 400 && sentResumeKey) {
+          // resume 400(作业记录过期/校验不符)→ 静默去掉 resume_key 按全新 POST 重走
+          resumeKey = null;
+          continue;
+        }
+        if (placeholderId) downloads.remove(placeholderId);
+        if (status === 403 && sentResumeKey) {
+          // 轮询期权限被整体回收(ready 复检 403)→ 终止占位,不进通用错误通道
+          message.error('下载权限已被回收');
+        } else if (status === 429) {
+          message.warning('已有打包进行中,请稍候');
+        } else {
+          // 422(>100 个,detail 数组已由 errorMessage 兼容拼接)/ 首次 403 /
+          // 400(超限/跨桶/全不存在)→ 通用错误通道
+          message.error(errorMessage(e, '批量下载失败'));
+        }
+        return;
+      }
+      wantRetry = false;
+      // 轮询 resume_key 恒取最近一次响应的 key(权限/就绪位变化时服务端收敛新 key,透明跟随)
+      resumeKey = res.key;
+
+      if (res.status === 'ready' && res.url) {
+        if (placeholderId && handle) {
+          await downloads.streamToHandle(handle, res.url, placeholderId);
+        } else {
+          // 无 FSA:直连分支对无 assetId 的 URL 直接使用(单次程序化 anchor 下载)
+          await downloads.start(res.url, res.filename);
+        }
+        notifyBulkSkipped(res);
+        return;
+      }
+
+      if (res.status === 'failed') {
+        if (placeholderId) downloads.remove(placeholderId);
+        // 失败标记 EX 600;重试带 retry:true 清标记立即重新入队(§6.2 第 5 步)。
+        // sticky(duration 0)+ 点击即销毁 — 6s 自动消失会让重试入口失联(P2-4)
+        const closer = message.error({
+          content: (
+            <span>
+              打包失败
+              <Button size="small" type="link"
+                      onClick={() => { closer(); void retryBulkDownload(ids, handle); }}>
+                重试
+              </Button>
+            </span>
+          ),
+          duration: 0,
+        });
+        return;
+      }
+
+      // packing:撞跨用户 per-key 闸时带 retry_after_seconds(闸剩余 TTL),透出到占位 note
+      if (placeholderId && res.retry_after_seconds != null) {
+        downloads.patchTask(placeholderId, {
+          note: `正在服务端打包…(同批任务进行中,约 ${res.retry_after_seconds}s)`,
+        });
+      }
+      if (Date.now() - startedAt >= capMs) {
+        if (placeholderId) downloads.remove(placeholderId);
+        // 权限有变化的边缘场景重点击会重新生成,不承诺绝对「不会重新生成」(§6.4)
+        message.info('仍在打包,稍后重新点击批量下载即可获取');
+        return;
+      }
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  };
+
+  // 点击 → 先弹保存框(Chromium 硬钉子:showSaveFilePicker 受 transient activation 约束
+  // ~5s,「轮询分钟级再弹」必 SecurityError)→ 用户取消保存框 = 取消整个批量(不发请求)
+  // → 再发 POST。最终落盘名以保存框输入为准;服务端 disposition 文件名带时间戳,供
+  // anchor 路径/展示用,两处不严格一致属预期
+  const handleBulkDownload = async () => {
+    const ids = [...selectedIds];
+    if (ids.length === 0 || bulkBusy) return;
+
+    let handle: unknown = null;
+    if (hasFSA()) {
+      handle = await pickSaveTarget(sanitizeBasename(`批量下载_${ids.length}个文件.zip`));
+      if (!handle) return;
+    }
+
+    setBulkBusy(true);
+    try {
+      await runBulkDownload(ids, handle);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  // failed 重试(P2-4):复用统一批量流程 — 闭包里保住已选保存路径的 handle,
+  // 带 retry:true 重新 POST + 继续轮询/写盘,不再弹保存框;全程置 busy,
+  // 与批量按钮 loading 同闸,防止并发再点
+  const retryBulkDownload = async (ids: string[], handle: unknown) => {
+    if (bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      await runBulkDownload(ids, handle, true);
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
+  // 批量下载 >20 加确认:服务端异步打包成单 zip,大文件可能需要几分钟
   const confirmBulkDownload = () => {
     if (selectedIds.length > 20) {
       modal.confirm({
         title: `下载 ${selectedIds.length} 个文件?`,
-        content: '数量较多,将逐个发起下载;浏览器可能拦截连续下载,建议分批(每批 ≤20)操作。',
+        content: '将打包为一个 zip 下载(大文件打包可能需要几分钟),期间请保持页面打开。',
         okText: '继续下载',
-        onOk: handleBulkDownload,
+        // 立即关弹窗:打包/轮询分钟级,确认按钮不能转几分钟圈;进度在任务中心
+        onOk: () => { void handleBulkDownload(); },
       });
     } else {
       void handleBulkDownload();
@@ -491,7 +627,7 @@ export default function ProjectDetailPage() {
       render: (_: unknown, a: Asset) => (
         <Tooltip title="下载">
           <Button type="text" size="small" icon={<Download size={14} strokeWidth={1.8} />}
-                  loading={dlLink.isPending && dlLink.variables === a.id}
+                  loading={isLinkPendingFor(dlLink, a.id)}
                   onClick={(e) => { e.stopPropagation(); handleDownload(a); }}
                   style={{ color: 'var(--ms-ink-muted)' }}
           />
@@ -1202,7 +1338,7 @@ export default function ProjectDetailPage() {
             <Button size="small" icon={<RotateCw size={13} strokeWidth={2} />}
                     onClick={() => refetch()}>刷新</Button>
             <Button size="small" icon={<Download size={13} strokeWidth={2} />}
-                    disabled={!hasSelection} onClick={confirmBulkDownload}>
+                    disabled={!hasSelection} loading={bulkBusy} onClick={confirmBulkDownload}>
               下载{hasSelection ? ` ${selectedIds.length}` : ''}
             </Button>
             {/* 回收站:普通夹 folder admin 或删除授权者;sensitive 夹仅系统 admin(后端同规则 enforce) */}

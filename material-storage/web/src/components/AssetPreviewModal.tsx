@@ -13,6 +13,7 @@ import type { Asset } from '../api/types';
 import { useDownloadLink } from '../api/hooks';
 import { http, errorMessage } from '../api/client';
 import { useDownloads } from '../lib/download-store';
+import { downloadAsset } from '../lib/asset-download';
 import { useCompactViewport } from '../lib/use-viewports';
 import { isIOS } from '../lib/ua';
 
@@ -72,9 +73,11 @@ export function AssetPreviewModal({
   asset, open, onClose, list, index, onIndexChange, canDownload,
 }: Props) {
   const { message } = App.useApp();
-  // hooks 置顶(见 use-viewports 模块注释)
+  // hooks 置顶(compact 判定唯一源,见 use-viewports 模块注释)
   const compact = useCompactViewport();
   const dlLink = useDownloadLink();
+  // F14 次选项独立 mutation 实例(P2-6):与主下载共用一个实例时任一点击两按钮同时转圈
+  const dlLinkOriginal = useDownloadLink();
   const downloads = useDownloads();
   const [content, setContent] = useState<string | null>(null);
   // livp 实况短片 URL(null = 无/未生成/无权限 — 只显示静态图)
@@ -85,11 +88,17 @@ export function AssetPreviewModal({
   const prevAssetIdRef = useRef<string | null>(null);
   const kind = detectKind(asset);
 
-  // iOS PDF 降级卡(§3.6)的下载按钮 — 走既有下载链路(as_attachment 直连系统预览)
-  const handleDownload = async () => {
+  // iOS PDF 降级卡(§3.6)的下载按钮 — 走共享 helper(F12:livp 默认请求解包 zip,
+  // 未就绪回落原始 + 提示;非 livp 行为零变化);forceOriginal = 「下载原始 .livp」次选项(F14)。
+  // 403 兜底走组件级提示(与三张降级卡同文案)
+  const handleDownload = async (forceOriginal = false) => {
     try {
-      const link = await dlLink.mutateAsync(asset.id);
-      await downloads.start(link.url, asset.filename, { assetId: asset.id });
+      await downloadAsset(
+        // 主/次选项各用各的 mutation 实例 — loading 状态互不影响(P2-6)
+        { dlLink: forceOriginal ? dlLinkOriginal : dlLink, downloads, message },
+        asset,
+        { forceOriginal },
+      );
     } catch (e) {
       const err = e as { response?: { status?: number } };
       if (err.response?.status === 403) message.warning('无下载权限,请联系项目管理员');
@@ -216,12 +225,25 @@ export function AssetPreviewModal({
     </Button>
   );
 
+  // F14:livp 专属次选项 — 默认下载已是解包 zip,需要回传 iPhone 的用户才拿原始 .livp
+  // loading 用次选项自己的实例(P2-6):与主下载互不影响
+  const originalLivpButton = kind === 'livp' && (
+    <Button size={compact ? 'large' : 'middle'} type="text"
+            icon={<Download size={15} strokeWidth={1.8} />}
+            disabled={canDownload === false}
+            loading={dlLinkOriginal.isPending}
+            onClick={() => void handleDownload(true)}>
+      下载原始 .livp
+    </Button>
+  );
+
   return (
     <Modal
       open={open}
       onCancel={onClose}
       footer={
-        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+          {originalLivpButton}
           {canDownload === false ? (
             <Tooltip title="无下载权限,可在文件面板点『申请下载』">{downloadButton}</Tooltip>
           ) : downloadButton}

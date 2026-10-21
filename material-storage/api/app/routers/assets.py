@@ -5,16 +5,20 @@ Phase B-2 iter4:每 endpoint 加 OpenFGA check + audit 落库。
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import itertools
+import json
 import logging
+import time
 import unicodedata
 import uuid
 from collections import Counter
-from datetime import datetime, timezone
-from typing import Any, cast
+from datetime import UTC, datetime, timezone
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, and_, func, literal_column, or_, select, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
@@ -54,6 +58,21 @@ from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService, is_already_exists_error
 from app.services.presign import PresignService, request_base_from
 from app.settings import get_settings
+from app.workers.batch_download import (
+    AUDITED_TTL,
+    BATCH_URL_TTL,
+    JOB_RECORD_TTL,
+    acquire_batch_locks,
+    batch_active_key,
+    batch_audited_key,
+    batch_fail_key,
+    batch_job_record_key,
+    batch_keygate_key,
+    batch_object_key,
+    canonical_ids,
+    compute_batch_key,
+    release_batch_locks,
+)
 
 router = APIRouter()
 log = logging.getLogger(__name__)
@@ -250,11 +269,13 @@ async def complete_upload(
     )
 
     # B-4:enqueue thumbnail 生成 — image 走 Pillow worker;video 走 ffmpeg worker (B-4 iter2 #101)
-    # .livp(iOS Live Photo,实为 zip)浏览器不识别 content-type,按扩展名分派专属 worker
+    # .livp(iOS Live Photo,实为 zip)浏览器不识别 content-type,按扩展名分派专属 worker;
+    # livp 分支并排多派一个下载级解包 job(livp-download-unpack 方案 §2.1,F2)
     ct = asset.content_type or ""
     if asset.filename.lower().endswith(".livp"):
-        from app.services.arq_pool import enqueue_livp_thumbnail
+        from app.services.arq_pool import enqueue_livp_download, enqueue_livp_thumbnail
         await enqueue_livp_thumbnail(request.app.state.arq_pool, str(asset.id))
+        await enqueue_livp_download(request.app.state.arq_pool, str(asset.id))
     elif ct.startswith("image/"):
         from app.services.arq_pool import enqueue_thumbnail
         await enqueue_thumbnail(request.app.state.arq_pool, str(asset.id))
@@ -1376,9 +1397,38 @@ class DownloadLinkIn(BaseModel):
 
     向后兼容:不传 body / `{}` 均可,as_attachment 默认 False → 行为与旧版
     完全一致(inline 语义,桌面 PDF iframe 预览不受影响)。
+    variant(livp-download-unpack 方案 §3,F3):默认 "original" 行为零变化;
+    "unpacked" 仅适用 .livp 资产,交付服务端解包 zip(未就绪 404 + 自愈)。
     """
 
     as_attachment: bool = False
+    variant: Literal["original", "unpacked"] = "original"
+
+
+# livp 解包 404 自愈的 Redis 频控窗口(SETNX EX;防反复点击刷派发,方案 §3)
+_LIVP_HEAL_RATE_LIMIT_SEC = 600
+
+
+async def _heal_livp_download_zip(request: Request, asset_id: uuid.UUID) -> None:
+    """unpacked 404 自愈(方案 §3):Redis SETNX EX 600 频控 + fire-and-forget
+    enqueue(上传时派发失败/漏派的兜底;enqueue 内部异常吞掉只 log,同
+    enqueue_livp_thumbnail 口径)。
+
+    SETNX 连接异常必须 try/except 只 log 后照常 404 —— download-link 现状不依赖
+    Redis,不能让 livp 下载从「404 回落原始」退化成 500。
+    """
+    redis = request.app.state.redis
+    try:
+        acquired = await redis.set(
+            f"livpdl:heal:{asset_id}", "1", nx=True, ex=_LIVP_HEAL_RATE_LIMIT_SEC,
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("livp heal rate-limit check fail asset=%s err=%s", asset_id, e)
+        return
+    if not acquired:
+        return  # 频控占用(10 分钟内已重派过),不刷派发
+    from app.services.arq_pool import enqueue_livp_download
+    await enqueue_livp_download(request.app.state.arq_pool, str(asset_id))
 
 
 def rfc5987_encode(filename: str) -> str:
@@ -1462,6 +1512,61 @@ async def get_download_link(
 
     settings = get_settings()
     ttl = settings.presigned_normal_ttl_seconds
+    variant = data.variant if data is not None else "original"
+    is_livp = (asset.filename or "").lower().endswith(".livp")
+
+    # variant="unpacked"(livp-download-unpack 方案 §3,F3):交付服务端解包 zip
+    if variant == "unpacked":
+        if not is_livp:
+            raise HTTPException(400, "variant unpacked 仅适用 .livp 资产")
+        tags = asset.tags or {}
+        zip_key = tags.get("download_zip_key")
+        ready = False
+        if zip_key:
+            # 签发前 head 校验衍生物对象存在(同步 boto3 按铁律 asyncio.to_thread
+            # 包裹,先例本文件 batch_prefix copy_object):tag 在而对象被外力清除的
+            # 孤儿 tag 按「缺失」分支走 404/自愈,不给无 FSA 的移动/火狐路径签出
+            # 必 404 的 URL —— JS 捕获不到 anchor 下载失败,兜底必须在服务端
+            try:
+                await asyncio.to_thread(
+                    presign.head_object, asset.minio_bucket, str(zip_key),
+                )
+                ready = True
+            except Exception as e:
+                log.warning("livp download zip head fail asset=%s key=%s err=%s",
+                            asset_id, zip_key, e)
+        if ready:
+            from app.workers.main import _livp_download_base_name
+            base = _livp_download_base_name(asset.filename or "", str(asset_id))
+            # disposition 仅 as_attachment 时给(桌面 FSA 路径不需要,前端
+            # suggestedName 决定文件名);基名沿用 job 侧 §2.3 清洗,保证与
+            # zip 内条目名同源
+            disposition = (
+                attachment_content_disposition(f"{base}.zip")
+                if data is not None and data.as_attachment
+                else None
+            )
+            url = presign.sign_get_url(
+                asset.minio_bucket, str(zip_key), ttl,
+                response_content_disposition=disposition,
+                request_base=request_base_from(request),
+            )
+            await audit.signed_url_issued(
+                actor_user_id=user_id,
+                target_asset_id=asset.id,
+                target_project_id=project_id,
+                target_minio_key=str(zip_key),
+                details={"expires_in_seconds": ttl, "variant": "unpacked"},
+                **ctx,
+            )
+            return DownloadLinkOut(url=url, expires_in=ttl, is_sensitive=False)
+
+        # 缺失:永久失败 tag 有值 → 404 不重派(重派注定同结果);否则 404 + 自愈
+        if not tags.get("download_zip_failed"):
+            await _heal_livp_download_zip(request, asset_id)
+        raise HTTPException(404, "livp 解包版尚未就绪")
+
+    # variant="original"(默认):现行为零变化
     # as_attachment=true → attachment 语义(移动端系统下载器直连,方案 §3.5);
     # 默认 None 不带 ResponseContentDisposition,预览路径(inline)零变化
     disposition = (
@@ -1476,15 +1581,484 @@ async def get_download_link(
     )
 
     await audit.signed_url_issued(
-        actor_user_id=user_id,
+        actor_user_id=user.id,
         target_asset_id=asset.id,
         target_project_id=project_id,
         target_minio_key=asset.minio_key,
+        # original 审计 details 保持原形(零回归;variant 只加在 unpacked 路径)
         details={"expires_in_seconds": ttl},
         **ctx,
     )
 
     return DownloadLinkOut(url=url, expires_in=ttl, is_sensitive=False)
+
+
+# ─── 批量下载单 zip(创建/轮询双职能端点;livp-download-unpack 方案 §6.2,F9)────
+class BatchDownloadLinkIn(BaseModel):
+    """批量下载入参:创建(不带 resume_key)与轮询(带 resume_key)同形。
+
+    asset_ids 1..100(>100 由 pydantic 入参约束回 422);retry 为 failed 后手动重试
+    (清失败标记重新入队,不受标记 TTL 拘束)。
+    """
+
+    asset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+    as_attachment: bool = False
+    resume_key: str | None = None
+    retry: bool = False
+
+
+class BatchDownloadLinkOut(BaseModel):
+    """三态同形响应:url/expires_in 仅 ready;跳过列表只回 id 不回文件名(防侧信道:
+    单文件 403 从不回资产名,本端点不能成为用随机 UUID 探测 sensitive 夹文件名的
+    新通道,前端用自己已加载的 Asset 名渲染提示)。"""
+
+    status: Literal["ready", "packing", "failed"]
+    key: str
+    url: str | None = None
+    expires_in: int | None = None
+    filename: str
+    skipped_no_permission: list[uuid.UUID] = Field(default_factory=list)
+    skipped_missing_count: int = 0
+    livp_raw_count: int = 0
+    retry_after_seconds: int | None = None
+
+
+# 合计折算体积名义上限 10GB(实际 zip 上界 ~1.3-1.5x,下游临时盘/URL/轮询三处按
+# 实际上界留余量,方案 §6.2 第 2 步)
+_BATCH_SIZE_LIMIT = 10 * 1024**3
+# 折算体积:livp 按 size_bytes x3 计入(解包产物 = 全分辨率 JPEG(HEIC 膨胀 2.5-4x)
+# + 转码 MP4,重 HEIC 轻视频条目的极端选集整包膨胀可达 ~3 倍;x2 会击穿校准)
+_BATCH_LIVP_WEIGHT = 3
+# epoch 后缀的进程内序列号:Windows 计时器量化下 time.time_ns() 可在同一毫秒重复,
+# 拼 4 位进程内自增序号保证同 key 两次入队的 _job_id 必不相同(纯数字,守
+# `key:\d+` 契约形态)
+_batch_epoch_seq = itertools.count()
+
+
+def _batch_is_livp(row: Any) -> bool:
+    return (row.filename or "").lower().endswith(".livp")
+
+
+def _batch_livp_ready(row: Any) -> bool:
+    """livp 解包衍生物就绪位(按当时 tags 静态判定;ready 响应以 job 实际计数为准)。"""
+    tags = row.tags or {}
+    return bool(tags.get("download_zip_key")) and not tags.get("download_zip_failed")
+
+
+def _batch_weighted_size(row: Any) -> int:
+    size = int(row.size_bytes or 0)
+    return size * _BATCH_LIVP_WEIGHT if _batch_is_livp(row) else size
+
+
+def _batch_filename(count: int) -> str:
+    return f"批量下载_{count}个文件_{datetime.now().strftime('%Y%m%d-%H%M')}.zip"
+
+
+class _BatchFresh:
+    """一次全量校验通过程的产物(首次 POST 与 ready 复检共用)。"""
+
+    __slots__ = ("allowed", "allowed_ids", "denied_ids", "missing_count", "readiness", "rows")
+
+    def __init__(
+        self,
+        rows: list[Any],
+        allowed: list[Any],
+        denied_ids: list[str],
+        missing_count: int,
+    ) -> None:
+        self.rows = rows
+        self.allowed = allowed
+        self.allowed_ids = [str(r.id) for r in allowed]
+        self.denied_ids = denied_ids
+        self.missing_count = missing_count
+        self.readiness = {
+            str(r.id): _batch_livp_ready(r) for r in allowed if _batch_is_livp(r)
+        }
+
+
+async def _batch_fresh_pass(
+    db: AsyncSession,
+    permissions: PermissionsService,
+    user: CurrentUser,
+    is_system_admin: bool,
+    selection: list[str],
+) -> _BatchFresh:
+    """单条 `SELECT … WHERE id IN` 查行(AsyncSession 不允许并发,勿逐资产 db.get)
+    + 仅 FGA check 用 asyncio.gather 并发(permissions 走 OpenFGA client 无 DB
+    session)。不存在/已软删 → 计入 missing。系统 admin 直通。"""
+    rows = list(
+        (
+            await db.execute(
+                select(Asset).where(
+                    Asset.id.in_([uuid.UUID(s) for s in selection]),
+                    Asset.deleted_at.is_(None),
+                )
+            )
+        ).scalars().all()
+    )
+    if is_system_admin or not rows:
+        checks: list[bool] = [True] * len(rows)
+    else:
+        checks = list(
+            await asyncio.gather(
+                *(
+                    permissions.check(
+                        user_subject=user.subject,
+                        relation="can_download",
+                        object_type="asset",
+                        object_id=str(r.id),
+                    )
+                    for r in rows
+                )
+            )
+        )
+    allowed = [r for r, ok in zip(rows, checks, strict=True) if ok]
+    denied = [str(r.id) for r, ok in zip(rows, checks, strict=True) if not ok]
+    missing = len(set(selection) - {str(r.id) for r in rows})
+    return _BatchFresh(rows, allowed, denied, missing)
+
+
+def _batch_bucket_of(allowed: list[Any]) -> str:
+    """归属桶断言:批量包存选中集所在项目的桶,允许集必须全部同桶(跨桶选集 →
+    400「跨项目批量暂不支持」;实际选集恒为单夹,此为防御)。"""
+    buckets = {r.minio_bucket for r in allowed}
+    if len(buckets) > 1:
+        raise HTTPException(400, "跨项目批量暂不支持")
+    return str(buckets.pop())
+
+
+def _batch_check_sizes(allowed: list[Any]) -> None:
+    """上限双文案:单个文件超限物理上无法分批,不得给它「请分批」的死胡同文案。"""
+    weighted = [_batch_weighted_size(r) for r in allowed]
+    if any(w > _BATCH_SIZE_LIMIT for w in weighted):
+        raise HTTPException(400, "选集中单个文件超过 10GB 上限,请单独下载该文件")
+    if sum(weighted) > _BATCH_SIZE_LIMIT:
+        raise HTTPException(400, "合计超出批量打包上限(≤100 个且合计 ≤10GB),请分批下载")
+
+
+async def _batch_audit_denied(
+    redis: Any,
+    audit: AuditService,
+    user: CurrentUser,
+    selection: list[str],
+    denied_ids: list[str],
+    ctx: dict,
+) -> None:
+    """denied 首次逐条审计:Redis SETNX EX 1800 去重(窗口 ≥ 前端轮询上限 900s,
+    轮询不重写)。去重键用 canonical(请求选中集)摘要而非批量缓存 key —— 全
+    denied 时 compute_batch_key 恒返同一常量(允许集为空),按它分键会把同一用户
+    30 分钟内不同选集的首评折叠少记;选中集摘要分键后不同选集各自首评、同选集
+    轮询仍去重。SETNX 异常只 log 跳过,不让审计故障变 5xx。"""
+    if not denied_ids:
+        return
+    try:
+        first = await redis.set(
+            batch_audited_key(str(user.id), selection), "1", nx=True, ex=AUDITED_TTL,
+        )
+    except Exception as e:
+        log.warning(
+            "batch denied audit dedup fail user=%s selection=%s err=%s",
+            user.id, selection, e,
+        )
+        return
+    if not first:
+        return
+    for rid in denied_ids:
+        await audit.write(
+            event_type="download_denied",
+            actor_user_id=user.id,
+            target_asset_id=uuid.UUID(rid),
+            details={"reason": "openfga can_download false", "kind": "batch_zip"},
+            **ctx,
+        )
+
+
+async def _batch_head(
+    presign: PresignService, bucket: str, obj_key: str,
+) -> dict[str, Any] | None:
+    """head 探测缓存包(同步 boto3 按铁律 asyncio.to_thread;缺失/异常 = miss)。"""
+    try:
+        return await asyncio.to_thread(presign.head_object, bucket, obj_key)
+    except Exception as e:
+        log.info("batch zip head miss bucket=%s key=%s err=%s", bucket, obj_key, e)
+        return None
+
+
+def _batch_record(
+    selection: list[str], bucket: str, fresh: _BatchFresh, key: str,
+) -> dict[str, Any]:
+    """作业记录(轮询轻校验与响应回放全靠它;selection_ids=请求 ids 的 canonical 形态
+    与 allowed_ids 分存 —— resume 校验若误用 allowed_ids,任何含无权限/缺失项的选集
+    轮询会恒 400 → 前端静默全新 POST → 每 3s 一轮全量 FGA 复检)。"""
+    return {
+        "bucket": bucket,
+        "key": key,
+        "filename": _batch_filename(len(selection)),
+        "selection_ids": list(selection),
+        "allowed_ids": fresh.allowed_ids,
+        "skipped_no_permission": fresh.denied_ids,
+        "skipped_missing_count": fresh.missing_count,
+        "livp_raw_count": sum(
+            1 for r in fresh.allowed if _batch_is_livp(r) and not _batch_livp_ready(r)
+        ),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def _batch_out_from_record(
+    status: str, key: str, record: dict[str, Any], retry_after: int | None = None,
+) -> BatchDownloadLinkOut:
+    # livp_raw_count:job 回写的实际计数(livp_raw_count_actual)优先 —— 定稿 §6.2
+    # 第 6 步:ready 响应以 job 实际打包计数为准(轮询期就绪位翻转时,首响应按当时
+    # tags 静态判定的数字可能与实际包内容有偏差);记录无回写字段(job 未跑/未回写/
+    # 记录重建)回落 tags 静态判定值
+    actual = record.get("livp_raw_count_actual")
+    livp_raw = int(actual) if actual is not None else int(record.get("livp_raw_count") or 0)
+    return BatchDownloadLinkOut(
+        status=status,  # type: ignore[arg-type]
+        key=key,
+        filename=str(record.get("filename") or ""),
+        skipped_no_permission=[
+            uuid.UUID(s) for s in record.get("skipped_no_permission") or []
+        ],
+        skipped_missing_count=int(record.get("skipped_missing_count") or 0),
+        livp_raw_count=livp_raw,
+        retry_after_seconds=retry_after,
+    )
+
+
+async def _batch_ready(
+    presign: PresignService,
+    audit: AuditService,
+    request: Request,
+    user: CurrentUser,
+    ctx: dict,
+    bucket: str,
+    key: str,
+    age_s: float,
+    record: dict[str, Any],
+    as_attachment: bool,
+) -> BatchDownloadLinkOut:
+    """缓存命中签发:URL 有效期 = min(21600, 21600-age)(剩余寿命收缩 —— 重签满额
+    会造出「URL 还活着、对象已被清」的断流尾窗);审计写单条聚合事件(语义与逐资产
+    等价、写放大小一个量级;双 tab/反复重点击不放大审计行数)。"""
+    obj_key = batch_object_key(key)
+    ttl = max(1, min(BATCH_URL_TTL, BATCH_URL_TTL - int(age_s)))
+    filename = str(record.get("filename") or "")
+    disposition = attachment_content_disposition(filename) if as_attachment else None
+    url = presign.sign_get_url(
+        bucket, obj_key, ttl,
+        response_content_disposition=disposition,
+        request_base=request_base_from(request),
+    )
+    await audit.signed_url_issued(
+        actor_user_id=user.id,
+        target_minio_key=obj_key,
+        details={
+            "expires_in_seconds": ttl,
+            "kind": "batch_zip",
+            "ids": list(record.get("allowed_ids") or []),
+        },
+        **ctx,
+    )
+    out = _batch_out_from_record("ready", key, record)
+    out.url = url
+    out.expires_in = ttl
+    return out
+
+
+async def _batch_dispatch(
+    redis: Any,
+    pool: Any,
+    user_id: str,
+    key: str,
+    bucket: str,
+    allowed_ids: list[str],
+    record: dict[str, Any],
+    *,
+    retry: bool,
+) -> BatchDownloadLinkOut:
+    """miss → 入队(锁即去重闸),按序判定:失败标记短路 → per-user 锁前缀比对 →
+    两键单段 Lua 原子落 → enqueue(epoch 后缀 _job_id)→ 失败 Lua 回滚。"""
+
+    def _out(status: str, retry_after: int | None = None) -> BatchDownloadLinkOut:
+        return _batch_out_from_record(status, key, record, retry_after)
+
+    # ① 失败标记存在 → failed 短路不入队;retry:true → 清标记继续(手动重试不受
+    #    标记 TTL 拘束)
+    if await redis.get(batch_fail_key(key)):
+        if not retry:
+            return _out("failed")
+        await redis.delete(batch_fail_key(key))
+
+    # ② per-user 锁在:value 前缀 == key(本批 job 在跑)→ packing 不重入队(确定性
+    #    _job_id 去重已弃用,轮询防踩踏靠这把锁);前缀 != key(异 key 打包中)→ 429
+    active = await redis.get(batch_active_key(user_id))
+    if active is not None:
+        if active.split(":", 1)[0] == key:
+            return _out("packing")
+        raise HTTPException(429, "已有打包任务进行中,请稍候")
+
+    # ③ 锁不存在 → per-key 在途闸 + per-user 锁单段 Lua 原子落(单段防「两 SET
+    #    之间进程死亡」留 40 分钟假 packing 的孤儿窗;TTL 2400 仅作崩溃兜底,job
+    #    执行开始会对两键 Lua 续期)
+    token = uuid.uuid4().hex
+    if await acquire_batch_locks(redis, user_id, key, token) != 1:
+        # 撞闸(跨用户同 key 打包期点击;或 get/eval 之间他请求抢锁):重新判定
+        active2 = await redis.get(batch_active_key(user_id))
+        if active2 is not None:
+            if active2.split(":", 1)[0] == key:
+                return _out("packing")
+            raise HTTPException(429, "已有打包任务进行中,请稍候")
+        gate_ttl = await redis.ttl(batch_keygate_key(key))
+        return _out("packing", retry_after=max(int(gate_ttl), 0))
+
+    # ④ enqueue:_job_id 用 epoch 后缀而非确定性 key —— 确定性 id 会与已完成 job 的
+    #    墓碑键(崩溃/kill 残留最长 24h)和 keep_result 结果键(300s)相撞,
+    #    enqueue_job 静默返 None → 假 packing 空转;head 检查是缓存闸门、同用户踩踏
+    #    由锁防、跨用户由 per-key 闸防,arq 层去重并无必要。入参显式带 bucket 与
+    #    job_token(finally 的「值匹配才删」无米下锅)。
+    try:
+        job = await pool.enqueue_job(
+            "generate_batch_download_zip",
+            user_id, token, *allowed_ids, bucket, key,
+            _job_id=f"{key}:{time.time_ns()}{next(_batch_epoch_seq):04d}",
+        )
+        if job is None:
+            raise RuntimeError("enqueue_job 返回 None(队列不可用)")
+    except Exception as e:
+        log.warning("batch zip enqueue fail key=%s err=%s", key, e)
+        # enqueue 抛错/返 None → 按 token Lua 匹配 DEL 刚落的两键回滚,不留锁孤儿
+        with contextlib.suppress(Exception):
+            await release_batch_locks(redis, user_id, key, token)
+        raise HTTPException(503, "打包任务派发失败,请稍后重试") from e
+    return _out("packing")
+
+
+@router.post("/batch-download-link", response_model=BatchDownloadLinkOut)
+async def batch_download_link(
+    request: Request,
+    data: BatchDownloadLinkIn,
+    db: AsyncSession = Depends(get_db),  # noqa: B008  # FastAPI DI,repo 全量同款
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  # FastAPI DI,repo 全量同款
+    presign: PresignService = Depends(get_presign),  # noqa: B008  # FastAPI DI,repo 全量同款
+    audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
+    user: CurrentUser = Depends(get_current_user),  # noqa: B008  # FastAPI DI,repo 全量同款
+    is_system_admin: bool = Depends(get_is_system_admin),  # noqa: B008  # FastAPI DI,repo 全量同款
+    ctx: dict = Depends(get_request_context),  # noqa: B008  # FastAPI DI,repo 全量同款
+) -> BatchDownloadLinkOut:
+    """批量下载创建/轮询双职能(方案 §6.2 六步):端点职责只有校验 + head 探测 +
+    enqueue(亚秒级,不做重活),重活全部在 worker job。
+
+    - 首次 POST 全量校验并落作业记录 `batchzip:job:{user}:{key}`(EX 3600);
+    - 轮询(带 resume_key)只做轻校验(canonical(body ids) == 记录 selection_ids,
+      不做行存在性/软删检查、不重算权限)—— 安全与内容闸门钉在 URL 签发时刻;
+    - ready 时刻才做全量复检 + key 收敛(head 命中且未超龄才触发,轮询不放大 FGA
+      成本;key 变化 → 按新批处理,先 head 新 key 命中即签发);
+    - miss = 失败标记短路 → 锁闸 → enqueue(epoch 后缀 _job_id)。
+    """
+    redis = request.app.state.redis
+    pool = request.app.state.arq_pool
+    user_id = str(user.id)
+    selection = canonical_ids(data.asset_ids)
+
+    # ── 轮询(resume)轻校验路径 ──────────────────────────────────────────────
+    if data.resume_key:
+        rk = data.resume_key
+        raw = await redis.get(batch_job_record_key(user_id, rk))
+        if raw is None:
+            # 记录缺失/过期/跨用户(记录按用户分存,天然挡住拿别人 key 做 resume)
+            raise HTTPException(400, "批量下载作业不存在或已过期,请重新发起批量下载")
+        record = json.loads(raw)
+        if [str(s) for s in record.get("selection_ids") or []] != selection:
+            raise HTTPException(400, "选中集与批量下载作业不一致,请重新发起批量下载")
+        bucket = str(record.get("bucket") or "")
+        head = await _batch_head(presign, bucket, batch_object_key(rk))
+        if head is not None:
+            age = (datetime.now(UTC) - head["last_modified"]).total_seconds()
+            if age < BATCH_URL_TTL:
+                # ready 时刻:全量复检 + key 收敛
+                fresh = await _batch_fresh_pass(
+                    db, permissions, user, is_system_admin, selection,
+                )
+                if not fresh.rows:
+                    raise HTTPException(400, "所选文件不存在或已删除,无可下载文件")
+                if not fresh.allowed:
+                    await _batch_audit_denied(redis, audit, user, selection, fresh.denied_ids, ctx)
+                    raise HTTPException(403, "所选文件均无下载权限(可对单个文件申请下载)")
+                cur_key = compute_batch_key(fresh.readiness, fresh.allowed_ids)
+                if cur_key == rk:
+                    # 权限与就绪位未翻转 → 直接签发(回放走记录)
+                    return await _batch_ready(
+                        presign, audit, request, user, ctx, bucket, rk, age, record,
+                        data.as_attachment,
+                    )
+                # 权限被回收/就绪位变化 → 按新批处理:先 head 新应然 key,命中缓存
+                # 即免一次重打包;该分支本用户可能无作业记录,filename/skipped 按
+                # 当前全量复检现算回放并补写记录(权限变化对调用者透明,前端照常按
+                # 响应里的新 key 继续轮询)
+                new_bucket = _batch_bucket_of(fresh.allowed)
+                _batch_check_sizes(fresh.allowed)
+                new_record = _batch_record(selection, new_bucket, fresh, cur_key)
+                await redis.set(
+                    batch_job_record_key(user_id, cur_key),
+                    json.dumps(new_record), ex=JOB_RECORD_TTL,
+                )
+                head2 = await _batch_head(presign, new_bucket, batch_object_key(cur_key))
+                if head2 is not None:
+                    age2 = (datetime.now(UTC) - head2["last_modified"]).total_seconds()
+                    if age2 < BATCH_URL_TTL:
+                        return await _batch_ready(
+                            presign, audit, request, user, ctx, new_bucket, cur_key,
+                            age2, new_record, data.as_attachment,
+                        )
+                return await _batch_dispatch(
+                    redis, pool, user_id, cur_key, new_bucket, fresh.allowed_ids,
+                    new_record, retry=data.retry,
+                )
+            # age ≥ 保留期(6h)→ 按 miss 处理(cron 是 10 分钟粒度可能扫到超龄
+            # 对象,剩余寿命 ≤0 时 botocore ExpiresIn 会直接抛错)
+            log.info("batch zip object expired by age key=%s age=%.0fs", rk, age)
+        # miss → 失败标记短路 → 锁闸 → enqueue(allowed_ids 从记录回放,轻校验
+        # 不重算权限)
+        return await _batch_dispatch(
+            redis, pool, user_id, rk, bucket,
+            [str(s) for s in record.get("allowed_ids") or []],
+            record, retry=data.retry,
+        )
+
+    # ── 首次 POST(创建)全量校验路径 ─────────────────────────────────────────
+    fresh = await _batch_fresh_pass(db, permissions, user, is_system_admin, selection)
+    if not fresh.rows:
+        raise HTTPException(400, "所选文件不存在或已删除,无可下载文件")
+    # 确定性缓存 key:允许集摘要 + livp 就绪位入 key(权限不同天然分 key,无投毒
+    # 无乒乓;就绪位翻转落新 key,旧包不被钉住)。key 是包内容的函数,与请求 id
+    # 顺序/重复项无关 —— 同选中集两次点击(前端 selectedIds 插入序差异)同 key。
+    key = compute_batch_key(fresh.readiness, fresh.allowed_ids)
+    await _batch_audit_denied(redis, audit, user, selection, fresh.denied_ids, ctx)
+    if not fresh.allowed:
+        raise HTTPException(403, "所选文件均无下载权限(可对单个文件申请下载)")
+    bucket = _batch_bucket_of(fresh.allowed)
+    _batch_check_sizes(fresh.allowed)
+
+    record = _batch_record(selection, bucket, fresh, key)
+    await redis.set(
+        batch_job_record_key(user_id, key), json.dumps(record), ex=JOB_RECORD_TTL,
+    )
+
+    head = await _batch_head(presign, bucket, batch_object_key(key))
+    if head is not None:
+        age = (datetime.now(UTC) - head["last_modified"]).total_seconds()
+        if age < BATCH_URL_TTL:
+            return await _batch_ready(
+                presign, audit, request, user, ctx, bucket, key, age, record,
+                data.as_attachment,
+            )
+        log.info("batch zip object expired by age key=%s age=%.0fs", key, age)
+    return await _batch_dispatch(
+        redis, pool, user_id, key, bucket, fresh.allowed_ids, record,
+        retry=data.retry,
+    )
 
 
 # ─── thumbnail URL — B-4 (轻量,签短 ttl presigned,不走 OpenFGA enforce)──────

@@ -10,6 +10,7 @@ import { useState } from 'react';
 import { useDownloadLink } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { useDownloads } from '../lib/download-store';
+import { downloadAsset, isLinkPendingFor } from '../lib/asset-download';
 import { AssetThumbnail } from './AssetThumbnail';
 import { RequestAccessModal } from './RequestAccessModal';
 import type { Asset } from '../api/types';
@@ -44,10 +45,10 @@ export function AssetCardList({
   const downloads = useDownloads();
   const [applyAsset, setApplyAsset] = useState<Asset | null>(null);
 
+  // F12:统一走共享 helper(livp 默认请求解包 zip,未就绪回落原始 + 提示;非 livp 零变化)
   const handleDownload = async (a: Asset) => {
     try {
-      const link = await dlLink.mutateAsync(a.id);
-      await downloads.start(link.url, a.filename, { assetId: a.id });
+      await downloadAsset({ dlLink, downloads, message }, a);
     } catch (e: unknown) {
       const err = e as { response?: { status?: number } };
       if (err.response?.status === 403) setApplyAsset(a);
@@ -145,7 +146,7 @@ export function AssetCardList({
                 type="text"
                 aria-label={`下载 ${a.filename}`}
                 icon={<Download size={18} strokeWidth={1.8} />}
-                loading={dlLink.isPending && dlLink.variables === a.id}
+                loading={isLinkPendingFor(dlLink, a.id)}
                 onClick={(e) => { e.stopPropagation(); void handleDownload(a); }}
                 style={{
                   width: 44, height: 44, flexShrink: 0,

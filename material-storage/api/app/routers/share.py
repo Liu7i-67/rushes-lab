@@ -11,6 +11,7 @@ GET endpoint 必须有 session cookie(短链默认 requires_login=True);
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 
@@ -195,13 +196,37 @@ async def resolve(
         # W2b:审计补 target_project_id(folder 并发删的竞速窗口回 None,不炸)
         folder = await db.get(Folder, asset.folder_id)
 
+        # livp 下载级解包交付(livp-download-unpack 方案 §4,F4):livp 且衍生物
+        # tag 就绪 → 先 head_object 校验对象存在(孤儿 tag → 回落签原始 livp ——
+        # share 页前端零改动无回落 UI,兜底必须在服务端,与 download-link 同原则;
+        # 同步 boto3 按铁律 asyncio.to_thread 包裹,先例 assets.py batch_prefix);
+        # 未就绪/非 livp → 现行为(原始 livp)。分享受众恰是最不懂电脑的人群,收益最大
+        # getattr:真实 Asset 行恒有 tags 列(默认 dict);仅非 ORM 替身(既有
+        # test_dynamic_presign_host stub 未带该属性)走缺省
+        tags = getattr(asset, "tags", None) or {}
+        zip_key = tags.get("download_zip_key")
+        livp_unpacked = False
+        if (
+            (asset.filename or "").lower().endswith(".livp")
+            and zip_key
+        ):
+            try:
+                await asyncio.to_thread(
+                    presign.head_object, asset.minio_bucket, str(zip_key),
+                )
+                livp_unpacked = True
+            except Exception as e:
+                log.warning("share livp derivative head fail asset=%s key=%s err=%s",
+                            target_id, zip_key, e)
+
         # 短链豁免 enforce — share owner 已 verified can_download;
         # 但落 audit 记录每次访问(谁、什么时间)
         await audit.write(
             event_type="share_link_accessed",
             actor_user_id=user_id, target_asset_id=target_id,
             target_project_id=folder.project_id if folder is not None else None,
-            details={"token": token[:6] + "…", "kind": "asset"},
+            details={"token": token[:6] + "…", "kind": "asset",
+                     "livp_unpacked": livp_unpacked},
             **ctx,
         )
         ttl = settings.presigned_normal_ttl_seconds
@@ -209,9 +234,17 @@ async def resolve(
         # 该 download_url 在前端只用于「下载」按钮,无内联预览复用,无条件 attachment。
         # 动态签发:分享页可能从任一入口打开,直链 host 跟随请求入口,
         # 否则 https 分享页拿到 http 直链被浏览器混合内容拦截
+        if livp_unpacked:
+            from app.workers.main import _livp_download_base_name
+            base = _livp_download_base_name(asset.filename or "", str(asset.id))
+            disposition_name = f"{base}.zip"
+            sign_key = str(zip_key)
+        else:
+            disposition_name = asset.filename
+            sign_key = asset.minio_key
         url = presign.sign_get_url(
-            asset.minio_bucket, asset.minio_key, ttl,
-            response_content_disposition=attachment_content_disposition(asset.filename),
+            asset.minio_bucket, sign_key, ttl,
+            response_content_disposition=attachment_content_disposition(disposition_name),
             request_base=request_base_from(request),
         )
         return ShareResolveOut(

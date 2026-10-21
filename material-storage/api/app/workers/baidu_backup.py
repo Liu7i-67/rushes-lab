@@ -1989,12 +1989,18 @@ async def _head_shortcut_md5_gate(
 async def _enqueue_thumbnail(
     *, ctx_pool: Any, asset_id: uuid.UUID, filename: str, content_type: str,
 ) -> None:
-    """缩略图三分派(复用 complete_upload 口径,§6 步骤 6);fire-and-forget。"""
+    """缩略图三分派(复用 complete_upload 口径,§6 步骤 6);fire-and-forget。
+
+    livp 分支并排多派一个下载级解包 job(livp-download-unpack 方案 §2.1,F2,
+    与 complete_upload 派发点同款)。
+    """
     if ctx_pool is None:
         return
     job: str | None = None
     if filename.lower().endswith(".livp"):
         job = "generate_livp_thumbnail"
+        from app.services.arq_pool import enqueue_livp_download
+        await enqueue_livp_download(ctx_pool, str(asset_id))
     elif content_type.startswith("image/"):
         job = "generate_thumbnail"
     elif content_type.startswith("video/"):

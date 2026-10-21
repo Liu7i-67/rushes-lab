@@ -7,7 +7,9 @@ import { Button, Drawer, Empty, List, Pagination, Progress, Segmented, Space, Ta
 import { CloseOutlined, DeleteOutlined, FileOutlined, FolderOutlined } from '@ant-design/icons';
 import { useRef, useState } from 'react';
 import { computeUploadStats, useUpload } from '../lib/upload-store';
-import { useDownloads, type DownloadTask } from '../lib/download-store';
+import {
+  DIRECT_DOWNLOAD_NOTE, triggerAnchorDownload, useDownloads, type DownloadTask,
+} from '../lib/download-store';
 import { useCompactViewport } from '../lib/use-viewports';
 
 function fmtBytes(n: number): string {
@@ -234,12 +236,22 @@ function DownloadList() {
             const tag = STATUS_TAG[t.status];
             const pct = t.total > 0 ? Math.round((t.loaded / t.total) * 100) : 0;
             const finalProgress = t.status === 'success' ? 'success' : t.status === 'failed' ? 'exception' : 'active';
+            // 「重新下载」(P2-7,§6.4 被拦降级):直连类型任务(已交给系统下载)供手动
+            // 补触发 — 单次自动下载被火狐等拦截时入口不丢;failed 任务有 url 同样给入口
+            const canRedownload = t.status !== 'running' && !!t.url
+              && (t.note === DIRECT_DOWNLOAD_NOTE || t.status === 'failed');
             return (
               <List.Item
                 actions={[
                   t.status === 'running' && (
                     <Tooltip title="取消下载" key="cancel">
                       <Button size="small" type="text" icon={<CloseOutlined />} onClick={() => cancel(t.id)} />
+                    </Tooltip>
+                  ),
+                  canRedownload && (
+                    <Tooltip title="用任务记录的链接重新触发下载" key="redownload">
+                      <Button size="small" type="link"
+                              onClick={() => triggerAnchorDownload(t.url)}>重新下载</Button>
                     </Tooltip>
                   ),
                   t.status !== 'running' && (

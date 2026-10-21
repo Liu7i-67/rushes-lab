@@ -365,7 +365,12 @@ class PresignService:
         self._s3_internal.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
 
     def head_object(self, bucket: str, key: str) -> dict[str, Any]:
-        """拿 object 元信息(size / content-type / etag),complete 后 enrich Asset 用。"""
+        """拿 object 元信息(size / content-type / etag),complete 后 enrich Asset 用。
+
+        metadata(S3 user metadata;S3/MinIO 会把键归一为全小写)一并返回:
+        livp 下载 zip / 批量包的 kind 守卫(签发前 head 校验)要读它
+        (livp-download-unpack 方案 §3/§6.2 第 4 步,F6)。
+        """
         resp = self._s3_internal.head_object(Bucket=bucket, Key=key)
         return {
             "size_bytes": int(resp.get("ContentLength", 0)),
@@ -373,6 +378,7 @@ class PresignService:
             "etag": (resp.get("ETag") or "").strip('"') or None,
             "version_id": resp.get("VersionId"),
             "last_modified": resp.get("LastModified"),
+            "metadata": dict(resp.get("Metadata") or {}),
         }
 
     def list_parts(self, bucket: str, key: str, upload_id: str) -> list[dict[str, Any]]:
