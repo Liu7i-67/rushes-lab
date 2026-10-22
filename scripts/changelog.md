@@ -1,3 +1,7 @@
+## 2026-10-22
+
+- **「下载源文件」按钮合并 liuqi+部署 dev**（用户指令「合并liuqi+清理worktree+部署dev」；liuqi `d25c9de` no-ff 合并 feat/livp-source-download-btn（9d6a56d+85b9ce2），worktree/分支已清；**纯 SPA 改动免容器重启**：deploy_lan 同步代码树（DEPLOYED=d25c9de）+SPA 三片分片推送+原子替换（备份 `web.bak-20261022-sourcebtn-dev`）；验证过——dev 指纹 `index-aRPam3rc.js`=本地 build、auth/me 401、ms-api-dev 不重启零打扰；**liuqi 未 push 待指令**；真机手测五组清单待 tester（livp 直下源文件/非 livp 隐藏/无权限同款门控/弹窗文案/四入口+批量回归））
+
 ## 2026-10-21
 - **单文件详情面板「下载源文件」按钮 qdev 交付**（用户需求:极限场景需 PC 直下 livp 源文件；feat `source-btn` 分支，基线 liuqi ba227b9；**未合并未部署待拍板**）：右栏 AssetSummaryPanel QuickActions「下载」旁新增「下载源文件」（仅 livp 显示、FileDown 图标，走既有 `downloadAsset forceOriginal` 链路零后端改动；权限门控与 403 申请分支和「下载」完全同款，独立 mutation 实例 loading 不互扰）；预览弹窗 F14「下载原始 .livp」次选项统一文案为「下载源文件」；lint/build 绿，专职测试静态审查 0 P0/P1/P2（3 条 P3 观察:双按钮可并发/failed tag 静默直下/奇数格留白均记档）；需求存档 `docs/qdev/2026-10-21-livp-source-download-btn.md`；真机手测清单见测试报告（F1 基本链路/F2 非 livp 隐藏/门控同款/F3 文案回归/四入口+批量回归）
 
