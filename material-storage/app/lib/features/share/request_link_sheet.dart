@@ -6,6 +6,8 @@
 /// app-polish D4:「复制链接」改 CopyButton 就地反馈(修 SnackBar 被 sheet
 /// 遮挡的 R1 同款回归);表单分组标签统一 fzSm muted+间距节奏;错误收口
 /// SheetScaffold errorText 位;骨架迁移 SheetScaffold+PrimaryXl 吸底。
+/// app-polish-3 E6:限定接收者改 UserPickerField 弹层形态(单选语义不变,
+/// 提交仍取 _receiver.single;分节标题已有说明,字段不带 label,hint「选择用户」)。
 library;
 
 import 'package:flutter/material.dart';
@@ -20,7 +22,7 @@ import '../../services/app_log.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/buttons.dart';
 import '../../widgets/copy_button.dart';
-import '../../widgets/pickers/user_picker.dart';
+import '../../widgets/pickers/user_picker_field.dart';
 import '../../widgets/sheet_scaffold.dart';
 
 /// 动作中文(web ACTION_LABEL)。
@@ -223,9 +225,10 @@ class _RequestLinkSheetState extends State<_RequestLinkSheet> {
         ],
       ),
       _groupLabel('限定接收者(可选;留空 = 任意登录用户可用,选了防转发)'),
-      UserPicker(
+      UserPickerField(
         value: _receiver,
         multiple: false,
+        hint: '选择用户',
         onChanged: (v) => setState(() => _receiver = v),
       ),
     ];

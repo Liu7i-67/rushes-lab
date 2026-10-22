@@ -1,9 +1,9 @@
 /// app-polish-2(P2 批)文件夹直属计数验收用例(对应需求文档
-/// 2026-10-22-app-polish-2.md K2 #1):FolderRow 计数三态——
-/// - 直属>0:主徽标「N 项」(数字=本夹直属,不含子树);
-/// - 直属 0 且子树>0:灰字弱提示「子级 M 项」(fzXs muted),不再出现误导的
-///   「1313 项」全量主数字;图标实心(子树含文件)语义保持;
-/// - 两者皆 0:不显示任何数字。
+/// 2026-10-22-app-polish-2.md K2 #1;app-polish-3 D1 定稿语义反转):
+/// FolderRow 计数两态——
+/// - 直属>0:徽标「N 项」(数字=本夹直属,不含子树);
+/// - 直属 0:不显示任何数字(含子树>0,原「子级 M 项」弱提示已整体删除,
+///   避免点进去为空的二次误导);图标实心(子树含文件)语义保持。
 ///
 /// 套路:直挂 FolderRow widget(独立验收基线;开发侧同条目用例见
 /// folders_page_title_test.dart K 组,两套互为对照)。
@@ -14,7 +14,6 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/features/folders/folder_row.dart';
 import 'package:ms_app/features/folders/folder_tree.dart';
 import 'package:ms_app/models/models.dart';
-import 'package:ms_app/theme/tokens.dart';
 
 Widget _host(FolderNode node) => MaterialApp(
       home: Scaffold(
@@ -50,17 +49,14 @@ void main() {
         reason: 'K2:有直属时不出「子级」弱提示');
   });
 
-  testWidgets('K2:直属 0 且子树>0 显示「子级 M 项」灰字弱提示', (tester) async {
+  testWidgets('K2:直属 0 且子树>0 不显示任何数字(子树弱提示已删除)', (tester) async {
     await tester.pumpWidget(_host(_node(name: '空直属夹', subtree: 1313)));
-    expect(find.text('子级 1313 项'), findsOneWidget,
-        reason: 'K2:子树数降级为「子级 M 项」弱提示');
-    expect(find.text('1313 项'), findsNothing,
-        reason: 'K2:不再出现误导的全量主数字');
-
-    // 弱提示样式:fzXs + muted 灰字(弱于主徽标)
-    final text = tester.widget<Text>(find.text('子级 1313 项'));
-    expect(text.style?.fontSize, Tk.fzXs);
-    expect(text.style?.color, Tk.muted);
+    expect(find.textContaining('子级'), findsNothing,
+        reason: 'app-polish-3:「子级 M 项」弱提示已整体删除');
+    expect(find.textContaining('1313'), findsNothing,
+        reason: '不出现任何子树数字');
+    expect(find.textContaining('项'), findsNothing,
+        reason: '直属 0 时不显示任何「项」文本');
 
     // 图标实心(子树含文件)语义保持不变
     expect(find.byIcon(Icons.folder), findsOneWidget);

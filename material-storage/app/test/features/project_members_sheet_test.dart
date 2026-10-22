@@ -97,12 +97,20 @@ void main() {
     await tester.tap(find.text('添加成员'));
     await tester.pumpAndSettle();
 
-    // 切用户组段选后期组
-    await tester.tap(find.text('用户组'));
-    await tester.pump(const Duration(milliseconds: 300));
+    // 选组主体:app-polish D1 起主体选择走弹层(原内联常驻列表已下线)——
+    // 点「添加用户 / 用户组」→ 弹层内切「用户组」段 → 勾后期组 → 完成回填
+    await tester.tap(find.text('添加用户 / 用户组'));
+    await tester.pumpAndSettle(); // 弹层进场动画
+    await tester.pump(const Duration(milliseconds: 300)); // 用户段空 query 防抖
     await tester.pumpAndSettle();
-    await tester.tap(find.text('后期组'));
-    await tester.pump();
+    await tester.tap(find.text('用户组'));
+    await tester.pump(const Duration(milliseconds: 300)); // 换段按关键词重搜防抖
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '后期组'));
+    await tester.pump(); // 勾选即时回填「完成(1)」
+    await tester.tap(find.text('完成(1)'));
+    await tester.pumpAndSettle(); // 退场动画后 onChanged 回填
+    expect(find.textContaining('已选 1 项'), findsOneWidget);
 
     // 默认勾「查看」,加勾「管理」→ 一次授两角色
     await tester.tap(find.text('管理'));

@@ -213,7 +213,10 @@ class _PickerFieldState extends State<PickerField> {
       onTap: widget.onTap,
       style: const TextStyle(fontSize: Tk.fzBody, color: Tk.fg),
       decoration: InputDecoration(
-        isDense: true,
+        // app-polish-3 D6:isDense 在 filled+outline 组合下压缩竖向内边距,
+        // 浮起 label 上半截被 InputDecorator 裁掉 → 去 isDense,显式内边距
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: Tk.spaceMd, vertical: Tk.spaceMd),
         labelText: widget.label,
         hintText: widget.hint,
         border: const OutlineInputBorder(),

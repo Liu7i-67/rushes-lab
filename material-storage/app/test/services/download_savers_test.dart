@@ -28,9 +28,19 @@ Future<File> _makeLivp() async {
 
 /// 轮询等 [dir] 清空(解包临时清理是 fire-and-forget,微任务泵不保证完成)。
 Future<void> _untilEmpty(Directory dir, {int maxMs = 3000}) async {
+  // 解包目录可能被整目录删除(递归清理),此时 listSync 抛路径不存在——
+  // 目录都已不存在,同样是「清理干净」,不能当作泄漏失败。
+  bool empty() {
+    try {
+      return dir.listSync(recursive: true).isEmpty;
+    } on PathNotFoundException {
+      return true;
+    }
+  }
+
   final deadline = DateTime.now().add(Duration(milliseconds: maxMs));
   while (DateTime.now().isBefore(deadline)) {
-    if (dir.listSync(recursive: true).isEmpty) return;
+    if (empty()) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
   fail('临时目录未在时限内清理干净:${dir.path}');

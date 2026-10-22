@@ -14,6 +14,12 @@
 /// app-polish-2 I3(#5 弹层太高难发现可取消):maxHeightFactor 0.9→0.85;
 /// 把手拖拽关闭走守卫的能力沿用 D2 自制把手(遮罩点击仍不可关);关闭钮
 /// 视觉放大在 sheet_scaffold 全局生效。
+/// app-polish-3 E1/E2/D6:四个文本字段统一 AppTextField(去 isDense,修
+/// 「高级」展开后浮起 label 上半截被裁);项目管理员改 UserPickerField 弹层
+/// 形态(label 由字段承担);自制把手条抽至 widgets/handle_strip.dart。
+/// app-polish-3 拆件(单文件 ≤300 行铁律):表单体抽至 new_project_form.dart
+/// (NewProjectForm,状态仍在此持有经 props 下发),无权限兜底视图抽至
+/// new_project_no_permit.dart;行为零变更。
 library;
 
 import 'package:flutter/material.dart';
@@ -22,16 +28,16 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
-import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
 import '../../widgets/buttons.dart';
+import '../../widgets/handle_strip.dart';
 import '../../widgets/pickers/subject_picker.dart';
-import '../../widgets/pickers/user_picker.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../folders/folder_form_sheet.dart' show kProjectCodePattern;
 import 'artist_account_field.dart';
-import 'folder_template_field.dart';
 import 'initial_grants_field.dart';
+import 'new_project_form.dart';
+import 'new_project_no_permit.dart';
 import 'project_create_fail.dart';
 
 /// 打开新建项目面板;返回是否创建成功(对外 API 不变)。
@@ -209,34 +215,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     final me = session.me;
     if (!(me?.isProjectCreator ?? false)) {
       // 无权限(直达兜底):web NewProjectModal 无权分支同文案口径
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _HandleStrip(onDismiss: () => Navigator.of(context).pop(false)),
-          SheetScaffold(
-            title: '新建项目',
-            maxHeightFactor: 0.85, // I3 #5:0.9→0.85,给取消 affordance 留余量
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                const Icon(Icons.lock_outline, size: 32, color: Tk.subtle),
-                const SizedBox(height: Tk.spaceSm),
-                const Text('当前账号暂无新建项目权限',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
-                const SizedBox(height: Tk.spaceXs),
-                const Text(
-                    '需要组织管理员,或加入已开启「允许组成员新建项目」的用户组。',
-                    style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle)),
-                const SizedBox(height: Tk.spaceLg),
-                OutlinedButton(
-                    onPressed: () => Navigator.of(context).pop(false),
-                    child: const Text('关闭')),
-              ],
-            ),
-          ),
-        ],
-      );
+      return NewProjectNoPermit(
+          onClose: () => Navigator.of(context).pop(false));
     }
     final created = _created;
     return PopScope(
@@ -249,7 +229,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _HandleStrip(onDismiss: _attemptClose),
+          HandleStrip(onDismiss: _attemptClose),
           SheetScaffold(
             title: '新建项目',
             // I3 #5:0.9→0.85(弹层太高难发现可取消);把手/关闭钮守卫同 D2
@@ -264,117 +244,43 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
                     ),
                   ],
             child: created != null
-                ? _artistResultView(created)
-                : _form(context, me),
+                ? ArtistResultView(
+                    username: created.artistAccount!.username,
+                    name: created.artistAccount!.name,
+                    password: created.artistAccount!.temporaryPassword,
+                    onFinish: () => Navigator.of(context).pop(true),
+                  )
+                : NewProjectForm(props: _formProps(me)),
           ),
         ],
       ),
     );
   }
 
-  Widget _form(BuildContext context, Me? me) {
-    return Form(
-      key: _formKey,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _field('项目名称', _name,
-              hint: '2026 春季婚礼策划',
-              validator: (v) =>
-                  (v ?? '').trim().isEmpty ? '请输入项目名称' : null,
-              onChanged: (_) => _projectNameManual = true),
-          const SizedBox(height: Tk.spaceLg),
-          _field('项目编码(小写字母/数字/-)', _code,
-              hint: 'wedding-2026-spring', validator: _codeError),
-          const Text('提交后不可改;影响 MinIO 路径前缀',
-              style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-          const SizedBox(height: Tk.spaceLg),
-          _field('描述(可选)', _desc),
-          const SizedBox(height: Tk.spaceMd),
-          const Text('项目管理员(必填)',
-              style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-          UserPicker(
-            value: _admin,
-            multiple: false,
-            preset: mePreset(),
-            hint: '选一个项目管理员(默认自己)',
-            onChanged: (v) => setState(() => _admin = v),
-          ),
-          if (_admin.any((u) => u.id == me?.id))
-            const Padding(
-              padding: EdgeInsets.only(top: Tk.spaceXs),
-              child: Text('你本人将作为项目管理员',
-                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-            ),
-          const SizedBox(height: Tk.spaceSm),
-          // 高级折叠:bucket 对普通用户易困惑,收进折叠(web PR-3 同款)
-          Theme(
-            data:
-                Theme.of(context).copyWith(dividerColor: Colors.transparent),
-            child: ExpansionTile(
-              tilePadding: EdgeInsets.zero,
-              childrenPadding: EdgeInsets.zero,
-              title: const Text('高级', style: TextStyle(fontSize: Tk.fzMd)),
-              children: [
-                // 测试报告 P2-D2:后端 ProjectCreateIn.minio_bucket
-                // max_length=63(api/app/models/__init__.py),前端同限——
-                // maxLength 输入截断+计数器,校验器长度兜底
-                _field('MinIO bucket(必填)', _bucket,
-                    hint: 'PoC 统一 ms-dev',
-                    maxLength: 63,
-                    validator: (v) {
-                      final b = (v ?? '').trim();
-                      if (b.isEmpty) return '请填写 MinIO bucket';
-                      if (b.length > 63) return 'bucket 最长 63 个字符';
-                      return null;
-                    }),
-                const SizedBox(height: Tk.spaceSm),
-              ],
-            ),
-          ),
-          if (_artistGate) ...[
-            const SizedBox(height: Tk.spaceMd),
-            ArtistAccountFields(
-              onChanged: (v) => setState(() => _artist = v),
-              onNameFollow: (v) {
-                // 项目名未被手动编辑过时跟随艺人姓名(web F3-① 同款)
-                if (!_projectNameManual) _name.text = v;
-              },
-            ),
-          ],
-          const SizedBox(height: Tk.spaceMd),
-          const Text('权限(可选)',
-              style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-          InitialGrantsField(
-              value: _rows,
-              onChanged: (v) => setState(() => _rows = v)),
-          const SizedBox(height: Tk.spaceMd),
-          const Text('目录模板(可选)',
-              style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-          FolderTemplateField(
-            value: _folderTemplateId,
-            onChanged: (v) => setState(() => _folderTemplateId = v),
-          ),
-          const SizedBox(height: Tk.spaceLg),
-          // 默认权限模板直通说明(P2-4;web 提交区 Alert 同义):防「行内
-          // 显式删除的角色被默认模板并回」无感知
-          const Text(
-              '创建后将自动合并组织默认权限模板；行内显式删除的角色也可能被合并回来。',
-              style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-          const SizedBox(height: Tk.spaceSm),
-        ],
-      ),
-    );
-  }
-
-  /// 艺人账号一次性结果面板(创建成功带 artist_account 时整体替换表单)。
-  Widget _artistResultView(ProjectCreated created) {
-    final a = created.artistAccount!;
-    return ArtistResultView(
-      username: a.username,
-      name: a.name,
-      password: a.temporaryPassword,
-      onFinish: () => Navigator.of(context).pop(true),
+  /// 表单体入参组装:状态全部在此持有,子组件不读 session(props 下发,
+  /// 回调上行 setState 也在此;codeValidator/艺人跟随判断均留在父级)。
+  NewProjectFormProps _formProps(Me? me) {
+    return NewProjectFormProps(
+      formKey: _formKey,
+      name: _name,
+      code: _code,
+      desc: _desc,
+      bucket: _bucket,
+      admin: _admin,
+      onAdminChanged: (v) => setState(() => _admin = v),
+      rows: _rows,
+      onRowsChanged: (v) => setState(() => _rows = v),
+      folderTemplateId: _folderTemplateId,
+      onFolderTemplateChanged: (v) => setState(() => _folderTemplateId = v),
+      artistGate: _artistGate,
+      onArtistChanged: (v) => setState(() => _artist = v),
+      onNameChanged: (_) => _projectNameManual = true,
+      onArtistNameFollow: (v) {
+        // 项目名未被手动编辑过时跟随艺人姓名(web F3-① 同款)
+        if (!_projectNameManual) _name.text = v;
+      },
+      codeValidator: _codeError,
+      showSelfAdminHint: _admin.any((u) => u.id == me?.id),
     );
   }
 
@@ -385,68 +291,5 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       return '编码仅限小写字母/数字/-,以字母数字开头';
     }
     return null;
-  }
-
-  Widget _field(String label, TextEditingController c,
-      {String? hint,
-      void Function(String)? onChanged,
-      String? Function(String?)? validator,
-      int? maxLength}) {
-    return TextFormField(
-      controller: c,
-      onChanged: onChanged,
-      validator: validator,
-      maxLength: maxLength,
-      decoration: InputDecoration(
-        isDense: true,
-        labelText: label,
-        hintText: hint,
-        border: const OutlineInputBorder(),
-      ),
-    );
-  }
-}
-
-/// 自制拖拽把手条(D2):框架 showDragHandle 的下滑关闭走 Navigator.pop 直呼,
-/// PopScope 拦不住 → 自绘把手承接下滑手势,与关闭钮/返回键同走关闭守卫流。
-/// 全宽 + 纵向 12 触控余量(测试自 sheet 顶 +24 下滑须命中);累计位移超阈值
-/// 或下甩速度超阈值即触发。
-class _HandleStrip extends StatefulWidget {
-  const _HandleStrip({required this.onDismiss});
-
-  final VoidCallback onDismiss;
-
-  @override
-  State<_HandleStrip> createState() => _HandleStripState();
-}
-
-class _HandleStripState extends State<_HandleStrip> {
-  var _dy = 0.0;
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onVerticalDragStart: (_) => _dy = 0,
-      onVerticalDragUpdate: (d) => _dy += d.primaryDelta ?? 0,
-      onVerticalDragEnd: (d) {
-        final v = d.primaryVelocity ?? 0;
-        if (_dy > 80 || v > 500) widget.onDismiss();
-      },
-      child: Center(
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: Tk.spaceMd),
-          width: 32,
-          height: 4,
-          decoration: BoxDecoration(
-            color: Theme.of(context)
-                .colorScheme
-                .onSurfaceVariant
-                .withValues(alpha: 0.4),
-            borderRadius: BorderRadius.circular(Tk.rPill),
-          ),
-        ),
-      ),
-    );
   }
 }

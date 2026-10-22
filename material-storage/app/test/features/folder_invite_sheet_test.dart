@@ -114,11 +114,19 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    // 进表单 → 用户段预置「甲(自己)」选中 → 下载 level → 7 天 → 提交
+    // 进表单 → 弹层选自己(app-polish D1 新形态:点添加入口 → 弹层勾选 →
+    // 完成回填;原内联常驻列表已下线)→ 下载 level → 7 天 → 提交
     await tester.tap(find.text('邀请成员'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('甲(自己)'));
+    await tester.tap(find.text('添加用户 / 用户组'));
+    await tester.pumpAndSettle(); // 弹层进场动画
+    await tester.pump(const Duration(milliseconds: 300)); // 空 query 首搜防抖
     await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '甲(自己)'));
+    await tester.pump(); // 勾选即时回填「完成(1)」
+    await tester.tap(find.text('完成(1)'));
+    await tester.pumpAndSettle(); // 退场动画后 onChanged 回填
+    expect(find.textContaining('已选 1 项'), findsOneWidget);
     await tester.tap(find.text('下载(downloader)'));
     await tester.pump();
     await tester.tap(find.text('7 天'));

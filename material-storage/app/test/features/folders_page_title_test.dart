@@ -2,8 +2,9 @@
 /// - P4:FoldersPage AppBar 标题=项目名,空回退「文件夹」(FakeFoldersApi 供数);
 /// - P5:FolderRow 含文件(子树计数>0)实心深色图标、空夹橙色空心,
 ///   计数徽标与敏感锁不受影响;
-/// - K(2026-10-22 真机反馈 #1):计数三态 —— 直属>0「N 项」主徽标;
-///   直属 0 且子树>0「子级 M 项」灰字弱提示;皆 0 不显示数字。
+/// - K(2026-10-22 真机反馈 #1;app-polish-3 D1 定稿):直属>0 显示
+///   「N 项」徽标;直属=0 不显示任何数字(「子级 M 项」子树弱提示已整体
+///   删除);图标实心仍按子树>0 点亮。
 library;
 
 import 'package:flutter/material.dart';
@@ -99,7 +100,7 @@ void main() {
     });
   });
 
-  group('K:FolderRow 计数三态(直属主数字 / 子级弱提示,2026-10-22)', () {
+  group('K:FolderRow 计数(直属「N 项」徽标,子树数字已删;app-polish-3)', () {
     Widget host(FolderNode node) => MaterialApp(
           home: Scaffold(
             body: FolderRow(
@@ -120,13 +121,14 @@ void main() {
       expect(find.text('5 项'), findsNothing, reason: '子树数不再作主数字');
     });
 
-    testWidgets('直属 0 且子树>0 → 「子级 M 项」灰字,无主徽标', (tester) async {
+    testWidgets('直属 0 且子树>0 → 不显示任何数字(子树弱提示已删除)', (tester) async {
       await tester.pumpWidget(host(FolderNode(folderOf('d2', files: 1313))));
-      expect(find.text('子级 1313 项'), findsOneWidget);
-      expect(find.text('1313 项'), findsNothing, reason: '不再出现误导的全量主数字');
-      final text = tester.widget<Text>(find.text('子级 1313 项'));
-      expect(text.style?.fontSize, Tk.fzXs, reason: '弱于主徽标(fzXs muted)');
-      expect(text.style?.color, Tk.muted);
+      expect(find.textContaining('子级'), findsNothing,
+          reason: 'app-polish-3:「子级 M 项」弱提示已整体删除');
+      expect(find.textContaining('1313'), findsNothing,
+          reason: '不出现任何子树数字');
+      expect(find.textContaining('项'), findsNothing,
+          reason: '直属 0 时不显示任何「项」文本');
       // 图标实心(子树含文件)语义保持不变
       expect(find.byIcon(Icons.folder), findsOneWidget);
       expect(find.byIcon(Icons.folder_outlined), findsNothing);
@@ -138,10 +140,13 @@ void main() {
       expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
     });
 
-    testWidgets('旧后端兼容:direct 缺省 0 + 子树>0 落「子级 M 项」态', (tester) async {
+    testWidgets('旧后端兼容:direct 缺省 0 + 子树>0 → 无任何「项」文本', (tester) async {
       await tester.pumpWidget(host(FolderNode(folderOf('d4', files: 3))));
-      expect(find.text('子级 3 项'), findsOneWidget);
-      expect(find.text('3 项'), findsNothing);
+      expect(find.textContaining('子级'), findsNothing,
+          reason: 'app-polish-3:旧后端缺 direct_file_count 也不显示子树弱提示');
+      expect(find.textContaining('3'), findsNothing,
+          reason: '直属 0 时不显示子树数字 3');
+      expect(find.textContaining('项'), findsNothing);
     });
   });
 }

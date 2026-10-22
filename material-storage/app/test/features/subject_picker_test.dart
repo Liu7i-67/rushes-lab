@@ -71,7 +71,11 @@ void main() {
     expect(selected.single.id, 'u3', reason: '单选=替换语义(新建项目管理员)');
   });
 
-  testWidgets('SubjectPicker:用户/组分段;选中回显跨段可见;移除 chip 同步',
+  // app-polish D1:SubjectPicker 改「已选汇总 + 添加入口」形态,原「分段
+  // 常驻列表」用例改写为等价的新形态路径——分段按钮/勾选迁入弹层
+  // (showSubjectPickerSheet),选中在弹层内即时回填「完成(N)」计数,
+  // 点完成才 onChanged 回填汇总 chips。业务断言(kind/跨段可见/移除同步)不变。
+  testWidgets('SubjectPicker:弹层双段勾选;完成回填跨段可见;移除 chip 同步',
       (tester) async {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1.0;
@@ -94,22 +98,36 @@ void main() {
         ),
       ),
     ));
-    // 组段 prefetch 也已发;等两路防抖都落地
+    // 空态汇总(内联列表已下线)
+    expect(find.text('尚未添加主体'), findsOneWidget);
+
+    // 点添加入口弹弹层;settleSearch = 进场动画 + 空 query 首搜 250ms 防抖
+    await tester.tap(find.text('添加用户 / 用户组'));
     await settleSearch(tester);
 
-    // 用户段选乙(头像首字与标题重名,点标题)
-    await tester.tap(find.text('乙').last);
-    await tester.pump(); // onChanged→setState 重建后才有回显
-    expect(subjects.single.kind, SubjectKind.user);
-    expect(find.textContaining('已选 1 项'), findsOneWidget);
+    // 用户段勾乙(行内头像首字与标题重名,widgetWithText 对同一行会重复
+    // 命中,取 .first 去重;点的就是该行 ListTile 中心 → InkWell.onTap)
+    await tester.tap(find.widgetWithText(ListTile, '乙').first);
+    await tester.pump(); // 勾选即时回填,底部完成计数更新
+    expect(find.text('完成(1)'), findsOneWidget,
+        reason: '弹层内勾选即时回填(原「已选 1 项」的等价中间态)');
 
-    // 切组段选后期组(回显仍在)
+    // 弹层内切用户组段(原外置分段的等价形态),等换段重搜防抖后勾后期组
     await tester.tap(find.text('用户组'));
     await settleSearch(tester);
-    await tester.tap(find.text('后期组'));
+    await tester.tap(find.widgetWithText(ListTile, '后期组'));
     await tester.pump();
+    expect(find.text('完成(2)'), findsOneWidget);
+
+    // 点完成 → 退场动画后 future 才回填 → onChanged,汇总跨段可见
+    await tester.tap(find.text('完成(2)'));
+    await tester.pumpAndSettle();
     expect(subjects.length, 2);
+    expect(subjects[0].kind, SubjectKind.user);
+    expect(subjects[1].kind, SubjectKind.group);
     expect(find.textContaining('已选 2 项'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, '👤 乙'), findsOneWidget);
+    expect(find.widgetWithText(InputChip, '🏷 后期组'), findsOneWidget);
 
     // 移除用户 chip(👤 乙):直接触发 InputChip.onDeleted(删除图标受 tooltip
     // 包装,finder 不稳;语义等价用户点 ×)

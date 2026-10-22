@@ -1,6 +1,8 @@
 /// UserPicker — 用户搜索多/单选(B6 §9 pickers;web UserPicker 移动版):
 /// 输入停顿 250ms 搜 GET /users?q=(留空返前 N),空 query 时注入 preset
 /// (自己);stale 响应用自增 tag 丢弃。value = users.id UUID(#150 起)。
+/// **表单场景请用 `UserPickerField`(弹层形态,app-polish-3 D4);本组件
+/// 保留给需要内联常驻列表的场景与既有测试**。
 library;
 
 import 'dart:async';
