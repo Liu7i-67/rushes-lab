@@ -23,6 +23,9 @@
          dataSync 类型;Android 14+ 起必须申明 type 级权限,服务才能 startForeground) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <!-- feat/app-qiniu-update:应用内更新(open_filex 调系统安装器装 APK);
+         仅申明,Android 8+ 实际能否安装仍由用户「允许安装未知应用」开关决定 -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <application
         android:label="浣花视界"
         android:name="${applicationName}"

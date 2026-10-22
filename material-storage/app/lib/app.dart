@@ -2,10 +2,14 @@
 /// 路由仍为命名路由 + Navigator.push(不引 go_router)。
 library;
 
+import 'dart:io';
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'core/maintenance/maintenance_overlay.dart';
 import 'core/session.dart';
+import 'core/update/update_flow.dart';
 import 'features/admin/admin_audit_page.dart';
 import 'features/admin/admin_baidu_tasks_page.dart';
 import 'features/admin/admin_folder_templates_page.dart';
@@ -43,6 +47,12 @@ class _MsAppState extends State<MsApp> {
     super.initState();
     // 冷启动探活(§4):命中即用;登录页监听 Session 呈现 探测中/不可达·重试
     session.probe();
+    // feat/app-qiniu-update F2-4(D9):首帧渲染完成后约 3s 自动静默检查更新,
+    // 仅 Android(D6);每 session 一次,任何失败完全无感(3s 延时与静默、
+    // 弹窗一次性闸门语义见 core/update/update_flow.dart)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      appUpdate.autoCheckOnce(isAndroid: !kIsWeb && Platform.isAndroid);
+    });
   }
 
   @override
