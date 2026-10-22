@@ -160,8 +160,14 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: ProjectsPage()));
     await tester.pumpAndSettle();
 
-    expect(find.byTooltip('请求链接'), findsOneWidget,
-        reason: '仅 admin 项目露出;viewer 项目不露出');
+    // app-polish E3:行尾「请求链接」图标钮移入长按菜单(行尾收敛为角色徽标
+    // +chevron)。admin 项目长按出菜单(含「请求链接」);viewer 项目无菜单
+    expect(find.byTooltip('请求链接'), findsNothing,
+        reason: 'E3:行尾图标钮已移除');
+    await tester.longPress(find.text('管理项目'));
+    await tester.pumpAndSettle();
+    expect(find.text('请求链接'), findsOneWidget,
+        reason: '仅 admin 项目长按菜单露出;viewer 项目不露出');
   });
 
   testWidgets('文件夹 ⋯ 菜单(P2-4 定稿):folder admin 可见可点,发起进 request_link_sheet',

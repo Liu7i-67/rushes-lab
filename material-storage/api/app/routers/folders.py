@@ -603,6 +603,9 @@ async def list_folders(
     for r in folders:
         item = FolderOut.model_validate(r)
         item.subtree_file_count = subtree.get(r.id, 0)
+        # 直属计数(2026-10-22 K1):direct GROUP BY 直出,与 subtree 同为
+        # 仅 list 回填(单条/创建响应走 model_validate 恒默认 0)
+        item.direct_file_count = direct.get(r.id, 0)
         out.append(item)
     return out
 

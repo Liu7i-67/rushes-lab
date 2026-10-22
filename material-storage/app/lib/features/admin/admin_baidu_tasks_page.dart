@@ -17,6 +17,9 @@ import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/search_field.dart';
+import '../../widgets/toast.dart';
+import 'admin_auto_load.dart';
 import 'baidu_task_detail_sheet.dart';
 import 'baidu_task_labels.dart';
 
@@ -30,7 +33,8 @@ class AdminBaiduTasksPage extends StatefulWidget {
   State<AdminBaiduTasksPage> createState() => _AdminBaiduTasksPageState();
 }
 
-class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
+class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
+    with AutoLoadScroll<AdminBaiduTasksPage> {
   final _search = TextEditingController();
   Timer? _debounce;
   Timer? _poll;
@@ -44,9 +48,12 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
 
   @override
   void initState() {
-    super.initState();
+    super.initState(); // AutoLoadScroll:挂滚动监听
     _reload();
   }
+
+  @override
+  void onAutoLoad() => _loadMore();
 
   @override
   void dispose() {
@@ -88,12 +95,13 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
     } on ApiException catch (e) {
       _fail(tag, e.message);
     } catch (e) {
-      _fail(tag, '$e');
+      _fail(tag, errorMessage(e, '加载失败,请稍后重试'));
     }
   }
 
+  /// 到底自动加载(F6):加载中/已取全守卫;失败 toast,滚动可再次触发。
   Future<void> _loadMore() async {
-    if (_loadingMore) return;
+    if (_loadingMore || _loading || _items.length >= _total) return;
     setState(() => _loadingMore = true);
     final tag = _reloadTag;
     try {
@@ -108,8 +116,11 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
         _items.addAll(page.items);
         _loadingMore = false;
       });
-    } catch (_) {
-      if (mounted) setState(() => _loadingMore = false);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingMore = false);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'),
+          tone: ToastTone.error);
     }
   }
 
@@ -129,27 +140,22 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: TextField(
+            padding: const EdgeInsets.fromLTRB(
+                Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
+            child: SearchField(
               controller: _search,
+              hintText: '搜用户名 / 姓名 / 源目录…',
               onChanged: (v) {
                 _debounce?.cancel();
-                _debounce =
-                    Timer(const Duration(milliseconds: 300), _reload);
+                _debounce = Timer(const Duration(milliseconds: 300), _reload);
               },
-              decoration: const InputDecoration(
-                isDense: true,
-                hintText: '搜用户名 / 姓名 / 源目录…',
-                prefixIcon: Icon(Icons.search, size: 20),
-                border: OutlineInputBorder(),
-              ),
             ),
           ),
           SizedBox(
             height: 48,
             child: ListView(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: Tk.spaceMd),
               children: [
                 for (final (key, label) in const [
                   ('', '全部状态'),
@@ -160,7 +166,7 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
                   ('failed', '失败'),
                 ])
                   Padding(
-                    padding: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.only(right: Tk.spaceSm),
                     child: ChoiceChip(
                       label: Text(label),
                       selected: _status == key,
@@ -174,11 +180,12 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: Tk.spaceLg),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text('共 $_total 个任务',
-                  style: const TextStyle(fontSize: 11.5, color: Tk.subtle)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ),
           ),
           Expanded(child: _body()),
@@ -198,15 +205,12 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage> {
       return const EmptyState(message: '暂无备份任务');
     }
     return ListView.builder(
+      controller: scrollController,
       itemCount: _items.length + (_items.length < _total ? 1 : 0),
       itemBuilder: (context, i) {
         if (i >= _items.length) {
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child: OutlinedButton(
-                onPressed: _loadingMore ? null : _loadMore,
-                child: Text(_loadingMore ? '加载中…' : '加载更多')),
-          );
+          // F6:底部自动加载指示器(到底自动触发;失败后可点重试)
+          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
         }
         return _TaskRow(task: _items[i], onChanged: _reload);
       },
@@ -238,7 +242,8 @@ class _TaskRow extends StatelessWidget {
         const Spacer(),
         if (t.failedFiles > 0)
           Text('失败 ${t.failedFiles}',
-              style: const TextStyle(fontSize: 11, color: Tk.red)),
+              style:
+                  const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
       ]),
       subtitle: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -246,7 +251,7 @@ class _TaskRow extends StatelessWidget {
           Text(t.sourceDir,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 11.5)),
+              style: const TextStyle(fontSize: Tk.fzXs)),
           Text(
             '${t.project.name} / ${t.targetFolder?.name ?? '已删'} · '
             '${t.status == 'enumerating' ? '清单准备中' : '${t.progressPct}%'} · '
@@ -254,7 +259,7 @@ class _TaskRow extends StatelessWidget {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: TextStyle(
-                fontSize: 11,
+                fontSize: Tk.fzXs,
                 color: t.targetFolder == null ? Tk.amber : Tk.muted),
           ),
           if (t.failReason != null)
@@ -262,7 +267,7 @@ class _TaskRow extends StatelessWidget {
                 '失败原因:${kFailReasonLabels[t.failReason] ?? t.failReason}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Tk.red)),
+                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
         ],
       ),
       isThreeLine: true,

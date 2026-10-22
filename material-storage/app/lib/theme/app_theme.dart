@@ -33,9 +33,11 @@ ThemeData buildAppTheme() {
     cardTheme: CardThemeData(
       color: Tk.surface,
       elevation: 0,
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      // 16/6→spaceLg/spaceSm(A2 就近归档);20→rXl 大卡档(A3)
+      margin: const EdgeInsets.symmetric(
+          horizontal: Tk.spaceLg, vertical: Tk.spaceSm),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(Tk.rXl),
         side: const BorderSide(color: Tk.border),
       ),
     ),
@@ -47,15 +49,16 @@ ThemeData buildAppTheme() {
         IconThemeData(color: Tk.muted),
       ),
       labelTextStyle: const WidgetStatePropertyAll(
-        TextStyle(fontSize: 12, color: Tk.muted),
+        TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
       ),
     ),
     inputDecorationTheme: InputDecorationTheme(
       filled: true,
       fillColor: Tk.fill,
       hintStyle: const TextStyle(color: Tk.subtle),
+      // 14→rMd 小卡/输入档(A3);SearchField 等不再各自覆盖
       border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(Tk.rMd),
         borderSide: BorderSide.none,
       ),
     ),

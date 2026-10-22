@@ -84,7 +84,7 @@ class AdminHomePage extends StatelessWidget {
             leading: Icon(t.icon, color: Tk.accent),
             title: Text(t.title),
             subtitle: Text(t.subtitle,
-                style: const TextStyle(fontSize: 12, color: Tk.muted)),
+                style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             trailing: const Icon(Icons.chevron_right),
             onTap: t.onTap,
           );

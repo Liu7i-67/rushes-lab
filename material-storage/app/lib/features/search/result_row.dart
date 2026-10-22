@@ -87,11 +87,13 @@ class ResultRow extends StatelessWidget {
     final a = r.asset;
     return InkWell(
       onTap: onTap,
+      borderRadius: const BorderRadius.all(Radius.circular(Tk.rMd)),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        padding: const EdgeInsets.symmetric(
+            horizontal: Tk.spaceMd, vertical: 10),
         decoration: BoxDecoration(
           border: Border.all(color: Tk.border),
-          borderRadius: BorderRadius.circular(10),
+          borderRadius: const BorderRadius.all(Radius.circular(Tk.rMd)),
         ),
         child: Row(
           children: [
@@ -99,7 +101,7 @@ class ResultRow extends StatelessWidget {
               width: 48,
               height: 48,
               child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
+                borderRadius: const BorderRadius.all(Radius.circular(Tk.rSm)),
                 child: ThumbnailImage(asset: a, fallbackIconSize: 20),
               ),
             ),
@@ -110,19 +112,20 @@ class ResultRow extends StatelessWidget {
                 children: [
                   highlightText(a.filename, query,
                       style: const TextStyle(
-                          fontSize: 14, fontWeight: FontWeight.w500)),
-                  const SizedBox(height: 4),
+                          fontSize: Tk.fzBody, fontWeight: FontWeight.w500)),
+                  const SizedBox(height: Tk.spaceXs),
+                  // E9:归属行 fzXs→fzSm 提升可读性
                   Text(
                     '${r.projectName} / ${r.folderName}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style:
-                        const TextStyle(fontSize: 11.5, color: Tk.subtle),
+                        const TextStyle(fontSize: Tk.fzSm, color: Tk.subtle),
                   ),
                 ],
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: Tk.spaceSm),
             Badge(label: typeBadgeLabel(a.filename, a.contentType)),
           ],
         ),

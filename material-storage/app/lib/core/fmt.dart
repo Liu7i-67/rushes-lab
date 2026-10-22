@@ -25,6 +25,30 @@ String fmtIsoShort(String iso) {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
 
+/// 相对时间(app-polish E6):通知等列表行的人类化时间。
+/// 规则:刚刚(<1 分钟)/ N 分钟前(<1 小时)/ N 小时前(今日)/
+/// 昨天 HH:mm / 前天 HH:mm / N 天前(3~7 天)/ MM-DD(同年)/
+/// YYYY-MM-DD(跨年);[now] 注入供单测;解析失败原样返回(不崩溃)。
+String fmtRelativeTime(String iso, {DateTime? now}) {
+  final t = DateTime.tryParse(iso)?.toLocal();
+  if (t == null) return iso;
+  final n = (now ?? DateTime.now()).toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  final hm = '${two(t.hour)}:${two(t.minute)}';
+  final diff = n.difference(t);
+  if (diff < const Duration(minutes: 1)) return '刚刚';
+  if (diff < const Duration(hours: 1)) return '${diff.inMinutes} 分钟前';
+  final today = DateTime(n.year, n.month, n.day);
+  final that = DateTime(t.year, t.month, t.day);
+  final days = today.difference(that).inDays;
+  if (days <= 0) return '${diff.inHours} 小时前';
+  if (days == 1) return '昨天 $hm';
+  if (days == 2) return '前天 $hm';
+  if (days <= 7) return '$days 天前';
+  if (t.year == n.year) return '${two(t.month)}-${two(t.day)}';
+  return '${t.year}-${two(t.month)}-${two(t.day)}';
+}
+
 /// ETA 人类可读(web fmtEta 同口径;B9 P2-6 收敛为单一实现——网盘备份任务
 /// 详情页与列表卡共用,勿再各自内联)。
 String fmtEtaShort(int seconds) {

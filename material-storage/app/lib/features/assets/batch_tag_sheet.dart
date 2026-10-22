@@ -8,9 +8,12 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/toast.dart';
 import 'asset_writeback.dart';
 
 /// 标签解析:逗号/、/换行分隔 → trim → 去空 → 去重(保序;web tags 输入同口径)。
@@ -147,15 +150,13 @@ class _TagEditSheetState extends State<_TagEditSheet> {
       if (ok > 0) notifyAssetMutation(widget.folderId);
       if (!mounted) return;
       Navigator.of(context).pop(ok > 0);
-      ScaffoldMessenger.maybeOf(context)
-        ?..hideCurrentSnackBar()
-        ..showSnackBar(SnackBar(
-            content: Text('已为 $ok 个文件打标${fail > 0 ? ' · 失败 $fail' : ''}')));
+      toast(context, '已为 $ok 个文件打标${fail > 0 ? ' · 失败 $fail' : ''}',
+          tone: fail > 0 ? ToastTone.error : ToastTone.success);
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(content: Text('标签保存失败:$e')));
+      toast(context, errorMessage(e, '标签保存失败,请稍后重试'),
+          tone: ToastTone.error);
     }
   }
 
@@ -173,13 +174,13 @@ class _TagEditSheetState extends State<_TagEditSheet> {
               crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(widget.batch ? '批量打标(${widget.assetIds.length} 个文件)' : '编辑标签与备注',
               style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 4),
+          const SizedBox(height: Tk.spaceXs),
           Text(
               widget.batch
                   ? '给选中文件统一打标;输入后逗号分隔,多个标签。'
                   : '逗号分隔多个标签;备注留空保存即清空。',
               style: Theme.of(context).textTheme.bodySmall),
-          const SizedBox(height: 12),
+          const SizedBox(height: Tk.spaceMd),
           TextField(
             controller: _labels,
             autofocus: true,
@@ -191,12 +192,12 @@ class _TagEditSheetState extends State<_TagEditSheet> {
             onChanged: (_) => setState(() {}),
           ),
           if (labels.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: Tk.spaceSm),
             Wrap(spacing: 6, runSpacing: 6, children: [
               for (final l in labels) Chip(label: Text(l), visualDensity: VisualDensity.compact),
             ]),
           ],
-          const SizedBox(height: 12),
+          const SizedBox(height: Tk.spaceMd),
           TextField(
             controller: _notes,
             decoration: InputDecoration(
@@ -206,7 +207,7 @@ class _TagEditSheetState extends State<_TagEditSheet> {
             maxLines: 3,
           ),
           if (widget.batch) ...[
-            const SizedBox(height: 12),
+            const SizedBox(height: Tk.spaceMd),
             SegmentedButton<String>(
               segments: const [
                 ButtonSegment(value: 'merge', label: Text('合并已有标签')),
@@ -216,7 +217,7 @@ class _TagEditSheetState extends State<_TagEditSheet> {
               onSelectionChanged: (s) => setState(() => _mode = s.first),
             ),
           ],
-          const SizedBox(height: 16),
+          const SizedBox(height: Tk.spaceLg),
           SizedBox(
             width: double.infinity,
             child: FilledButton(

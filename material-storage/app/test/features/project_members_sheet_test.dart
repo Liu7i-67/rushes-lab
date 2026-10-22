@@ -51,13 +51,14 @@ void main() {
     expect(find.text('成员 · 演示项目'), findsOneWidget);
     expect(find.text('甲'), findsWidgets, reason: '头像首字+标题');
     expect(find.text('后期组(群组)'), findsOneWidget);
-    // 角色徽章按 ROLE_ORDER 序(admin>uploader>downloader>viewer)
-    expect(find.text('管理 ×'), findsOneWidget);
-    expect(find.text('查看 ×'), findsOneWidget);
-    expect(find.text('上传 ×'), findsOneWidget);
+    // 角色徽章按 ROLE_ORDER 序(admin>uploader>downloader>viewer);
+    // app-polish E13:徽章不再带「×」文案,撤销入口=徽章行尾显式移除图标钮
+    expect(find.text('管理'), findsOneWidget);
+    expect(find.text('查看'), findsOneWidget);
+    expect(find.text('上传'), findsOneWidget);
 
-    // 撤自己的 admin → 409 detail 透传
-    await tester.tap(find.text('管理 ×'));
+    // 撤自己的 admin → 显式移除钮(语义 icon)→ 确认层 → 409 detail 透传
+    await tester.tap(find.byTooltip('移除管理角色'));
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '撤销'));
     await tester.pumpAndSettle();

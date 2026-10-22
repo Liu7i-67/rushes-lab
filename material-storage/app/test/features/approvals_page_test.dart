@@ -140,7 +140,10 @@ void main() {
 
     expect(api.approvalsOps.decideCalls.single.id, 'a1');
     expect(api.approvalsOps.decideCalls.single.approve, isTrue);
-    expect(api.approvalsOps.listCalls.length, 2, reason: '决策成功刷新列表');
+    // app-polish E8:决策成功改为按 id 局部更新(不再整列表重拉),滚动位置
+    // 天然保持——原「刷新列表 listCalls=2」断言随实现翻转
+    expect(api.approvalsOps.listCalls.length, 1,
+        reason: 'E8:决策后局部更新,不整列表重拉');
     expect(find.textContaining('已批准'), findsOneWidget);
     await tester.pump(const Duration(seconds: 6)); // 清 SnackBar timer
     await tester.pumpAndSettle();

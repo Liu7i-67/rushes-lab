@@ -71,17 +71,18 @@ class _GroupMultiSelectState extends State<GroupMultiSelect> {
           ),
           onChanged: _search,
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: Tk.spaceXs),
         if (widget.value.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(bottom: 4),
+            padding: const EdgeInsets.only(bottom: Tk.spaceXs),
             child: Wrap(
               spacing: 6,
               runSpacing: 2,
               children: [
                 for (final g in widget.value)
                   InputChip(
-                    label: Text(g.name, style: const TextStyle(fontSize: 12)),
+                    label: Text(g.name,
+                        style: const TextStyle(fontSize: Tk.fzSm)),
                     visualDensity: VisualDensity.compact,
                     onDeleted: () => _toggle(g),
                   ),
@@ -92,14 +93,15 @@ class _GroupMultiSelectState extends State<GroupMultiSelect> {
           constraints: const BoxConstraints(maxHeight: 160),
           decoration: BoxDecoration(
             border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: _options.isEmpty
               ? Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(Tk.spaceMd),
                   child: Center(
                       child: Text(_fetching ? '加载中…' : '无用户组',
-                          style: const TextStyle(fontSize: 12.5))),
+                          style:
+                              const TextStyle(fontSize: Tk.fzSm))),
                 )
               : ListView.builder(
                   shrinkWrap: true,
@@ -113,10 +115,10 @@ class _GroupMultiSelectState extends State<GroupMultiSelect> {
                       title: Text(g.name,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5)),
+                          style: const TextStyle(fontSize: Tk.fzMd)),
                       subtitle: Text('${g.memberCount} 人',
-                          style:
-                              const TextStyle(fontSize: 11, color: Tk.subtle)),
+                          style: const TextStyle(
+                              fontSize: Tk.fzXs, color: Tk.subtle)),
                       dense: true,
                       trailing:
                           selected ? const Icon(Icons.check, size: 18) : null,

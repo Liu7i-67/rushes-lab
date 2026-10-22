@@ -10,8 +10,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
 import 'folder_template_form_sheet.dart';
 
 class AdminFolderTemplatesPage extends StatefulWidget {
@@ -52,41 +54,30 @@ class _AdminFolderTemplatesPageState extends State<AdminFolderTemplatesPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '加载失败,请稍后重试');
         _loading = false;
       });
     }
   }
 
   Future<void> _delete(FolderTemplate t) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('删除目录模板「${t.name}」?'),
-        content: Text('${t.entryCount} 条目录条目将一并删除;已建项目不受影响'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-            style: FilledButton.styleFrom(foregroundColor: Tk.red),
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text('删除'),
-          ),
-        ],
-      ),
+    // F3:确认口径 `!= true`——取消 false / 遮罩关闭 null 均视为未确认
+    final ok = await showAppConfirm(
+      context,
+      title: '删除目录模板「${t.name}」?',
+      content: '${t.entryCount} 条目录条目将一并删除;已建项目不受影响',
+      confirmLabel: '删除',
+      danger: true,
     );
     if (ok != true) return;
     try {
       await session.api!.adminTemplates.deleteFolderTemplate(t.id);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('已删除目录模板「${t.name}」')));
+      toast(context, '已删除目录模板「${t.name}」', tone: ToastTone.success);
       _reload();
     } on ApiException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message))); // 404/403 透传
+      toast(context, e.message, tone: ToastTone.error); // 404/403 透传
     }
   }
 
@@ -164,7 +155,8 @@ class _AdminFolderTemplatesPageState extends State<AdminFolderTemplatesPage> {
               ),
               const SizedBox(width: 6),
               Text('${t.entryCount} 个目录',
-                  style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ]),
             subtitle: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -173,17 +165,18 @@ class _AdminFolderTemplatesPageState extends State<AdminFolderTemplatesPage> {
                   Text(t.description!,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11.5)),
+                      style: const TextStyle(fontSize: Tk.fzXs)),
                 // 条目一览(最多 6 条,余量折叠;web TemplateRow 同口径)
                 for (final e in t.entries.take(6))
                   Text(e.path,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: Tk.muted)),
+                      style:
+                          const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
                 if (t.entries.length > 6)
                   Text('+${t.entries.length - 6}',
-                      style:
-                          const TextStyle(fontSize: 11, color: Tk.subtle)),
+                      style: const TextStyle(
+                          fontSize: Tk.fzXs, color: Tk.subtle)),
               ],
             ),
             isThreeLine: t.entries.length > 3,

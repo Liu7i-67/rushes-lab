@@ -1,8 +1,10 @@
-/// DeletedProjectsPage — 已删除项目回收站(B6 §8.5;web DeletedProjectsModal
-/// 移动版):列表(q 过 code/name,deleted_at 倒序,带删除人)+ 服务端分页
-/// + 单行恢复。入口=我的→「回收站(项目)」,仅 is_project_deleter 可见
-/// (后端 deleted/restore 双端点 require_project_deleter 同口径);恢复成功
-/// invalidate projects scope。
+/// DeletedProjectsPage — 已删除项目回收站(B6 §8.5;app-polish E10 精修):
+/// 列表(q 过 code/name,deleted_at 倒序,带删除人)+ 滚动到底自动加载
+/// (替代「加载更多」按钮)+ 单行恢复(danger 确认)。顶部说明收进可关闭
+/// 提示卡(默认展示一次,可收起);错误走 errorMessage;恢复成功 toast。
+/// 入口=我的→「回收站(项目)」,仅 is_project_deleter 可见(后端 deleted/
+/// restore 双端点 require_project_deleter 同口径);恢复成功 invalidate
+/// projects scope。
 library;
 
 import 'package:flutter/material.dart';
@@ -12,12 +14,17 @@ import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_confirm.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/toast.dart';
 import '../../core/fmt.dart';
 
 /// 分页页大小(web DELETED_PROJECTS_PAGE_SIZE 同款)。
 const kDeletedProjectsPageSize = 20;
+
+/// 距底不足此距离即预取下一页(自动加载阈值)。
+const _kLoadMoreThreshold = 200.0;
 
 class DeletedProjectsPage extends StatefulWidget {
   const DeletedProjectsPage({super.key});
@@ -32,6 +39,7 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
   var _total = 0;
   var _loading = true;
   String? _error;
+  var _infoOpen = true;
 
   /// P2-2 加载更多防连点 + 代际 tag(参照 pickers stale tag 模式):
   /// 搜索 reload 使 tag 自增,旧 loadMore 的迟到响应按 tag 不匹配丢弃,
@@ -46,6 +54,11 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
   void initState() {
     super.initState();
     _reload();
+  }
+
+  @override
+  void dispose() {
+    super.dispose();
   }
 
   /// 拉第一页并整表替换(搜索词变化/恢复后);[q] 传 null = 沿用当前词。
@@ -72,16 +85,17 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
     } catch (e) {
       if (tag != _reloadTag || !mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '回收站加载失败');
         _loading = false;
       });
     }
   }
 
-  /// 追加下一页(加载更多;P2-2:_loadingMore 防连点,快照代际 tag 防搜索
-  /// reload 后旧响应追加进新词列表)。
+  /// 追加下一页(自动加载;P2-2:_loadingMore 防连点,_items.length >= _total
+  /// 取尽守卫,快照代际 tag 防搜索 reload 后旧响应追加进新词列表);
+  /// 失败 toast 可见反馈,再次滚动重试。
   Future<void> _loadMore() async {
-    if (_loadingMore) return;
+    if (_loadingMore || _items.length >= _total) return;
     final tag = _reloadTag;
     setState(() => _loadingMore = true);
     try {
@@ -96,8 +110,8 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
       });
     } catch (e) {
       if (tag != _reloadTag || !mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('加载更多失败:$e')));
+      toast(context, errorMessage(e, '加载更多失败,可再次滚动重试'),
+          tone: ToastTone.error);
     } finally {
       _loadingMore = false;
       if (mounted) setState(() {});
@@ -106,20 +120,11 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
 
   Future<void> _restore(DeletedProject p) async {
     if (_restoring) return; // P2-1 防连点(守卫须在首个 await 前同步生效)
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('恢复项目「${p.name}」?'),
-        content: const Text('恢复后立即回到项目列表,原成员权限不变。'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              child: const Text('恢复')),
-        ],
-      ),
+    final ok = await showAppConfirm(
+      context,
+      title: '恢复项目「${p.name}」?',
+      content: '恢复后立即回到项目列表,原成员权限不变。',
+      confirmLabel: '恢复',
     );
     if (ok != true) return;
     setState(() => _restoring = true);
@@ -127,13 +132,12 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
       await session.api!.projectsOps.restore(p.id);
       RefreshBus.I.invalidate('projects');
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('项目「${p.name}」已恢复')));
+      toast(context, '项目「${p.name}」已恢复', tone: ToastTone.success);
       _reload();
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)
-          ?.showSnackBar(SnackBar(content: Text('恢复失败:$e')));
+      toast(context, errorMessage(e, '恢复失败,请稍后重试'),
+          tone: ToastTone.error);
     } finally {
       _restoring = false;
       if (mounted) setState(() {});
@@ -161,14 +165,49 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
             },
           ),
         ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Text(
-            '已删除的项目对所有成员(含系统管理员)隐藏,但数据、授权与分享链接'
-            '全部保留;恢复后立即回到项目列表。',
-            style: const TextStyle(fontSize: 11.5, color: Tk.subtle),
+        // E10:顶部说明收进可关闭提示卡(不再常驻占三行)
+        if (_infoOpen)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+                Tk.spaceLg, Tk.spaceXs, Tk.spaceLg, 0),
+            child: Container(
+              padding: const EdgeInsets.fromLTRB(
+                  Tk.spaceMd, Tk.spaceXs, Tk.spaceXs, Tk.spaceXs),
+              decoration: const BoxDecoration(
+                color: Tk.surface2,
+                borderRadius: BorderRadius.all(Radius.circular(Tk.rMd)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 2),
+                    child: Icon(Icons.info_outline,
+                        size: 16, color: Tk.muted),
+                  ),
+                  const SizedBox(width: Tk.spaceSm),
+                  const Expanded(
+                    child: Text(
+                      '已删除的项目对所有成员隐藏,数据与授权保留;恢复后立即回到项目列表。',
+                      style: TextStyle(
+                          fontSize: Tk.fzXs, color: Tk.muted, height: 1.5),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: IconButton(
+                      padding: EdgeInsets.zero,
+                      iconSize: 16,
+                      tooltip: '收起',
+                      icon: const Icon(Icons.close, color: Tk.subtle),
+                      onPressed: () => setState(() => _infoOpen = false),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ),
         Expanded(child: _body()),
       ]),
     );
@@ -182,40 +221,71 @@ class _DeletedProjectsPageState extends State<DeletedProjectsPage> {
       return ErrorView(message: _error!, onRetry: _reload);
     }
     if (_items.isEmpty) {
-      return EmptyState(
-        icon: Icons.delete_sweep_outlined,
-        message: _q.isEmpty ? '没有已删除的项目' : '无匹配项目',
+      return RefreshIndicator(
+        onRefresh: _reload,
+        child: LayoutBuilder(
+          builder: (context, constraints) => ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              SizedBox(height: constraints.maxHeight, child: Center(
+                child: EmptyState(
+                  icon: Icons.delete_sweep_outlined,
+                  message: _q.isEmpty ? '没有已删除的项目' : '无匹配项目',
+                ),
+              )),
+            ],
+          ),
+        ),
       );
     }
     return RefreshIndicator(
       onRefresh: _reload,
-      child: ListView.separated(
-        itemCount: _items.length + (_items.length < _total ? 1 : 0),
-        separatorBuilder: (_, _) => const Divider(height: 1),
-        itemBuilder: (context, i) {
-          if (i >= _items.length) {
-            return TextButton(
-              onPressed: _loadingMore ? null : _loadMore,
-              child: Text(_loadingMore ? '加载中…' : '加载更多'),
-            );
+      // E10:滚动到底(距底 <200px)自动加载。NotificationListener 恒派发
+      // (含内容不足一屏的 overscroll),不受 physics 钳制影响
+      child: NotificationListener<ScrollNotification>(
+        onNotification: (n) {
+          // 更新与越界(overscroll)都要:内容不足一屏时只有越界通知
+          if ((n is ScrollUpdateNotification || n is OverscrollNotification) &&
+              n.metrics.extentAfter < _kLoadMoreThreshold) {
+            _loadMore();
           }
-          final p = _items[i];
-          return ListTile(
-            leading: const Icon(Icons.folder_delete_outlined),
-            title: Text('${p.name}(${p.code})',
-                maxLines: 1, overflow: TextOverflow.ellipsis),
-            subtitle: Text(
-              '删除于 ${p.deletedAt.isEmpty ? '—' : fmtDate(p.deletedAt)}'
-              '${p.deletedByName == null ? '' : ' · ${p.deletedByName}'}',
-              style: const TextStyle(fontSize: 11.5),
-            ),
-            trailing: TextButton.icon(
-              icon: const Icon(Icons.restore_from_trash_outlined, size: 16),
-              label: const Text('恢复'),
-              onPressed: _restoring ? null : () => _restore(p),
-            ),
-          );
+          return false;
         },
+        child: ListView.separated(
+          itemCount: _items.length + (_loadingMore ? 1 : 0),
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemBuilder: (context, i) {
+            // E10:底部加载指示(自动加载 in-flight;替代「加载更多」按钮)
+            if (i >= _items.length) {
+              return const Padding(
+                padding: EdgeInsets.symmetric(vertical: Tk.spaceMd),
+                child: Center(
+                  child: SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              );
+            }
+            final p = _items[i];
+            return ListTile(
+              leading: const Icon(Icons.folder_delete_outlined),
+              title: Text('${p.name}(${p.code})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text(
+                '删除于 ${p.deletedAt.isEmpty ? '—' : fmtDate(p.deletedAt)}'
+                '${p.deletedByName == null ? '' : ' · ${p.deletedByName}'}',
+                style: const TextStyle(fontSize: Tk.fzXs),
+              ),
+              trailing: TextButton.icon(
+                icon: const Icon(Icons.restore_from_trash_outlined, size: 16),
+                label: const Text('恢复'),
+                onPressed: _restoring ? null : () => _restore(p),
+              ),
+            );
+          },
+        ),
       ),
     );
   }

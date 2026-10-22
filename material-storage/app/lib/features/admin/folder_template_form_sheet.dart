@@ -10,6 +10,7 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import 'admin_form_skeleton.dart';
 
 /// 打开建/编目录模板表单;返回是否成功提交。
 Future<bool> showFolderTemplateFormSheet(BuildContext context,
@@ -180,7 +181,7 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '提交失败,请稍后重试');
       });
     }
   }
@@ -189,111 +190,82 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
   Widget build(BuildContext context) {
     final t = widget.template;
     final treeRows = pathsToTreeRows(_paths);
-    return SafeArea(
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.85),
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-              20, 0, 20, 16 + MediaQuery.of(context).viewInsets.bottom),
-          child: SingleChildScrollView(
+    // F5:内联骨架(限高 0.85 + 滚动 + 键盘避让 + 错误行 + 提交键)收口
+    // FormSkeleton,与权限模板表单共用一处实现
+    return FormSkeleton(
+      title: _isEdit ? '编辑目录模板 — ${t!.name}' : '新建目录模板',
+      submitLabel: _isEdit ? '保存' : '创建',
+      submitting: _submitting,
+      onSubmit: _submit,
+      error: _error,
+      maxHeightFactor: 0.85,
+      children: [
+        TextField(
+          controller: _name,
+          autofocus: !_isEdit,
+          decoration: const InputDecoration(
+              labelText: '模板名', border: OutlineInputBorder()),
+        ),
+        const SizedBox(height: 10),
+        TextField(
+          controller: _desc,
+          maxLength: 1024,
+          decoration: const InputDecoration(
+              labelText: '描述(可选)', border: OutlineInputBorder()),
+        ),
+        Text(
+          '目录条目(${_paths.length}/200,每条为项目根下相对路径,'
+          '保存时全量替换)',
+          style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
+        ),
+        for (final (i, path) in _paths.indexed)
+          ListTile(
+            visualDensity: VisualDensity.compact,
+            dense: true,
+            leading: const Icon(Icons.folder_outlined, size: 18),
+            title: Text(path, style: const TextStyle(fontSize: Tk.fzMd)),
+            trailing: IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: const Icon(Icons.delete_outline, size: 18),
+              onPressed: () => setState(() {
+                _paths = [..._paths]..removeAt(i);
+              }),
+            ),
+          ),
+        OutlinedButton.icon(
+          onPressed: _addRow,
+          icon: const Icon(Icons.add, size: 18),
+          label: const Text('添加目录'),
+        ),
+        // 只读树预览(输入即所得;web Tree 预览的移动简化)
+        if (treeRows.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(top: 10),
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Tk.fill,
+              borderRadius: BorderRadius.circular(Tk.rSm),
+            ),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(_isEdit ? '编辑目录模板 — ${t!.name}' : '新建目录模板',
-                    style: Theme.of(context).textTheme.titleMedium),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _name,
-                  autofocus: !_isEdit,
-                  decoration: const InputDecoration(
-                      labelText: '模板名', border: OutlineInputBorder()),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: _desc,
-                  maxLength: 1024,
-                  decoration: const InputDecoration(
-                      labelText: '描述(可选)', border: OutlineInputBorder()),
-                ),
                 Text(
-                  '目录条目(${_paths.length}/200,每条为项目根下相对路径,'
-                  '保存时全量替换)',
-                  style: const TextStyle(fontSize: 12, color: Tk.muted),
-                ),
-                for (final (i, path) in _paths.indexed)
-                  ListTile(
-                    visualDensity: VisualDensity.compact,
-                    dense: true,
-                    leading: const Icon(Icons.folder_outlined, size: 18),
-                    title: Text(path,
-                        style: const TextStyle(fontSize: 13)),
-                    trailing: IconButton(
-                      visualDensity: VisualDensity.compact,
-                      icon: const Icon(Icons.delete_outline, size: 18),
-                      onPressed: () =>
-                          setState(() {
-                            _paths = [..._paths]..removeAt(i);
-                          }),
-                    ),
-                  ),
-                OutlinedButton.icon(
-                  onPressed: _addRow,
-                  icon: const Icon(Icons.add, size: 18),
-                  label: const Text('添加目录'),
-                ),
-                // 只读树预览(输入即所得;web Tree 预览的移动简化)
-                if (treeRows.isNotEmpty)
-                  Container(
-                    margin: const EdgeInsets.only(top: 10),
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: Tk.fill,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                            '目录树预览 · ${_paths.length} 条路径 · '
-                            '去重后 ${treeRows.length} 个目录',
-                            style: const TextStyle(
-                                fontSize: 11, color: Tk.subtle)),
-                        for (final (depth, seg) in treeRows)
-                          Padding(
-                            padding:
-                                EdgeInsets.only(left: depth * 14.0, top: 2),
-                            child: Text('└ $seg',
-                                style: const TextStyle(
-                                    fontSize: 12, color: Tk.muted)),
-                          ),
-                      ],
-                    ),
-                  ),
-                if (_error != null)
+                    '目录树预览 · ${_paths.length} 条路径 · '
+                    '去重后 ${treeRows.length} 个目录',
+                    style:
+                        const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+                for (final (depth, seg) in treeRows)
                   Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(_error!,
-                        style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
-                            fontSize: 12.5)),
+                    padding: EdgeInsets.only(left: depth * 14.0, top: 2),
+                    child: Text('└ $seg',
+                        style: const TextStyle(
+                            fontSize: Tk.fzSm, color: Tk.muted)),
                   ),
-                const SizedBox(height: 16),
-                SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    onPressed: _submitting ? null : _submit,
-                    child:
-                        Text(_submitting ? '提交中…' : (_isEdit ? '保存' : '创建')),
-                  ),
-                ),
               ],
             ),
           ),
-        ),
-      ),
+      ],
     );
   }
 }

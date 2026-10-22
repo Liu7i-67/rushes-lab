@@ -1,7 +1,10 @@
 /// InitialGrantsField — 新建项目初始权限编辑器(B6 §8.5;web NewProjectModal
-/// 权限组移动版):顶部权限模板 Select(仅显式选中时把模板条目展开为
+/// 权限组移动版):顶部权限模板选择(仅显式选中时把模板条目展开为
 /// initial_grants 行,可再增删改——后端无模板 id 入参)+ SubjectPicker 手选
 /// + 每行主体各自 RoleChips + 移除。行上限 50(后端 INITIAL_GRANTS_MAX)。
+/// app-polish-2 I2(#6):模板下拉改「只读字段+弹层选择器」(PickerField +
+/// showPickerSheet,可搜索);「不使用模板」null 项经 PickerOption 包装保留
+/// 语义(选中=清空重来,取消=维持现状)。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,6 +12,7 @@ import 'package:flutter/material.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/pickers/picker_sheet.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/role_chips.dart';
 
@@ -77,6 +81,10 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
   String _shortId(String id, int n) =>
       id.length > n ? '${id.substring(0, n)}…' : id;
 
+  /// 模板展示文案(字段关闭态与弹层行共用;含「不使用模板」null 项)。
+  static String _label(GrantTemplate? t) =>
+      t == null ? '不使用模板' : '${t.name}${t.isDefault ? '(默认)' : ''}';
+
   /// SubjectPicker 增删 → 同步行:已有行保留其角色,新行默认「查看」,移除即丢。
   void _applySubjects(List<Subject> subjects) {
     final byKey = {for (final r in widget.value) r.key: r};
@@ -96,8 +104,31 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
       widget.onChanged([]);
       return;
     }
-    // 选中模板可能是在下拉打开后才加载完成的行外对象,直接展开
+    // 选中模板可能是弹层打开后才加载完成的行外对象,直接展开
     widget.onChanged(templateToRows(t));
+  }
+
+  /// 模板弹层选择(I2:替代下拉,可搜索):null 项经 PickerOption 包装——
+  /// 选中「不使用模板」返回非 null option(value=null → 清空),取消返回
+  /// null(维持现状),语义与原下拉完全一致。
+  Future<void> _pickTemplate(List<GrantTemplate> templates) async {
+    final picked = await showPickerSheet<PickerOption<GrantTemplate>>(
+      context: context,
+      title: '权限模板',
+      items: [
+        const PickerOption<GrantTemplate>(null),
+        for (final t in templates) PickerOption<GrantTemplate>(t),
+      ],
+      initial: PickerOption<GrantTemplate>(_selectedTemplate(templates)),
+      labelOf: (o) => _label(o.value),
+      searchTextHint: '搜索模板…',
+    );
+    if (picked == null || !mounted) return; // 取消 = 维持现状
+    final t = picked.value;
+    setState(() {
+      _selectedId = t?.id;
+      _applyTemplate(t);
+    });
   }
 
   @override
@@ -109,45 +140,20 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
           future: _templates,
           builder: (context, snap) {
             final templates = snap.data ?? const <GrantTemplate>[];
-            return Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              decoration: BoxDecoration(
-                border: Border.all(color: Theme.of(context).dividerColor),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<GrantTemplate?>(
-                  value: _selectedTemplate(templates),
-                  isExpanded: true,
-                  hint: const Text('权限模板(可选)',
-                      style: TextStyle(fontSize: 13.5)),
-                  items: [
-                    const DropdownMenuItem(
-                        value: null, child: Text('不使用模板')),
-                    for (final t in templates)
-                      DropdownMenuItem(
-                        value: t,
-                        child: Text(
-                          '${t.name}${t.isDefault ? '(默认)' : ''}',
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5),
-                        ),
-                      ),
-                  ],
-                  onChanged: (t) => setState(() {
-                    _selectedId = t?.id;
-                    _applyTemplate(t);
-                  }),
-                ),
-              ),
+            // 显式选中的模板不在(或加载失败)时按未选渲染,显示 hint
+            // (原下拉 value 命中语义不变)
+            final current = _selectedTemplate(templates);
+            return PickerField(
+              value: current == null ? null : _label(current),
+              hint: '权限模板(可选)',
+              onTap: () => _pickTemplate(templates),
             );
           },
         ),
-        const SizedBox(height: 8),
-        Text('选模板预填后可增删行/改角色,或直接手选主体:',
-            style: const TextStyle(fontSize: 11, color: Tk.subtle)),
-        const SizedBox(height: 4),
+        const SizedBox(height: Tk.spaceSm),
+        const Text('选模板预填后可增删行/改角色,或直接手选主体:',
+            style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+        const SizedBox(height: Tk.spaceXs),
         SubjectPicker(
           value: [
             for (final r in widget.value)
@@ -162,7 +168,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
         if (widget.value.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text('${widget.value.length}/$kInitialGrantsMax 行',
-              style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
           for (final r in widget.value)
             _RowCard(
               row: r,
@@ -184,7 +190,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
     );
   }
 
-  /// 下拉回显:显式选中的模板(不存在/已加载失败回 null 显示「不使用模板」)。
+  /// 字段/弹层回显:显式选中的模板(不存在/已加载失败回 null 显示 hint)。
   GrantTemplate? _selectedTemplate(List<GrantTemplate> templates) {
     final id = _selectedId;
     if (id == null) return null;
@@ -214,11 +220,11 @@ class _RowCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final isUser = row.kind == 'user';
     return Container(
-      margin: const EdgeInsets.only(top: 8),
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      margin: const EdgeInsets.only(top: Tk.spaceSm),
+      padding: const EdgeInsets.fromLTRB(Tk.spaceMd, Tk.spaceSm, Tk.spaceMd, 10),
       decoration: BoxDecoration(
         border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -232,23 +238,23 @@ class _RowCard extends StatelessWidget {
                     ? (name.isEmpty ? '?' : name.characters.first.toUpperCase())
                     : '群',
                 style:
-                    TextStyle(fontSize: 11, color: isUser ? Tk.surface : Tk.muted),
+                    TextStyle(fontSize: Tk.fzXs, color: isUser ? Tk.surface : Tk.muted),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: Tk.spaceSm),
             Expanded(
               child: Text(name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 13, fontWeight: FontWeight.w500)),
+                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500)),
             ),
             Text(isUser ? '用户' : '群组',
-                style: const TextStyle(fontSize: 9.5, color: Tk.subtle)),
+                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             if (row.missing) ...[
               const SizedBox(width: 6),
               const Text('已删除',
-                  style: TextStyle(fontSize: 9.5, color: Tk.amber)),
+                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
             ],
             IconButton(
               visualDensity: VisualDensity.compact,

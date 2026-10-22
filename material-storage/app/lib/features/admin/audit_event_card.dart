@@ -53,11 +53,11 @@ class _AuditEventCardState extends State<AuditEventCard> {
         e.targetAssetFilename ?? (e.targetAssetId != null ? shortId(e.targetAssetId!) : null);
     final meta = [projectName, assetName].whereType<String>().join(' · ');
     return Container(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      margin: const EdgeInsets.fromLTRB(Tk.spaceMd, 6, Tk.spaceMd, 0),
       decoration: BoxDecoration(
         color: Tk.surface,
         border: Border(left: BorderSide(color: color, width: 3)),
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: InkWell(
         onTap: () => setState(() => _expanded = !_expanded),
@@ -70,33 +70,39 @@ class _AuditEventCardState extends State<AuditEventCard> {
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                   decoration: BoxDecoration(
                     color: color.withValues(alpha: 0.08),
+                    // 3px 极小圆角为 chip 微缝,非档值保留(A3 映射表注)
                     borderRadius: BorderRadius.circular(3),
                   ),
-                  child: Text(e.eventType,
+                  // F7 同口径:事件类型展示中文映射,缺 key 回落 raw token
+                  child: Text(auditEventLabel(e.eventType),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                          fontSize: 11, color: color, fontWeight: FontWeight.w500)),
+                          fontSize: Tk.fzXs,
+                          color: color,
+                          fontWeight: FontWeight.w500)),
                 ),
               ),
-              const SizedBox(width: 8),
+              const SizedBox(width: Tk.spaceSm),
               Flexible(
                 child: Text(e.actorName ?? '系统',
                     maxLines: 1, overflow: TextOverflow.ellipsis),
               ),
               const Spacer(),
               Text(fmtIsoShort(e.eventTime),
-                  style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ]),
             if (meta.isNotEmpty || e.requestIp != null)
               Padding(
-                padding: const EdgeInsets.only(top: 4),
+                padding: const EdgeInsets.only(top: Tk.spaceXs),
                 child: Text(
                   [if (meta.isNotEmpty) meta, if (e.requestIp != null) e.requestIp!]
                       .join('  '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 11, color: Tk.muted),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
                 ),
               ),
             if (_expanded) ..._expandedBody(e),
@@ -119,11 +125,11 @@ class _AuditEventCardState extends State<AuditEventCard> {
       if (e.targetProjectId != null) _kv('项目', e.targetProjectId!),
       if (e.targetAssetId != null) _kv('文件', e.targetAssetId!),
       if (e.targetMinioKey != null) _kv('key', e.targetMinioKey!),
-      const SizedBox(height: 4),
+      const SizedBox(height: Tk.spaceXs),
     ];
     if (details.isEmpty) {
       rows.add(const Text('details: —',
-          style: TextStyle(fontSize: 11, color: Tk.muted)));
+          style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted)));
     } else {
       for (final entry in details.entries) {
         final key = entry.key;
@@ -143,10 +149,12 @@ class _AuditEventCardState extends State<AuditEventCard> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('$k: ',
-                style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                style:
+                    const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             Expanded(
               child: SelectableText(v,
-                  style: const TextStyle(fontSize: 11, color: Tk.muted)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
             ),
           ],
         ),

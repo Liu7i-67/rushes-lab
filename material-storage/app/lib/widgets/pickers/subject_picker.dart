@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 import 'user_picker.dart';
 
 enum SubjectKind { user, group }
@@ -101,7 +102,7 @@ class _SubjectPickerState extends State<SubjectPicker> {
           onSelectionChanged: (s) => setState(() => _tab = s.first),
           showSelectedIcon: false,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: Tk.spaceSm),
         if (_tab == SubjectKind.user)
           UserPicker(
             value: [for (final u in _users) UserBrief(id: u.id, name: u.name)],
@@ -111,7 +112,7 @@ class _SubjectPickerState extends State<SubjectPicker> {
         else
           _GroupPicker(value: _groups, onChanged: _setGroups),
         if (widget.value.isNotEmpty) ...[
-          const SizedBox(height: 8),
+          const SizedBox(height: Tk.spaceSm),
           _SelectedSummary(
               value: widget.value,
               onRemove: (s) =>
@@ -137,24 +138,24 @@ class _SelectedSummary extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(Tk.spaceSm),
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(6),
+        borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: Wrap(
-        spacing: 6,
-        runSpacing: 4,
+        spacing: Tk.spaceSm, // 6→spaceSm(A2 就近归档)
+        runSpacing: Tk.spaceXs,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
           Text('已选 ${value.length} 项:',
-              style: const TextStyle(fontSize: 11.5)),
+              style: const TextStyle(fontSize: Tk.fzXs)),
           for (final s in value)
             InputChip(
               label: Text(
                 '${s.kind == SubjectKind.user ? '👤' : '🏷'} '
                 '${s.name.isEmpty ? _shortId(s.id, 12) : s.name}',
-                style: const TextStyle(fontSize: 11.5),
+                style: const TextStyle(fontSize: Tk.fzXs),
               ),
               visualDensity: VisualDensity.compact,
               onDeleted: () => onRemove(s),
@@ -247,23 +248,22 @@ class _GroupPickerState extends State<_GroupPicker> {
                       _search('');
                     },
                   ),
-            border: const OutlineInputBorder(),
           ),
           onChanged: _search,
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: Tk.spaceXs),
         Container(
           constraints: const BoxConstraints(maxHeight: 180),
           decoration: BoxDecoration(
             border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: _options.isEmpty
               ? Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(Tk.spaceMd),
                   child: Center(
                     child: Text(_fetching ? '搜索中…' : '无匹配项',
-                        style: const TextStyle(fontSize: 12.5)),
+                        style: const TextStyle(fontSize: Tk.fzSm)),
                   ),
                 )
               : ListView.builder(
@@ -278,13 +278,13 @@ class _GroupPickerState extends State<_GroupPicker> {
                       leading: const Icon(Icons.groups_outlined, size: 20),
                       title: Text(g.name,
                           maxLines: 1, overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5)),
+                          style: const TextStyle(fontSize: Tk.fzMd)),
                       subtitle: Text(
                         '${_shortId(g.id, 18)}'
                         '${g.memberCount != null ? ' · ${g.memberCount} 人' : ''}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 10.5),
+                        style: const TextStyle(fontSize: Tk.fzXs),
                       ),
                       dense: true,
                       trailing:

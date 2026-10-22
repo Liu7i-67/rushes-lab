@@ -88,21 +88,21 @@ class BaiduTargetPicker extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text('导入到哪个目录(敏感目录及其子目录不可选)',
-            style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+            style: TextStyle(fontSize: Tk.fzSm, fontWeight: FontWeight.w600)),
         const SizedBox(height: 4),
         _rootRow(context),
         Container(
           constraints: const BoxConstraints(maxHeight: 240),
           decoration: BoxDecoration(
             border: Border.all(color: Tk.border),
-            borderRadius: BorderRadius.circular(8),
+            borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: folders.isEmpty
               ? const Padding(
                   padding: EdgeInsets.all(16),
                   child: Center(
                       child: Text('项目暂无文件夹',
-                          style: TextStyle(fontSize: 12.5, color: Tk.muted))),
+                          style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted))),
                 )
               : ListView(
                   shrinkWrap: true,
@@ -126,11 +126,11 @@ class BaiduTargetPicker extends StatelessWidget {
           size: 20, color: Tk.muted),
       title: Text('项目根',
           style: TextStyle(
-              fontSize: 13.5,
+              fontSize: Tk.fzMd,
               fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
               color: selected ? Tk.accentStrong : Tk.fg)),
       subtitle: const Text('自动创建承接文件夹(以网盘目录名命名,同名复用)',
-          style: TextStyle(fontSize: 11)),
+          style: TextStyle(fontSize: Tk.fzXs)),
       tileColor: selected ? Tk.accentFaint : null,
       onTap: () => onChanged(const BaiduTarget.root()),
     );
@@ -146,7 +146,7 @@ class BaiduTargetPicker extends StatelessWidget {
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(
-              fontSize: 13,
+              fontSize: Tk.fzMd,
               color: selected ? Tk.accentStrong : Tk.fg,
               fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
       tileColor: selected ? Tk.accentFaint : null,

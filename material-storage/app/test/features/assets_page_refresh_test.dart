@@ -17,6 +17,7 @@ import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/assets/assets_page.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/widgets/list_skeleton.dart';
 
 /// 计数假 assets 列表:f9 首拉返回 1 条、其后每拉多 1 条(验证静默刷新
 /// swap 后新资产出现);f0 恒空;每次调用记 hit。
@@ -192,6 +193,9 @@ void main() {
     await tester.pumpWidget(
         MaterialApp(home: AssetsPage(folderId: 'f0', folderName: '夹f0')));
     await tester.pump();
+    // B5 改因:上传入口由 AppBar 图标(同步移除)改 FloatingActionButton.extended
+    // ——FAB 移除走 Scaffold 退场动画,推进一帧动画后再断言隐藏
+    await tester.pump(const Duration(milliseconds: 300));
     expect(find.byTooltip('上传'), findsNothing);
     expect(find.text('上传素材'), findsNothing, reason: '空文件夹引导钮同口径');
     expect(find.text('空文件夹'), findsOneWidget);
@@ -204,8 +208,9 @@ void main() {
     await tester.pumpWidget(
         MaterialApp(home: AssetsPage(folderId: 'f9', folderName: '夹f9')));
     await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget,
-        reason: '全屏首拉在途(第 1 次调用挂起)');
+    // B9 改因:首载整页 spinner 改宫格骨架 ListSkeleton(columns:3)
+    expect(find.byType(ListSkeleton), findsOneWidget,
+        reason: '全屏首拉在途(第 1 次调用挂起)→ 宫格骨架');
 
     // 上传成功失效 → 静默刷新(第 2 次调用,先于全屏路完成)
     RefreshBus.I.invalidate('assets:f9');

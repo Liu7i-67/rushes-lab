@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
 
 class UserPicker extends StatefulWidget {
   const UserPicker({
@@ -115,7 +116,7 @@ class _UserPickerState extends State<UserPicker> {
             suffixIcon: _controller.text.isEmpty
                 ? (_fetching
                     ? const Padding(
-                        padding: EdgeInsets.all(10),
+                        padding: EdgeInsets.all(10), // 10 参与加载圈尺寸计算,不入档
                         child: SizedBox(
                             width: 16,
                             height: 16,
@@ -129,24 +130,23 @@ class _UserPickerState extends State<UserPicker> {
                       _search('');
                     },
                   ),
-            border: const OutlineInputBorder(),
           ),
           onChanged: _search,
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: Tk.spaceXs),
         ...valueChips(context),
         Container(
           constraints: const BoxConstraints(maxHeight: 180),
           decoration: BoxDecoration(
             border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(6),
+            borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: options.isEmpty
               ? Padding(
                   padding: const EdgeInsets.all(12),
                   child: Center(
                     child: Text(_fetching ? '搜索中…' : '无匹配',
-                        style: const TextStyle(fontSize: 12.5)),
+                        style: const TextStyle(fontSize: Tk.fzSm)),
                   ),
                 )
               : ListView.builder(
@@ -162,16 +162,16 @@ class _UserPickerState extends State<UserPicker> {
                         backgroundColor: Theme.of(context).colorScheme.primaryContainer,
                         child: Text(
                           u.name.isEmpty ? '?' : u.name.characters.first,
-                          style: const TextStyle(fontSize: 11),
+                          style: const TextStyle(fontSize: Tk.fzXs),
                         ),
                       ),
                       title: Text(u.name,
                           maxLines: 1, overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 13.5)),
+                          style: const TextStyle(fontSize: Tk.fzMd)),
                       subtitle: (u.username?.isNotEmpty ?? false)
                           ? Text(u.username!,
                               maxLines: 1, overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: 11))
+                              style: const TextStyle(fontSize: Tk.fzXs))
                           : null,
                       dense: true,
                       trailing: selected
@@ -191,19 +191,19 @@ class _UserPickerState extends State<UserPicker> {
     if (widget.value.isEmpty) return const [];
     return [
       Wrap(
-        spacing: 6,
+        spacing: Tk.spaceSm, // 6→spaceSm(A2 就近归档)
         runSpacing: 2,
         children: [
           for (final u in widget.value)
             InputChip(
               label: Text(u.name.isEmpty ? u.id : u.name,
-                  style: const TextStyle(fontSize: 12)),
+                  style: const TextStyle(fontSize: Tk.fzSm)),
               visualDensity: VisualDensity.compact,
               onDeleted: () => _toggle(u),
             ),
         ],
       ),
-      const SizedBox(height: 4),
+      const SizedBox(height: Tk.spaceXs),
     ];
   }
 }

@@ -15,19 +15,19 @@ class ErrorView extends StatelessWidget {
   Widget build(BuildContext context) {
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.all(Tk.spaceXl),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             const Icon(Icons.cloud_off_outlined, size: 40, color: Tk.subtle),
-            const SizedBox(height: 12),
+            const SizedBox(height: Tk.spaceMd),
             Text(
               message,
               textAlign: TextAlign.center,
               style: const TextStyle(color: Tk.muted),
             ),
             if (onRetry != null) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: Tk.spaceMd),
               FilledButton.tonal(onPressed: onRetry, child: const Text('重试')),
             ],
           ],

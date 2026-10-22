@@ -118,8 +118,8 @@ class _MaintainingCard extends StatelessWidget {
         return AlertDialog(
           title: const Row(children: [
             Icon(Icons.circle, size: 10, color: Tk.amber),
-            SizedBox(width: 8),
-            Expanded(child: Text('系统升级中', style: TextStyle(fontSize: 16))),
+            SizedBox(width: Tk.spaceSm),
+            Expanded(child: Text('系统升级中', style: TextStyle(fontSize: Tk.fzTitle))),
           ]),
           content: SingleChildScrollView(
             child: Column(
@@ -130,28 +130,28 @@ class _MaintainingCard extends StatelessWidget {
                     ? '我们正在部署一次更新,通常 1 分钟内恢复。'
                     : custom),
                 if (issues.isNotEmpty) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: Tk.spaceMd),
                   const Text('本次解决',
-                      style: TextStyle(fontSize: 12, color: Tk.subtle)),
-                  const SizedBox(height: 4),
+                      style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle)),
+                  const SizedBox(height: Tk.spaceXs),
                   for (final (no, summary) in issues)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
                       child: Row(crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text('#$no',
-                                style: const TextStyle(fontSize: 12,
+                                style: const TextStyle(fontSize: Tk.fzSm,
                                     color: Tk.amber)),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: Tk.spaceSm),
                             Expanded(child: Text(summary,
-                                style: const TextStyle(fontSize: 13))),
+                                style: const TextStyle(fontSize: Tk.fzMd))),
                           ]),
                     ),
                 ],
-                const SizedBox(height: 12),
+                const SizedBox(height: Tk.spaceMd),
                 const Text(
                   '如果你正在上传或下载,可能会被打断 — 升级完成后请重试。',
-                  style: TextStyle(fontSize: 12, color: Tk.muted),
+                  style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
                 ),
               ],
             ),
@@ -171,12 +171,12 @@ class _FinishedCard extends StatelessWidget {
     return AlertDialog(
       title: const Row(children: [
         Icon(Icons.check_circle, size: 20, color: Tk.green),
-        SizedBox(width: 8),
-        Expanded(child: Text('升级完成', style: TextStyle(fontSize: 16))),
+        SizedBox(width: Tk.spaceSm),
+        Expanded(child: Text('升级完成', style: TextStyle(fontSize: Tk.fzTitle))),
       ]),
       content: const Text(
         '已恢复正常使用,如果之前的操作中断,请重新尝试一次。',
-        style: TextStyle(fontSize: 13),
+        style: TextStyle(fontSize: Tk.fzMd),
       ),
     );
   }

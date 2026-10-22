@@ -559,7 +559,9 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('无文件'), findsNothing);
-    expect(find.textContaining('网络开小差'), findsOneWidget);
+    // E14(app-polish):原始异常对象不再 `'$e'` 直出,统一 errorMessage 中文
+    // 兜底;断言场景不变——错误态以用户文案呈现(非「无文件」),重试可恢复
+    expect(find.textContaining('加载失败'), findsOneWidget);
     // 重试恢复后渲染文件行
     api.adminBaidu.filesStaged = null;
     api.adminBaidu.filesResult = [

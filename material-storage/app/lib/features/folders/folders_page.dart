@@ -7,11 +7,13 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/list_skeleton.dart';
 import 'folder_form_sheet.dart';
 import 'folder_row.dart';
 import 'folder_tree.dart';
@@ -71,7 +73,7 @@ class _FoldersPageState extends State<FoldersPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() {
-        _error = '$e';
+        _error = errorMessage(e, '文件夹加载失败');
         _loading = false;
       });
     }
@@ -139,11 +141,29 @@ class _FoldersPageState extends State<FoldersPage> {
             ),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? ErrorView(message: _error!, onRetry: _reload)
-              : _buildTree(context),
+      // E4(R3 模式补齐):loading/error/empty/列表全分支包 RefreshIndicator
+      // + AlwaysScrollableScrollPhysics,任意状态均可下拉刷新
+      body: RefreshIndicator(
+        onRefresh: _reload,
+        child: _loading
+            ? _scrollable(const ListSkeleton(rows: 5))
+            : _error != null
+                ? _scrollable(ErrorView(message: _error!, onRetry: _reload))
+                : _buildTree(context),
+      ),
+    );
+  }
+
+  /// E4:非列表内容(loading/error/empty)全高可滚动包装(projects_page 同款),
+  /// 使 RefreshIndicator 在这些状态也能下拉。
+  Widget _scrollable(Widget child) {
+    return LayoutBuilder(
+      builder: (context, constraints) => ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          SizedBox(height: constraints.maxHeight, child: Center(child: child)),
+        ],
+      ),
     );
   }
 
@@ -151,10 +171,10 @@ class _FoldersPageState extends State<FoldersPage> {
     final roots = buildFolderTree(_all);
     if (roots.isEmpty) {
       // 含全被过滤(孤儿/环不可达)的情况:与 web 同口径,空即空
-      return const EmptyState(
+      return _scrollable(const EmptyState(
         icon: Icons.folder_outlined,
         message: '暂无文件夹',
-      );
+      ));
     }
     final rows = _visibleRows(roots);
     return RefreshIndicator(

@@ -26,6 +26,7 @@ import 'package:ms_app/features/projects/projects_page.dart';
 import 'package:ms_app/models/models.dart';
 import 'package:ms_app/services/notifier.dart';
 import 'package:ms_app/widgets/empty_state.dart';
+import 'package:ms_app/widgets/list_skeleton.dart' as ms_widgets;
 
 import 'helpers/api_harness.dart';
 
@@ -79,8 +80,10 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: ProjectsPage()));
     await tester.pump();
     await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget,
-        reason: '前置:首轮挂起 → loading 分支');
+    // app-polish E3:首载 loading 分支由裸转圈改为 ListSkeleton 骨架屏,
+    // 探锚同步替换(分支行为——可下拉触发 onRefresh——不变)
+    expect(find.byType(ms_widgets.ListSkeleton), findsOneWidget,
+        reason: '前置:首轮挂起 → loading 分支(骨架屏)');
     expect(gated.calls, 1);
 
     gated.gate = null; // 后续刷新立即返回

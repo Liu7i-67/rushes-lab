@@ -159,7 +159,7 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
           child: Align(
             alignment: Alignment.centerLeft,
             child: Text('文件明细 共 $_total 条',
-                style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
           ),
         ),
         Expanded(child: _list()),
@@ -176,7 +176,7 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
     }
     if (_files.isEmpty) {
       return const Center(
-          child: Text('无文件', style: TextStyle(color: Tk.muted, fontSize: 12.5)));
+          child: Text('无文件', style: TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
     }
     final hasMore = _files.length < _total;
     return ListView.builder(
@@ -198,7 +198,7 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
           title: Text(row.relPath,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12.5)),
+              style: const TextStyle(fontSize: Tk.fzSm)),
           subtitle: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -208,7 +208,7 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: 11,
+                    fontSize: Tk.fzXs,
                     color: row.targetPath == null ? Tk.amber : Tk.muted),
               ),
               if (row.status == 'failed' &&
@@ -217,7 +217,7 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
                 Text(row.lastError!,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: Tk.red)),
+                    style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
             ],
           ),
           trailing: _opsMenu(row, plan),
@@ -237,14 +237,14 @@ class _BaiduTaskFilesState extends State<BaiduTaskFiles> {
               row.nonRetryable ? null : () => _runAction(row, 'retry'),
           child: Text(row.nonRetryable ? '不可重试' : '重试',
               style: TextStyle(
-                  fontSize: 12.5,
+                  fontSize: Tk.fzSm,
                   color: row.nonRetryable ? Tk.subtle : Tk.accent)),
         ),
       // key_conflict 行:随机后缀直发(web 同款;换 key 非破坏性)
       if (plan.canResolveConflict)
         TextButton(
           onPressed: () => _runAction(row, 'random-suffix'),
-          child: const Text('随机后缀', style: TextStyle(fontSize: 12.5)),
+          child: const Text('随机后缀', style: TextStyle(fontSize: Tk.fzSm)),
         ),
       if (plan.canOverwrite || plan.canResolveConflict)
         IconButton(

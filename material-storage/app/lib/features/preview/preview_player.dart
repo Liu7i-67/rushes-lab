@@ -149,13 +149,13 @@ class _MediaVideoPlayerState extends State<MediaVideoPlayer> {
             ),
             // P2-1:进度/时长角标(悬于进度条上方右侧)
             Positioned(
-              right: 8,
-              bottom: 14,
+              right: Tk.spaceSm,
+              bottom: 14, // 悬于进度条上方的定位微调,非间距档,保留
               child: Text(
                 '${videoClock(v.position)} / ${videoClock(v.duration)}',
                 style: const TextStyle(
                     color: Colors.white70,
-                    fontSize: 11,
+                    fontSize: Tk.fzXs,
                     fontFeatures: [FontFeature.tabularFigures()]),
               ),
             ),

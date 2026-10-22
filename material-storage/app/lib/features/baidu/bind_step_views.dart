@@ -24,7 +24,7 @@ class BindStepCard extends StatelessWidget {
   Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Tk.rXl)),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -36,7 +36,7 @@ class BindStepCard extends StatelessWidget {
               const SizedBox(width: 6),
               Text(title,
                   style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w600)),
+                      fontSize: Tk.fzBody, fontWeight: FontWeight.w600)),
             ]),
             const SizedBox(height: 8),
             child,
@@ -62,12 +62,12 @@ class BindDisabledView extends StatelessWidget {
             const Icon(Icons.cloud_off_outlined, size: 48, color: Tk.subtle),
             const SizedBox(height: 12),
             const Text('网盘备份未启用',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                style: TextStyle(fontSize: Tk.fzTitle, fontWeight: FontWeight.w600)),
             const SizedBox(height: 8),
             const Text(
               '当前部署未开启百度网盘备份功能,如有需要请联系管理员。',
               textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: Tk.muted),
+              style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted),
             ),
           ],
         ),
@@ -96,7 +96,7 @@ class BindUrlPanel extends StatelessWidget {
       children: [
         const SizedBox(height: 8),
         SelectableText(url,
-            style: const TextStyle(fontSize: 11, fontFamily: 'monospace')),
+            style: const TextStyle(fontSize: Tk.fzXs, fontFamily: 'monospace')),
         const SizedBox(height: 8),
         Row(children: [
           OutlinedButton.icon(
@@ -115,7 +115,7 @@ class BindUrlPanel extends StatelessWidget {
         const Text(
           '在浏览器完成百度授权后,页面会显示一串授权码,'
           '复制它回到这里粘贴。授权码单次有效约 10 分钟。',
-          style: TextStyle(fontSize: 12, color: Tk.subtle),
+          style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle),
         ),
       ],
     );

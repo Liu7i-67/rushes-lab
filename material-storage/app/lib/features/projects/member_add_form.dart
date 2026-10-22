@@ -5,12 +5,14 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/role_chips.dart';
+import '../../widgets/toast.dart';
 
 /// 邀请表单:SubjectPicker + RoleChips(默认「查看」),逐主体 POST members。
 class MemberAddForm extends StatefulWidget {
@@ -57,16 +59,17 @@ class _MemberAddFormState extends State<MemberAddForm> {
         ok++;
       } catch (e) {
         fail++;
-        firstError ??= '${s.name}: $e';
+        // E14:错误中文兜底(勿 '$e' 原始异常直出)
+        firstError ??= '${s.name}: ${errorMessage(e, '添加失败')}';
       }
     }
     if (!mounted) return;
     setState(() => _submitting = false);
     if (ok > 0) {
       RefreshBus.I.invalidate('projects');
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-          content: Text('已为 $ok 个主体授予'
-              '「${joinedRoleLabels(roles)}」${fail > 0 ? ' · 失败 $fail' : ''}')));
+      toast(context,
+          '已为 $ok 个主体授予「${joinedRoleLabels(roles)}」${fail > 0 ? ' · 失败 $fail' : ''}',
+          tone: fail > 0 ? ToastTone.info : ToastTone.success);
       widget.onDone();
       return;
     }
@@ -86,7 +89,7 @@ class _MemberAddFormState extends State<MemberAddForm> {
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             const Text('添加主体(用户 / 用户组)',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             SubjectPicker(
               value: _subjects,
               onChanged: (v) => setState(() {
@@ -97,7 +100,7 @@ class _MemberAddFormState extends State<MemberAddForm> {
             ),
             const SizedBox(height: 12),
             const Text('角色(可多选,一次授予)',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             RoleChips(
                 value: _roles,
                 onChanged: (v) => setState(() => _roles = v)),
@@ -107,7 +110,7 @@ class _MemberAddFormState extends State<MemberAddForm> {
                 child: Text(_error!,
                     style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
-                        fontSize: 12.5)),
+                        fontSize: Tk.fzSm)),
               ),
             const SizedBox(height: 16),
             Row(children: [

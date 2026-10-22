@@ -39,7 +39,7 @@ class BaiduBindingCard extends StatelessWidget {
     final expires = binding?.expiresAt;
     return Card(
       margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Tk.rXl)),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -58,14 +58,14 @@ class BaiduBindingCard extends StatelessWidget {
                   loaded && _bound && account != null
                       ? '$account${expires == null ? '' : ' · 授权至 ${fmtDate(expires)}'}'
                       : '',
-                  style: const TextStyle(fontSize: 12, color: Tk.muted),
+                  style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
                 ),
               ),
               if (loaded && (binding != null && (_bound || _expired)))
                 TextButton(
                   onPressed: busy ? null : onUnbind,
                   child: const Text('解绑',
-                      style: TextStyle(fontSize: 12.5, color: Tk.red)),
+                      style: TextStyle(fontSize: Tk.fzSm, color: Tk.red)),
                 ),
             ]),
             Row(children: [
@@ -84,14 +84,14 @@ class BaiduBindingCard extends StatelessWidget {
                 padding: EdgeInsets.only(top: 8),
                 child: Text(
                   '绑定已过期:进行中的任务会失败终止,请重新绑定后用「全部重试失败」继续。',
-                  style: TextStyle(fontSize: 12, color: Tk.amber),
+                  style: TextStyle(fontSize: Tk.fzSm, color: Tk.amber),
                 ),
               ),
             const Padding(
               padding: EdgeInsets.only(top: 8),
               child: Text(
                 '网盘授权仅用于将所选目录只读备份至应用侧,不做修改、删除、分享。',
-                style: TextStyle(fontSize: 12, color: Tk.subtle),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle),
               ),
             ),
           ],

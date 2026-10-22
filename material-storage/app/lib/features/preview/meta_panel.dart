@@ -1,6 +1,8 @@
 /// MetaPanel — 预览底部元数据卡(B2 §8.2):文件名/大小/类型/时间/标签 chips+备注。
 /// 暗色画布上的浮层用 darkSurface;B5 功能点 3:「编辑」钮点亮 → 打标/改标面板
 /// (AssetTagEditor 移动版;单条不传 labels_mode)。
+/// C4(app-polish):浮层化——四周留边+全圆角卡(rLg),与胶片条/操作钮圆角
+/// 过渡,不再直角堆叠。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
@@ -37,8 +39,14 @@ class MetaPanel extends StatelessWidget {
         filename: asset.filename, contentType: asset.contentType);
     return Container(
       width: double.infinity,
-      color: Tk.darkSurface,
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+      // C4:浮层卡——横向留边+全圆角,与上方胶片条/下方操作钮过渡
+      margin: const EdgeInsets.fromLTRB(Tk.spaceMd, 0, Tk.spaceMd, Tk.spaceXs),
+      decoration: BoxDecoration(
+        color: Tk.darkSurface,
+        borderRadius: BorderRadius.circular(Tk.rLg),
+      ),
+      padding: const EdgeInsets.fromLTRB(
+          Tk.spaceLg, Tk.spaceMd, Tk.spaceLg, Tk.spaceMd),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -50,8 +58,8 @@ class MetaPanel extends StatelessWidget {
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
+                  color: Colors.white, // 媒体叠加层例外:暗底浮层前景
+                  fontSize: Tk.fzBody,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -65,15 +73,15 @@ class MetaPanel extends StatelessWidget {
                 onPressed: onEdit,
               ),
           ]),
-          const SizedBox(height: 4),
+          const SizedBox(height: Tk.spaceXs),
           Text(
             '${fmtBytes(asset.sizeBytes)} · ${kindLabel(kind)} · ${fmtDate(asset.createdAt)}',
-            style: const TextStyle(color: Tk.subtle, fontSize: 12),
+            style: const TextStyle(color: Tk.subtle, fontSize: Tk.fzSm),
           ),
           if (asset.userLabels.isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: Tk.spaceSm),
             Wrap(
-              spacing: 6,
+              spacing: 6, // chip 间微缝,同 Badge 内距比例保留
               runSpacing: 6,
               children: [
                 for (final l in asset.userLabels)
@@ -82,12 +90,12 @@ class MetaPanel extends StatelessWidget {
             ),
           ],
           if (asset.notes != null && asset.notes!.trim().isNotEmpty) ...[
-            const SizedBox(height: 8),
+            const SizedBox(height: Tk.spaceSm),
             Text(
               asset.notes!,
               maxLines: 3,
               overflow: TextOverflow.ellipsis,
-              style: const TextStyle(color: Tk.muted, fontSize: 12),
+              style: const TextStyle(color: Tk.muted, fontSize: Tk.fzSm),
             ),
           ],
         ],

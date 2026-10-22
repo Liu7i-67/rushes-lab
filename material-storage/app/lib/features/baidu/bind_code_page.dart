@@ -18,6 +18,7 @@ import '../../core/api/ms_api.dart' show ApiException, errorMessage;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/toast.dart';
 import 'bind_step_views.dart';
 
 class BindCodePage extends StatefulWidget {
@@ -138,9 +139,8 @@ class _BindCodePageState extends State<BindCodePage> {
     if (_url == null) return;
     await Clipboard.setData(ClipboardData(text: _url!));
     if (mounted) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(const SnackBar(content: Text('授权链接已复制')));
+      // E14:toast 统一(floating 不被弹层遮挡)
+      toast(context, '授权链接已复制', tone: ToastTone.success);
     }
   }
 
@@ -150,10 +150,8 @@ class _BindCodePageState extends State<BindCodePage> {
       await launchUrl(Uri.parse(_url!), mode: LaunchMode.externalApplication);
     } catch (_) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(const SnackBar(
-              content: Text('无法打开系统浏览器,请复制链接到浏览器打开')));
+        toast(context, '无法打开系统浏览器,请复制链接到浏览器打开',
+            tone: ToastTone.error);
       }
     }
   }
@@ -175,7 +173,7 @@ class _BindCodePageState extends State<BindCodePage> {
                           ? '当前已绑定:${_status!.displayName}'
                           : '当前未绑定${_status!.status == 'expired' ? '(绑定已失效,请重新授权)' : ''}',
                       style: TextStyle(
-                          fontSize: 13,
+                          fontSize: Tk.fzMd,
                           color: _status!.bound ? Tk.green : Tk.muted),
                     ),
                   ),
@@ -188,7 +186,7 @@ class _BindCodePageState extends State<BindCodePage> {
                       const Text(
                         '生成百度 OAuth 授权链接,用于确认本人百度账号身份。'
                         '网盘授权仅用于将所选目录只读备份至应用侧,不做修改、删除、分享。',
-                        style: TextStyle(fontSize: 13, color: Tk.muted),
+                        style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted),
                       ),
                       const SizedBox(height: 8),
                       OutlinedButton(
@@ -218,7 +216,7 @@ class _BindCodePageState extends State<BindCodePage> {
                     padding: const EdgeInsets.only(top: 12),
                     child: Text(_msg!,
                         style: TextStyle(
-                            fontSize: 13,
+                            fontSize: Tk.fzMd,
                             color: _msgOk ? Tk.green : Tk.red,
                             fontWeight: FontWeight.w500)),
                   ),

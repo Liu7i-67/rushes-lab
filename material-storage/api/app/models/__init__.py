@@ -344,6 +344,11 @@ class FolderOut(ORMModel):
     # (folder-subtree-file-badge 方案 §3.1/§3.4;口径走 parent_folder_id 结构链,
     # 禁 minio_prefix 前缀匹配 §2)
     subtree_file_count: int = 0
+    # 本夹直属(不含子树)活跃文件数(同 deleted_at IS NULL 口径)——与
+    # subtree_file_count 同惯例:仅 list_folders 端点回填(direct GROUP BY 直出),
+    # create/get 单条响应恒默认 0;app 据此区分「N 项 / 子级 M 项」两级展示
+    # (2026-10-22 app-polish-2 K1;子树数只作弱提示不再作主数字)
+    direct_file_count: int = 0
     # 当前 user 对本 folder 的有效权限(派生 can_*)— get_folder 时填充
     my_can_view: bool = False
     my_can_download: bool = False

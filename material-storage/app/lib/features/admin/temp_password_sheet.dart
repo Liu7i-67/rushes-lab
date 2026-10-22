@@ -32,31 +32,32 @@ class _TempPasswordSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+        padding: const EdgeInsets.fromLTRB(
+            Tk.spaceXl, 0, Tk.spaceXl, Tk.spaceLg),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(title, style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
+            const SizedBox(height: Tk.spaceSm),
             const Text(
               '这是唯一一次展示,不会写入日志 / 审计。请直接交给对方,首次登录后必须修改。',
-              style: TextStyle(fontSize: 12.5, color: Tk.muted, height: 1.6),
+              style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted, height: 1.6),
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: Tk.spaceMd),
             Container(
               width: double.infinity,
-              padding: const EdgeInsets.all(12),
+              padding: const EdgeInsets.all(Tk.spaceMd),
               decoration: BoxDecoration(
                 color: Tk.fill,
-                borderRadius: BorderRadius.circular(6),
+                borderRadius: BorderRadius.circular(Tk.rSm),
               ),
               child: Row(
                 children: [
                   Expanded(
                     child: Text(password,
                         style: const TextStyle(
-                            fontSize: 16,
+                            fontSize: Tk.fzTitle,
                             letterSpacing: 1,
                             fontWeight: FontWeight.w600)),
                   ),
@@ -65,7 +66,7 @@ class _TempPasswordSheet extends StatelessWidget {
                 ],
               ),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: Tk.spaceLg),
             SizedBox(
               width: double.infinity,
               child: FilledButton(

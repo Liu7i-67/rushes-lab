@@ -96,7 +96,7 @@ class _FolderGrantFormState extends State<FolderGrantForm> {
                 style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             const Text('主体(用户 / 用户组)',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             SubjectPicker(
               value: _subjects,
               onChanged: (v) => setState(() {
@@ -107,7 +107,7 @@ class _FolderGrantFormState extends State<FolderGrantForm> {
             ),
             const SizedBox(height: 12),
             const Text('权限(可多选,一次授予;恒永久)',
-                style: TextStyle(fontSize: 12, color: Tk.muted)),
+                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
             const SizedBox(height: 4),
             Wrap(
               spacing: 8,
@@ -130,7 +130,7 @@ class _FolderGrantFormState extends State<FolderGrantForm> {
               const Padding(
                 padding: EdgeInsets.only(top: 6),
                 child: Text('至少勾选一个权限',
-                    style: TextStyle(fontSize: 11, color: Tk.amber)),
+                    style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
               ),
             if (_error != null)
               Padding(
@@ -138,7 +138,7 @@ class _FolderGrantFormState extends State<FolderGrantForm> {
                 child: Text(_error!,
                     style: TextStyle(
                         color: Theme.of(context).colorScheme.error,
-                        fontSize: 12.5)),
+                        fontSize: Tk.fzSm)),
               ),
             const SizedBox(height: 16),
             Row(children: [

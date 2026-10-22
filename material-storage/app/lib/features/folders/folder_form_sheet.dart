@@ -1,6 +1,8 @@
 /// FolderFormSheet — 新建子夹 / 项目根新建 / 重命名 三态表单(B6 §8.4):
 /// 子夹仅名称(敏感夹只能直挂项目一级,后端 400);项目根新建带敏感开关;
 /// 重命名预填现名。成功 invalidate folders scope;4xx detail 透传。
+/// app-polish D1:骨架迁移 SheetScaffold(标题/滚动区/errorText 位/PrimaryXl
+/// 吸底,键盘避让由骨架统一);错误 errorMessage 兜底(E14)。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,6 +11,9 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
+import '../../widgets/sheet_scaffold.dart';
 
 enum FolderFormMode { createChild, createRoot, rename }
 
@@ -126,7 +131,7 @@ class _FolderFormSheetState extends State<_FolderFormSheet> {
       if (!mounted) return;
       setState(() {
         _submitting = false;
-        _error = '$e';
+        _error = errorMessage(e, '保存失败,请稍后重试');
       });
     }
   }
@@ -138,58 +143,43 @@ class _FolderFormSheetState extends State<_FolderFormSheet> {
         : widget.parentLabel == null
             ? ''
             : '「${widget.parentLabel}」下';
-    return SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(
-            20, 0, 20,
-            16 + MediaQuery.of(context).viewInsets.bottom),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('$_title$target',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            TextField(
-              controller: _name,
-              autofocus: true,
-              decoration: const InputDecoration(
-                labelText: '名称',
-                border: OutlineInputBorder(),
-              ),
-              onSubmitted: (_) => _submit(),
+    return SheetScaffold(
+      title: '$_title$target',
+      errorText: _error,
+      bottomActions: [
+        PrimaryXl(
+          onPressed: _submitting ? null : _submit,
+          label: _submitting ? '保存中…' : '保存',
+        ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            controller: _name,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: '名称',
+              border: OutlineInputBorder(),
             ),
-            // 敏感开关仅项目根新建出现(子夹恒普通:后端 400「sensitive folder
-            // 只能直挂 project 一级」;重命名不改敏感性)
-            if (widget.mode == FolderFormMode.createRoot) ...[
-              const SizedBox(height: 4),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('敏感文件夹', style: TextStyle(fontSize: 14.5)),
-                subtitle: const Text('仅被邀请的成员可见;不可再建子夹、不可移动',
-                    style: TextStyle(fontSize: 12)),
-                value: _sensitive,
-                onChanged: (v) => setState(() => _sensitive = v),
-              ),
-            ],
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(_error!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontSize: 12.5)),
-              ),
-            const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _submitting ? null : _submit,
-                child: Text(_submitting ? '保存中…' : '保存'),
-              ),
+            onSubmitted: (_) => _submit(),
+          ),
+          // 敏感开关仅项目根新建出现(子夹恒普通:后端 400「sensitive folder
+          // 只能直挂 project 一级」;重命名不改敏感性)
+          if (widget.mode == FolderFormMode.createRoot) ...[
+            const SizedBox(height: Tk.spaceXs),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('敏感文件夹',
+                  style: TextStyle(fontSize: Tk.fzBody)),
+              subtitle: const Text('仅被邀请的成员可见;不可再建子夹、不可移动',
+                  style: TextStyle(fontSize: Tk.fzSm)),
+              value: _sensitive,
+              onChanged: (v) => setState(() => _sensitive = v),
             ),
           ],
-        ),
+        ],
       ),
     );
   }

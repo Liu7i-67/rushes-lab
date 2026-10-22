@@ -15,6 +15,9 @@ import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/search_field.dart';
+import '../../widgets/toast.dart';
+import 'admin_auto_load.dart';
 import 'admin_user_row.dart';
 import 'temp_password_sheet.dart';
 import 'user_form_sheets.dart';
@@ -29,21 +32,26 @@ class AdminUsersPage extends StatefulWidget {
   State<AdminUsersPage> createState() => _AdminUsersPageState();
 }
 
-class _AdminUsersPageState extends State<AdminUsersPage> {
+class _AdminUsersPageState extends State<AdminUsersPage>
+    with AutoLoadScroll<AdminUsersPage> {
   final _search = TextEditingController();
   Timer? _debounce;
   bool? _active; // null=全部
   final _items = <DirectoryUser>[];
   var _total = 0;
   var _loading = true;
+  var _loadingMore = false;
   String? _error;
   var _reloadTag = 0;
 
   @override
   void initState() {
-    super.initState();
+    super.initState(); // AutoLoadScroll:挂滚动监听
     _reload();
   }
+
+  @override
+  void onAutoLoad() => _loadMore();
 
   @override
   void dispose() {
@@ -79,11 +87,14 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
     } on ApiException catch (e) {
       _fail(tag, e.message);
     } catch (e) {
-      _fail(tag, '$e');
+      _fail(tag, errorMessage(e, '加载失败,请稍后重试'));
     }
   }
 
+  /// 到底自动加载(F6):加载中/已取全守卫;失败 toast,滚动可再次触发。
   Future<void> _loadMore() async {
+    if (_loadingMore || _loading || _items.length >= _total) return;
+    setState(() => _loadingMore = true);
     final tag = _reloadTag;
     try {
       final page = await session.api!.directory.listUsers(
@@ -93,8 +104,16 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
         offset: _items.length,
       );
       if (tag != _reloadTag || !mounted) return;
-      setState(() => _items.addAll(page.items));
-    } catch (_) {}
+      setState(() {
+        _items.addAll(page.items);
+        _loadingMore = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loadingMore = false);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'),
+          tone: ToastTone.error);
+    }
   }
 
   void _fail(int tag, String message) {
@@ -129,30 +148,26 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: TextField(
+            padding: const EdgeInsets.fromLTRB(
+                Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceXs),
+            child: SearchField(
               controller: _search,
+              hintText: '搜用户名 / 姓名 / 邮箱…',
               onChanged: _onSearchChanged,
-              decoration: const InputDecoration(
-                isDense: true,
-                hintText: '搜用户名 / 姓名 / 邮箱…',
-                prefixIcon: Icon(Icons.search, size: 20),
-                border: OutlineInputBorder(),
-              ),
             ),
           ),
           SizedBox(
             height: 48,
             child: Row(
               children: [
-                const SizedBox(width: 12),
+                const SizedBox(width: Tk.spaceMd),
                 for (final (label, value) in const [
                   ('全部', null),
                   ('启用', true),
                   ('停用', false),
                 ])
                   Padding(
-                    padding: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.only(right: Tk.spaceSm),
                     child: ChoiceChip(
                       label: Text(label),
                       selected: _active == value,
@@ -164,8 +179,9 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
                   ),
                 const Spacer(),
                 Text('共 $_total 名用户',
-                    style: const TextStyle(fontSize: 11.5, color: Tk.subtle)),
-                const SizedBox(width: 12),
+                    style:
+                        const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+                const SizedBox(width: Tk.spaceMd),
               ],
             ),
           ),
@@ -186,14 +202,12 @@ class _AdminUsersPageState extends State<AdminUsersPage> {
       return const EmptyState(message: '无用户');
     }
     return ListView.builder(
+      controller: scrollController,
       itemCount: _items.length + (_items.length < _total ? 1 : 0),
       itemBuilder: (context, i) {
         if (i >= _items.length) {
-          return Padding(
-            padding: const EdgeInsets.all(12),
-            child:
-                OutlinedButton(onPressed: _loadMore, child: const Text('加载更多')),
-          );
+          // F6:底部自动加载指示器(到底自动触发;失败后可点重试)
+          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
         }
         return AdminUserRow(user: _items[i], onChanged: _reload);
       },

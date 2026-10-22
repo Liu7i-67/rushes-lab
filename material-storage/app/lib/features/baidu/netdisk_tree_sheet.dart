@@ -138,9 +138,9 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
         title: Text(e.name,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: 13, color: Tk.subtle)),
+            style: const TextStyle(fontSize: Tk.fzMd, color: Tk.subtle)),
         trailing: Text(fmtBytes(e.sizeBytes ?? 0),
-            style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+            style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
       );
 
   Widget _dirRow(NetdiskNode n, int depth) {
@@ -164,16 +164,16 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                  fontSize: 13.5,
+                  fontSize: Tk.fzMd,
                   color: selected ? Tk.accentStrong : Tk.fg,
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
           subtitle: n.loading
-              ? const Text('加载中…', style: TextStyle(fontSize: 11))
+              ? const Text('加载中…', style: TextStyle(fontSize: Tk.fzXs))
               : n.error != null
                   ? Text(n.error!,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: Tk.red))
+                      style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red))
                   : null,
           trailing: IconButton(
             visualDensity: VisualDensity.compact,
@@ -197,7 +197,7 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text('目录过大,仅显示部分内容',
-                  style: TextStyle(fontSize: 11, color: Tk.amber,
+                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber,
                       fontStyle: FontStyle.italic)),
             ),
           ),
@@ -238,7 +238,7 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: 12,
+                    fontSize: Tk.fzSm,
                     color: _selected == null ? Tk.subtle : Tk.accentStrong),
               ),
             ),
@@ -262,7 +262,7 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
       return Center(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           const Text('网盘为空或读取失败,可点右上刷新',
-              style: TextStyle(fontSize: 13, color: Tk.muted)),
+              style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted)),
           const SizedBox(height: 8),
           TextButton(onPressed: _loadRoot, child: const Text('重试')),
         ]),
@@ -277,7 +277,7 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
             alignment: Alignment.centerLeft,
             child: Text('目录过大,仅显示部分内容',
                 style: TextStyle(
-                    fontSize: 11,
+                    fontSize: Tk.fzXs,
                     color: Tk.amber,
                     fontStyle: FontStyle.italic)),
           ),

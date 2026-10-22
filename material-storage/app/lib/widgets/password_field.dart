@@ -17,6 +17,8 @@ class PasswordField extends StatefulWidget {
     this.onSubmitted,
     this.autocorrect = false,
     this.obscureText = true,
+    this.textInputAction,
+    this.autofillHints,
   });
 
   final TextEditingController? controller;
@@ -37,6 +39,12 @@ class PasswordField extends StatefulWidget {
   /// 初始是否遮挡(默认 true;仅供特殊场景显式放开,不改动现役用法)。
   final bool obscureText;
 
+  /// 键盘动作键透传(app-polish E1:登录页密码框 done 提交;缺省系统默认)。
+  final TextInputAction? textInputAction;
+
+  /// 自动填充提示透传(app-polish E1;配合页面级 AutofillGroup 使用)。
+  final Iterable<String>? autofillHints;
+
   @override
   State<PasswordField> createState() => _PasswordFieldState();
 }
@@ -54,6 +62,8 @@ class _PasswordFieldState extends State<PasswordField> {
       autocorrect: widget.autocorrect,
       validator: widget.validator,
       onFieldSubmitted: widget.onSubmitted,
+      textInputAction: widget.textInputAction,
+      autofillHints: widget.autofillHints,
       decoration: InputDecoration(
         labelText: widget.labelText,
         hintText: widget.hintText,

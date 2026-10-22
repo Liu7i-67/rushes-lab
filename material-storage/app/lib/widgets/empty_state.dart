@@ -22,7 +22,7 @@ class EmptyState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 40, color: Tk.subtle),
-          const SizedBox(height: 12),
+          const SizedBox(height: Tk.spaceMd),
           Text(
             message,
             textAlign: TextAlign.center,

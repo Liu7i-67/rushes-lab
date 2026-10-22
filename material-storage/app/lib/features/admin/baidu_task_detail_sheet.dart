@@ -53,7 +53,7 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
       setState(() => _detail = d);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = e is ApiException ? e.message : '$e');
+      setState(() => _error = errorMessage(e, '详情加载失败,请稍后重试'));
     }
   }
 
@@ -85,14 +85,14 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
                         '共 ${t.totalFiles} · 完成 ${t.doneFiles}'
                         '${t.skippedFiles > 0 ? ' · 跳过 ${t.skippedFiles}' : ''}'
                         '${t.failedFiles > 0 ? ' · 失败 ${t.failedFiles}' : ''}',
-                        style:
-                            const TextStyle(fontSize: 11, color: Tk.muted)),
+                        style: const TextStyle(
+                            fontSize: Tk.fzXs, color: Tk.muted)),
                   ]),
                   const SizedBox(height: 6),
                   Text(t.sourceDir,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 12.5)),
+                      style: const TextStyle(fontSize: Tk.fzMd)),
                   // enumerating 阶段清单未就绪,不渲染进度条(web 同款改进)
                   if (t.status != 'enumerating') ...[
                     const SizedBox(height: 6),
@@ -107,18 +107,19 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
                     ' · ${t.project.name} / ${t.targetFolder?.name ?? '已删'}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 11, color: Tk.muted),
+                    style: const TextStyle(
+                        fontSize: Tk.fzXs, color: Tk.muted),
                   ),
                   if (t.failReason != null)
                     Text(
                         '失败原因:'
                         '${kFailReasonLabels[t.failReason] ?? t.failReason}',
                         style: const TextStyle(
-                            fontSize: 11.5, color: Tk.red)),
+                            fontSize: Tk.fzXs, color: Tk.red)),
                   if (_error != null)
                     Text(_error!,
                         style: TextStyle(
-                            fontSize: 11.5,
+                            fontSize: Tk.fzXs,
                             color: Theme.of(context).colorScheme.error)),
                 ],
               ),
@@ -175,11 +176,13 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
             SizedBox(
               width: 128,
               child: Text(k,
-                  style: const TextStyle(fontSize: 11, color: Tk.subtle)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ),
             Expanded(
               child: Text(v,
-                  style: const TextStyle(fontSize: 11, color: Tk.muted)),
+                  style:
+                      const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
             ),
           ],
         ),

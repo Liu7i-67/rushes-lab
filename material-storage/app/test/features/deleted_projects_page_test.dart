@@ -94,9 +94,10 @@ void main() {
     expect(find.text('回收站(项目)'), findsOneWidget);
   });
 
-  testWidgets('加载更多:items<total 出现按钮并追下一页', (tester) async {
+  testWidgets('自动加载(app-polish E10):滚到底按 offset=20 追加下一页,取尽即止',
+      (tester) async {
     final api = installFakeApi();
-    // 第一页 20 条 + total 25 → 出现「加载更多」;第二页 5 条 → 追加后无更多
+    // 第一页 20 条 + total 25 → 滚到底自动拉第二页(5 条)→ 25/25 停
     addTearDown(() => session.api = null);
     api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
         items: [
@@ -109,14 +110,10 @@ void main() {
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
-    // 加载更多在列表尾(builder 惰性构建),滚到可见
-    // (scrollUntilVisible 默认 Scrollable finder 会被 TextField 的 Scrollable
-    // 撞成多义,故 dragUntilVisible 指定 ListView)
-    await tester.dragUntilVisible(
-        find.text('加载更多'), find.byType(ListView), const Offset(0, -400));
-    expect(find.text('加载更多'), findsOneWidget);
+    // E10:「加载更多」按钮已移除,改滚动到底自动加载
+    expect(find.text('加载更多'), findsNothing);
 
-    // 第二页 5 条
+    // 第二页 5 条(拖动即触发,先入桩)
     api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
         items: [
           for (var i = 20; i < 25; i++)
@@ -125,16 +122,17 @@ void main() {
                 deletedAt: '2026-10-20T10:00:00Z'),
         ],
         total: 25);
-    await tester.tap(find.text('加载更多'));
+    await tester.drag(find.byType(ListView), const Offset(0, -1200));
+    await tester.pump();
     await tester.pumpAndSettle();
     expect(api.projectsOps.listDeletedCalls.last.offset, 20);
     expect(find.text('加载更多'), findsNothing,
-        reason: '25/25 无更多(追加后按钮行消失)');
+        reason: '25/25 无更多(自动加载取尽即止)');
   });
 
   // ── B6 批补充(P2-1 / P2-2)─────────────────────────────────────────────────
 
-  testWidgets('P2-2 加载更多防连点:in-flight 期间连点只发一次请求且不重复追加',
+  testWidgets('P2-2 自动加载防连点:in-flight 期间再滚只发一次请求且不重复追加',
       (tester) async {
     final api = _GatedMsApi();
     session.api = api;
@@ -144,24 +142,24 @@ void main() {
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
-    await tester.dragUntilVisible(
-        find.text('加载更多'), find.byType(ListView), const Offset(0, -400));
 
-    // 第二页先入桩(挂起前捕获),loadMore 挂起在 gate 上
+    // 第二页先入桩(挂起前捕获),滚动触发 loadMore 挂起在 gate 上
     api.gatedOps.listDeletedStaged =
         models.DeletedProjectsPage(items: _page(20, 25), total: 25);
     api.gatedOps.loadMoreGate = Completer<void>();
-    await tester.tap(find.text('加载更多'));
-    await tester.tap(find.text('加载更多')); // in-flight 连点:守卫拦下
+    await tester.drag(find.byType(ListView), const Offset(0, -1200));
     await tester.pump();
-    expect(find.text('加载中…'), findsOneWidget, reason: '挂起中按钮进加载态');
+    await tester.drag(find.byType(ListView), const Offset(0, -600));
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget,
+        reason: 'E10:in-flight 底部加载指示可见');
     expect(
         api.projectsOps.listDeletedCalls.where((c) => c.offset > 0).length, 1,
-        reason: '连点只发一次请求');
+        reason: 'in-flight 再滚只发一次请求(_loadingMore 守卫拦下)');
 
     api.gatedOps.loadMoreGate!.complete();
     await tester.pumpAndSettle();
-    expect(find.text('加载更多'), findsNothing, reason: '25/25 无更多(按钮行消失)');
+    expect(find.text('加载更多'), findsNothing, reason: '25/25 无更多(按钮已移除)');
     // 列表惰性构建:滚到第二页区段再断言(滚动态下 find.text 才会物化行)
     await tester.dragUntilVisible(
         find.text('项目24(c24)'), find.byType(ListView), const Offset(0, -400));
@@ -180,17 +178,17 @@ void main() {
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
-    await tester.dragUntilVisible(
-        find.text('加载更多'), find.byType(ListView), const Offset(0, -400));
 
-    // 旧词第二页挂起 in-flight(挂起前捕获快照)
+    // 旧词第二页挂起 in-flight(挂起前捕获快照);E10:滚动触发而非点按钮
     api.gatedOps.listDeletedStaged =
         models.DeletedProjectsPage(items: _page(20, 25), total: 25);
     api.gatedOps.loadMoreGate = Completer<void>();
-    await tester.tap(find.text('加载更多'));
+    await tester.drag(find.byType(ListView), const Offset(0, -1200));
     await tester.pump();
 
-    // 新词搜索 reload(offset=0 不受 gate):整表替换,代际 tag 自增
+    // 新词搜索 reload(offset=0 不受 gate):整表替换,代际 tag 自增。
+    // 小调注释:E10 起底部加载指示为转圈动画,gate 未放行期间不可
+    // pumpAndSettle(会永不落定),改逐 pump
     api.gatedOps.listDeletedStaged = models.DeletedProjectsPage(items: [
       models.DeletedProject(
           id: 'q1', code: 'new', name: '新词项目',
@@ -198,7 +196,8 @@ void main() {
     ], total: 1);
     await tester.enterText(find.byType(TextField), '新词');
     await tester.testTextInput.receiveAction(TextInputAction.done);
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump();
     expect(find.text('新词项目(new)'), findsOneWidget);
 
     // 放行旧 loadMore:tag 不匹配 → 旧词第二页整页丢弃,不污染新词列表
