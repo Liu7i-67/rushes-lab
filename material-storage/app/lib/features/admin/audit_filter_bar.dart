@@ -4,6 +4,9 @@
 /// app-polish-2 I2(#6):事件类型/项目两处下拉改「只读字段+弹层选择器」
 /// (PickerField + showPickerSheet,支持搜索);回调与数据流不变——值恒为
 /// raw token/项目 id,'' = 全部。
+/// app-polish-3 E4/D5:操作者也改 UserPickerField 弹层形态(点按弹层选人),
+/// 并提供清除钮(allowClear)——清除 = onChanged([]) = 回「全部操作者」,
+/// 对齐 web AuditPage 语义。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,7 +14,7 @@ import 'package:flutter/material.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/pickers/picker_sheet.dart';
-import '../../widgets/pickers/user_picker.dart';
+import '../../widgets/pickers/user_picker_field.dart';
 import 'audit_labels.dart';
 
 /// 审计筛选栏(projectId ''=全部;actor null=全部;day null=不限单日)。
@@ -72,10 +75,12 @@ class AuditFilterBar extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.fromLTRB(
               Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
-          child: UserPicker(
+          child: UserPickerField(
             value: [?actor],
             multiple: false,
-            hint: '按操作者筛选(单选,可留空)',
+            label: '按操作者筛选(可选)',
+            hint: '全部操作者',
+            allowClear: true,
             onChanged: onActorChanged,
           ),
         ),

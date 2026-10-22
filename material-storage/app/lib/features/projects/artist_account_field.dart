@@ -5,6 +5,8 @@
 /// 结果面板:一次性初始密码回显可复制,仅此一次(F3-②)。
 /// R1:面板处于新建项目 sheet 内,复制反馈改 CopyButton 就地图标切换
 /// (SnackBar 被 sheet 遮挡不可见),登录名/初始密码两行就地生效。
+/// app-polish-3 E3/D6:两处 isDense TextField 改 AppTextField(修浮起 label
+/// 裁切;登录名冲突走 errorText 参数,姓名隐藏计数器)。
 library;
 
 import 'dart:async';
@@ -14,6 +16,7 @@ import 'package:flutter/material.dart';
 import '../../core/session.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/copy_button.dart';
+import '../../widgets/form_text_field.dart';
 
 /// 登录名字符集(users.py username-available / ArtistAccountIn 同款)。
 final RegExp kUsernamePattern = RegExp(r'^[a-zA-Z0-9._-]+$');
@@ -98,28 +101,20 @@ class _ArtistAccountFieldsState extends State<ArtistAccountFields> {
         const Text('开通艺人账号(可选,两项都留空 = 仅创建项目)',
             style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
         const SizedBox(height: Tk.spaceXs),
-        TextField(
+        AppTextField(
+          label: '艺人登录名(字母/数字/._-,2-64 位)',
           controller: _username,
-          decoration: InputDecoration(
-            isDense: true,
-            labelText: '艺人登录名(字母/数字/._-,2-64 位)',
-            border: const OutlineInputBorder(),
-            errorText: _conflict
-                ? '该登录名已被占用;若属该艺人本人请勿重复开通,可联系管理员加入项目成员'
-                : null,
-          ),
+          errorText: _conflict
+              ? '该登录名已被占用;若属该艺人本人请勿重复开通,可联系管理员加入项目成员'
+              : null,
           onChanged: _onUsernameChanged,
         ),
         const SizedBox(height: Tk.spaceSm),
-        TextField(
+        AppTextField(
+          label: '艺人姓名(填写后自动带入项目名称,手改项目名后脱钩)',
           controller: _name,
           maxLength: 128,
-          decoration: const InputDecoration(
-            isDense: true,
-            labelText: '艺人姓名(填写后自动带入项目名称,手改项目名后脱钩)',
-            border: OutlineInputBorder(),
-            counterText: '',
-          ),
+          counterText: '',
           onChanged: (v) {
             _emit();
             widget.onNameFollow(v);

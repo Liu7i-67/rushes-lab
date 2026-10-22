@@ -11,6 +11,7 @@ import 'core/error_boundary.dart';
 import 'core/maintenance/banner_controller.dart';
 import 'core/polling_controller.dart';
 import 'core/session.dart';
+import 'core/thumb_disk_store.dart';
 import 'core/transfers/transfer_queue.dart';
 import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
@@ -32,6 +33,8 @@ void main() {
   // 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
   // 特性侧缓存在此挂载,core 不再反向 import features)
   session.addSessionClearHook(thumbnailCache.clear);
+  // 包 B(app-polish-3):位图磁盘缓存随会话清空(登出/401 不残留用户素材)
+  session.addSessionClearHook(ThumbDiskStore.I.clear);
   // B7 通知未读轮询(§8.7 单一 PollingController):挂 App 生命周期 +
   // Session 门控(登录/登出/401 清会话即经 syncGate 起停,仅前台+已登录才轮)
   unreadPoller.attach();
@@ -53,6 +56,9 @@ void main() {
   // transfers.json)并恢复历史记录(终态原样/非终态标「进程中断」;存储打开
   // 失败如测试环境无插件通道,静默降级仅内存)
   TransferQueue.I.attachDefaultStore().ignore();
+  // 包 B(app-polish-3):缩略图位图磁盘缓存目录就绪(建目录 + 150MB LRU 清理),
+  // 异步不阻塞启动;失败静默降级为纯网络链路(测试环境无插件通道同此)
+  ThumbDiskStore.I.init().ignore();
   // B9 功能点 4:渲染异常全局兜底(友好页 + 日志,不白屏)
   installErrorBoundary();
   runApp(const MsApp());

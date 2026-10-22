@@ -3,6 +3,8 @@
 /// name/email 前端过滤)、移出(确认 → DELETE,即时失去组权限)。
 /// 成功增删后抽屉**驻留**(刷新成员列表,不自动关闭;web 同款),调用方在
 /// 抽屉关闭后刷新组列表。
+/// app-polish-3 E5:添加成员改 UserPickerField 弹层形态(点按弹层搜索勾选,
+/// 底部「完成(N)」回填;选后仍走下方「添加所选成员」批量提交,数据流不变)。
 library;
 
 import 'package:flutter/material.dart';
@@ -12,7 +14,7 @@ import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
-import '../../widgets/pickers/user_picker.dart';
+import '../../widgets/pickers/user_picker_field.dart';
 import '../../widgets/search_field.dart';
 import '../../widgets/toast.dart';
 
@@ -145,10 +147,12 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
               Text('成员 — ${widget.group.name}(${_members.length} 人)',
                   style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: Tk.spaceMd),
-              UserPicker(
+              UserPickerField(
                 value: _selected,
+                multiple: true,
+                label: '添加成员',
+                hint: '搜索并选择用户',
                 onChanged: (v) => setState(() => _selected = v),
-                hint: '搜姓名 / 用户名加成员…',
               ),
               const SizedBox(height: Tk.spaceSm),
               SizedBox(

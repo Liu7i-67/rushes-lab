@@ -646,7 +646,9 @@ void main() {
   });
 
   // ── K2 探针:直挂 FolderRow 已有三套测试,这里补「直属>0 且子树相同」边界 ──
-  testWidgets('K2 探针:直属=子树(无子夹)时显示直属主数字,不叠「子级」提示',
+  // app-polish-3 D1(2026-10-22):子树数字已整体删除,直属>0 只显示「N 项」
+  // 徽标;直属=子树(平铺夹)时也不得叠出任何「子级」提示。
+  testWidgets('K2 探针:直属=子树(无子夹)时只显示直属「N 项」,无任何「子级」提示',
       (tester) async {
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(

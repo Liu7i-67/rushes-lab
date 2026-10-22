@@ -3,9 +3,10 @@
 /// 敏感锁(amber 点缀)、「⋯」图标钮菜单(在 folder_menu_sheet.dart,B6 全量)、
 /// 点行进该夹宫格上下文。E4:行尾 chevron 移除(与整行可点重复);展开箭头
 /// 触控区≥44×44。多级下钻靠树递归展开。
-/// K(2026-10-22 真机反馈 #1):计数三态 —— 直属>0「N 项」主徽标;直属 0 且
-/// 子树>0「子级 M 项」fzXs muted 灰字(弱提示,不再误导「点进去为空」);
-/// 皆 0 不显示。图标实心(子树含文件)语义保持不变。
+/// K(2026-10-22 真机反馈 #1)+ app-polish-3 D1 定稿:计数两态 —— 直属>0
+/// 显示「N 项」徽标;直属=0 不显示任何数字(「子级 M 项」子树弱提示已整体
+/// 删除,避免「点进去为空」二次误导)。图标实心仍按子树含文件(subtree>0)
+/// 点亮。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
@@ -93,19 +94,11 @@ class FolderRow extends StatelessWidget {
             ],
             if (f.directFileCount > 0) ...[
               const SizedBox(width: Tk.spaceXs),
-              // 直属>0:「N 项」主徽标(数字 = 本夹直属,不含子树)
+              // 直属>0:「N 项」徽标(数字 = 本夹直属,不含子树)。直属=0
+              // 一律不显示数字(子树信息只由实心图标表达,D1)
               Badge(
                 label: '${f.directFileCount} 项',
                 tone: BadgeTone.neutral,
-              ),
-            ] else if (f.subtreeFileCount > 0) ...[
-              const SizedBox(width: Tk.spaceXs),
-              // 直属 0 且子树>0:「子级 M 项」灰字弱提示(fzXs muted,弱于主
-              // 徽标)—— 旧后端缺 direct_file_count 键时解析默认 0,同样落到
-              // 此态(子树>0),不再出现误导的「M 项」主数字,可接受
-              Text(
-                '子级 ${f.subtreeFileCount} 项',
-                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
               ),
             ],
             // ⋯ 菜单:回收站 B5 点亮(入口三态闸门);其余管理动作 B6 填。

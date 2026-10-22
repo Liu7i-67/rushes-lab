@@ -95,9 +95,19 @@ void main() {
     await tester.pump();
     expect(find.text('请选至少一个主体'), findsOneWidget);
 
-    // 选自己 + 勾 上传(默认已有 查看)→ 提交 levels 固定序 [uploader, viewer]
-    await tester.tap(find.text('甲(自己)'));
+    // 选自己:app-polish D1 起主体选择走弹层(原内联常驻列表已下线)——
+    // 点「添加用户 / 用户组」→ 弹层勾自己 → 完成(N) 回填汇总
+    await tester.tap(find.text('添加用户 / 用户组'));
+    await tester.pumpAndSettle(); // 弹层进场动画
+    await tester.pump(const Duration(milliseconds: 300)); // 空 query 首搜防抖
     await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(ListTile, '甲(自己)'));
+    await tester.pump(); // 勾选即时回填「完成(1)」
+    await tester.tap(find.text('完成(1)'));
+    await tester.pumpAndSettle(); // 退场动画后 onChanged 回填
+    expect(find.textContaining('已选 1 项'), findsOneWidget);
+
+    // 勾 上传(默认已有 查看)→ 提交 levels 固定序 [uploader, viewer]
     await tester.tap(find.text('上传'));
     await tester.pump();
     await tester.tap(find.text('添加').last);
