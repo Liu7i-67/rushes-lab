@@ -89,7 +89,7 @@ export function AssetPreviewModal({
   const kind = detectKind(asset);
 
   // iOS PDF 降级卡(§3.6)的下载按钮 — 走共享 helper(F12:livp 默认请求解包 zip,
-  // 未就绪回落原始 + 提示;非 livp 行为零变化);forceOriginal = 「下载原始 .livp」次选项(F14)。
+  // 未就绪回落原始 + 提示;非 livp 行为零变化);forceOriginal = 「下载源文件」次选项(F14)。
   // 403 兜底走组件级提示(与三张降级卡同文案)
   const handleDownload = async (forceOriginal = false) => {
     try {
@@ -233,7 +233,7 @@ export function AssetPreviewModal({
             disabled={canDownload === false}
             loading={dlLinkOriginal.isPending}
             onClick={() => void handleDownload(true)}>
-      下载原始 .livp
+      下载源文件
     </Button>
   );
 
