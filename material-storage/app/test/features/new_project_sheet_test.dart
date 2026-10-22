@@ -15,6 +15,7 @@ import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/projects/folder_template_field.dart';
+import 'package:ms_app/features/projects/initial_grants_field.dart';
 import 'package:ms_app/features/projects/new_project_sheet.dart';
 import 'package:ms_app/features/projects/project_create_fail.dart';
 import 'package:ms_app/models/models.dart';
@@ -33,6 +34,12 @@ Widget _host() => MaterialApp(
           ),
         ),
       ),
+    );
+
+/// 弹层内行文本(PickerSheet;字段 hint 文本恒在树里,行断言限定弹层去重)。
+Finder _sheetRow(String label) => find.descendant(
+      of: find.byType(BottomSheet),
+      matching: find.text(label),
     );
 
 void main() {
@@ -172,19 +179,19 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    // 选权限模板 → 条目展开为行(组行,角色已预勾)
-    // (value=null 但 items 含「不使用模板」项 → 按钮显示该项而非 hint)
-    await tester.tap(find.text('不使用模板'));
+    // 选权限模板 → 弹层选择(I2:字段点按弹层,选即关即回填)→ 条目展开为行
+    // (组行,角色已预勾)。字段初始为 hint 态,唯一可点
+    await tester.tap(find.text('权限模板(可选)'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('标准项目(默认)').last);
+    await tester.tap(find.text('标准项目(默认)'));
     await tester.pumpAndSettle();
     expect(find.text('后期组'), findsOneWidget);
     expect(find.text('1/50 行'), findsOneWidget);
 
-    // 选目录模板
+    // 选目录模板:字段 hint 态点按弹层 → 选「婚礼标准目录」
     await tester.tap(find.text('不使用模板(默认)'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('婚礼标准目录(2 个目录)').last);
+    await tester.tap(find.text('婚礼标准目录(2 个目录)'));
     await tester.pumpAndSettle();
     expect(find.textContaining('目录树预览'), findsOneWidget);
 
@@ -349,8 +356,8 @@ void main() {
     expect(find.text('创建'), findsNothing, reason: '成功后面板关闭');
   });
 
-  testWidgets('P2-3 目录模板可回退:选中后再选「不使用模板(默认)」→ onChanged(null) 预览消失',
-      (tester) async {
+  testWidgets('P2-3 目录模板可回退:选中后再选「不使用模板(默认)」→ onChanged(null) 预览消失'
+      '(I2:原下拉 null 项语义在弹层中保留)', (tester) async {
     final api = installFakeApi();
     api.adminTemplates.folderResult = [
       FolderTemplate(
@@ -374,26 +381,79 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    // 选中模板(菜单实体项:排除按钮内部 IndexedStack 副本与 IgnorePointer 的 hint)
-    await tester.tap(find.text('不使用模板(默认)').first);
+    // 字段初始 hint 态(唯一),点按弹层 → 选模板(选即关)
+    await tester.tap(find.text('不使用模板(默认)'));
     await tester.pumpAndSettle();
-    await tester.tap(_tappableMenuText('婚礼标准目录(2 个目录)'));
+    await tester.tap(find.text('婚礼标准目录(2 个目录)'));
     await tester.pumpAndSettle();
     expect(selected, 'ft1');
     expect(find.textContaining('目录树预览'), findsOneWidget);
 
-    // 回退:null 项始终在列(选中态不消失),选它 → onChanged(null)
-    final button = tester.widget<DropdownButton<String?>>(
-        find.byType(DropdownButton<String?>));
-    expect(button.items!.map((i) => i.value), contains(null),
-        reason: '选中模板后仍存在「不使用模板(默认)」可回退项');
-
-    await tester.tap(find.text('婚礼标准目录(2 个目录)').first);
+    // 回退:null 项始终在列(选中态不消失),重开弹层选「不使用模板(默认)」
+    // → onChanged(null)。行断言限定弹层范围(字段的 hint 文本恒在树里)
+    await tester.tap(find.text('婚礼标准目录(2 个目录)'));
     await tester.pumpAndSettle();
-    await tester.tap(_tappableMenuText('不使用模板(默认)'));
+    await tester.tap(_sheetRow('不使用模板(默认)'));
     await tester.pumpAndSettle();
     expect(selected, isNull);
     expect(find.textContaining('目录树预览'), findsNothing);
+  });
+
+  testWidgets('I2 授权模板:字段点按弹层→搜索→选择回填(行展开);'
+      '回退「不使用模板」清空', (tester) async {
+    final api = installFakeApi();
+    api.adminTemplates.grantResult = [
+      GrantTemplate(id: 't1', name: '标准项目', isDefault: true, items: [
+        GrantTemplateItem(
+            kind: 'group', id: 'g1', roles: ['viewer'],
+            name: '后期组', missing: false),
+      ]),
+      GrantTemplate(id: 't2', name: '婚礼模板', isDefault: false, items: [
+        GrantTemplateItem(
+            kind: 'user', id: 'u1', roles: ['viewer'],
+            name: '甲', missing: false),
+      ]),
+    ];
+    addTearDown(() => session.api = null);
+
+    List<GrantRowData> rows = const [];
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: StatefulBuilder(builder: (context, setState) {
+          return InitialGrantsField(
+            value: rows,
+            onChanged: (v) => setState(() => rows = v),
+          );
+        }),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    // 字段 hint 态点按 → 弹层 → 搜索过滤 → 选择「婚礼模板」
+    await tester.tap(find.text('权限模板(可选)'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.descendant(
+            of: find.byType(BottomSheet), matching: find.byType(TextField)),
+        '婚礼');
+    await tester.pump();
+    // 行断言限定弹层范围(字段本体在遮罩后仍在树里)
+    Finder sheetRow(String label) => find.descendant(
+        of: find.byType(BottomSheet), matching: find.text(label));
+    expect(sheetRow('标准项目(默认)'), findsNothing, reason: '搜索过滤');
+    await tester.tap(sheetRow('婚礼模板'));
+    await tester.pumpAndSettle();
+    expect(rows, hasLength(1), reason: '模板条目展开为 initial_grants 行');
+    expect(rows.single.name, '甲');
+    expect(find.widgetWithText(TextField, '婚礼模板'), findsOneWidget,
+        reason: '字段回填所选模板');
+
+    // 重开弹层 → 回退「不使用模板」→ 行清空(PickerOption 语义:选中 null 项)
+    await tester.tap(find.widgetWithText(TextField, '婚礼模板'));
+    await tester.pumpAndSettle();
+    await tester.tap(sheetRow('不使用模板'));
+    await tester.pumpAndSettle();
+    expect(rows, isEmpty, reason: '「不使用模板」清空重来(原下拉语义)');
   });
 
   testWidgets('端到端:mock 500 → guard5xx 转 ApiException,sheet 显中性引导文案'
@@ -433,15 +493,6 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   });
-}
-
-/// 菜单里的实体项文本(下拉展开时唯一 ListView 即菜单列表;按钮内部 IndexedStack
-/// 副本与 hint 副本都不在其内,菜单 scrollbar 的 IgnorePointer 也让祖先排除法失效)。
-Finder _tappableMenuText(String label) {
-  return find.descendant(
-    of: find.byType(ListView),
-    matching: find.text(label),
-  );
 }
 
 /// P2-1 测试专用:create 可挂起的假 projectsOps(Completer 放行)。

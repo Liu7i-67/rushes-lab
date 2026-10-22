@@ -11,6 +11,8 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart'
+    show InterruptionLevel;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/transfers/transfer_task.dart';
 import 'package:ms_app/services/notifier.dart';
@@ -71,8 +73,12 @@ void main() {
     });
 
     test('名单超 3 截断:「等 N 个」收尾', () {
-      final (title, body) = transferNotifyTexts(TransferKind.upload,
-          [1, 2, 3, 4, 5].map((n) => TransferNotifyEntry(ok: true, filename: '$n.jpg')).toList());
+      final (title, body) = transferNotifyTexts(
+        TransferKind.upload,
+        [1, 2, 3, 4, 5]
+            .map((n) => TransferNotifyEntry(ok: true, filename: '$n.jpg'))
+            .toList(),
+      );
       expect(title, '上传完成:5 个文件');
       expect(body, '1.jpg、2.jpg、3.jpg 等 5 个');
     });
@@ -96,7 +102,10 @@ void main() {
 
     test('前台完成:gate false → 不入批不调度,不发通知', () {
       final b = build(background: false);
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: true, filename: 'a.jpg'));
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'a.jpg'),
+      );
       expect(flushes, isEmpty, reason: '前台丢弃,连聚合定时器都不挂');
       for (final f in List.of(flushes)) {
         f();
@@ -107,8 +116,10 @@ void main() {
     test('后台同窗 99 张上传完成 → 只挂一个定时器,到期一条汇总(防轰炸)', () {
       final b = build(background: true);
       for (var i = 0; i < 99; i++) {
-        b.add(TransferKind.upload,
-            TransferNotifyEntry(ok: true, filename: 'f$i.jpg'));
+        b.add(
+          TransferKind.upload,
+          TransferNotifyEntry(ok: true, filename: 'f$i.jpg'),
+        );
       }
       expect(flushes.length, 1, reason: '窗口内只挂一个聚合定时器');
       flushes.removeAt(0)();
@@ -118,26 +129,47 @@ void main() {
 
     test('上/下载同窗各聚一条(两类互不混)', () {
       final b = build(background: true);
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: true, filename: 'u1.jpg'));
-      b.add(TransferKind.download,
-          const TransferNotifyEntry(ok: true, filename: 'd1.jpg', detail: '已存入相册'));
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: false, filename: 'u2.jpg'));
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'u1.jpg'),
+      );
+      b.add(
+        TransferKind.download,
+        const TransferNotifyEntry(
+          ok: true,
+          filename: 'd1.jpg',
+          detail: '已存入相册',
+        ),
+      );
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: false, filename: 'u2.jpg'),
+      );
       flushes.removeAt(0)();
       expect(sinkCalls.length, 2);
-      expect(sinkCalls.map((c) => c.$1), containsAll(<String>[
-        '上传完成:1 成功 · 1 失败',
-        '下载完成:d1.jpg',
-      ]));
+      expect(
+        sinkCalls.map((c) => c.$1),
+        containsAll(<String>['上传完成:1 成功 · 1 失败', '下载完成:d1.jpg']),
+      );
     });
 
     test('窗口触发后重开新批:第二批重新计窗再聚一条', () {
       final b = build(background: true);
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: true, filename: 'a.jpg'));
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'a.jpg'),
+      );
       flushes.removeAt(0)(); // 第一窗到期(单文件详报口径)
       expect(sinkCalls.single.$1, '上传完成:a.jpg');
 
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: true, filename: 'b.jpg'));
-      b.add(TransferKind.upload, const TransferNotifyEntry(ok: true, filename: 'c.jpg'));
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'b.jpg'),
+      );
+      b.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'c.jpg'),
+      );
       expect(flushes.length, 1, reason: '新批重新计窗');
       flushes.removeAt(0)();
       expect(sinkCalls.length, 2);
@@ -146,8 +178,14 @@ void main() {
 
     test('批内混合成败聚合:k 成功 · m 失败(单批口径)', () {
       final b = build(background: true);
-      b.add(TransferKind.download, const TransferNotifyEntry(ok: true, filename: '1.jpg'));
-      b.add(TransferKind.download, const TransferNotifyEntry(ok: false, filename: '2.jpg', detail: '空间不足'));
+      b.add(
+        TransferKind.download,
+        const TransferNotifyEntry(ok: true, filename: '1.jpg'),
+      );
+      b.add(
+        TransferKind.download,
+        const TransferNotifyEntry(ok: false, filename: '2.jpg', detail: '空间不足'),
+      );
       flushes.removeAt(0)();
       expect(sinkCalls.single.$1, '下载完成:1 成功 · 1 失败');
       expect(sinkCalls.single.$2, '失败:2.jpg');
@@ -168,13 +206,17 @@ void main() {
         schedule: (_, cb) => flushes.add(cb),
       );
 
-      batcher.add(TransferKind.upload,
-          const TransferNotifyEntry(ok: true, filename: 'a.jpg'));
+      batcher.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'a.jpg'),
+      );
       flushes.removeAt(0)(); // 第一批:sink 抛(被 catchError 吞,不外泄)
       await Future<void>.delayed(Duration.zero);
 
-      batcher.add(TransferKind.upload,
-          const TransferNotifyEntry(ok: true, filename: 'b.jpg'));
+      batcher.add(
+        TransferKind.upload,
+        const TransferNotifyEntry(ok: true, filename: 'b.jpg'),
+      );
       flushes.removeAt(0)(); // 第二批:照常聚合发出
       await Future<void>.delayed(Duration.zero);
       expect(ok.single.$1, '上传完成:b.jpg', reason: 'sink 异常后批器仍可用');
@@ -194,16 +236,20 @@ void main() {
         ),
       );
       notifier.taskFinished(
-          kind: TransferKind.download,
-          ok: true,
-          filename: 'a.jpg',
-          detail: '已存入相册');
+        kind: TransferKind.download,
+        ok: true,
+        filename: 'a.jpg',
+        detail: '已存入相册',
+      );
       flushes.removeAt(0)();
       expect(calls.single, ('下载完成:a.jpg', '已存入相册'));
 
       background = false; // 前台:终态丢弃
       notifier.taskFinished(
-          kind: TransferKind.download, ok: false, filename: 'b.jpg');
+        kind: TransferKind.download,
+        ok: false,
+        filename: 'b.jpg',
+      );
       expect(flushes, isEmpty, reason: '前台不入批不调度');
     });
 
@@ -258,14 +304,14 @@ void main() {
     test('R4a:已授权不弹引导;null 结果(<13/iOS 无结论)视为可用也不弹', () async {
       var guides = 0;
       Notifier build(Future<bool?> Function() p) => Notifier.test(
-            batcher: TransferNotifyBatcher(
-              sink: (_, _) async {},
-              gate: () => true,
-              schedule: (_, _) {},
-            ),
-            permission: p,
-            guide: () async => guides++,
-          );
+        batcher: TransferNotifyBatcher(
+          sink: (_, _) async {},
+          gate: () => true,
+          schedule: (_, _) {},
+        ),
+        permission: p,
+        guide: () async => guides++,
+      );
       await build(() async => true).ensurePermission();
       expect(guides, 0, reason: '已授权不弹');
       await build(() async => null).ensurePermission();
@@ -288,8 +334,7 @@ void main() {
       expect(notifier.permissionGranted, isNull);
     });
 
-    test('R4a:queryPermission 注入查询直通;单例真实路径无插件通道降级为已开启',
-        () async {
+    test('R4a:queryPermission 注入查询直通;单例真实路径无插件通道降级为已开启', () async {
       final notifier = Notifier.test(
         batcher: TransferNotifyBatcher(
           sink: (_, _) async {},
@@ -309,33 +354,67 @@ void main() {
       // 终态上报 no-op:不抛错、不挂任何定时器(若挂了真实 Timer,flutter_test
       // 会以 pending timer 报错——本用例即防回归钉子)
       Notifier.I.taskFinished(
-          kind: TransferKind.upload, ok: true, filename: 'x.jpg');
+        kind: TransferKind.upload,
+        ok: true,
+        filename: 'x.jpg',
+      );
       await Notifier.I.ensurePermission();
     });
   });
 
   group('R4a 引导框(widget)', () {
-    testWidgets('文案钉死:标题「开启系统通知」+ 用途正文 + 去设置/取消;取消可关',
-        (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Builder(
-          builder: (ctx) => FilledButton(
-            onPressed: () => Notifier.I.showNotificationGuideDialog(ctx),
-            child: const Text('open'),
+    testWidgets('文案钉死:标题「开启系统通知」+ 用途正文 + 去设置/取消;取消可关', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) => FilledButton(
+              onPressed: () => Notifier.I.showNotificationGuideDialog(ctx),
+              child: const Text('open'),
+            ),
           ),
         ),
-      ));
+      );
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
       expect(find.text('开启系统通知'), findsOneWidget);
-      expect(find.textContaining('系统通知权限'), findsOneWidget,
-          reason: '正文说明后台传输完成提醒用途');
+      expect(
+        find.textContaining('系统通知权限'),
+        findsOneWidget,
+        reason: '正文说明后台传输完成提醒用途',
+      );
       expect(find.text('去设置'), findsOneWidget);
       expect(find.text('取消'), findsOneWidget);
       // 只点取消(去设置会触平台通道,不在单测覆盖)
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
       expect(find.text('开启系统通知'), findsNothing);
+    });
+  });
+
+  group('J3 iOS Darwin 展示配置(静态钉字段,真机验证留人工)', () {
+    test('kTransferDarwinDetails:interruptionLevel=active + 声音/角标/前台 banner', () {
+      // 配置依据(flutter_local_notifications 22.3.2 本地缓存源码):
+      // - InterruptionLevel.active → UNNotificationInterruptionLevel.active
+      //   (lib/src/platform_specifics/darwin/interruption_level.dart);
+      // - presentSound=true → 原生 presentSound && content.sound == nil 时落
+      //   默认提示音(iOS FlutterLocalNotificationsPlugin.m
+      //   buildStandardNotificationContent),故不设自定义 sound 文件名;
+      // - presentBanner/presentList → iOS 14+ willPresent 的 presentationOptions
+      //   (delegate 挂接见 ios/Runner/AppDelegate.swift)。
+      const d = kTransferDarwinDetails;
+      expect(
+        d.interruptionLevel,
+        InterruptionLevel.active,
+        reason: 'iOS 15+:立即呈现并点亮屏幕',
+      );
+      expect(d.presentSound, isTrue, reason: '原生侧自动落默认提示音');
+      expect(d.badgeNumber, 1, reason: '到达亮角标');
+      expect(d.presentBadge, isTrue);
+      expect(d.presentBanner, isTrue, reason: 'iOS 14+ 前台 banner');
+      expect(d.presentList, isTrue, reason: 'iOS 14+ 前台入通知中心列表');
+      expect(d.presentAlert, isTrue, reason: 'iOS <14 前台 alert 兼容');
+      expect(d.threadIdentifier, 'ms_transfers', reason: '通知中心同线程归组');
+      expect(d.sound, isNull, reason: '默认提示音走 presentSound,不配自定义文件');
     });
   });
 }

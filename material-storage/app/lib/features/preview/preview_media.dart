@@ -9,6 +9,15 @@
 /// onDoubleTap,原因见 _onTapUp 字段注释),双击走图片分支 1x↔2.5x 缩放动画。
 /// C6(app-polish):Android PDF 由「需下载后打开」死胡同改为就地面板
 /// (下载完成就地「打开」,见 preview_doc_views.AndroidPdfPanel)。
+/// G2(app-polish-2):图片分支两段式渐进加载——进入默认签 thumbnail-url
+/// 直显缩略图(不再直接签原图);捏合/双击放大 >1.5x 时签发一次
+/// download-link 原图,就绪后同 Image fade 平滑替换(缩放态不打断,复位
+/// 不回退);失败保持缩略图叠 P7 式小字提示。无缩略图资产维持原图 inline,
+/// heic/svg 等恒缩略图,livp/视频/PDF 分支零改动。
+/// P2-1(app-polish-2 探针实证缺陷修复):放大签发的原图下载/解码失败
+/// (Image errorBuilder)时不再落「图片解码失败」失败卡——缩略图可用态
+/// 回退保持缩略图+_thumbFallback 提示(与 403 路径同观感),仅无缩略图
+/// 可用时保留失败卡。
 library;
 
 import 'dart:async';
@@ -38,6 +47,9 @@ const kSwipeVelocityThreshold = 500.0;
 
 /// C3:双击放大目标倍率(规格 2.5x;捏合上限 maxScale 4 不变)。
 const double kDoubleTapScale = 2.5;
+
+/// G2:放大触发原图签发的缩放阈值(捏合/双击超过即签,规格 1.5x)。
+const double kOriginalZoomThreshold = 1.5;
 
 class PreviewMedia extends StatefulWidget {
   const PreviewMedia({
@@ -105,7 +117,18 @@ class _PreviewMediaState extends State<PreviewMedia>
   var _swipeDx = 0.0;
 
   // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字提示)。
+  // G2 起图片分支反向复用:放大签原图失败(403/网络)时保持缩略图+同一提示。
+  // P2-1:原图签发成功但下载/解码失败(Image errorBuilder)同口径——缩略图
+  // 可用则回退保持缩略图+提示,仅无缩略图可用时保留失败卡。
   var _thumbFallback = false;
+
+  // P2-1:本张缩略图 URL(_loadThumb 就绪时记录,不重签)——原图下载/解码
+  // 失败时经 errorBuilder 回退复用。
+  String? _thumbUrl;
+
+  // G2(app-polish-2)缩略图优先状态机:
+  var _showingThumb = false; // 当前 _url 为缩略图(进入默认;换原图后 false)
+  var _originalRequested = false; // 本张原图签发去重(缩放反复越线只签一次)
 
   Asset get _a => widget.asset;
 
@@ -135,9 +158,13 @@ class _PreviewMediaState extends State<PreviewMedia>
 
   /// P3:交互中按当前缩放分流——未放大(scale≈1)累计横滑位移(供切页判定),
   /// 放大后位移归 InteractiveViewer 平移,不再累计。
+  /// G2:捏合放大越过 1.5x 阈值即触发原图签发(去重内闸,连发安全)。
   void _onInteractionUpdate(ScaleUpdateDetails d) {
     if (_transform.value.getMaxScaleOnAxis() <= 1.01) {
       _swipeDx += d.focalPointDelta.dx;
+    }
+    if (_transform.value.getMaxScaleOnAxis() > kOriginalZoomThreshold) {
+      _maybeRequestOriginal();
     }
   }
 
@@ -236,6 +263,47 @@ class _PreviewMediaState extends State<PreviewMedia>
       setState(() => _zoomed = zoomTo);
       widget.onZoomChanged?.call(zoomTo);
     }
+    // G2:双击放大目标 2.5x > 1.5x 阈值 → 签发原图(去重内闸)
+    if (zoomTo) _maybeRequestOriginal();
+  }
+
+  // ── G2 缩略图优先 + 放大换原图 ────────────────────────────────────────────
+
+  /// 当前张是否允许「放大换原图」:仅普通可解码图片且缩略图在显
+  /// (svg/avif/ico/heic 恒缩略图;无缩略图进入时已是原图;其余分支零改动)。
+  bool get _canUpgradeToOriginal =>
+      _kind == PreviewKind.image &&
+      _a.hasThumbnail &&
+      !kUnDecodableImageExts
+          .any((e) => _a.filename.toLowerCase().endsWith(e)) &&
+      _showingThumb &&
+      _fail == null;
+
+  /// 缩放(捏合或双击)>1.5x 触发一次原图签发;签发去重:同一张预览会话内
+  /// 只签一次(反复缩放/复位不重签;切张重建 State 后视为新会话)。
+  void _maybeRequestOriginal() {
+    if (!_canUpgradeToOriginal || _originalRequested) return;
+    _originalRequested = true; // 同步置位,手势连发不双签
+    _requestOriginal();
+  }
+
+  /// 签发 download-link 原图并平滑替换:就绪后仅换 _url(fade 由渲染层
+  /// AnimatedSwitcher 承担,InteractiveViewer/变换矩阵不动,缩放态不打断;
+  /// 复位 1x 不回退);失败(403 无下载权/网络)保持缩略图,叠 P7 式小字提示。
+  /// 切张防串:State 随 asset.id 重建,旧请求落地经 mounted 守卫丢弃。
+  Future<void> _requestOriginal() async {
+    try {
+      final url =
+          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
+      if (!mounted) return;
+      setState(() {
+        _url = url;
+        _showingThumb = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _thumbFallback = true);
+    }
   }
 
   Future<void> _load() async {
@@ -258,7 +326,16 @@ class _PreviewMediaState extends State<PreviewMedia>
           if (mounted) setState(() => _loading = false);
           return;
         }
-        await _loadInlineUrl();
+        // G2:有缩略图先缩略图直显(原图待放大 >1.5x 再签,见
+        // _maybeRequestOriginal);无缩略图维持原图 inline(现状,web 同口径)
+        if (_a.hasThumbnail) {
+          await _loadThumb();
+          if (!mounted) return;
+          if (_fail == null) _showingThumb = true;
+          setState(() => _loading = false);
+        } else {
+          await _loadInlineUrl();
+        }
       case PreviewKind.video:
         await _loadInlineUrl(); // URL 就绪即挂播放器(plan loading 分支可见)
       case PreviewKind.markdown || PreviewKind.text:
@@ -296,14 +373,15 @@ class _PreviewMediaState extends State<PreviewMedia>
     }
   }
 
-  /// 缩略图大图(heic/livp 静态/不可解码 image);缺失/失败按 P2-6 两态置 _fail。
+  /// 缩略图大图(heic/livp 静态/不可解码 image/G2 默认首显);缺失/失败按
+  /// P2-6 两态置 _fail。P2-1:URL 就绪时记入 _thumbUrl(原图失败回退复用)。
   Future<void> _loadThumb() async {
     try {
       if (!_a.hasThumbnail) {
         _fail = thumbFailText(_a.tags);
         return;
       }
-      _url = await thumbnailCache.urlOf(_a.id);
+      _url = _thumbUrl = await thumbnailCache.urlOf(_a.id);
     } catch (_) {
       _fail = thumbFailText(_a.tags);
     }
@@ -393,7 +471,8 @@ class _PreviewMediaState extends State<PreviewMedia>
           : _render(),
     );
     Widget content = core;
-    // P7:缩略图降级时叠加不打断的小字提示(纯展示,手势穿透不阻断查看)
+    // P7/G2:缩略图兜底(原图 inline 失败回退/放大签原图失败保持)时叠加
+    // 不打断的小字提示(纯展示,手势穿透不阻断查看)
     if (_thumbFallback) {
       content = Stack(
         fit: StackFit.expand,
@@ -486,6 +565,44 @@ class _PreviewMediaState extends State<PreviewMedia>
         },
       );
 
+  /// G2:缩略图→原图平滑替换——AnimatedSwitcher 同尺寸 fade 交叠(布局恒满幅,
+  /// StackFit.expand),InteractiveViewer/变换矩阵不动,缩放态不打断。
+  Widget _previewImage(String url) => AnimatedSwitcher(
+        duration: const Duration(milliseconds: 200),
+        // 默认 layoutBuilder 居中 Stack 会让 Image 收缩到内在尺寸,这里恒撑满
+        layoutBuilder: (currentChild, previousChildren) => Stack(
+          fit: StackFit.expand,
+          alignment: Alignment.center,
+          children: [
+            ...previousChildren,
+            ?currentChild,
+          ],
+        ),
+        child: Image.network(
+          url,
+          key: ValueKey(url), // URL 变化即触发 fade(thumb→原图)
+          fit: BoxFit.contain,
+          errorBuilder: (_, _, _) {
+            // P2-1(测试实证缺陷修复):原图签发成功但下载/解码失败——缩略图
+            // 可用态回退保持缩略图(_thumbFallback 叠 P7 式小字提示,与 403
+            // 路径同观感),仅无缩略图可用(或失败的正是缩略图)时保留失败卡。
+            // errorBuilder 处于 build 期,回退经 post-frame setState 落地:
+            // 本帧先现失败卡,下帧起 fade 回缩略图(同 thumb↔原图交叠款)。
+            if (_thumbUrl != null && url != _thumbUrl) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (!mounted) return;
+                setState(() {
+                  _url = _thumbUrl;
+                  _showingThumb = true;
+                  _thumbFallback = true; // 复位不重签(_originalRequested 保持)
+                });
+              });
+            }
+            return _block('图片解码失败,建议下载后打开');
+          },
+        ),
+      );
+
   Widget _image() {
     final stack = <Widget>[
       InteractiveViewer(
@@ -498,11 +615,7 @@ class _PreviewMediaState extends State<PreviewMedia>
         onInteractionStart: _onInteractionStart, // C3:捏合打断双击动画
         onInteractionUpdate: _onInteractionUpdate,
         onInteractionEnd: _onInteractionEnd,
-        child: Image.network(
-          _url!,
-          fit: BoxFit.contain,
-          errorBuilder: (_, _, _) => _block('图片解码失败,建议下载后打开'),
-        ),
+        child: _previewImage(_url!),
       ),
     ];
     // livp 起播中:静态图上叠加加载圈(播放器 Offstage 预热)

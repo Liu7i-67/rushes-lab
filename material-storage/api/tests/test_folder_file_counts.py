@@ -16,6 +16,9 @@
   T8 孤儿三态(私有/public/邀请撤销)    → test_t8_orphan_private_member_zero_invitee_backfill_and_chain_break
                                          test_t8_orphan_public_variant_under_report_zero
                                          test_t8_invite_revoke_falls_back_to_zero
+  T9 直属计数 direct_file_count         → (并入 T1/T6 断言) test_t9_direct_count_zero_direct_subtree_positive
+    (2026-10-22 app-polish-2 K1:FolderOut 新增 direct_file_count,仅 list 回填;
+    直属 0 / 子树>0 是真机反馈「1313 项点进去为空」的痛点场景)
 
 预期前置(同 test_v4_permissions.py / test_trash_and_purge.py):
   1. seed_demo_data.py 已跑过(Evan = 系统 admin;outsider = 无任何角色的契约账号)
@@ -173,6 +176,15 @@ def _subtree_by_name(folders: list[dict]) -> dict[str, int]:
     (sensitive 行被过滤 / 孤儿行在列)—— 防计数泄漏到任何未预期节点。
     """
     return {f["name"]: f["subtree_file_count"] for f in folders}
+
+
+def _direct_by_name(folders: list[dict]) -> dict[str, int]:
+    """列表响应 → {夹名: direct_file_count}(2026-10-22 K1 直属计数)。
+
+    与 _subtree_by_name 同款整体等值断言风格:直属计数逐夹精确,且字段
+    必返(缺键 KeyError 即断言失败,钉死「必返 int」契约)。
+    """
+    return {f["name"]: f["direct_file_count"] for f in folders}
 
 
 async def _invite(
@@ -344,6 +356,11 @@ async def test_t1_subtree_counts_exact_multi_folder(client: AsyncClient) -> None
             r1["name"]: 7, c1["name"]: 2, g1["name"]: 1,
             c2["name"]: 3, r2["name"]: 0, r3["name"]: 4,
         }, f"T1 子树计数不精确: {_subtree_by_name(folders)}"
+        # K1(2026-10-22):直属计数同批断言 —— 不含子树回累,逐夹 = 自身直插数
+        assert _direct_by_name(folders) == {
+            r1["name"]: 2, c1["name"]: 1, g1["name"]: 1,
+            c2["name"]: 3, r2["name"]: 0, r3["name"]: 4,
+        }, f"T1 直属计数不精确: {_direct_by_name(folders)}"
     finally:
         await _hard_cleanup(
             client, aids,
@@ -430,6 +447,10 @@ async def test_t4_empty_template_project_all_zero(client: AsyncClient) -> None:
         assert all(f["subtree_file_count"] == 0 for f in folders), (
             f"空模板项目应全夹 0: {_subtree_by_name(folders)}"
         )
+        # K1:直属计数同批为 0(两态皆 0 → app 不显示数字的空态)
+        assert all(f["direct_file_count"] == 0 for f in folders), (
+            f"空模板项目应全夹直属 0: {_direct_by_name(folders)}"
+        )
     finally:
         # 收尾对齐其余用例的删夹惯例(P2-2):归档前先删模板物化的夹
         # (先子后父,空夹应逐个 204;失败 best-effort 告警不掩盖断言)
@@ -487,6 +508,7 @@ async def test_t6_single_get_and_create_always_zero(client: AsyncClient) -> None
     pid = proj["id"]
     folder = await _create_folder(client, pid, _uniq("t6_f"))
     assert folder["subtree_file_count"] == 0, "POST /folders 201 应恒默认 0"
+    assert folder["direct_file_count"] == 0, "POST /folders 201 直属计数应恒默认 0(K1)"
     aid = await _insert_asset(folder["id"], f"t6_{folder['name']}.txt")
     try:
         # 单条(成员视角;200 即证 can_view 经 parent 链成立)有文件仍 0
@@ -494,6 +516,9 @@ async def test_t6_single_get_and_create_always_zero(client: AsyncClient) -> None
         assert r.status_code == 200, r.text
         assert r.json()["subtree_file_count"] == 0, (
             f"GET 单条应恒默认 0(仅 list 回填): {r.json()}"
+        )
+        assert r.json()["direct_file_count"] == 0, (
+            f"GET 单条直属计数应恒默认 0(仅 list 回填,K1): {r.json()}"
         )
     finally:
         await _hard_cleanup(client, [aid], [folder["id"]])
@@ -671,4 +696,43 @@ async def test_t8_invite_revoke_falls_back_to_zero(client: AsyncClient) -> None:
                 client, s["id"], OUTSIDER_ID, level="viewer", permanent=False,
             )
         await _hard_cleanup(client, [aid_s, aid_c], [c["id"], s["id"]])
+        await _archive_project(pid)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# T9:直属计数 direct_file_count(2026-10-22 app-polish-2 K1,真机反馈 #1)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.asyncio
+async def test_t9_direct_count_zero_direct_subtree_positive(client: AsyncClient) -> None:
+    """T9 直属 0 / 子树>0(真机痛点场景):文件全在子夹 → 父夹 subtree>0 而
+    direct=0,app 据此显示「子级 M 项」弱提示而非误导的「M 项」。
+
+    结构:P(直 0)─ C(直 2)─ G(直 0)。
+      P:subtree=2、direct=0(直属 0 但子树>0 —— 用户反馈「1313 项点进去空」的
+         恰好逆写);C:subtree=2、direct=2(直属>0 —— 「N 项」主数字态);
+      G:全 0(两态皆 0 → app 不显示数字)。
+    直属>0 的逐夹精确已由 T1 并入断言覆盖,此处钉死三态里的「直属 0」边界与
+    direct≠subtree 的区分(防实现把 direct 误写成 subtree 直出)。
+    """
+    proj = await _create_project(client, initial_grants=_viewer_grant(OUTSIDER_ID))
+    pid = proj["id"]
+    p = await _create_folder(client, pid, _uniq("t9_p"))
+    c = await _create_folder(client, pid, _uniq("t9_c"), parent_id=p["id"])
+    g = await _create_folder(client, pid, _uniq("t9_g"), parent_id=c["id"])
+    aids = [
+        await _insert_asset(c["id"], f"t9_{c['name']}_{i}.txt") for i in range(2)
+    ]
+    try:
+        folders = await _list_folders(client, pid, uid=OUTSIDER_ID)
+        by_name = {f["name"]: f for f in folders}
+        assert len(by_name) == 3, f"应恰 3 夹在列: {sorted(by_name)}"
+        # 直属 0 / 子树>0(痛点态:app「子级 2 项」)
+        assert _subtree_by_name(folders) == {p["name"]: 2, c["name"]: 2, g["name"]: 0}
+        assert _direct_by_name(folders) == {p["name"]: 0, c["name"]: 2, g["name"]: 0}, (
+            f"直属计数不得混入子树回累: {_direct_by_name(folders)}"
+        )
+    finally:
+        await _hard_cleanup(client, aids, [g["id"], c["id"], p["id"]])
         await _archive_project(pid)

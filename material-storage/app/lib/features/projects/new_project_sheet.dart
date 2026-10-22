@@ -11,6 +11,9 @@
 /// 关闭钮/返回键)有未保存输入→showAppConfirm「放弃编辑?」。框架拖拽关闭走
 /// Navigator.pop 直呼(PopScope 拦不住)→ 改 isDismissible/enableDrag 双关+
 /// 自制把手条,拖拽与关闭钮同走确认流。
+/// app-polish-2 I3(#5 弹层太高难发现可取消):maxHeightFactor 0.9→0.85;
+/// 把手拖拽关闭走守卫的能力沿用 D2 自制把手(遮罩点击仍不可关);关闭钮
+/// 视觉放大在 sheet_scaffold 全局生效。
 library;
 
 import 'package:flutter/material.dart';
@@ -212,6 +215,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
           _HandleStrip(onDismiss: () => Navigator.of(context).pop(false)),
           SheetScaffold(
             title: '新建项目',
+            maxHeightFactor: 0.85, // I3 #5:0.9→0.85,给取消 affordance 留余量
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -248,6 +252,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
           _HandleStrip(onDismiss: _attemptClose),
           SheetScaffold(
             title: '新建项目',
+            // I3 #5:0.9→0.85(弹层太高难发现可取消);把手/关闭钮守卫同 D2
+            maxHeightFactor: 0.85,
             errorText: _error,
             bottomActions: created != null
                 ? const <Widget>[]

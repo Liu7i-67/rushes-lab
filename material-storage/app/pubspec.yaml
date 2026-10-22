@@ -55,6 +55,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  # app-polish-2 H2(#10):登录页品牌区 logo(icon/logo.png 经 PIL 压至 512px;
+  # 原 icon/ 仍归 flutter_launcher_icons,不混用)
+  assets:
+    - assets/logo.png
 
 # 应用图标生成:flutter pub get 后跑 `dart run flutter_launcher_icons`
 # 素材=icon/logo.png(1254×1254 RGB);产物直写 ios/Runner/Assets.xcassets 与

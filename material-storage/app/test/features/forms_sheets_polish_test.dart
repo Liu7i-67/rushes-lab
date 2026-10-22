@@ -18,6 +18,7 @@ import 'package:ms_app/features/assets/batch_move_sheet.dart';
 import 'package:ms_app/features/projects/new_project_sheet.dart';
 import 'package:ms_app/features/share/request_link_sheet.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/widgets/sheet_scaffold.dart';
 
 import '../helpers/api_harness.dart';
 
@@ -152,6 +153,49 @@ void main() {
         reason: 'D2:有未保存修改时下滑关闭弹确认层');
     expect(find.widgetWithText(TextField, '项目名称'), findsOneWidget,
         reason: 'D2:确认前 sheet 不关闭(表单仍在)');
+  });
+
+  // ── I3(app-polish-2 #5):新建项目弹层高度与取消可见性 ────────────────────
+  testWidgets('I3:maxHeightFactor 0.85,长表单触顶封顶(弹层不再占满全屏)',
+      (tester) async {
+    installFakeApi();
+    addTearDown(() {
+      session.api = null;
+      session.me = null;
+    });
+    session.me = Me(id: 'me1', name: '甲', isProjectCreator: true);
+    tester.view.physicalSize = const Size(900, 2000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) => Center(
+            child: FilledButton(
+              onPressed: () => showNewProjectSheet(ctx),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    ));
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    // 契约断言:传给 SheetScaffold 的 maxHeightFactor=0.85(原 0.9)
+    final scaffold = tester.widget<SheetScaffold>(find.byType(SheetScaffold));
+    expect(scaffold.maxHeightFactor, 0.85,
+        reason: '#5 弹层太高难发现可取消 → 0.85');
+
+    // 行为断言:弹层总高(自制把手 ~28 + 骨架 ≤0.85*屏高)不超过
+    // 0.85*2000+把手余量;0.9 时代约 1828 会越界,此处可甄别回归
+    final sheetHeight = tester.getSize(find.byType(BottomSheet)).height;
+    expect(sheetHeight, lessThanOrEqualTo(2000 * 0.85 + 33),
+        reason: '#5 弹层高度封顶在 0.85 屏 + 自制把手');
+    expect(tester.getSize(find.byType(SheetScaffold)).height,
+        lessThanOrEqualTo(2000 * 0.85),
+        reason: '骨架本体不超 0.85 屏');
   });
 
   // ── D4 请求链接复制就地反馈 ─────────────────────────────────────────────

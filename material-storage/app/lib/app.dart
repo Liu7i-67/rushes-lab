@@ -29,6 +29,7 @@ import 'features/permissions/my_permissions_page.dart';
 import 'features/projects/deleted_projects_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
+import 'widgets/toast.dart' show ToastRouteObserver;
 
 class MsApp extends StatefulWidget {
   const MsApp({super.key});
@@ -52,6 +53,9 @@ class _MsAppState extends State<MsApp> {
       debugShowCheckedModeBanner: false,
       theme: buildAppTheme(),
       navigatorKey: session.navigatorKey,
+      // P1-2(J1 探针实证缺陷修复):路由 push/pop/replace 即销毁当前 toast
+      // ——页面切走旧页提示对新页无意义,兼修隐形 toast 盖新页顶部吞首击。
+      navigatorObservers: [ToastRouteObserver()],
       locale: const Locale('zh', 'CN'),
       // B9 §8.12 维护横幅:挂 builder 覆盖登录页与主界面全部路由(不分登录态)
       builder: (context, child) => Stack(

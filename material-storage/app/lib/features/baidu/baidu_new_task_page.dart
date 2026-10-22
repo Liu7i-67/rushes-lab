@@ -14,6 +14,7 @@ import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/pickers/picker_sheet.dart';
 import '../../widgets/toast.dart';
 import 'baidu_target_picker.dart';
 import 'netdisk_tree_sheet.dart';
@@ -112,6 +113,30 @@ class _BaiduNewTaskPageState extends State<BaiduNewTaskPage> {
         _step = 1;
       });
     }
+  }
+
+  /// 目标项目弹层选择(I2:替代下拉,可搜索);重选同一项目不重置,切换项目
+  /// 则承接夹目标重置为项目根并按新项目重载文件夹(原 onChanged 语义不变)。
+  Future<void> _pickTargetProject() async {
+    Project? current;
+    for (final p in _projects) {
+      if (p.id == _projectId) current = p;
+    }
+    final picked = await showPickerSheet<Project>(
+      context: context,
+      title: '目标项目',
+      items: _projects,
+      initial: current,
+      labelOf: (p) => p.name,
+      searchTextHint: '搜索项目…',
+    );
+    if (picked == null || !mounted || picked.id == _projectId) return;
+    setState(() {
+      _projectId = picked.id;
+      _target = const BaiduTarget.root();
+      _folders = const [];
+    });
+    _loadFolders(picked.id);
   }
 
   Future<void> _submit() async {
@@ -314,23 +339,15 @@ class _BaiduNewTaskPageState extends State<BaiduNewTaskPage> {
             const Text('目标项目(仅列出你可上传的项目)',
                 style: TextStyle(fontSize: Tk.fzSm, fontWeight: FontWeight.w600)),
             const SizedBox(height: 4),
-            DropdownButtonFormField<String>(
-              initialValue: _projectId,
-              decoration:
-                  const InputDecoration(isDense: true, border: OutlineInputBorder()),
-              items: [
-                for (final p in _projects)
-                  DropdownMenuItem(value: p.id, child: Text(p.name)),
-              ],
-              onChanged: (v) {
-                if (v == null || v == _projectId) return;
-                setState(() {
-                  _projectId = v;
-                  _target = const BaiduTarget.root();
-                  _folders = const [];
-                });
-                _loadFolders(v);
-              },
+            // I2(#6):下拉改「只读字段+弹层选择器」(可搜索);仅列可上传项目
+            // 的闸门不变(筛选在 _loadProjects,弹层 items 即闸门后列表)
+            PickerField(
+              value: _projects
+                  .firstWhere((p) => p.id == _projectId,
+                      orElse: () => _projects.first)
+                  .name,
+              hint: '选择目标项目',
+              onTap: _pickTargetProject,
             ),
             const SizedBox(height: 12),
             if (_foldersLoading)

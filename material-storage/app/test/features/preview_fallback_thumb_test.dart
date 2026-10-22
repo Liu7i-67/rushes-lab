@@ -1,8 +1,11 @@
-/// P7 无下载权限预览降级单测(target-behavior 锁:实现落地前部分断言会红——
-/// 实现于 preview_media.dart:`_loadInlineUrl()` 失败(403/网络)时,
-/// asset.hasThumbnail 则回退缩略图 URL 并显示不打断的小字提示
-/// 「原图不可用(无下载权限或加载失败),当前为缩略图预览」;
-/// 无缩略图维持原「预览加载失败」卡)。
+/// P7 无下载权限预览降级单测(G2 改因:图片分支入口改为缩略图优先直显,
+/// 不再先签原图——「inline 失败回退缩略图」的入口场景只剩视频分支与
+/// 无缩略图图片;图片的原图签发失败场景移至「放大 >1.5x 后签发失败保持
+/// 缩略图+提示」,见 preview_polish_test G2 用例):
+/// - 图片有缩略图 → 进入直显缩略图,不签原图、无提示(G2 语义);
+/// - 图片无缩略图 → 原图 inline,失败维持原「预览加载失败」卡(现状);
+/// - (视频 inline 失败有缩略图 → 静态帧降级+提示,同口径,另见
+///   preview_media_fallback_test)。
 library;
 
 import 'package:flutter/material.dart';
@@ -86,7 +89,7 @@ Future<FallbackFakeAssetsApi> pumpMedia(
 void main() {
   setUp(() => thumbnailCache.clear());
 
-  testWidgets('inline 403 + 有缩略图 → 走缩略图 URL 且提示出现,不再失败卡',
+  testWidgets('G2:图片有缩略图 → 进入只签缩略图直显,不签原图无提示(原 P7 用例改因)',
       (tester) async {
     final fake = await pumpMedia(
       tester,
@@ -94,15 +97,16 @@ void main() {
       downloadLinkStaged: ApiException(403, '无下载权限'),
     );
 
-    expect(fake.downloadLinkCalls, contains('a403'),
-        reason: '先按原图 inline 拉,失败后才降级');
+    expect(fake.downloadLinkCalls, isEmpty,
+        reason: 'G2:缩略图优先,入口不再签 download-link 原图(签了也不会触发)');
     expect(fake.thumbCalls, contains('a403'),
-        reason: 'P7:降级回退缩略图签名(thumbnail-url)');
-    expect(find.textContaining('原图不可用'), findsOneWidget,
-        reason: '显示不打断的小字提示');
-    expect(find.textContaining('缩略图预览'), findsOneWidget);
+        reason: 'G2:入口直签 thumbnail-url(thumbnail 通道)');
+    expect(find.textContaining('原图不可用'), findsNothing,
+        reason: '缩略图正常直显,无提示');
     expect(find.text('预览加载失败'), findsNothing,
-        reason: '有缩略图时不再出「预览加载失败」卡');
+        reason: '有缩略图不落失败卡');
+    expect(find.byType(InteractiveViewer), findsOneWidget,
+        reason: '缩略图直显仍为图片分支(可放大)');
   });
 
   testWidgets('inline 403 + 无缩略图 → 维持「预览加载失败」卡,不发缩略图请求',

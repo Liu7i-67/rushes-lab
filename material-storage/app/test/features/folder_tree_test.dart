@@ -70,7 +70,7 @@ void main() {
     expect(roots, isEmpty);
   });
 
-  test('Folder.from 契约:subtree_file_count / is_sensitive 解析', () {
+  test('Folder.from 契约:subtree_file_count / direct_file_count / is_sensitive 解析', () {
     final j = {
       'id': 'f1',
       'project_id': 'p1',
@@ -80,13 +80,31 @@ void main() {
       'is_sensitive': true,
       'created_at': '2026-10-20T00:00:00Z',
       'subtree_file_count': 7,
+      'direct_file_count': 3,
       // 列表响应里 my_can_* 恒 False — 模型照收,但只有详情值可信(字段级注释)
       'my_can_download': false,
     };
     final folder = Folder.fromJson(j);
     expect(folder.subtreeFileCount, 7);
+    expect(folder.directFileCount, 3);
     expect(folder.isSensitive, isTrue);
     expect(folder.parentFolderId, isNull);
     expect(folder.myCanDownload, isFalse);
+  });
+
+  test('Folder.from 旧后端兼容:direct_file_count 缺键默认 0(K1)', () {
+    final j = {
+      'id': 'f2',
+      'project_id': 'p1',
+      'parent_folder_id': null,
+      'name': '旧响应夹',
+      'minio_prefix': '旧响应夹/',
+      'is_sensitive': false,
+      'created_at': '2026-10-20T00:00:00Z',
+      'subtree_file_count': 5,
+    };
+    final folder = Folder.fromJson(j);
+    expect(folder.directFileCount, 0);
+    expect(folder.subtreeFileCount, 5);
   });
 }

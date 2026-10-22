@@ -39,6 +39,8 @@ void main() {
     expect(find.text('内容区'), findsOneWidget);
     // 标题行带关闭钮
     expect(find.byTooltip('关闭'), findsOneWidget);
+    // app-polish-2 #5 关闭可见性:图标放大 22→24 + 点击区加大(视觉微调)
+    expect(tester.widget<Icon>(find.byIcon(Icons.close)).size, 24);
 
     await tester.tap(find.byTooltip('关闭'));
     await tester.pumpAndSettle();

@@ -1,5 +1,5 @@
 /// Notifier — 传输完成系统级本地通知(mobile-ux-polish P8)+ 通知权限可达
-/// (mobile-ux-polish-2 R4a)。
+/// (mobile-ux-polish-2 R4a)+ iOS 前台/刚切后台展示修复(app-polish-2 J3)。
 ///
 /// 口径(用户拍板):**后台(生命周期非 resumed)才发系统通知,前台维持应用内
 /// SnackBar/无提示现状**;同窗口多条终态聚合为一条汇总(防批量 99 张逐条轰炸,
@@ -7,6 +7,27 @@
 /// R4a:请求结果消费入内存(被拒不再全链路静默),请求后仍被拒 → 弹一次中文
 /// 引导框(标题「开启系统通知」,「去设置」跳应用详情设置页,会话内至多一次);
 /// 「我的」页「传输通知」状态行经 [queryPermission] 实时查询。
+///
+/// J3(用户反馈 #8「iOS 下载上传成功后没有系统级提示,安卓可以」)修复链:
+/// ① iOS 前台展示(willPresent → banner)依赖 `UNUserNotificationCenter`
+///    delegate——插件自带 delegate 实现,但挂接需 app 侧一行
+///    `UNUserNotificationCenter.current().delegate = self`(flutter_local_notifications
+///    22.3.2 README § iOS setup「General setup」+ 插件 example ios/Runner/AppDelegate.swift),
+///    已补入 ios/Runner/AppDelegate.swift(FlutterAppDelegate 实现
+///    UNUserNotificationCenterDelegate 并转发给 addApplicationDelegate 注册的插件);
+/// ② 展示参数按 22.x 实名补齐:`DarwinNotificationDetails` 的
+///    `interruptionLevel: InterruptionLevel.active`(iOS 15+:系统立即呈现并
+///    点亮屏幕)、`presentSound: true`(原生侧 `presentSound && content.sound == nil`
+///    时自动落 UNNotificationSound.defaultSound,见插件 iOS 源
+///    FlutterLocalNotificationsPlugin.m `buildStandardNotificationContent`;
+///    `sound` 参数只认包内自定义文件名,默认提示音走 presentSound 即可)、
+///    `badgeNumber: 1` + present 四项显式开(前台 willPresent 的
+///    presentationOptions 由插件按 per-notification present 标志给出,
+///    iOS 14+ 走 presentBanner/presentList)——见 [kTransferDarwinDetails];
+/// ③ **平台限制(文档记录,不强解)**:iOS 无前台服务机制,app 挂起后 Dart
+///    冻结、传输本身暂停,不存在「挂起后仍完成并发通知」;本批覆盖的是
+///    前台/刚切后台(未挂起)窗口。真机验证留人工:iOS 前台切后台数秒内
+///    传完 → 收到横幅+提示音;角标观感(badgeNumber=1)是否接受。
 ///
 /// 降级哲学(与 AppLog 同款):插件初始化/权限/发送任何一步失败都静默,系统
 /// 通知整体不可用只损失「后台感知」,不影响业务流。单测注入 sink/schedule/
@@ -16,7 +37,15 @@ library;
 import 'dart:async';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
-import 'package:flutter/material.dart' show AlertDialog, BuildContext, FilledButton, Navigator, Text, TextButton, showDialog;
+import 'package:flutter/material.dart'
+    show
+        AlertDialog,
+        BuildContext,
+        FilledButton,
+        Navigator,
+        Text,
+        TextButton,
+        showDialog;
 import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:photo_manager/photo_manager.dart' show PhotoManager;
@@ -50,7 +79,9 @@ class TransferNotifyEntry {
 /// 单文件详报(标题带文件名),多文件聚合汇总(「N 个文件」或「k 成功 · m 失败」),
 /// 批量带失败时正文列失败名单(最多 3 个,超出「等 N 个」)。
 (String, String) transferNotifyTexts(
-    TransferKind kind, List<TransferNotifyEntry> entries) {
+  TransferKind kind,
+  List<TransferNotifyEntry> entries,
+) {
   assert(entries.isNotEmpty, '空批不该聚通知');
   final label = kind == TransferKind.upload ? '上传' : '下载';
   final fails = entries.where((e) => !e.ok).toList();
@@ -67,10 +98,7 @@ class TransferNotifyEntry {
   if (okCount == 0) {
     return ('$label失败:${entries.length} 个文件', _nameList(fails, ''));
   }
-  return (
-    '$label完成:$okCount 成功 · ${fails.length} 失败',
-    _nameList(fails, '失败:'),
-  );
+  return ('$label完成:$okCount 成功 · ${fails.length} 失败', _nameList(fails, '失败:'));
 }
 
 /// 文件名名单正文:最多列 3 个,超出以「等 N 个」收尾。
@@ -123,8 +151,7 @@ class TransferNotifyBatcher {
     final batch = List.of(_pending);
     _pending.clear();
     for (final kind in TransferKind.values) {
-      final group =
-          batch.where((r) => r.$1 == kind).map((r) => r.$2).toList();
+      final group = batch.where((r) => r.$1 == kind).map((r) => r.$2).toList();
       if (group.isEmpty) continue;
       final (title, body) = transferNotifyTexts(kind, group);
       sink(title, body).catchError((Object e) {
@@ -196,7 +223,9 @@ class Notifier {
   }
 
   /// main 挂接一次:插件初始化 + Android 渠道创建。iOS 侧启动**不弹**权限
-  /// (Darwin 初始化全 false),权限统一在 [ensurePermission](首次入队)。
+  /// (Darwin 初始化仅关 request*Permission,时序保留:权限统一在
+  /// [ensurePermission] 首次入队时请求;前台展示 defaultPresent* 维持插件
+  /// 默认全 true,per-notification 展示口径见 [kTransferDarwinDetails])。
   /// 任何失败静默降级为无系统通知(前台 SnackBar 现状不受影响)。
   Future<void> init() async {
     try {
@@ -214,12 +243,15 @@ class Notifier {
       if (ok != true) throw StateError('本地通知初始化未就绪');
       await _plugin
           .resolvePlatformSpecificImplementation<
-              AndroidFlutterLocalNotificationsPlugin>()
-          ?.createNotificationChannel(const AndroidNotificationChannel(
-            _channelId,
-            _channelName,
-            description: _channelDesc,
-          ));
+            AndroidFlutterLocalNotificationsPlugin
+          >()
+          ?.createNotificationChannel(
+            const AndroidNotificationChannel(
+              _channelId,
+              _channelName,
+              description: _channelDesc,
+            ),
+          );
       _batcher = TransferNotifyBatcher(sink: _send, gate: isBackground);
       AppLog.info('notifier', '系统通知就绪(channel=$_channelId)');
     } catch (e) {
@@ -262,12 +294,15 @@ class Notifier {
   /// 真实权限请求:Android 13+ 运行时权限(返回授权与否);Android <13 走
   /// null(视为可用,系统本就不拦);iOS 请求 alert/badge/sound。
   Future<bool?> _requestRealPermission() async {
-    final android = _plugin.resolvePlatformSpecificImplementation<
-        AndroidFlutterLocalNotificationsPlugin>();
+    final android = _plugin
+        .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin
+        >();
     if (android != null) return android.requestNotificationsPermission();
     final granted = await _plugin
         .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin>()
+          IOSFlutterLocalNotificationsPlugin
+        >()
         ?.requestPermissions(alert: true, badge: true, sound: true);
     return granted;
   }
@@ -293,8 +328,9 @@ class Notifier {
       builder: (dialogCtx) => AlertDialog(
         title: const Text('开启系统通知'),
         content: const Text(
-            '后台上传/下载完成后,需要系统通知权限才能收到完成提醒。'
-            '建议开启,避免错过传输结果。'),
+          '后台上传/下载完成后,需要系统通知权限才能收到完成提醒。'
+          '建议开启,避免错过传输结果。',
+        ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(dialogCtx).pop(),
@@ -320,13 +356,16 @@ class Notifier {
     final injected = _queryPermission;
     if (injected != null) return injected();
     try {
-      final android = _plugin.resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
       final enabled = await android?.areNotificationsEnabled();
       if (enabled != null) return enabled;
       final ios = await _plugin
           .resolvePlatformSpecificImplementation<
-              IOSFlutterLocalNotificationsPlugin>()
+            IOSFlutterLocalNotificationsPlugin
+          >()
           ?.checkPermissions();
       return ios?.isEnabled ?? true;
     } catch (e) {
@@ -348,7 +387,9 @@ class Notifier {
     String? detail,
   }) {
     _batcher?.add(
-        kind, TransferNotifyEntry(ok: ok, filename: filename, detail: detail));
+      kind,
+      TransferNotifyEntry(ok: ok, filename: filename, detail: detail),
+    );
   }
 
   /// 真实通知出口:自增 id 逐条发(聚合后量小,无需 dedup);失败只记日志。
@@ -366,7 +407,7 @@ class Notifier {
             importance: Importance.defaultImportance,
             priority: Priority.defaultPriority,
           ),
-          iOS: DarwinNotificationDetails(),
+          iOS: kTransferDarwinDetails,
         ),
       );
     } catch (e) {
@@ -374,6 +415,31 @@ class Notifier {
     }
   }
 }
+
+/// iOS 传输完成通知详情(J3 定稿;compile-time const,单测静态钉字段):
+/// - `interruptionLevel: InterruptionLevel.active` — iOS 15+ 系统立即呈现、
+///   点亮屏幕、可出声(22.x API:插件 lib/.../darwin/interruption_level.dart);
+/// - `presentSound: true` — 原生 `presentSound && content.sound == nil` 时
+///   自动落默认提示音(flutter_local_notifications 22.3.2
+///   FlutterLocalNotificationsPlugin.m buildStandardNotificationContent),
+///   前台/后台一致,无需自定义 sound 文件;
+/// - `badgeNumber: 1` + `presentBadge` — 到达亮角标;
+/// - `presentBanner`/`presentList`(iOS 14+ 前台 banner + 通知中心列表)
+///   与 `presentAlert`(iOS <14)显式开,不依赖初始化默认值;willPresent 的
+///   presentationOptions 由插件自带 delegate 按这些标志给出(delegate 挂接见
+///   ios/Runner/AppDelegate.swift);
+/// - `threadIdentifier` 同渠道聚合,上/下载两条在通知中心归组展示。
+@visibleForTesting
+const kTransferDarwinDetails = DarwinNotificationDetails(
+  presentAlert: true,
+  presentBanner: true,
+  presentList: true,
+  presentSound: true,
+  presentBadge: true,
+  badgeNumber: 1,
+  threadIdentifier: Notifier._channelId,
+  interruptionLevel: InterruptionLevel.active,
+);
 
 /// Android 应用包名(构建 applicationId;跳应用详情设置页用)。与 upload_pick
 /// 的 kAndroidAppPackage 同值——各自独立常量,避免 services→features 反向依赖。

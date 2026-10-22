@@ -159,8 +159,11 @@ class _TitleRow extends StatelessWidget {
           ),
           if (showClose)
             IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.close, size: 22),
+              // app-polish-2 #5 取消可见性:图标 22→24 + 去紧凑密度
+              // (默认 padding 8 → 点击区加大);仅视觉/触控微调,
+              // 行为仍是 pop(null),API 不变
+              padding: const EdgeInsets.all(Tk.spaceSm),
+              icon: const Icon(Icons.close, size: 24),
               tooltip: '关闭',
               onPressed: () => Navigator.of(context).maybePop(),
             ),

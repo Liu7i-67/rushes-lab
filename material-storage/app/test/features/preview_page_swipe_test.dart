@@ -5,9 +5,12 @@
 ///   scale 识别器,经 onSwipe 内层路上报,两路不双触发);双指捏合放大后拖动
 ///   为平移不切页(onZoomChanged 回报,外层 _mediaZoomed 双保险);捏回原大
 ///   复位后可再滑切。
-/// API 内存假件:downloadLink 即回假 URL(图片分支挂 InteractiveViewer;网络
-/// 图在 widget 测试区恒错误→errorBuilder,不影响手势与滑切断言);胶片条
-/// thumbnailUrl 挂起(占位 spinner,避开 48px 小格 TypeBlock 的布局溢出噪音)。
+/// API 内存假件(G2 改因):资产一律不带 thumbnail_key——图片入口走既有原图
+/// inline 路径(downloadLink 即回假 URL),媒体区照常挂 InteractiveViewer,
+/// 捏合/拖动手势断言与媒体加载来源无关;胶片条小格直出 TypeBlock,由下方
+/// textScaler 0.5 缩字防溢出(同 preview_swipe_test 形态);thumbnailUrl 挂起
+/// (hasThumbnail=false 恒不触发,兜底防串)。
+/// 网络图在 widget 测试区恒错误→errorBuilder,不影响手势与滑切断言。
 library;
 
 import 'dart:async';
@@ -29,7 +32,7 @@ class _SwipeAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(String assetId, {bool asAttachment = true}) async =>
       'http://presigned/$assetId';
 
-  /// 永挂起:胶片条 FutureBuilder 停在 spinner 占位(不落 TypeBlock 小格溢出)。
+  /// 永挂起:G2 后仅 hasThumbnail 资产才会请求;本文件资产均无 thumbnail_key。
   @override
   Future<({String url, int expiresIn})> thumbnailUrl(String assetId) =>
       Completer<({String url, int expiresIn})>().future;
@@ -50,8 +53,7 @@ PreviewArgs _args() => PreviewArgs(
               filename: 'p3-$i.jpg',
               sizeBytes: 4,
               contentType: 'image/jpeg',
-              createdAt: '2026-10-20T10:00:00Z',
-              tags: const {'thumbnail_key': 'k'}),
+              createdAt: '2026-10-20T10:00:00Z'), // G2 改因:无 thumbnail_key
       ],
       index: 0,
       folderId: 'f1',
@@ -64,7 +66,6 @@ Asset _assetOf(String id, String filename, String? ct) => Asset(
       sizeBytes: 4,
       contentType: ct,
       createdAt: '2026-10-20T10:00:00Z',
-      tags: const {'thumbnail_key': 'k'},
     );
 
 /// 混排:图片 + pdf(非图片张;测试平台非 iOS → 恒「下载后打开」失败卡,无
@@ -89,8 +90,15 @@ Future<void> _pump(WidgetTester tester, [PreviewArgs? args]) async {
   addTearDown(tester.view.reset);
   installFakeApi(_SwipeFakeMsApi());
   addTearDown(() => session.api = null);
-  await tester
-      .pumpWidget(MaterialApp(home: PreviewPage(args: args ?? _args())));
+  await tester.pumpWidget(MaterialApp(
+    home: MediaQuery(
+      // G2 改因:小格改直出 TypeBlock(Ahem 行高偏大,48px 格内假性溢出),
+      // 缩小文本度量只影响测试渲染,与被测的横滑/捏合断言无关(同
+      // preview_swipe_test 口径)
+      data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
+      child: PreviewPage(args: args ?? _args()),
+    ),
+  ));
   await tester.pump(); // _load 微任务:URL 即回,Image.network 错误走 errorBuilder
   await tester.pump();
 }

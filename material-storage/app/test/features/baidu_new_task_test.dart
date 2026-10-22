@@ -241,9 +241,57 @@ void main() {
     await tester.pumpAndSettle();
 
     // 下拉默认选第一个可用项目;只读项目不出现在选项
+    // (I2:字段点按现弹 PickerSheet,闸门后列表不变——只读项目不在列)
     await tester.tap(find.text('可传项目'));
     await tester.pumpAndSettle();
     expect(find.text('只读项目'), findsNothing,
         reason: 'viewer 项目不在可承接列表');
+  });
+
+  testWidgets('I2:目标项目字段点按弹层→搜索→选择回填;提交用所选项目',
+      (tester) async {
+    final adapter = FakeBaiduAdapter((req) async {
+      if (req.query['path'] == '/') {
+        return netdiskJson([entry('/照片', '照片')]);
+      }
+      return (201, taskJson('t-new'));
+    });
+    await pumpWizard(tester, adapter, projects: [
+      Project(id: 'p1', name: '婚礼项目', code: 'W1', myRoles: ['uploader']),
+      Project(id: 'p2', name: '医美项目', code: 'YM', myRoles: ['uploader']),
+    ]);
+
+    await tester.tap(find.text('浏览网盘选目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('照片'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('确定'));
+    await tester.pumpAndSettle();
+
+    // 默认第一个可用项目;点字段 → 弹层列出全部可传项目
+    expect(find.text('婚礼项目'), findsOneWidget);
+    await tester.tap(find.text('婚礼项目'));
+    await tester.pumpAndSettle();
+
+    // 弹层内搜索过滤(字段本体在遮罩后仍在树里,行断言限定弹层范围)
+    Finder sheetRow(String label) => find.descendant(
+        of: find.byType(BottomSheet), matching: find.text(label));
+    await tester.enterText(
+        find.descendant(
+            of: find.byType(BottomSheet), matching: find.byType(TextField)),
+        '医美');
+    await tester.pump();
+    expect(sheetRow('婚礼项目'), findsNothing, reason: '搜索过滤命中前隐藏其余项');
+    expect(sheetRow('医美项目'), findsOneWidget);
+
+    await tester.tap(sheetRow('医美项目'));
+    await tester.pumpAndSettle();
+    expect(find.text('医美项目'), findsOneWidget, reason: '字段回填所选项目');
+
+    await tester.tap(find.text('开始备份'));
+    await tester.pumpAndSettle();
+    final post = adapter.calls
+        .lastWhere((c) => c.method == 'POST' && c.path.endsWith('/backup/tasks'));
+    expect(post.body['project_id'], 'p2', reason: '提交用弹层所选项目');
   });
 }
