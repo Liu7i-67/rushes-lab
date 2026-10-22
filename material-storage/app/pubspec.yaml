@@ -46,6 +46,11 @@ dependencies:
   #   3.47.7/Dart 3.13/AGP 9.1/Kotlin 2.4/Gradle 9.3.1)兼容。备选
   #   flutter_background_service 需手写 service 配置与通信协议,接入成本更高。
   flutter_foreground_task: ^11.0.3
+  # feat/app-qiniu-update 批新增(F2,用途+批次):
+  # package_info_plus — F2-1「我的」页版本号展示 + F2-3 版本比较取本地 version/build
+  package_info_plus: ^9.0.1
+  # open_filex — F2-6 APK 下载完成后调系统安装器(type=application/vnd.android.package-archive)
+  open_filex: ^5.0.0
 
 dev_dependencies:
   flutter_test:

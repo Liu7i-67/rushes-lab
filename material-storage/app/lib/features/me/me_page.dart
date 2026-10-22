@@ -1,7 +1,8 @@
 /// 我的页(B1 骨架,§2/§6):账号信息行 + 账号与安全(改密)+ 协作(B7:
 /// 审批中心/通知/我的权限)+ 项目管理(B6:回收站(项目),仅 is_project_deleter
 /// 可见)+ 网盘备份(B9)+ 传输(R4a:传输通知授权状态行)+ 诊断(日志推送)
-/// + 当前服务入口(只读,内网/公网标识)+ 退出登录。
+/// + 当前服务入口(只读,内网/公网标识)+ 关于(版本号/检查更新,仅 Android
+/// 显示检查入口)+ 退出登录。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
@@ -15,6 +16,7 @@ import '../../widgets/badge.dart';
 import 'admin_tiles.dart';
 import 'collab_tiles.dart';
 import 'log_push.dart';
+import 'update_tile.dart';
 
 class MePage extends StatelessWidget {
   const MePage({super.key});
@@ -115,6 +117,10 @@ class MePage extends StatelessWidget {
                 ),
                 trailing: const Badge(label: '只读'),
               ),
+              // feat/app-qiniu-update F2-1:版本号全平台展示;「检查更新」仅
+              // Android(D6),手动检查反馈与下载安装流程见 core/update/
+              const _SectionLabel('关于'),
+              const UpdateCheckTile(),
               const SizedBox(height: 24),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 16),
