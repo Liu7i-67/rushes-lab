@@ -4,14 +4,14 @@
  */
 import { App, Button, Input, Tag } from 'antd';
 import {
-  Copy, Download as DownloadIcon, Eye, FileText, Files,
+  Copy, Download as DownloadIcon, Eye, FileDown, FileText, Files,
   Hash, KeyRound, Save, Share2,
 } from 'lucide-react';
 import { useState } from 'react';
 import type { Asset, Folder, Me } from '../api/types';
 import { useDownloadLink, useUpdateAssetMeta } from '../api/hooks';
 import { useDownloads } from '../lib/download-store';
-import { downloadAsset } from '../lib/asset-download';
+import { downloadAsset, isLivpAsset } from '../lib/asset-download';
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
 import { ShareModal } from './ShareModal';
@@ -49,6 +49,9 @@ export function AssetSummaryPanel({
   const [applyOpen, setApplyOpen] = useState(false);
   const { message } = App.useApp();
   const dlLink = useDownloadLink();
+  // 「下载源文件」用独立 mutation 实例(F1,同预览弹窗 P2-6 口径):与「下载」共用
+  // 同一实例时任一点击会两按钮同时转圈
+  const dlLinkOriginal = useDownloadLink();
   const downloads = useDownloads();
   // 无下载权限时:下载/预览会被后端 403;「申请下载」把审批入口显式摆出来
   const canDownload = folder?.my_can_download !== false;
@@ -87,19 +90,32 @@ export function AssetSummaryPanel({
   if (selected.length === 1) {
     const a = selected[0];
 
+    // 下载 403/失败处理 —「下载」「下载源文件」共用同一分支:
+    // 403 无权限 → 自动弹申请(与 FolderDetail / ProjectDetail 同款流程);其余通用报错
+    const onDownloadError = (e: unknown) => {
+      const err = e as { response?: { status?: number } };
+      if (err.response?.status === 403) {
+        message.warning('无下载权限,已为你打开权限申请…');
+        setApplyOpen(true);
+      } else {
+        message.error(errorMessage(e, '下载失败'));
+      }
+    };
     // F12:统一走共享 helper(livp 默认请求解包 zip,未就绪回落原始 + 提示;非 livp 零变化)
     const handleDownload = async () => {
       try {
         await downloadAsset({ dlLink, downloads, message }, a);
       } catch (e) {
-        const err = e as { response?: { status?: number } };
-        if (err.response?.status === 403) {
-          // 无权限 → 自动弹申请(与 FolderDetail / ProjectDetail 同款流程)
-          message.warning('无下载权限,已为你打开权限申请…');
-          setApplyOpen(true);
-        } else {
-          message.error(errorMessage(e, '下载失败'));
-        }
+        onDownloadError(e);
+      }
+    };
+    // F1:「下载源文件」= forceOriginal 走原始 livp 链路(默认下载是服务端解包 zip);
+    // 权限门控与「下载」完全同款(不新增语义),403/错误同 onDownloadError 分支
+    const handleDownloadSource = async () => {
+      try {
+        await downloadAsset({ dlLink: dlLinkOriginal, downloads, message }, a, { forceOriginal: true });
+      } catch (e) {
+        onDownloadError(e);
       }
     };
     const handleCopyId = () => {
@@ -171,6 +187,13 @@ export function AssetSummaryPanel({
                        label="下载"
                        loading={dlLink.isPending}
                        onClick={handleDownload} />
+          {/* F2:仅 livp 显示(非 livp 源文件=本体,重复入口无意义);显隐/禁用随「下载」同门控 */}
+          {isLivpAsset(a) && (
+            <QuickAction icon={<FileDown size={14} strokeWidth={1.8} />}
+                         label="下载源文件"
+                         loading={dlLinkOriginal.isPending}
+                         onClick={handleDownloadSource} />
+          )}
           {me && (
             <QuickAction icon={<Share2 size={14} strokeWidth={1.8} />}
                          label="分享"
