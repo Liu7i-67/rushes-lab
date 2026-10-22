@@ -51,7 +51,12 @@ class ProjectCreateIn(BaseModel):
     description: str | None = None
     # 留空 = 用 user.organization_id 或 settings.default_organization_id
     organization_id: uuid.UUID | None = None
-    minio_bucket: str = Field(..., max_length=63)
+    # 2026-10-22(第四批):S3 桶名口径(小写字母/数字/连字符,3-63,首尾非连字符)。
+    # 前端两端已改单选下拉(唯一 ms-dev),此约束是 API 直调兜底 —— 任意桶名会
+    # 创建成功但首次上传即 NoSuchBucket 500,且项目 bucket 无 API 可改。
+    minio_bucket: str = Field(
+        ..., min_length=3, max_length=63, pattern=r"^[a-z0-9][a-z0-9\-]*[a-z0-9]$"
+    )
     # 必填:指派的项目 admin(系统 admin 创建,需要明确指派 sub-admin;
     # 可以是自己 = me.id;UI 默认填创建者)
     admin_user_id: uuid.UUID = Field(..., description="项目管理员的 users.id UUID")
@@ -346,8 +351,9 @@ class FolderOut(ORMModel):
     subtree_file_count: int = 0
     # 本夹直属(不含子树)活跃文件数(同 deleted_at IS NULL 口径)——与
     # subtree_file_count 同惯例:仅 list_folders 端点回填(direct GROUP BY 直出),
-    # create/get 单条响应恒默认 0;app 据此区分「N 项 / 子级 M 项」两级展示
-    # (2026-10-22 app-polish-2 K1;子树数只作弱提示不再作主数字)
+    # create/get 单条响应恒默认 0;用于 app/web 行内「N 项」显示(>0 才显示),
+    # subtree_file_count 仅用于图标实心;直属=0 则行内不显示任何数字
+    # (2026-10-22 app-polish-2 K1)
     direct_file_count: int = 0
     # 当前 user 对本 folder 的有效权限(派生 can_*)— get_folder 时填充
     my_can_view: bool = False

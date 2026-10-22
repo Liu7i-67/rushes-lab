@@ -1,25 +1,12 @@
-/// NewProjectSheet — 新建项目(B6 §8.5;web NewProjectModal 移动版):
-/// 字段对齐 ProjectCreateIn 实况——名称/code(小写字母数字-,前端 pattern 同
-/// 后端)/描述/项目管理员(必填,默认=创建者,UserPicker 单选)/minio_bucket
-/// (必填默认 ms-dev,收进高级折叠;maxLength 63 同后端限长;无「可见性」字段)/权限模板展开为
-/// initial_grants 行(≤50,initial_grants_field.dart)/目录模板预填
-/// (folder_template_field.dart)/艺人账号可选开通(artist_account_field.dart,
-/// 闸门 is_artist_account_creator;停顿预检+一次性密码回显。总闸门 is_project_creator;成功 invalidate projects scope。
-/// app-polish D2:Form+GlobalKey 校验,名称/code/bucket 内联 errorText(不再
-/// 只靠提交时 SnackBar 报第一条),跨字段错误(admin/权限行/艺人)走
-/// SheetScaffold errorText 位;「创建」PrimaryXl 吸底;关闭(自制把手下滑/
-/// 关闭钮/返回键)有未保存输入→showAppConfirm「放弃编辑?」。框架拖拽关闭走
-/// Navigator.pop 直呼(PopScope 拦不住)→ 改 isDismissible/enableDrag 双关+
-/// 自制把手条,拖拽与关闭钮同走确认流。
-/// app-polish-2 I3(#5 弹层太高难发现可取消):maxHeightFactor 0.9→0.85;
-/// 把手拖拽关闭走守卫的能力沿用 D2 自制把手(遮罩点击仍不可关);关闭钮
-/// 视觉放大在 sheet_scaffold 全局生效。
-/// app-polish-3 E1/E2/D6:四个文本字段统一 AppTextField(去 isDense,修
-/// 「高级」展开后浮起 label 上半截被裁);项目管理员改 UserPickerField 弹层
-/// 形态(label 由字段承担);自制把手条抽至 widgets/handle_strip.dart。
-/// app-polish-3 拆件(单文件 ≤300 行铁律):表单体抽至 new_project_form.dart
-/// (NewProjectForm,状态仍在此持有经 props 下发),无权限兜底视图抽至
-/// new_project_no_permit.dart;行为零变更。
+/// NewProjectSheet — 新建项目(B6 §8.5;web NewProjectModal 移动版):字段对齐
+/// ProjectCreateIn(名称/code/描述/管理员/minio_bucket 下拉(见 minio_buckets.dart)/
+/// 权限行/目录模板/艺人可选开通),总闸门 is_project_creator。D2:Form+GlobalKey
+/// 校验(name/code 内联 errorText,跨字段走 SheetScaffold errorText);关闭有未保存
+/// 输入→确认层(框架拖拽直关绕过 PopScope 故禁用,自制把手条见 handle_strip.dart)。
+/// 文本字段统一 AppTextField(去 isDense,修「高级」展开后浮起 label 被裁),管理员用
+/// PickerField;maxHeightFactor 0.85(I3 #5:弹层太高难发现可取消)。拆件:表单体→
+/// new_project_form.dart,无权限兜底→new_project_no_permit.dart;历史见
+/// docs/qdev/2026-10-21-app-polish.md 与 -2/-3 文档。
 library;
 
 import 'package:flutter/material.dart';
@@ -31,11 +18,13 @@ import '../../models/models.dart';
 import '../../widgets/app_confirm.dart';
 import '../../widgets/buttons.dart';
 import '../../widgets/handle_strip.dart';
+import '../../widgets/pickers/picker_sheet.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../folders/folder_form_sheet.dart' show kProjectCodePattern;
 import 'artist_account_field.dart';
 import 'initial_grants_field.dart';
+import 'minio_buckets.dart';
 import 'new_project_form.dart';
 import 'new_project_no_permit.dart';
 import 'project_create_fail.dart';
@@ -67,7 +56,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   final _name = TextEditingController();
   final _code = TextEditingController();
   final _desc = TextEditingController();
-  final _bucket = TextEditingController(text: 'ms-dev'); // web 同款默认
+  var _bucket = kMinioBuckets.first.value; // web 同款默认
 
   List<UserBrief> _admin = const [];
   var _rows = const <GrantRowData>[];
@@ -94,7 +83,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
 
   @override
   void dispose() {
-    for (final c in [_name, _code, _desc, _bucket]) {
+    for (final c in [_name, _code, _desc]) {
       c.dispose();
     }
     super.dispose();
@@ -102,7 +91,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
 
   bool get _artistGate => session.me?.isArtistAccountCreator ?? false;
 
-  /// 字段级校验(name/code/bucket)交给 Form validator;此处只管跨字段项。
+  /// 字段级校验(name/code)交给 Form validator;此处只管跨字段项。
   String? _crossValidate() {
     if (_admin.isEmpty) return '请指派项目管理员';
     if (_rows.length > kInitialGrantsMax) {
@@ -129,7 +118,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     return _name.text.trim().isNotEmpty ||
         _code.text.trim().isNotEmpty ||
         _desc.text.trim().isNotEmpty ||
-        _bucket.text.trim() != 'ms-dev' ||
+        _bucket != kMinioBuckets.first.value ||
         adminChanged ||
         _rows.isNotEmpty ||
         _folderTemplateId != null ||
@@ -155,6 +144,20 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     if (ok == true && mounted) Navigator.of(context).pop(false);
   }
 
+  /// bucket 下拉(与 web 单选一致):选项来自 kMinioBuckets,单选项无需搜索。
+  Future<void> _pickBucket(BuildContext context) async {
+    final v = await showPickerSheet<String>(
+      context: context,
+      title: '选择 MinIO bucket',
+      items: [for (final o in kMinioBuckets) o.value],
+      initial: _bucket,
+      labelOf: minioBucketLabel,
+      searchable: false,
+    );
+    if (v == null || !mounted) return; // 取消 = 维持现状
+    setState(() => _bucket = v);
+  }
+
   Future<void> _submit() async {
     if (_submitting) return; // P2-1 防连点(守卫须在首个 await 前同步生效)
     final fieldsOk = _formKey.currentState?.validate() ?? false;
@@ -171,7 +174,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       final p = await session.api!.projectsOps.create(
         code: _code.text.trim(),
         name: _name.text.trim(),
-        minioBucket: _bucket.text.trim(),
+        minioBucket: _bucket,
         adminUserId: _admin.first.id,
         description: _desc.text.trim(),
         initialGrants: [
@@ -266,6 +269,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       code: _code,
       desc: _desc,
       bucket: _bucket,
+      onBucketTap: () => _pickBucket(context),
       admin: _admin,
       onAdminChanged: (v) => setState(() => _admin = v),
       rows: _rows,
