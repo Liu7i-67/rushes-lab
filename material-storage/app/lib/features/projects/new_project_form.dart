@@ -7,11 +7,13 @@ import 'package:flutter/material.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/form_text_field.dart';
+import '../../widgets/pickers/picker_sheet.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/pickers/user_picker_field.dart';
 import 'artist_account_field.dart';
 import 'folder_template_field.dart';
 import 'initial_grants_field.dart';
+import 'minio_buckets.dart';
 
 /// 表单体入参集(数据类承载,避免长位置参数表;状态归 sheet 所有)。
 class NewProjectFormProps {
@@ -21,6 +23,7 @@ class NewProjectFormProps {
     required this.code,
     required this.desc,
     required this.bucket,
+    required this.onBucketTap,
     required this.admin,
     required this.onAdminChanged,
     required this.rows,
@@ -36,7 +39,10 @@ class NewProjectFormProps {
   });
 
   final GlobalKey<FormState> formKey;
-  final TextEditingController name, code, desc, bucket;
+  final TextEditingController name, code, desc;
+  /// 已选 bucket 值(下拉恒有值,无需校验/controller)。
+  final String bucket;
+  final VoidCallback onBucketTap;
   final List<UserBrief> admin; // 项目管理员(单选,默认=创建者)
   final ValueChanged<List<UserBrief>> onAdminChanged;
   final List<GrantRowData> rows; // 初始权限行(initial_grants)
@@ -112,18 +118,12 @@ class NewProjectForm extends StatelessWidget {
               childrenPadding: EdgeInsets.zero,
               title: const Text('高级', style: TextStyle(fontSize: Tk.fzMd)),
               children: [
-                // 测试报告 P2-D2:后端 ProjectCreateIn.minio_bucket
-                // max_length=63,前端同限——maxLength 截断+校验器长度兜底
-                AppTextField(
+                // 第四批 A2:与 web 单选一致(原自由输入可写不存在桶名 →
+                // 创建成功但首次上传 500 NoSuchBucket,bucket 又无 API 可改)
+                PickerField(
                   label: 'MinIO bucket(必填)',
-                  controller: p.bucket,
-                  hint: 'PoC 统一 ms-dev',
-                  maxLength: 63,
-                  validator: (v) {
-                    final b = (v ?? '').trim();
-                    if (b.isEmpty) return '请填写 MinIO bucket';
-                    return b.length > 63 ? 'bucket 最长 63 个字符' : null;
-                  },
+                  value: minioBucketLabel(p.bucket),
+                  onTap: p.onBucketTap,
                 ),
                 const SizedBox(height: Tk.spaceSm),
               ],

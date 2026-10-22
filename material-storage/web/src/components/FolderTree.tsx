@@ -15,9 +15,10 @@ import type { MenuProps, TreeProps } from 'antd';
 // antd v6 的 TreeProps['allowDrop'/'onDrop'] 含 undefined,useCallback 泛型约束要纯函数型
 type TreeAllowDrop = NonNullable<TreeProps['allowDrop']>;
 type TreeOnDrop = NonNullable<TreeProps['onDrop']>;
-import { Ellipsis, Folder as FolderIcon, FolderInput, FolderOpen, Lock, Pencil, Plus } from 'lucide-react';
+import { Ellipsis, Folder as FolderIcon, FolderInput, Pencil, Plus } from 'lucide-react';
 import { useCallback, useMemo } from 'react';
 import type { Folder } from '../api/types';
+import { renderFolderNode } from './folderNodeTitle';
 
 interface Props {
   folders: Folder[];
@@ -83,6 +84,7 @@ function buildTree(
   folders: Folder[],
   disabledSet: Set<string>,
   selfDisabledSet: Set<string>,
+  showCount: boolean,
   renderNodeOps?: (folder: Folder) => React.ReactNode,
 ): TreeNode[] {
   const byParent = new Map<string | null, Folder[]>();
@@ -106,60 +108,21 @@ function buildTree(
       // selfDisabledSet 只禁节点自身,不进级联源,子夹仍可选
       const disabled = ancestorDisabled || disabledSet.has(f.id) || selfDisabledSet.has(f.id);
       const sub = build(f.id, ancestorDisabled || disabledSet.has(f.id));
-      // 子树含活跃文件(subtree_file_count>0,软删不计)→ 图标实心填充;空夹保持空心。
-      // D1 定档:仅图标区分,无数字、无 tooltip。lucide 透传 fill 覆盖默认 fill="none"(已核实 v1.16.0 Icon 源码)。
-      const hasFiles = (f.subtree_file_count ?? 0) > 0;
-      const ops = renderNodeOps?.(f);
+      // 2026-10-22 两端统一:图标=子树含活跃文件(subtree>0)实心深色、空夹空心灰;
+      // 数字=直属文件数(direct>0)才显示「N 项」,直属=0 不显示(即使子树有文件)。
+      // title/icon 渲染已抽到 folderNodeTitle.tsx(加 pill 后主文件超 400 行)。
+      const { title, icon } = renderFolderNode({
+        folder: f,
+        disabled,
+        ops: renderNodeOps?.(f),
+        hasChildren: sub.length > 0,
+        showCount,
+      });
       return {
         key: f.id,
         disabled: disabled || undefined,
-        title: (
-          <span style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 8,
-            position: 'relative',
-            paddingLeft: f.is_sensitive ? 6 : 0,
-            color: 'var(--ms-ink)',
-            fontSize: 13,
-          }}>
-            {f.is_sensitive && (
-              <span
-                aria-label="敏感目录"
-                title={disabled ? '敏感目录及其子目录不可选' : '敏感目录 — 仅邀请可见'}
-                style={{
-                  position: 'absolute',
-                  left: -2, top: 4, bottom: 4,
-                  width: 2,
-                  background: 'var(--ms-sensitive)',
-                  borderRadius: 1,
-                }}
-              />
-            )}
-            <span style={{
-              flex: 1,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}>{f.name}</span>
-            {f.is_sensitive && (
-              <Lock size={10} strokeWidth={2}
-                    style={{ color: 'var(--ms-sensitive)', flexShrink: 0 }} />
-            )}
-            {ops}
-          </span>
-        ),
-        icon: f.is_sensitive
-          ? <FolderIcon size={14} strokeWidth={1.7}
-                        fill={hasFiles ? 'currentColor' : 'none'}
-                        style={{ color: 'var(--ms-sensitive)' }} />
-          : sub.length > 0
-            ? <FolderOpen size={14} strokeWidth={1.7}
-                          fill={hasFiles ? 'currentColor' : 'none'}
-                          style={{ color: 'var(--ms-ink-muted)' }} />
-            : <FolderIcon size={14} strokeWidth={1.7}
-                          fill={hasFiles ? 'currentColor' : 'none'}
-                          style={{ color: 'var(--ms-ink-muted)' }} />,
+        title,
+        icon,
         children: sub.length > 0 ? sub : undefined,
       };
     });
@@ -174,9 +137,9 @@ export function FolderTree({
   const disabledSet = useMemo(() => new Set(disabledIds ?? []), [disabledIds]);
   const selfDisabledSet = useMemo(() => new Set(disabledSelfIds ?? []), [disabledSelfIds]);
   const tree = useMemo(
-    () => buildTree(folders, disabledSet, selfDisabledSet, renderNodeOps),
+    () => buildTree(folders, disabledSet, selfDisabledSet, !selectMode, renderNodeOps),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [folders, disabledSet, selfDisabledSet, nodeActions, onRenameFolder, onMoveFolder],
+    [folders, disabledSet, selfDisabledSet, selectMode, nodeActions, onRenameFolder, onMoveFolder],
   );
 
   function renderNodeOps(folder: Folder): React.ReactNode {

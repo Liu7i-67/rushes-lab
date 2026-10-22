@@ -113,8 +113,12 @@ void main() {
     expect(call['admin_user_id'], 'me1', reason: '默认 admin=创建者');
   });
 
-  testWidgets('bucket 限长 63(测试报告 P2-D2,同后端 max_length):'
-      '输入截断+计数器,提交值=63 字符', (tester) async {
+  // 第四批 A2/A5:bucket 由自由输入改为只读下拉(web NewProjectModal 同款)。
+  // 原「限长 63 + 计数器」用例随自由输入一起废止(P2-D2 语义由只读下拉替代:
+  // 可达值收敛到 kMinioBuckets,不再有超长输入面)。此处改写为等价验证:
+  // 只读形态 → 点按弹层 → 选中回显 → 提交值恒为 value('ms-dev')。
+  testWidgets('bucket 为只读下拉(A2/A5):无 maxLength 计数器、输入不生效;'
+      '点按弹层选中回显,提交 minio_bucket=ms-dev', (tester) async {
     tester.view.physicalSize = const Size(900, 2000);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -126,26 +130,40 @@ void main() {
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    // 展开「高级」折叠露出 bucket 字段;输入 70 字符 → maxLength 截断到 63
+    // 展开「高级」露出 bucket 字段:只读 PickerField,回显默认桶 label
     await tester.tap(find.text('高级'));
     await tester.pumpAndSettle();
-    const long70 =
-        'abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyz0123456789abcdefgh';
-    await tester.enterText(
-        find.widgetWithText(TextField, 'MinIO bucket(必填)'), long70);
-    await tester.pump();
-    expect(find.text('63/63'), findsOneWidget,
-        reason: 'P2-D2:bucket maxLength=63 计数器可见');
+    final bucketField = find.widgetWithText(TextField, 'MinIO bucket(必填)');
+    expect(bucketField, findsOneWidget);
+    expect(tester.widget<TextField>(bucketField).readOnly, isTrue,
+        reason: 'bucket 不再是自由输入框(A2:改 PickerField)');
+    expect(tester.widget<TextField>(bucketField).controller!.text,
+        'ms-dev(开发环境)');
+    expect(find.textContaining('/63'), findsNothing,
+        reason: '原 maxLength=63 计数器随自由输入移除');
 
-    // 名称/编码合法 → 提交放行,bucket=截断后的 63 字符(不再发给后端吃 422)
+    // 点按字段 → 弹层出现唯一选项(含关闭钮)
+    await tester.tap(bucketField);
+    await tester.pumpAndSettle();
+    expect(find.text('选择 MinIO bucket'), findsOneWidget);
+    expect(find.widgetWithText(ListTile, 'ms-dev(开发环境)'), findsOneWidget);
+    expect(find.byTooltip('关闭'), findsWidgets);
+
+    // 选中 → 弹层关闭、字段回显 label
+    await tester.tap(find.widgetWithText(ListTile, 'ms-dev(开发环境)'));
+    await tester.pumpAndSettle();
+    expect(find.text('选择 MinIO bucket'), findsNothing);
+    expect(tester.widget<TextField>(bucketField).controller!.text,
+        'ms-dev(开发环境)');
+
+    // 提交请求体走 value(落库值),不是 label
     await tester.enterText(find.widgetWithText(TextField, '项目名称'), '项目A');
     await tester.enterText(
         find.widgetWithText(TextField, '项目编码(小写字母/数字/-)'), 'demo-2026');
     await tester.pump();
     await tester.tap(find.text('创建'));
     await tester.pumpAndSettle();
-    expect(api.projectsOps.createCalls.single['minio_bucket'],
-        long70.substring(0, 63));
+    expect(api.projectsOps.createCalls.single['minio_bucket'], 'ms-dev');
   });
 
   testWidgets('权限模板展开为 initial_grants 行(可增删改);目录模板选中提交 id;'

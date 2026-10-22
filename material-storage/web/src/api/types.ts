@@ -266,6 +266,10 @@ export interface Folder {
   // 回填,create/get 单条响应恒 0。>0 → 侧栏文件夹图标实心。可选 —— 旧后端无此字段,
   // 消费侧用 `?? 0` 回落。
   subtree_file_count?: number;
+  // 直属活跃文件计数(不含子树):仅 GET /folders 列表端点回填,create/get 单条响应
+  // 恒 0。2026-10-22 文件夹计数两端统一:>0 才在行内显示「N 项」;=0 不显示任何
+  // 数字(即使子树有文件)。可选 —— 旧后端无此字段,消费侧用 `?? 0` 回落。
+  direct_file_count?: number;
 }
 
 // ─── W4/W5:目录改名 / 移动(六项优化 2026-10-17;PATCH /api/v1/folders/{id})──
