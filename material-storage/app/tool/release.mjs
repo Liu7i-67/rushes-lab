@@ -41,7 +41,9 @@ const VERSION_JSON_NAME = "app_version.json";
 const KEEP_APK_NAME = "app-arm64-v8a-release.apk";
 
 const UC_HOST = "uc.qbox.me";
-const CDN_REFRESH_HOST = "cdn.qiniuapi.com";
+// 七牛 CDN(融合 CDN)刷新 API:旧域名 cdn.qiniuapi.com 已在公网 DNS 消失
+// (NXDOMAIN,2026-10-22 首发 HTTP 0 ENOTFOUND 实证),现行端点=fusion.qiniuapi.com
+const CDN_REFRESH_HOST = "fusion.qiniuapi.com";
 
 // 七牛区域 -> 上传/管理域名（上传入口域名与下载域名无关）
 const ZONE_UPLOAD_HOSTS = {
@@ -443,7 +445,10 @@ async function rsCopy({ env, rsHost, srcKey, destKey }) {
   throw new Error(`rs copy 失败：HTTP ${res.statusCode} - ${res.body.slice(0, 500)}`);
 }
 
-// CDN 刷新：POST https://cdn.qiniuapi.com/refresh，json body 计入 QBox 签名
+// CDN 刷新：POST https://fusion.qiniuapi.com/refresh（2026-10-22 首发实测：
+// 旧域名 cdn.qiniuapi.com 公网 DNS 已 NXDOMAIN；且 QBox 签名串仅计入
+// form-urlencoded 的 body——JSON body 不参与签名，签 body 会被 401 bad token，
+// rs copy(表单空 body)同函数签名则 200，规则差异以此实证固化）
 // 刷新是异步动作：失败只打印响应体不阻断（可人工到控制台补刷）
 async function cdnRefresh({ env, urls }) {
   const urlPath = "/refresh";
@@ -452,7 +457,7 @@ async function cdnRefresh({ env, urls }) {
     accessKey: env.accessKey,
     secretKey: env.secretKey,
     path: urlPath,
-    body,
+    body: "", // JSON body 不计入 QBox 签名（见上注释）
   });
   try {
     const res = await managementRequest({
