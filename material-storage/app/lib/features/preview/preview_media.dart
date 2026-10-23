@@ -494,7 +494,7 @@ class _PreviewMediaState extends State<PreviewMedia>
                 ),
                 child: const Text(
                   '原图不可用(无下载权限或加载失败),当前为缩略图预览',
-                  style: TextStyle(color: Tk.subtle, fontSize: Tk.fzXs),
+                  style: TextStyle(color: Tk.previewFg2, fontSize: Tk.fzXs),
                   textAlign: TextAlign.center,
                 ),
               ),
@@ -527,7 +527,7 @@ class _PreviewMediaState extends State<PreviewMedia>
         return DocSheet(
           child: SelectableText(
             _text ?? '',
-            style: const TextStyle(fontSize: Tk.fzMd, color: Tk.fg),
+            style: const TextStyle(fontSize: Tk.fzMd, color: Tk.previewFg),
           ),
         );
       case PreviewBody.pdf:

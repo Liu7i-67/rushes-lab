@@ -1,7 +1,8 @@
 /// SheetScaffold — 底部弹层统一骨架(app-polish A4,方案 §A4/D1):
-/// 键盘避让(viewInsets)+ SafeArea + maxHeight 约束 + 标题行(titleMedium
-/// + 可选关闭钮)+ 错误文案行工具位 + 单子滚动区 + 可选吸底按钮区(不随
-/// 内容滚动)。替代 30 处同构 showModalBottomSheet 零封装。
+/// 键盘避让(viewInsets)+ SafeArea + maxHeight 约束 + 标题行
+/// (20/w600 + 可选关闭钮 24)+ 错误文案行工具位 + 单子滚动区 + 可选吸底
+/// 按钮区(不随内容滚动,间距 10,高 48)。替代 30 处同构
+/// showModalBottomSheet 零封装。
 ///
 /// 两条迁移路径:
 /// 1. 新代码直接 `showAppSheet<T>(...)`(透传 showModalBottomSheet 返回值,
@@ -9,6 +10,7 @@
 /// 2. 存量 sheet 低成本改造:保留原 showModalBottomSheet 调用(showDragHandle
 ///    + isScrollControlled),把 builder 里的自拼 Column 换成本组件。
 ///
+/// 背景/圆角(rXl 24)/拖拽把手(38×4)由主题 BottomSheetThemeData 提供。
 /// 形态覆盖:长表单(child 为 StatefulWidget 表单,maxHeightFactor 0.9)、
 /// 短菜单(无标题或仅标题,内容自适应收拢)、结果态(child 为结果卡,
 /// bottomActions 给「完成」)。吸底按钮区每个 action 等分撑满:单个=通栏、
@@ -19,10 +21,12 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import '../theme/context_tk.dart';
 import '../theme/tokens.dart';
 
 /// 底部弹层便捷封装(showModalBottomSheet + SheetScaffold 组合,参数透传)。
-/// [T] 为返回值类型;把手对齐存量调用(showDragHandle: true)。
+/// [T] 为返回值类型;把手对齐存量调用(showDragHandle: true);useSafeArea
+/// 让弹层避开顶部/左右系统区域(底部仍贴屏,便于吸底按钮落安全区)。
 Future<T?> showAppSheet<T>({
   required BuildContext context,
   String? title,
@@ -38,6 +42,7 @@ Future<T?> showAppSheet<T>({
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
+    useSafeArea: true,
     isDismissible: isDismissible,
     enableDrag: enableDrag,
     builder: (_) => SheetScaffold(
@@ -62,13 +67,13 @@ class SheetScaffold extends StatelessWidget {
     this.showClose = true,
   });
 
-  /// 标题(titleMedium);null = 不渲染标题行(短菜单/结果态可省)。
+  /// 标题(20/w600);null = 不渲染标题行(短菜单/结果态可省)。
   final String? title;
 
   /// 滚动区内容(长表单/菜单/结果卡;超高自动滚动,不高则收拢)。
   final Widget child;
 
-  /// 吸底按钮区(不随内容滚动);每个 action 等分撑满。
+  /// 吸底按钮区(不随内容滚动);每个 action 等分撑满、固定 48 高。
   final List<Widget> bottomActions;
 
   /// 错误文案行工具位(表单提交失败等;空/null 不渲染,放标题下方)。
@@ -82,6 +87,7 @@ class SheetScaffold extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final mq = MediaQuery.of(context);
     final insets = mq.viewInsets.bottom;
     return Padding(
@@ -92,8 +98,10 @@ class SheetScaffold extends StatelessWidget {
         child: ConstrainedBox(
           // maxHeight 因内容定:短内容收拢,长内容封顶滚动;扣除键盘后仍不溢出
           constraints: BoxConstraints(
-            maxHeight:
-                math.max(160.0, mq.size.height * maxHeightFactor - insets),
+            maxHeight: math.max(
+              160.0,
+              mq.size.height * maxHeightFactor - insets,
+            ),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -103,30 +111,46 @@ class SheetScaffold extends StatelessWidget {
               if (errorText != null && errorText!.isNotEmpty)
                 Padding(
                   padding: const EdgeInsets.fromLTRB(
-                      Tk.spaceLg, 0, Tk.spaceLg, Tk.spaceSm),
+                    Tk.spacePage,
+                    0,
+                    Tk.spacePage,
+                    Tk.spaceSm,
+                  ),
                   child: Text(
                     errorText!,
-                    style: const TextStyle(fontSize: Tk.fzSm, color: Tk.red),
+                    style: TextStyle(fontSize: Tk.fzMd, color: tk.danger),
                   ),
                 ),
               Flexible(
                 child: SingleChildScrollView(
-                  padding: EdgeInsets.fromLTRB(Tk.spaceLg, title == null ? Tk.spaceXs : 0,
-                      Tk.spaceLg, bottomActions.isEmpty ? Tk.spaceLg : Tk.spaceSm),
+                  padding: EdgeInsets.fromLTRB(
+                    Tk.spacePage,
+                    title == null ? Tk.spaceXs : 0,
+                    Tk.spacePage,
+                    bottomActions.isEmpty ? Tk.spacePage : Tk.spaceXs,
+                  ),
                   child: child,
                 ),
               ),
               if (bottomActions.isNotEmpty)
                 Padding(
+                  // 吸底区:固定在 SafeArea 之上,上缝 4、下缝 16,按钮高 48
                   padding: const EdgeInsets.fromLTRB(
-                      Tk.spaceLg, Tk.spaceXs, Tk.spaceLg, Tk.spaceLg),
-                  child: Row(
-                    children: [
-                      for (var i = 0; i < bottomActions.length; i++) ...[
-                        if (i > 0) const SizedBox(width: Tk.spaceSm),
-                        Expanded(child: bottomActions[i]),
+                    Tk.spacePage,
+                    Tk.spaceXs,
+                    Tk.spacePage,
+                    Tk.spaceLg,
+                  ),
+                  child: SizedBox(
+                    height: 48,
+                    child: Row(
+                      children: [
+                        for (var i = 0; i < bottomActions.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 10),
+                          Expanded(child: bottomActions[i]),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
             ],
@@ -137,7 +161,7 @@ class SheetScaffold extends StatelessWidget {
   }
 }
 
-/// 标题行:左标题(titleMedium)右关闭钮;关闭=pop(null)。
+/// 标题行:左标题(20/w600/ink)右关闭钮(24);关闭=pop(null)。
 class _TitleRow extends StatelessWidget {
   const _TitleRow({required this.title, required this.showClose});
 
@@ -148,19 +172,26 @@ class _TitleRow extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
-          Tk.spaceLg, Tk.spaceXs, Tk.spaceSm, Tk.spaceXs),
+        Tk.spacePage,
+        Tk.spaceXs,
+        Tk.spaceSm,
+        Tk.spaceXs,
+      ),
       child: Row(
         children: [
           Expanded(
             child: Text(
               title,
-              style: Theme.of(context).textTheme.titleMedium,
+              style: TextStyle(
+                fontSize: Tk.fzSection,
+                fontWeight: FontWeight.w600,
+                color: context.tk.ink,
+              ),
             ),
           ),
           if (showClose)
             IconButton(
-              // app-polish-2 #5 取消可见性:图标 22→24 + 去紧凑密度
-              // (默认 padding 8 → 点击区加大);仅视觉/触控微调,
+              // app-polish-2 #5 取消可见性:图标 24 + 去紧凑密度;
               // 行为仍是 pop(null),API 不变
               padding: const EdgeInsets.all(Tk.spaceSm),
               icon: const Icon(Icons.close, size: 24),

@@ -9,26 +9,26 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/features/admin/baidu_file_actions.dart';
 import 'package:ms_app/features/admin/folder_template_form_sheet.dart'
-    show
-        dedupNodeCount,
-        folderTemplatePathError,
-        pathsToTreeRows;
+    show dedupNodeCount, folderTemplatePathError, pathsToTreeRows;
 import 'package:ms_app/features/admin/audit_export.dart';
 import 'package:ms_app/models/models.dart';
 import 'package:ms_app/services/media_save.dart';
 
 AdminBaiduTask taskOf(String status) => AdminBaiduTask(
-      id: 't1',
-      user: AdminTaskUser(id: 'u1', username: 'zs', name: '张三'),
-      status: status,
-      sourceDir: '/灵机备份',
-      project: AdminTaskRef(id: 'p1', name: '婚礼项目'),
-      createdAt: '2026-10-20T09:00:00Z',
-      updatedAt: '2026-10-20T10:00:00Z',
-    );
+  id: 't1',
+  user: AdminTaskUser(id: 'u1', username: 'zs', name: '张三'),
+  status: status,
+  sourceDir: '/灵机备份',
+  project: AdminTaskRef(id: 'p1', name: '婚礼项目'),
+  createdAt: '2026-10-20T09:00:00Z',
+  updatedAt: '2026-10-20T10:00:00Z',
+);
 
-AdminBaiduTaskFile fileOf(
-    {required String status, bool nonRetryable = false, String? lastError}) {
+AdminBaiduTaskFile fileOf({
+  required String status,
+  bool nonRetryable = false,
+  String? lastError,
+}) {
   final f = AdminBaiduTaskFile(
     id: 'f1',
     sourcePath: '/盘/a.jpg',
@@ -63,8 +63,9 @@ void main() {
     test('key_conflict 失败行分流:不出现普通重试,改出 覆盖导入+随机后缀', () {
       final task = taskOf('failed');
       final row = fileOf(
-          status: 'failed',
-          lastError: 'key_conflict:素材/a.jpg 已被 成片.jpg、b.jpg占用');
+        status: 'failed',
+        lastError: 'key_conflict:素材/a.jpg 已被 成片.jpg、b.jpg占用',
+      );
       final plan = fileActionPlan(task, row);
       expect(plan.canRetry, isFalse);
       expect(plan.canResolveConflict, isTrue);
@@ -73,19 +74,24 @@ void main() {
 
     test('completed 任务的 skipped_exists 行:仅覆盖导入;running 任务无操作', () {
       final done = fileActionPlan(
-          taskOf('completed'), fileOf(status: 'skipped_exists'));
+        taskOf('completed'),
+        fileOf(status: 'skipped_exists'),
+      );
       expect(done.canOverwrite, isTrue);
       expect(done.canRetry, isFalse);
 
-      final running =
-          fileActionPlan(taskOf('running'), fileOf(status: 'skipped_exists'));
+      final running = fileActionPlan(
+        taskOf('running'),
+        fileOf(status: 'skipped_exists'),
+      );
       expect(running.hasAny, isFalse);
     });
 
     test('keyConflictHolders:F1 格式解析占用者,解析失败回 null', () {
-      expect(
-          keyConflictHolders('key_conflict:素材/a.jpg 已被 成片.jpg、b.jpg占用'),
-          ['成片.jpg', 'b.jpg']);
+      expect(keyConflictHolders('key_conflict:素材/a.jpg 已被 成片.jpg、b.jpg占用'), [
+        '成片.jpg',
+        'b.jpg',
+      ]);
       expect(keyConflictHolders('key_conflict:x 已被 a.jpg占用'), ['a.jpg']);
       expect(keyConflictHolders('格式不对'), isNull);
       expect(keyConflictHolders(null), isNull);
@@ -93,16 +99,21 @@ void main() {
 
     test('确认文案:key_conflict 点名占用者;skipped 行通用文案', () {
       final conflict = fileOf(
-          status: 'failed',
-          lastError: 'key_conflict:素材/a.jpg 已被 成片.jpg占用');
-      final (t1, c1) =
-          confirmText(conflict, fileActionPlan(taskOf('failed'), conflict));
+        status: 'failed',
+        lastError: 'key_conflict:素材/a.jpg 已被 成片.jpg占用',
+      );
+      final (t1, c1) = confirmText(
+        conflict,
+        fileActionPlan(taskOf('failed'), conflict),
+      );
       expect(t1, '覆盖导入?');
       expect(c1, contains('成片.jpg'));
 
       final skipped = fileOf(status: 'skipped_exists');
-      final (_, c2) =
-          confirmText(skipped, fileActionPlan(taskOf('failed'), skipped));
+      final (_, c2) = confirmText(
+        skipped,
+        fileActionPlan(taskOf('failed'), skipped),
+      );
       expect(c2, contains('永久删除目标位置的原文件后重新导入'));
     });
   });
@@ -119,8 +130,10 @@ void main() {
       expect(folderTemplatePathError(r'素材\成片'), '段不能含反斜杠 \\');
       expect(folderTemplatePathError('素材 /成片'), '段「素材 」首尾含空白');
       expect(folderTemplatePathError('x' * 256), '单段超 255 字符');
-      expect(folderTemplatePathError('${'a' * 201}/${'b' * 201}/${'c' * 201}'),
-          '总长超 600 字符');
+      expect(
+        folderTemplatePathError('${'a' * 201}/${'b' * 201}/${'c' * 201}'),
+        '总长超 600 字符',
+      );
     });
 
     test('合法路径(中文/多段)通过', () {
@@ -137,8 +150,7 @@ void main() {
   });
 
   group('审计 CSV 导出落盘(禁 url_launcher;dio 带会话由 AuditApi 承担)', () {
-    test('落盘矩阵 other 列:Android→Downloads / iOS→share(注入假件验证)',
-        () async {
+    test('落盘矩阵 other 列:Android→Downloads / iOS→share(注入假件验证)', () async {
       final calls = <String>[];
       final dir = await Directory.systemTemp.createTemp('b8_export');
       // Windows 并发跑批下,目录删除与 saveExportedCsv finally 内的 f.delete()
@@ -159,27 +171,37 @@ void main() {
         share: (f) => ok('share'),
       );
       final bytes = utf8.encode('\uFEFFtime,event_type\n2026,a');
-      final android = await saveExportedCsv(bytes, 'audit-a.csv',
-          platform: SavePlatform.android,
-          savers: savers,
-          tempRoot: () async => dir);
+      final android = await saveExportedCsv(
+        bytes,
+        'audit-a.csv',
+        platform: SavePlatform.android,
+        savers: savers,
+        tempRoot: () async => dir,
+      );
       expect(calls, ['downloads']);
       expect(android, contains('Download/浣花视界'));
 
       calls.clear();
-      await saveExportedCsv(bytes, 'audit-i.csv',
-          platform: SavePlatform.ios,
-          savers: savers,
-          tempRoot: () async => dir);
+      await saveExportedCsv(
+        bytes,
+        'audit-i.csv',
+        platform: SavePlatform.ios,
+        savers: savers,
+        tempRoot: () async => dir,
+      );
       expect(calls, ['share']);
     });
 
     test('文件名解析与 CSV 嗅探(BOM/表头;错误体不误存)', () {
       final name = csvFilenameFromDisposition(
-          'attachment; filename="audit-20261020-120000.csv"', DateTime.now());
+        'attachment; filename="audit-20261020-120000.csv"',
+        DateTime.now(),
+      );
       expect(name, 'audit-20261020-120000.csv');
-      expect(csvFilenameFromDisposition(null, DateTime(2026, 10, 20, 9, 5, 3)),
-          'audit-20261020-090503.csv');
+      expect(
+        csvFilenameFromDisposition(null, DateTime(2026, 10, 20, 9, 5, 3)),
+        'audit-20261020-090503.csv',
+      );
       expect(looksLikeCsv(utf8.encode('\uFEFFtime,event_type')), isTrue);
       expect(looksLikeCsv(utf8.encode('time,event_type')), isTrue);
       expect(looksLikeCsv(utf8.encode('{"detail":"x"}')), isFalse);
@@ -187,8 +209,7 @@ void main() {
   });
 
   group('入口闸门(功能点 1/7:双闸门语义)', () {
-    test('Me.is_folder_template_manager 缺省回落 is_system_admin(旧后端兼容)',
-        () {
+    test('Me.is_folder_template_manager 缺省回落 is_system_admin(旧后端兼容)', () {
       final admin = Me.fromJson({
         'id': 'u1',
         'name': '管理员',
@@ -223,8 +244,14 @@ void main() {
     final t = _task(4, 2, 1, 1);
     expect(t.progressPct, 75); // (done2+skipped1)/4
     expect(_task(0, 0, 0, 0, 'enumerating').progressPct, 0);
-    expect(_task(0, 0, 0, 0, 'completed').progressPct, 100); // 空目录(web taskPct 同款)
-    expect(_task(0, 0, 0, 0, 'cancelled').progressPct, 0); // 非空目录 completed 外仍 0
+    expect(
+      _task(0, 0, 0, 0, 'completed').progressPct,
+      100,
+    ); // 空目录(web taskPct 同款)
+    expect(
+      _task(0, 0, 0, 0, 'cancelled').progressPct,
+      0,
+    ); // 非空目录 completed 外仍 0
     expect(taskOf('running').isActive, isTrue);
     expect(taskOf('failed').isActive, isFalse);
   });
@@ -255,12 +282,13 @@ void main() {
   });
 }
 
-AdminBaiduTask _task(
-    [int total = 0,
-    int done = 0,
-    int failed = 0,
-    int skipped = 0,
-    String status = 'completed']) {
+AdminBaiduTask _task([
+  int total = 0,
+  int done = 0,
+  int failed = 0,
+  int skipped = 0,
+  String status = 'completed',
+]) {
   final f = AdminBaiduTask.fromJson({
     'id': 't1',
     'user': {'id': 'u1', 'username': null, 'name': '张三'},

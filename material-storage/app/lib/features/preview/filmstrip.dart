@@ -1,11 +1,7 @@
-/// Filmstrip — 预览胶片条(B2 §8.2):顶部 ‹n/N› 同源的切张逻辑+横向缩略图条。
-/// 序列=进入预览时的列表序;边界即停(首张不可前翻/末张不可后翻,web 同语义)。
-/// FilmstripPager 为纯逻辑可单测;Widget 条供预览页挂载。
-/// C1(app-polish):ScrollController 自动跟随——进入靠后张/横滑切张后把当前张
-/// 滚到居中(首帧 jumpTo 免开场滚动,后续短动画 200ms)。
-/// G1(app-polish-2):跟随语义从「不完整可见才滚」改为**恒居中**——去掉
-/// 「已完整可见则不滚」守卫,点选视口贴边项/横滑切张后当前张一律 animateTo
-/// 居中(真机反馈:点选最后一格不居中、切张后高亮不在可视区)。
+/// Filmstrip — 预览胶片条(F9;D10 保留原型省略的既有能力):横向缩略图条,
+/// 选中金框(previewGold / 2px)、圆角 10、间距 8;浮层化=previewSurface 底 +
+/// 圆角 18 + 横向留边。序列=进入预览时的列表序;边界即停;当前张恒居中
+/// (首帧 jumpTo,切张 200ms animateTo)。
 library;
 
 import 'package:flutter/material.dart';
@@ -17,7 +13,7 @@ import '../assets/thumbnail_image.dart';
 
 class FilmstripPager {
   FilmstripPager({required this.length, int initial = 0})
-      : _i = length == 0 ? 0 : initial.clamp(0, length - 1);
+    : _i = length == 0 ? 0 : initial.clamp(0, length - 1);
 
   final int length;
   int _i;
@@ -40,17 +36,15 @@ class FilmstripPager {
   }
 
   /// 定位(胶片条点按):越界 clamp 到边界。
-  void moveTo(int i) =>
-      _i = length == 0 ? 0 : i.clamp(0, length - 1);
+  void moveTo(int i) => _i = length == 0 ? 0 : i.clamp(0, length - 1);
 }
 
-/// 布局常量(与 build 内保持同源;G1 自查:itemExtent 48 + separatorBuilder
-/// SizedBox(width: _kGap) → 步距 = 48+8=56,与 [*_kItemStride] 一致):
-/// 小格 48 + 间隔 8(_kGap=Tk.spaceSm,6 就近归档)+ 条水平 padding 12。
+/// 布局常量(与 build 同源):小格 48 + 间隔 8(spaceSm)+ 条内水平 padding 8;
+/// 浮层卡另加页面留边 12。
 const double _kThumb = 48;
-const double _kGap = Tk.spaceSm; // 6→spaceSm(A2 就近归档)
+const double _kGap = Tk.spaceSm;
 const double _kItemStride = _kThumb + _kGap;
-const double _kEdgePad = Tk.spaceMd;
+const double _kEdgePad = Tk.spaceSm;
 
 class Filmstrip extends StatefulWidget {
   const Filmstrip({
@@ -74,7 +68,7 @@ class _FilmstripState extends State<Filmstrip> {
   @override
   void initState() {
     super.initState();
-    // C1:首帧定位——等首帧布局完拿到 viewport 后直接 jumpTo(无开场滚动)。
+    // 首帧定位——布局完拿到 viewport 后直接 jumpTo(无开场滚动)。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _follow(animate: false);
     });
@@ -84,29 +78,30 @@ class _FilmstripState extends State<Filmstrip> {
   void didUpdateWidget(covariant Filmstrip old) {
     super.didUpdateWidget(old);
     if (old.index != widget.index) {
-      // C1:切张(横滑/胶片条点选)后下一帧跟随;快速连滑时 animateTo 以
-      // 当前 offset 重新出发,天然收敛到最后一次目标。
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _follow(animate: true);
       });
     }
   }
 
-  /// 当前张恒居中(G1):index 变化(胶片条点选/横滑切张)后一律把当前张滚到
-  /// 条中央(target=(item 中心-viewport/2).clamp)——不再有「已完整可见则不动」
-  /// 守卫,贴边可见项点选后同样居中;首帧(animate:false)jumpTo。
+  /// 当前张恒居中(G1):index 变化后一律把当前张滚到条中央
+  /// (target=(item 中心-viewport/2).clamp);首帧 jumpTo。
   void _follow({required bool animate}) {
     if (!_controller.hasClients) return;
     final position = _controller.position;
     final viewport = position.viewportDimension;
     final left = _kEdgePad + widget.index * _kItemStride;
     final right = left + _kThumb;
-    final target =
-        ((left + right) / 2 - viewport / 2).clamp(0.0, position.maxScrollExtent);
+    final target = ((left + right) / 2 - viewport / 2).clamp(
+      0.0,
+      position.maxScrollExtent,
+    );
     if (animate) {
-      _controller.animateTo(target,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic);
+      _controller.animateTo(
+        target,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOutCubic,
+      );
     } else {
       _controller.jumpTo(target);
     }
@@ -121,34 +116,51 @@ class _FilmstripState extends State<Filmstrip> {
   @override
   Widget build(BuildContext context) {
     if (widget.items.length < 2) return const SizedBox.shrink();
-    return SizedBox(
-      height: 60,
+    return Container(
+      // 62 = 内容 60(48 格 + 上下 6)+ 卡片 1px 描边 ×2
+      height: 62,
+      margin: const EdgeInsets.fromLTRB(Tk.spaceMd, 0, Tk.spaceMd, Tk.spaceSm),
+      clipBehavior: Clip.antiAlias,
+      decoration: BoxDecoration(
+        color: Tk.previewSurface,
+        borderRadius: BorderRadius.circular(Tk.rLg),
+        border: Border.all(color: Tk.previewLine),
+      ),
       child: ListView.separated(
         controller: _controller,
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(
-            horizontal: _kEdgePad, vertical: 6), // 参与定高计算(60=48+2×6)保留
+          horizontal: _kEdgePad,
+          vertical: 6,
+        ), // 参与定高(60=48+2×6)
         itemCount: widget.items.length,
         separatorBuilder: (_, _) => const SizedBox(width: _kGap),
         itemBuilder: (context, i) {
           final current = i == widget.index;
-          return GestureDetector(
-            onTap: () {
-              Haptics.select(); // G2:轻量点选触觉
-              widget.onSelect(i);
-            },
-            child: Container(
-              width: _kThumb,
-              height: _kThumb,
-              clipBehavior: Clip.antiAlias,
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(Tk.rSm),
-                border: Border.all(
-                  width: current ? 2 : 1,
-                  color: current ? Tk.accent : Colors.white24,
+          // P2-6:小格补按钮/选中语义与「第 N 张」标签(读屏可定位/感知当前)。
+          return Semantics(
+            container: true,
+            button: true,
+            selected: current,
+            label: '第 ${i + 1} 张',
+            child: GestureDetector(
+              onTap: () {
+                Haptics.select();
+                widget.onSelect(i);
+              },
+              child: Container(
+                width: _kThumb,
+                height: _kThumb,
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(Tk.rSm),
+                  border: Border.all(
+                    width: current ? 2 : 1,
+                    color: current ? Tk.previewGold : Tk.previewLine,
+                  ),
                 ),
+                child: ThumbnailImage(asset: widget.items[i]),
               ),
-              child: ThumbnailImage(asset: widget.items[i]),
             ),
           );
         },

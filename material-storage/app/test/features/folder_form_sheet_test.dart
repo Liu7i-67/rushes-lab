@@ -29,22 +29,26 @@ void main() {
     RefreshBus.I.addListener('folders', onFolders);
     addTearDown(() => RefreshBus.I.removeListener('folders', onFolders));
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderFormSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderFormSheet(
+                  ctx,
                   mode: FolderFormMode.createChild,
                   projectId: 'p1',
                   parentFolderId: 'f1',
-                  parentLabel: '档案'),
-              child: const Text('open'),
+                  parentLabel: '档案',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -68,21 +72,25 @@ void main() {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderFormSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderFormSheet(
+                  ctx,
                   mode: FolderFormMode.createRoot,
                   projectId: 'p1',
-                  parentLabel: '医美项目'),
-              child: const Text('open'),
+                  parentLabel: '医美项目',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -103,20 +111,24 @@ void main() {
     api.foldersOps.renameStaged = ApiException(409, '该项目下已存在同名文件夹');
     addTearDown(() => session.api = null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderFormSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderFormSheet(
+                  ctx,
                   mode: FolderFormMode.rename,
-                  folder: Folder(id: 'f1', name: '旧名', parentFolderId: null)),
-              child: const Text('open'),
+                  folder: Folder(id: 'f1', name: '旧名', parentFolderId: null),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -133,9 +145,11 @@ void main() {
     await tester.enterText(find.byType(TextField).first, '新名');
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
-    expect(api.foldersOps.renameCalls.single,
-        (folderId: 'f1', name: '新名'));
-    expect(find.textContaining('该项目下已存在同名文件夹'), findsOneWidget,
-        reason: '409 detail 透传');
+    expect(api.foldersOps.renameCalls.single, (folderId: 'f1', name: '新名'));
+    expect(
+      find.textContaining('该项目下已存在同名文件夹'),
+      findsOneWidget,
+      reason: '409 detail 透传',
+    );
   });
 }

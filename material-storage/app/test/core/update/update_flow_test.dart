@@ -32,11 +32,8 @@ Future<LocalAppVersion> _localV1() async => (version: '1.0.0', build: 4);
 /// (T6 断言闸门消费后第二次 autoCheckOnce 连 fetch 都不发生)。
 class _FakeService extends UpdateService {
   _FakeService(Future<AppVersionInfo> Function() behavior)
-      : _behavior = behavior,
-        super(
-          dio: Dio(),
-          versionJsonUrl: 'http://update.test/app_version.json',
-        );
+    : _behavior = behavior,
+      super(dio: Dio(), versionJsonUrl: 'http://update.test/app_version.json');
 
   final Future<AppVersionInfo> Function() _behavior;
   int fetchCount = 0;
@@ -62,10 +59,10 @@ void main() {
   });
 
   group('T5 自动检查静默(F2-4:任何失败完全静默)', () {
-    test('fetchLatest 抛 UpdateException(如 404/超时)→ 不抛、不弹、闸门未消费',
-        () async {
+    test('fetchLatest 抛 UpdateException(如 404/超时)→ 不抛、不弹、闸门未消费', () async {
       final svc = _FakeService(
-          () async => throw const UpdateException('服务异常(HTTP 404)'));
+        () async => throw const UpdateException('服务异常(HTTP 404)'),
+      );
       final flow = AppUpdateFlow(service: svc, localVersion: _localV1);
 
       await expectLater(
@@ -79,7 +76,8 @@ void main() {
 
     test('fetchLatest 抛 FormatException(坏 JSON/字段无效)→ 不抛、不弹', () async {
       final svc = _FakeService(
-          () async => throw const FormatException('version 缺失/为空/类型错误'));
+        () async => throw const FormatException('version 缺失/为空/类型错误'),
+      );
       final flow = AppUpdateFlow(service: svc, localVersion: _localV1);
 
       await expectLater(
@@ -119,30 +117,34 @@ void main() {
   });
 
   group('T6 取消语义(确认弹窗弹出即消费 session 闸门,D5)', () {
-    test('无导航器:弹窗静默放弃但闸门已消费;第二次 autoCheckOnce 不再 fetch',
-        () async {
+    test('无导航器:弹窗静默放弃但闸门已消费;第二次 autoCheckOnce 不再 fetch', () async {
       final svc = _FakeService(() async => _info(version: '9.9.9'));
       final flow = AppUpdateFlow(service: svc, localVersion: _localV1);
 
       await flow.autoCheckOnce(isAndroid: true, delay: Duration.zero);
 
-      expect(flow.autoPromptUsed, isTrue,
-          reason: '实现口径:闸门在即将弹窗时消费,导航未就绪同样算已弹'
-              '(本 session 不再自动弹,手动入口不受影响)');
+      expect(
+        flow.autoPromptUsed,
+        isTrue,
+        reason:
+            '实现口径:闸门在即将弹窗时消费,导航未就绪同样算已弹'
+            '(本 session 不再自动弹,手动入口不受影响)',
+      );
       expect(svc.fetchCount, 1);
 
       await flow.autoCheckOnce(isAndroid: true, delay: Duration.zero);
       expect(svc.fetchCount, 1, reason: '闸门已用,第二次直接短路,连 fetch 都不发生');
     });
 
-    testWidgets('挂真实导航器:确认弹窗点「取消」→ 本 session 不再自动弹',
-        (tester) async {
+    testWidgets('挂真实导航器:确认弹窗点「取消」→ 本 session 不再自动弹', (tester) async {
       final svc = _FakeService(() async => _info(version: '9.9.9'));
       final flow = AppUpdateFlow(service: svc, localVersion: _localV1);
-      await tester.pumpWidget(MaterialApp(
-        navigatorKey: session.navigatorKey,
-        home: const Scaffold(body: SizedBox.shrink()),
-      ));
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: session.navigatorKey,
+          home: const Scaffold(body: SizedBox.shrink()),
+        ),
+      );
 
       final fut = flow.autoCheckOnce(isAndroid: true, delay: Duration.zero);
       await tester.pump(); // 微任务:fetch 完成 → 消费闸门 → showDialog 建路由

@@ -14,6 +14,7 @@ import 'package:ms_app/features/folders/folder_row.dart';
 import 'package:ms_app/features/projects/projects_page.dart';
 import 'package:ms_app/features/share/request_link_sheet.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/widgets/app_row.dart';
 
 import '../helpers/api_harness.dart';
 
@@ -60,8 +61,7 @@ class _FakeRequestLinksApi extends RequestLinksApi {
 }
 
 void main() {
-  testWidgets('sheet:创建即复制(成功 toast + landing_url 展示);入参=实码',
-      (tester) async {
+  testWidgets('sheet:创建即复制(成功 toast + landing_url 展示);入参=实码', (tester) async {
     tester.view.physicalSize = const Size(800, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -69,22 +69,28 @@ void main() {
     addTearDown(() => session.api = null);
 
     late BuildContext captured;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(builder: (ctx) {
-          captured = ctx;
-          return Center(
-            child: FilledButton(
-              onPressed: () => showRequestLinkSheet(captured,
-                  targetType: 'folder',
-                  targetId: 'f1',
-                  targetLabel: '成片夹'),
-              child: const Text('open'),
-            ),
-          );
-        }),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) {
+              captured = ctx;
+              return Center(
+                child: FilledButton(
+                  onPressed: () => showRequestLinkSheet(
+                    captured,
+                    targetType: 'folder',
+                    targetId: 'f1',
+                    targetLabel: '成片夹',
+                  ),
+                  child: const Text('open'),
+                ),
+              );
+            },
+          ),
+        ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -107,42 +113,55 @@ void main() {
     expect(find.text('在浏览器打开落地页'), findsOneWidget);
   });
 
-  testWidgets('sheet:敏感夹默认动作含 access;失败 403 detail 透传 toast',
-      (tester) async {
+  testWidgets('sheet:敏感夹默认动作含 access;失败 403 detail 透传 toast', (tester) async {
     tester.view.physicalSize = const Size(800, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     final api = installFakeApi(_RequestLinkFakeApi());
     addTearDown(() => session.api = null);
     (api as _RequestLinkFakeApi).createStaged = ApiException(
-        403, '无权对该资源生成申请链接 — 需要 system admin 或该资源 admin');
+      403,
+      '无权对该资源生成申请链接 — 需要 system admin 或该资源 admin',
+    );
 
     late BuildContext captured;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(builder: (ctx) {
-          captured = ctx;
-          return Center(
-            child: FilledButton(
-              onPressed: () => showRequestLinkSheet(captured,
-                  targetType: 'sensitive_folder',
-                  targetId: 'fs1',
-                  targetLabel: '敏感夹'),
-              child: const Text('open'),
-            ),
-          );
-        }),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) {
+              captured = ctx;
+              return Center(
+                child: FilledButton(
+                  onPressed: () => showRequestLinkSheet(
+                    captured,
+                    targetType: 'sensitive_folder',
+                    targetId: 'fs1',
+                    targetLabel: '敏感夹',
+                  ),
+                  child: const Text('open'),
+                ),
+              );
+            },
+          ),
+        ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    expect(find.text('访问(进入敏感目录)'), findsOneWidget,
-        reason: 'sensitive_folder 才有 access 项');
+    expect(
+      find.text('访问(进入敏感目录)'),
+      findsOneWidget,
+      reason: 'sensitive_folder 才有 access 项',
+    );
     await tester.tap(find.text('生成并复制链接'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('无权对该资源生成申请链接'), findsOneWidget,
-        reason: '403 detail 透传(非 admin 兜底文案)');
+    expect(
+      find.textContaining('无权对该资源生成申请链接'),
+      findsOneWidget,
+      reason: '403 detail 透传(非 admin 兜底文案)',
+    );
     expect(find.text('https://ms.test/r/tok1'), findsNothing);
   });
 
@@ -162,103 +181,128 @@ void main() {
 
     // app-polish E3:行尾「请求链接」图标钮移入长按菜单(行尾收敛为角色徽标
     // +chevron)。admin 项目长按出菜单(含「请求链接」);viewer 项目无菜单
-    expect(find.byTooltip('请求链接'), findsNothing,
-        reason: 'E3:行尾图标钮已移除');
+    expect(find.byTooltip('请求链接'), findsNothing, reason: 'E3:行尾图标钮已移除');
     await tester.longPress(find.text('管理项目'));
     await tester.pumpAndSettle();
-    expect(find.text('请求链接'), findsOneWidget,
-        reason: '仅 admin 项目长按菜单露出;viewer 项目不露出');
+    expect(
+      find.text('请求链接'),
+      findsOneWidget,
+      reason: '仅 admin 项目长按菜单露出;viewer 项目不露出',
+    );
   });
 
-  testWidgets('文件夹 ⋯ 菜单(P2-4 定稿):folder admin 可见可点,发起进 request_link_sheet',
-      (tester) async {
+  testWidgets('文件夹 ⋯ 菜单(P2-4 定稿):folder admin 可见可点,发起进 request_link_sheet', (
+    tester,
+  ) async {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     final api = installFakeApi(_RequestLinkFakeApi());
     addTearDown(() => session.api = null);
     api.folders.getResult = Folder(
-        id: 'f1',
-        name: '普通一级夹',
-        parentFolderId: null,
-        projectId: 'p1',
-        isSensitive: false,
-        myCanAdmin: true,
-        myCanUpload: true,
-        myDeleteGrant: false);
+      id: 'f1',
+      name: '普通一级夹',
+      parentFolderId: null,
+      projectId: 'p1',
+      isSensitive: false,
+      myCanAdmin: true,
+      myCanUpload: true,
+      myDeleteGrant: false,
+    );
     session.me = Me(id: 'u1', name: '甲');
     addTearDown(() => session.me = null);
 
     late BuildContext captured;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(builder: (ctx) {
-          captured = ctx;
-          return Center(
-            child: FilledButton(
-              onPressed: () => showFolderMenu(captured,
-                  folder: Folder(
-                      id: 'f1', name: '普通一级夹', parentFolderId: null)),
-              child: const Text('open'),
-            ),
-          );
-        }),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) {
+              captured = ctx;
+              return Center(
+                child: FilledButton(
+                  onPressed: () => showFolderMenu(
+                    captured,
+                    folder: Folder(
+                      id: 'f1',
+                      name: '普通一级夹',
+                      parentFolderId: null,
+                    ),
+                  ),
+                  child: const Text('open'),
+                ),
+              );
+            },
+          ),
+        ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
-    // my_can_admin=true(单夹详情回填):tile 可见且可点(非置灰)
-    final tile = tester.widget<ListTile>(find.ancestor(
-        of: find.text('请求链接'), matching: find.byType(ListTile)));
-    expect(tile.enabled, isTrue, reason: 'folder admin 可见可点');
+    // my_can_admin=true(单夹详情回填):行可见且可点(非置灰;WP5 已迁 AppRow)
+    final row = tester.widget<AppRow>(
+      find.ancestor(of: find.text('请求链接'), matching: find.byType(AppRow)),
+    );
+    expect(row.onTap, isNotNull, reason: 'folder admin 可见可点');
 
     // 点击发起:菜单收起 → request_link_sheet 打开(target label 随行)
     await tester.tap(find.text('请求链接'));
     await tester.pumpAndSettle();
     expect(find.text('生成申请链接'), findsOneWidget);
-    expect(find.text('普通一级夹'), findsOneWidget,
-        reason: 'targetLabel=夹名带入发起面板');
+    expect(find.text('普通一级夹'), findsOneWidget, reason: 'targetLabel=夹名带入发起面板');
     expect(find.text('生成并复制链接'), findsOneWidget);
-    expect((api as _RequestLinkFakeApi).createCalls, isEmpty,
-        reason: '仅打开发起面板,尚未提交创建');
+    expect(
+      (api as _RequestLinkFakeApi).createCalls,
+      isEmpty,
+      reason: '仅打开发起面板,尚未提交创建',
+    );
   });
 
-  testWidgets('文件夹 ⋯ 菜单:my_can_admin=false「请求链接」完全不渲染(P2-4)',
-      (tester) async {
+  testWidgets('文件夹 ⋯ 菜单:my_can_admin=false「请求链接」完全不渲染(P2-4)', (tester) async {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     final api = installFakeApi(_RequestLinkFakeApi());
     addTearDown(() => session.api = null);
     api.folders.getResult = Folder(
-        id: 'f2',
-        name: '普通子夹',
-        parentFolderId: 'f1',
-        projectId: 'p1',
-        isSensitive: false,
-        myCanAdmin: false,
-        myCanUpload: true,
-        myDeleteGrant: false);
+      id: 'f2',
+      name: '普通子夹',
+      parentFolderId: 'f1',
+      projectId: 'p1',
+      isSensitive: false,
+      myCanAdmin: false,
+      myCanUpload: true,
+      myDeleteGrant: false,
+    );
     session.me = Me(id: 'u1', name: '甲');
     addTearDown(() => session.me = null);
 
     late BuildContext captured;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(builder: (ctx) {
-          captured = ctx;
-          return Center(
-            child: FilledButton(
-              onPressed: () => showFolderMenu(captured,
-                  folder: Folder(
-                      id: 'f2', name: '普通子夹', parentFolderId: 'f1')),
-              child: const Text('open'),
-            ),
-          );
-        }),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) {
+              captured = ctx;
+              return Center(
+                child: FilledButton(
+                  onPressed: () => showFolderMenu(
+                    captured,
+                    folder: Folder(
+                      id: 'f2',
+                      name: '普通子夹',
+                      parentFolderId: 'f1',
+                    ),
+                  ),
+                  child: const Text('open'),
+                ),
+              );
+            },
+          ),
+        ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 

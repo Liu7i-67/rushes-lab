@@ -31,7 +31,10 @@ class FallbackFakeAssetsApi extends FakeAssetsApi {
   Object? downloadLinkStaged;
 
   @override
-  Future<String> downloadLink(String assetId, {bool asAttachment = true}) async {
+  Future<String> downloadLink(
+    String assetId, {
+    bool asAttachment = true,
+  }) async {
     downloadLinkCalls.add(assetId);
     final staged = downloadLinkStaged;
     if (staged is Exception) throw staged;
@@ -55,14 +58,14 @@ class FallbackFakeMsApi extends FakeMsApi {
 }
 
 Asset assetOf(String id, {Map<String, dynamic> tags = const {}}) => Asset(
-      id: id,
-      filename: '$id.jpg',
-      sizeBytes: 1,
-      contentType: 'image/jpeg',
-      createdAt: '2026-10-20T10:00:00Z',
-      folderId: 'f1',
-      tags: tags,
-    );
+  id: id,
+  filename: '$id.jpg',
+  sizeBytes: 1,
+  contentType: 'image/jpeg',
+  createdAt: '2026-10-20T10:00:00Z',
+  folderId: 'f1',
+  tags: tags,
+);
 
 /// 装配假 API(先编排后 pump)并挂 PreviewMedia;返回假 assets 记录器。
 Future<FallbackFakeAssetsApi> pumpMedia(
@@ -73,11 +76,13 @@ Future<FallbackFakeAssetsApi> pumpMedia(
   final fake = (installFakeApi(FallbackFakeMsApi()) as FallbackFakeMsApi).assets
     ..downloadLinkStaged = downloadLinkStaged;
   addTearDown(() => session.api = null);
-  await tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: SizedBox.expand(child: PreviewMedia(asset: asset)),
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: SizedBox.expand(child: PreviewMedia(asset: asset)),
+      ),
     ),
-  ));
+  );
   // 编排链(download-link → 降级缩略图签名)均为微任务,逐 pump 推进
   // (加载圈为不定长动画,勿 pumpAndSettle)
   await tester.pump();
@@ -89,38 +94,45 @@ Future<FallbackFakeAssetsApi> pumpMedia(
 void main() {
   setUp(() => thumbnailCache.clear());
 
-  testWidgets('G2:图片有缩略图 → 进入只签缩略图直显,不签原图无提示(原 P7 用例改因)',
-      (tester) async {
+  testWidgets('G2:图片有缩略图 → 进入只签缩略图直显,不签原图无提示(原 P7 用例改因)', (tester) async {
     final fake = await pumpMedia(
       tester,
       asset: assetOf('a403', tags: {'thumbnail_key': 'tk'}),
       downloadLinkStaged: ApiException(403, '无下载权限'),
     );
 
-    expect(fake.downloadLinkCalls, isEmpty,
-        reason: 'G2:缩略图优先,入口不再签 download-link 原图(签了也不会触发)');
-    expect(fake.thumbCalls, contains('a403'),
-        reason: 'G2:入口直签 thumbnail-url(thumbnail 通道)');
-    expect(find.textContaining('原图不可用'), findsNothing,
-        reason: '缩略图正常直显,无提示');
-    expect(find.text('预览加载失败'), findsNothing,
-        reason: '有缩略图不落失败卡');
-    expect(find.byType(InteractiveViewer), findsOneWidget,
-        reason: '缩略图直显仍为图片分支(可放大)');
+    expect(
+      fake.downloadLinkCalls,
+      isEmpty,
+      reason: 'G2:缩略图优先,入口不再签 download-link 原图(签了也不会触发)',
+    );
+    expect(
+      fake.thumbCalls,
+      contains('a403'),
+      reason: 'G2:入口直签 thumbnail-url(thumbnail 通道)',
+    );
+    expect(find.textContaining('原图不可用'), findsNothing, reason: '缩略图正常直显,无提示');
+    expect(find.text('预览加载失败'), findsNothing, reason: '有缩略图不落失败卡');
+    expect(
+      find.byType(InteractiveViewer),
+      findsOneWidget,
+      reason: '缩略图直显仍为图片分支(可放大)',
+    );
   });
 
-  testWidgets('inline 403 + 无缩略图 → 维持「预览加载失败」卡,不发缩略图请求',
-      (tester) async {
+  testWidgets('inline 403 + 无缩略图 → 维持「预览加载失败」卡,不发缩略图请求', (tester) async {
     final fake = await pumpMedia(
       tester,
       asset: assetOf('a404'),
       downloadLinkStaged: ApiException(403, '无下载权限'),
     );
 
-    expect(fake.thumbCalls, isEmpty,
-        reason: 'hasThumbnail=false 不打 thumbnail-url(既有门槛)');
-    expect(find.text('预览加载失败'), findsOneWidget,
-        reason: '无缩略图时失败卡文案不变');
+    expect(
+      fake.thumbCalls,
+      isEmpty,
+      reason: 'hasThumbnail=false 不打 thumbnail-url(既有门槛)',
+    );
+    expect(find.text('预览加载失败'), findsOneWidget, reason: '无缩略图时失败卡文案不变');
     expect(find.textContaining('原图不可用'), findsNothing);
   });
 
@@ -129,10 +141,12 @@ void main() {
 
     expect(fake.thumbCalls, isEmpty);
     expect(
-      find.byWidgetPredicate((w) =>
-          w is Image &&
-          w.image is NetworkImage &&
-          (w.image as NetworkImage).url == 'http://preview.test/aok'),
+      find.byWidgetPredicate(
+        (w) =>
+            w is Image &&
+            w.image is NetworkImage &&
+            (w.image as NetworkImage).url == 'http://preview.test/aok',
+      ),
       findsOneWidget,
       reason: '正常路径仍走原图 inline URL',
     );

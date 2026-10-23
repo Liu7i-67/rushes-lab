@@ -9,6 +9,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 
 /// 接近底部提前量(px):到底前 n px 即预加载,滚动连贯无停顿感。
@@ -80,6 +81,7 @@ class AutoLoadFooter extends StatelessWidget {
         ),
       );
     }
+    final tk = context.tk;
     return SizedBox(
       height: 48,
       child: GestureDetector(
@@ -88,7 +90,7 @@ class AutoLoadFooter extends StatelessWidget {
         child: Center(
           child: Text(
             label,
-            style: const TextStyle(fontSize: Tk.fzSm, color: Tk.subtle),
+            style: TextStyle(fontSize: Tk.fzSm, color: tk.ink3),
           ),
         ),
       ),

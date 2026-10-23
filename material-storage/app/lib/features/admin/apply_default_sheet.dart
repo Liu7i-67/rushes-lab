@@ -10,7 +10,9 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
 import '../../widgets/app_confirm.dart';
 import '../../widgets/search_field.dart';
 import '../../widgets/toast.dart';
@@ -50,9 +52,11 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     final kw = _q.trim().toLowerCase();
     if (kw.isEmpty) return _projects;
     return _projects
-        .where((p) =>
-            p.name.toLowerCase().contains(kw) ||
-            p.code.toLowerCase().contains(kw))
+        .where(
+          (p) =>
+              p.name.toLowerCase().contains(kw) ||
+              p.code.toLowerCase().contains(kw),
+        )
         .toList();
   }
 
@@ -67,9 +71,11 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     // API 预检 400 双保险)
     final out = <Project>[];
     try {
-      for (var offset = 0;; offset += 100) {
-        final page =
-            await session.api!.projects.listPaged(limit: 100, offset: offset);
+      for (var offset = 0; ; offset += 100) {
+        final page = await session.api!.projects.listPaged(
+          limit: 100,
+          offset: offset,
+        );
         out.addAll(page);
         if (page.length < 100) break;
       }
@@ -93,7 +99,8 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     final ok = await showAppConfirm(
       context,
       title: '刷新 ${_selected.length} 个项目的默认权限?',
-      content: '将逐项目合并默认模板授权(叠加不删,不移除现有授权)。'
+      content:
+          '将逐项目合并默认模板授权(叠加不删,不移除现有授权)。'
           '项目较多时耗时较长(满批可达数分钟),建议每批 20–30 个项目分次提交。',
       confirmLabel: '开始刷新',
     );
@@ -101,10 +108,11 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     setState(() => _applying = true);
     try {
       final result = await session.api!.adminTemplates.applyDefault(
-          _projects
-              .where((p) => _selected.contains(p.id))
-              .map((p) => p.id)
-              .toList());
+        _projects
+            .where((p) => _selected.contains(p.id))
+            .map((p) => p.id)
+            .toList(),
+      );
       if (!mounted) return;
       setState(() {
         _result = result;
@@ -129,8 +137,7 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
     setState(() {
       if (!_selected.remove(id)) {
         if (_selected.length >= kApplyDefaultBatchMax) {
-          toast(context,
-              '单批最多 $kApplyDefaultBatchMax 个项目(接口上限),请分批刷新');
+          toast(context, '单批最多 $kApplyDefaultBatchMax 个项目(接口上限),请分批刷新');
           return;
         }
         _selected.add(id);
@@ -140,6 +147,7 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final result = _result;
     if (result != null) {
       return ApplyDefaultResultView(
@@ -152,18 +160,33 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
       child: SizedBox(
         height: MediaQuery.of(context).size.height * 0.85,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
+          padding: const EdgeInsets.fromLTRB(
+            Tk.spacePage,
+            0,
+            Tk.spacePage,
+            Tk.spaceLg,
+          ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('刷新默认权限',
-                  style: Theme.of(context).textTheme.titleMedium),
+              Text(
+                '刷新默认权限',
+                style: TextStyle(
+                  fontSize: Tk.fzSection,
+                  fontWeight: FontWeight.w600,
+                  color: tk.ink,
+                ),
+              ),
               const SizedBox(height: 6),
-              const Text(
+              Text(
                 '叠加不删:只补缺失的默认模板授权,不移除项目现有授权;'
                 '单批最多 100 个项目(接口上限),满批可达数分钟,建议每批 20–30 个分次提交。',
-                style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted, height: 1.5),
+                style: TextStyle(
+                  fontSize: Tk.fzMd,
+                  color: tk.ink3,
+                  height: 1.5,
+                ),
               ),
               const SizedBox(height: Tk.spaceSm),
               SearchField(
@@ -174,29 +197,32 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
               if (_error != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: Tk.spaceSm),
-                  child: Text(_error!,
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                          fontSize: Tk.fzSm)),
+                  child: Text(
+                    _error!,
+                    style: TextStyle(color: tk.danger, fontSize: Tk.fzMd),
+                  ),
                 ),
               Expanded(child: _projectList()),
-              Row(children: [
-                Text('已选 ${_selected.length}/$kApplyDefaultBatchMax',
-                    style:
-                        const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-                const Spacer(),
-                TextButton(
-                  onPressed: _selected.isEmpty
-                      ? null
-                      : () => setState(() => _selected = <String>{}),
-                  child: const Text('清空'),
-                ),
-                const SizedBox(width: 8),
-                FilledButton(
-                  onPressed: _selected.isEmpty || _applying ? null : _apply,
-                  child: Text(_applying ? '刷新中…' : '刷新'),
-                ),
-              ]),
+              Row(
+                children: [
+                  Text(
+                    '已选 ${_selected.length}/$kApplyDefaultBatchMax',
+                    style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                  ),
+                  const Spacer(),
+                  TextButton(
+                    onPressed: _selected.isEmpty
+                        ? null
+                        : () => setState(() => _selected = <String>{}),
+                    child: const Text('清空'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton(
+                    onPressed: _selected.isEmpty || _applying ? null : _apply,
+                    child: Text(_applying ? '刷新中…' : '刷新'),
+                  ),
+                ],
+              ),
             ],
           ),
         ),
@@ -205,20 +231,21 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
   }
 
   Widget _projectList() {
+    final tk = context.tk;
     if (_loading) {
       return const Center(child: CircularProgressIndicator());
     }
     final list = _filtered;
     if (list.isEmpty) {
-      return const Center(
-          child: Text('暂无可刷新的项目(归档项目不支持)',
-              style: TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
+      return Center(
+        child: Text(
+          '暂无可刷新的项目(归档项目不支持)',
+          style: TextStyle(color: tk.ink3, fontSize: Tk.fzMd),
+        ),
+      );
     }
-    return Container(
-      decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).dividerColor),
-        borderRadius: BorderRadius.circular(Tk.rSm),
-      ),
+    return AppCard(
+      padding: EdgeInsets.zero,
       child: ListView.builder(
         itemCount: list.length,
         itemBuilder: (context, i) {
@@ -230,11 +257,15 @@ class _ApplyDefaultSheetState extends State<_ApplyDefaultSheet> {
             value: checked,
             // 到达单批上限后禁止再勾(提示分批)
             onChanged: disabled ? null : (_) => _toggle(p.id),
-            title: Text('${p.name}(${p.code})',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                    fontSize: Tk.fzMd, color: disabled ? Tk.subtle : Tk.fg)),
+            title: Text(
+              '${p.name}(${p.code})',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: Tk.fzMd,
+                color: disabled ? tk.ink3 : tk.ink,
+              ),
+            ),
           );
         },
       ),

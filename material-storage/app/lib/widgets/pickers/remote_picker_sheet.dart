@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../buttons.dart';
 import '../search_field.dart';
@@ -24,8 +25,12 @@ Future<List<UserBrief>?> showUserPickerSheet({
   List<UserBrief>? preset,
 }) {
   return _showRemotePickerSheet<UserBrief>(
-    context: context, title: title, initial: initial, multiple: multiple,
-    preset: preset, search: (q) => session.api!.users.searchUsers(q: q),
+    context: context,
+    title: title,
+    initial: initial,
+    multiple: multiple,
+    preset: preset,
+    search: (q) => session.api!.users.searchUsers(q: q),
     idOf: (u) => u.id,
   );
 }
@@ -38,13 +43,17 @@ Future<List<GroupBrief>?> showGroupPickerSheet({
   bool multiple = true,
 }) {
   return _showRemotePickerSheet<GroupBrief>(
-    context: context, title: title, initial: initial, multiple: multiple,
+    context: context,
+    title: title,
+    initial: initial,
+    multiple: multiple,
     search: (q) => session.api!.users.searchGroups(q: q),
     idOf: (g) => g.id,
   );
 }
 
-/// 泛型装配:选中集合外提为 ValueNotifier(列表与底部完成钮共用,不 dispose),本体+吸底钮一次组装,用户/组零复制。
+/// 泛型装配:选中集合外提为 ValueNotifier(列表与底部完成钮共用,不 dispose),
+/// 本体+吸底钮一次组装,用户/组零复制。
 Future<List<T>?> _showRemotePickerSheet<T>({
   required BuildContext context,
   required String title,
@@ -54,8 +63,9 @@ Future<List<T>?> _showRemotePickerSheet<T>({
   required String Function(T) idOf,
   List<T>? preset,
 }) {
-  final selected = ValueNotifier<List<T>>(
-      [...{for (final x in initial) idOf(x): x}.values]); // 按 id 防御性去重
+  final selected = ValueNotifier<List<T>>([
+    ...{for (final x in initial) idOf(x): x}.values, // 按 id 防御性去重
+  ]);
   return showAppSheet<List<T>>(
     context: context,
     title: title,
@@ -65,13 +75,18 @@ Future<List<T>?> _showRemotePickerSheet<T>({
           valueListenable: selected,
           // N=0 也放行:提交空集合 = 显式清空(需求口径)
           builder: (nctx, sel, _) => PrimaryXl(
-              label: '完成(${sel.length})',
-              onPressed: () => Navigator.of(nctx).pop(List<T>.of(sel))),
+            label: '完成(${sel.length})',
+            onPressed: () => Navigator.of(nctx).pop(List<T>.of(sel)),
+          ),
         ),
     ],
     child: _RemotePickerSheet<T>(
-        search: search, idOf: idOf, selected: selected,
-        multiple: multiple, preset: preset),
+      search: search,
+      idOf: idOf,
+      selected: selected,
+      multiple: multiple,
+      preset: preset,
+    ),
   );
 }
 
@@ -140,66 +155,89 @@ class _RemotePickerSheetState<T> extends State<_RemotePickerSheet<T>> {
     final sel = List<T>.of(widget.selected.value);
     final id = widget.idOf(item);
     final i = sel.indexWhere((x) => widget.idOf(x) == id);
-    if (i >= 0) { sel.removeAt(i); } else { sel.add(item); }
+    if (i >= 0) {
+      sel.removeAt(i);
+    } else {
+      sel.add(item);
+    }
     widget.selected.value = sel;
   }
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final options = _visible;
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      Padding(
-        padding: const EdgeInsets.only(bottom: Tk.spaceSm),
-        child: SearchField(
-            controller: _query, hintText: '搜索…', onChanged: _searcher.search),
-      ),
-      // 列表自封顶内滚(搜索框恒在顶;口径同 showPickerSheet,底线提到 200)
-      Container(
-        constraints: BoxConstraints(
-            maxHeight: (MediaQuery.sizeOf(context).height * 0.45)
-                .clamp(200.0, 420.0)),
-        decoration: BoxDecoration(
-            border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(Tk.rSm)),
-        child: options.isEmpty
-            ? remoteStatus(_searcher.fetching)
-            : ListView.builder(
-                shrinkWrap: true,
-                itemCount: options.length,
-                itemBuilder: (context, i) => remoteTileOf(
+    // 列表自封顶内滚(搜索框恒在顶;口径同 showPickerSheet,底线提到 200)
+    final listMax = (MediaQuery.sizeOf(context).height * 0.45).clamp(
+      200.0,
+      420.0,
+    );
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(bottom: Tk.spaceSm),
+          child: SearchField(
+            controller: _query,
+            hintText: '搜索…',
+            onChanged: _searcher.search,
+          ),
+        ),
+        Container(
+          constraints: BoxConstraints(maxHeight: listMax),
+          decoration: BoxDecoration(
+            border: Border.all(color: tk.line),
+            borderRadius: BorderRadius.circular(Tk.rSm),
+          ),
+          child: options.isEmpty
+              ? remoteStatus(context, _searcher.fetching)
+              : ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: options.length,
+                  itemBuilder: (context, i) => remoteTileOf(
+                    context,
                     options[i],
                     selected: widget.selected.value.any(
-                        (x) => widget.idOf(x) == widget.idOf(options[i])),
-                    onTap: () => _onTap(options[i]))),
-      ),
-    ]);
+                      (x) => widget.idOf(x) == widget.idOf(options[i]),
+                    ),
+                    onTap: () => _onTap(options[i]),
+                  ),
+                ),
+        ),
+      ],
+    );
   }
 }
 
 /// ── picker 族内部复用面(subject_picker_sheet 共用),勿在族外引用 ──
 
+// 共享行/状态件保持紧凑排版(单文件 ≤300 行;dart format 局部关闭)。
+// dart format off
+
 /// 加载/空态行(「搜索中…」/「无匹配」,与 I1/I2 文案口径一致)。
-Widget remoteStatus(bool fetching) => Padding(
-    padding: const EdgeInsets.all(Tk.spaceMd),
-    child: Center(
-        child: Text(fetching ? '搜索中…' : '无匹配',
-            style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted))));
+Widget remoteStatus(BuildContext context, bool fetching) => Padding(
+  padding: const EdgeInsets.all(Tk.spaceMd),
+  child: Center(
+    child: Text(fetching ? '搜索中…' : '无匹配',
+        style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3)),
+  ),
+);
 
 /// picker 族共用行构建(UserBrief → 用户行 / GroupBrief → 组行,按类型分发,
-/// 视觉单点;选中 accent 高亮 + 对勾,I1 口径)。
-Widget remoteTileOf(Object? item,
+/// 视觉单点;选中金浅底 + 金字 + 对勾,I1 口径)。
+Widget remoteTileOf(BuildContext context, Object? item,
     {required bool selected, required VoidCallback onTap}) {
+  final tk = context.tk;
   final (leading, title, subtitle) = switch (item) {
     UserBrief u => (
-        CircleAvatar(
-            radius: 12, backgroundColor: Tk.accentSoft,
+        CircleAvatar(radius: 12, backgroundColor: tk.goldSoft,
             child: Text(u.name.isEmpty ? '?' : u.name.characters.first,
-                style: const TextStyle(fontSize: Tk.fzXs))),
+                style: TextStyle(fontSize: Tk.fzXs, color: tk.goldInk))),
         u.name,
         (u.username?.isNotEmpty ?? false) ? u.username : null,
       ),
     GroupBrief g => (
-        const Icon(Icons.groups_outlined, size: 20),
+        Icon(Icons.groups_outlined, size: 20, color: tk.ink2),
         g.name,
         // memberCount null 时只显示 name,不加「0 人」
         g.memberCount != null ? '${g.memberCount} 人' : null,
@@ -207,19 +245,20 @@ Widget remoteTileOf(Object? item,
     _ => throw UnsupportedError('remoteTileOf: 不支持的条目类型 $item'),
   };
   return ListTile(
-    dense: true,
+    dense: true, selected: selected, selectedTileColor: tk.goldSoft,
     leading: leading,
     title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: Tk.fzMd, color: selected ? Tk.accent : null,
-            fontWeight: selected ? FontWeight.w600 : null)),
-    subtitle: subtitle == null ? null : Text(subtitle,
-        maxLines: 1, overflow: TextOverflow.ellipsis,
-        style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
-    trailing:
-        selected ? const Icon(Icons.check, size: 18, color: Tk.accent) : null,
+        style: TextStyle(fontSize: Tk.fzRowTitle,
+            color: selected ? tk.goldInk : tk.ink,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.w500)),
+    subtitle: subtitle == null ? null
+        : Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3)),
+    trailing: selected ? Icon(Icons.check, size: 18, color: tk.gold) : null,
     onTap: onTap,
   );
 }
+// dart format on
 
 /// 250ms 防抖远程搜索器 —— picker 族唯一实现(user_picker/subject_picker 既有
 /// 内联 _search 模式收敛于此):停顿 250ms 才发;自增 tag 丢弃过期响应;异常

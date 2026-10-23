@@ -15,27 +15,38 @@ import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/me/me_page.dart';
 import 'package:ms_app/features/projects/deleted_projects_page.dart';
 // 页面 widget 与分页模型同名:测试里模型用法居多,hide 掉模型的同名类
-import 'package:ms_app/models/models.dart' as models
+import 'package:ms_app/models/models.dart'
+    as models
     show DeletedProject, DeletedProjectsPage, Me;
 
 import '../helpers/api_harness.dart';
 import '../helpers/fake_apis_b6.dart';
 
 List<models.DeletedProject> _page(int from, int to) => [
-      for (var i = from; i < to; i++)
-        models.DeletedProject(
-            id: 'p$i', code: 'c$i', name: '项目$i',
-            deletedAt: '2026-10-20T10:00:00Z'),
-    ];
+  for (var i = from; i < to; i++)
+    models.DeletedProject(
+      id: 'p$i',
+      code: 'c$i',
+      name: '项目$i',
+      deletedAt: '2026-10-20T10:00:00Z',
+    ),
+];
 
 void main() {
   testWidgets('列表展示+恢复确认+失效 projects', (tester) async {
     final api = installFakeApi();
-    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(items: [
-      models.DeletedProject(
-          id: 'p1', code: 'old', name: '旧项目',
-          deletedAt: '2026-10-20T10:00:00Z', deletedByName: '管理员'),
-    ], total: 1);
+    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: [
+        models.DeletedProject(
+          id: 'p1',
+          code: 'old',
+          name: '旧项目',
+          deletedAt: '2026-10-20T10:00:00Z',
+          deletedByName: '管理员',
+        ),
+      ],
+      total: 1,
+    );
     addTearDown(() => session.api = null);
     session.me = models.Me(id: 'u0', name: '管');
     var projects = 0;
@@ -46,7 +57,8 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
 
-    expect(find.text('回收站(项目)'), findsOneWidget);
+    expect(find.text('已删除项目'), findsOneWidget);
+    expect(find.text('仅项目删除人可见'), findsOneWidget);
     expect(find.text('旧项目(old)'), findsOneWidget);
     expect(find.textContaining('删除于 2026-10-20 · 管理员'), findsOneWidget);
 
@@ -63,7 +75,10 @@ void main() {
 
   testWidgets('空列表与搜索词区分文案;恢复 404 detail 透传', (tester) async {
     final api = installFakeApi();
-    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(items: [], total: 0);
+    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: [],
+      total: 0,
+    );
     api.projectsOps.restoreStaged = ApiException(404, 'project not found');
     addTearDown(() => session.api = null);
 
@@ -82,31 +97,42 @@ void main() {
   testWidgets('me_page 回收站(项目)入口仅 is_project_deleter 可见', (tester) async {
     installFakeApi();
     addTearDown(() => session.api = null);
-    session.me = models.Me(id: 'u1', name: '甲', isSystemAdmin: false,
-        isProjectDeleter: false);
+    session.me = models.Me(
+      id: 'u1',
+      name: '甲',
+      isSystemAdmin: false,
+      isProjectDeleter: false,
+    );
     await tester.pumpWidget(const MaterialApp(home: MePage()));
     expect(find.text('回收站(项目)'), findsNothing);
 
-    session.me = models.Me(id: 'u0', name: '管', isSystemAdmin: false,
-        isProjectDeleter: true);
+    session.me = models.Me(
+      id: 'u0',
+      name: '管',
+      isSystemAdmin: false,
+      isProjectDeleter: true,
+    );
     await tester.pumpWidget(MaterialApp(home: MePage()));
     await tester.pumpAndSettle();
     expect(find.text('回收站(项目)'), findsOneWidget);
   });
 
-  testWidgets('自动加载(app-polish E10):滚到底按 offset=20 追加下一页,取尽即止',
-      (tester) async {
+  testWidgets('自动加载(app-polish E10):滚到底按 offset=20 追加下一页,取尽即止', (tester) async {
     final api = installFakeApi();
     // 第一页 20 条 + total 25 → 滚到底自动拉第二页(5 条)→ 25/25 停
     addTearDown(() => session.api = null);
     api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
-        items: [
-          for (var i = 0; i < 20; i++)
-            models.DeletedProject(
-                id: 'p$i', code: 'c$i', name: '项目$i',
-                deletedAt: '2026-10-20T10:00:00Z'),
-        ],
-        total: 25);
+      items: [
+        for (var i = 0; i < 20; i++)
+          models.DeletedProject(
+            id: 'p$i',
+            code: 'c$i',
+            name: '项目$i',
+            deletedAt: '2026-10-20T10:00:00Z',
+          ),
+      ],
+      total: 25,
+    );
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
@@ -115,73 +141,93 @@ void main() {
 
     // 第二页 5 条(拖动即触发,先入桩)
     api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
-        items: [
-          for (var i = 20; i < 25; i++)
-            models.DeletedProject(
-                id: 'p$i', code: 'c$i', name: '项目$i',
-                deletedAt: '2026-10-20T10:00:00Z'),
-        ],
-        total: 25);
+      items: [
+        for (var i = 20; i < 25; i++)
+          models.DeletedProject(
+            id: 'p$i',
+            code: 'c$i',
+            name: '项目$i',
+            deletedAt: '2026-10-20T10:00:00Z',
+          ),
+      ],
+      total: 25,
+    );
     await tester.drag(find.byType(ListView), const Offset(0, -1200));
     await tester.pump();
     await tester.pumpAndSettle();
     expect(api.projectsOps.listDeletedCalls.last.offset, 20);
-    expect(find.text('加载更多'), findsNothing,
-        reason: '25/25 无更多(自动加载取尽即止)');
+    expect(find.text('加载更多'), findsNothing, reason: '25/25 无更多(自动加载取尽即止)');
   });
 
   // ── B6 批补充(P2-1 / P2-2)─────────────────────────────────────────────────
 
-  testWidgets('P2-2 自动加载防连点:in-flight 期间再滚只发一次请求且不重复追加',
-      (tester) async {
+  testWidgets('P2-2 自动加载防连点:in-flight 期间再滚只发一次请求且不重复追加', (tester) async {
     final api = _GatedMsApi();
     session.api = api;
     addTearDown(() => session.api = null);
-    api.projectsOps.listDeletedStaged =
-        models.DeletedProjectsPage(items: _page(0, 20), total: 25);
+    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: _page(0, 20),
+      total: 25,
+    );
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
 
     // 第二页先入桩(挂起前捕获),滚动触发 loadMore 挂起在 gate 上
-    api.gatedOps.listDeletedStaged =
-        models.DeletedProjectsPage(items: _page(20, 25), total: 25);
+    api.gatedOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: _page(20, 25),
+      total: 25,
+    );
     api.gatedOps.loadMoreGate = Completer<void>();
     await tester.drag(find.byType(ListView), const Offset(0, -1200));
     await tester.pump();
     await tester.drag(find.byType(ListView), const Offset(0, -600));
     await tester.pump();
-    expect(find.byType(CircularProgressIndicator), findsOneWidget,
-        reason: 'E10:in-flight 底部加载指示可见');
     expect(
-        api.projectsOps.listDeletedCalls.where((c) => c.offset > 0).length, 1,
-        reason: 'in-flight 再滚只发一次请求(_loadingMore 守卫拦下)');
+      find.byType(CircularProgressIndicator),
+      findsOneWidget,
+      reason: 'E10:in-flight 底部加载指示可见',
+    );
+    expect(
+      api.projectsOps.listDeletedCalls.where((c) => c.offset > 0).length,
+      1,
+      reason: 'in-flight 再滚只发一次请求(_loadingMore 守卫拦下)',
+    );
 
     api.gatedOps.loadMoreGate!.complete();
     await tester.pumpAndSettle();
     expect(find.text('加载更多'), findsNothing, reason: '25/25 无更多(按钮已移除)');
     // 列表惰性构建:滚到第二页区段再断言(滚动态下 find.text 才会物化行)
     await tester.dragUntilVisible(
-        find.text('项目24(c24)'), find.byType(ListView), const Offset(0, -400));
+      find.text('项目24(c24)'),
+      find.byType(ListView),
+      const Offset(0, -400),
+    );
     expect(find.text('项目24(c24)'), findsOneWidget, reason: '放行后追加第二页');
-    expect(find.text('项目20(c20)'), findsOneWidget,
-        reason: '两次请求会把第二页追加两遍(变 2 个同名 widget)');
+    expect(
+      find.text('项目20(c20)'),
+      findsOneWidget,
+      reason: '两次请求会把第二页追加两遍(变 2 个同名 widget)',
+    );
   });
 
-  testWidgets('P2-2 搜索 reload 后旧 loadMore 迟到响应被代际 tag 丢弃',
-      (tester) async {
+  testWidgets('P2-2 搜索 reload 后旧 loadMore 迟到响应被代际 tag 丢弃', (tester) async {
     final api = _GatedMsApi();
     session.api = api;
     addTearDown(() => session.api = null);
-    api.projectsOps.listDeletedStaged =
-        models.DeletedProjectsPage(items: _page(0, 20), total: 25);
+    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: _page(0, 20),
+      total: 25,
+    );
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
 
     // 旧词第二页挂起 in-flight(挂起前捕获快照);E10:滚动触发而非点按钮
-    api.gatedOps.listDeletedStaged =
-        models.DeletedProjectsPage(items: _page(20, 25), total: 25);
+    api.gatedOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: _page(20, 25),
+      total: 25,
+    );
     api.gatedOps.loadMoreGate = Completer<void>();
     await tester.drag(find.byType(ListView), const Offset(0, -1200));
     await tester.pump();
@@ -189,11 +235,17 @@ void main() {
     // 新词搜索 reload(offset=0 不受 gate):整表替换,代际 tag 自增。
     // 小调注释:E10 起底部加载指示为转圈动画,gate 未放行期间不可
     // pumpAndSettle(会永不落定),改逐 pump
-    api.gatedOps.listDeletedStaged = models.DeletedProjectsPage(items: [
-      models.DeletedProject(
-          id: 'q1', code: 'new', name: '新词项目',
-          deletedAt: '2026-10-20T10:00:00Z'),
-    ], total: 1);
+    api.gatedOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: [
+        models.DeletedProject(
+          id: 'q1',
+          code: 'new',
+          name: '新词项目',
+          deletedAt: '2026-10-20T10:00:00Z',
+        ),
+      ],
+      total: 1,
+    );
     await tester.enterText(find.byType(TextField), '新词');
     await tester.testTextInput.receiveAction(TextInputAction.done);
     await tester.pump();
@@ -203,19 +255,19 @@ void main() {
     // 放行旧 loadMore:tag 不匹配 → 旧词第二页整页丢弃,不污染新词列表
     api.gatedOps.loadMoreGate!.complete();
     await tester.pumpAndSettle();
-    expect(find.text('项目20(c20)'), findsNothing,
-        reason: '旧词迟到响应按代际丢弃');
+    expect(find.text('项目20(c20)'), findsNothing, reason: '旧词迟到响应按代际丢弃');
     expect(find.text('新词项目(new)'), findsOneWidget);
     expect(find.text('加载更多'), findsNothing, reason: '新词 1/1 无更多按钮');
   });
 
-  testWidgets('P2-1 恢复防重:restore in-flight 期间再点恢复不发第二次请求',
-      (tester) async {
+  testWidgets('P2-1 恢复防重:restore in-flight 期间再点恢复不发第二次请求', (tester) async {
     final api = _GatedMsApi();
     session.api = api;
     addTearDown(() => session.api = null);
-    api.projectsOps.listDeletedStaged =
-        models.DeletedProjectsPage(items: _page(0, 1), total: 1);
+    api.projectsOps.listDeletedStaged = models.DeletedProjectsPage(
+      items: _page(0, 1),
+      total: 1,
+    );
 
     await tester.pumpWidget(const MaterialApp(home: DeletedProjectsPage()));
     await tester.pumpAndSettle();
@@ -251,14 +303,16 @@ class _GatedProjectOpsApi extends FakeProjectOpsApi {
   Completer<void>? restoreGate;
 
   @override
-  Future<models.DeletedProjectsPage> listDeleted(
-      {String? q, int limit = 20, int offset = 0}) async {
+  Future<models.DeletedProjectsPage> listDeleted({
+    String? q,
+    int limit = 20,
+    int offset = 0,
+  }) async {
     final gate = loadMoreGate;
     if (gate == null || offset == 0) {
       return super.listDeleted(q: q, limit: limit, offset: offset);
     }
-    final stale =
-        await super.listDeleted(q: q, limit: limit, offset: offset);
+    final stale = await super.listDeleted(q: q, limit: limit, offset: offset);
     await gate.future;
     return stale;
   }

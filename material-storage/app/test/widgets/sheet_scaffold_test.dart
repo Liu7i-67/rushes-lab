@@ -5,23 +5,26 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ms_app/theme/app_theme.dart';
 import 'package:ms_app/widgets/sheet_scaffold.dart';
 
 void main() {
   /// 挂一个「open」按钮,点击时执行 [onOpen](拿到的 ctx 在 Scaffold 下)。
   Future<void> host(WidgetTester tester, void Function(BuildContext) onOpen) =>
-      tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: Builder(
-            builder: (ctx) => Center(
-              child: FilledButton(
-                onPressed: () => onOpen(ctx),
-                child: const Text('open'),
+      tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => Center(
+                child: FilledButton(
+                  onPressed: () => onOpen(ctx),
+                  child: const Text('open'),
+                ),
               ),
             ),
           ),
         ),
-      ));
+      );
 
   testWidgets('showAppSheet 标题/内容渲染;关闭钮 pop(null) 透传', (tester) async {
     Future<bool?>? result;
@@ -70,35 +73,50 @@ void main() {
   });
 
   testWidgets('errorText 渲染在标题下;无 error 不渲染错误行', (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(
-        body: SheetScaffold(title: '标题', errorText: '名称不能为空', child: Text('x')),
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SheetScaffold(
+            title: '标题',
+            errorText: '名称不能为空',
+            child: Text('x'),
+          ),
+        ),
       ),
-    ));
+    );
     expect(find.text('名称不能为空'), findsOneWidget);
 
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(body: SheetScaffold(title: '标题', child: Text('x'))),
-    ));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SheetScaffold(title: '标题', child: Text('x')),
+        ),
+      ),
+    );
     expect(find.text('名称不能为空'), findsNothing);
   });
 
   testWidgets('长内容走滚动区;吸底按钮不随内容滚动', (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(
-        body: SheetScaffold(
-          title: '长表单',
-          bottomActions: [FilledButton(onPressed: null, child: Text('保存'))],
-          child: SizedBox(height: 2000, child: Text('很高内容')),
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: SheetScaffold(
+            title: '长表单',
+            bottomActions: [FilledButton(onPressed: null, child: Text('保存'))],
+            child: SizedBox(height: 2000, child: Text('很高内容')),
+          ),
         ),
       ),
-    ));
+    );
 
     expect(find.text('保存'), findsOneWidget);
     final saveCenter = tester.getCenter(find.text('保存'));
     expect(saveCenter.dy, greaterThan(450), reason: '吸底按钮区贴近底部');
 
-    await tester.drag(find.byType(SingleChildScrollView), const Offset(0, -300));
+    await tester.drag(
+      find.byType(SingleChildScrollView),
+      const Offset(0, -300),
+    );
     await tester.pump();
     final scrollable = tester.state<ScrollableState>(find.byType(Scrollable));
     expect(scrollable.position.pixels, greaterThan(0), reason: '长内容可滚动');
@@ -109,28 +127,107 @@ void main() {
   testWidgets('键盘避让:viewInsets.bottom 转为骨架底部 padding', (tester) async {
     // 内层 MediaQuery 放 Scaffold body 内(Scaffold 会吞 body 的 viewInsets,
     // 真实调用位是 modal 路由 overlay 不经 Scaffold;此处只验组件读数契约)
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: MediaQuery(
-          data: const MediaQueryData(viewInsets: EdgeInsets.only(bottom: 200)),
-          child: const SheetScaffold(title: 'T', child: Text('x')),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MediaQuery(
+            data: const MediaQueryData(
+              viewInsets: EdgeInsets.only(bottom: 200),
+            ),
+            child: const SheetScaffold(title: 'T', child: Text('x')),
+          ),
         ),
       ),
-    ));
+    );
     final bottoms = tester
-        .widgetList<Padding>(find.byWidgetPredicate(
-            (w) => w is Padding && w.padding is EdgeInsets))
+        .widgetList<Padding>(
+          find.byWidgetPredicate(
+            (w) => w is Padding && w.padding is EdgeInsets,
+          ),
+        )
         .map((p) => p.padding as EdgeInsets)
         .toList();
-    expect(bottoms, contains(const EdgeInsets.only(bottom: 200)),
-        reason: '键盘顶起弹层(A4 键盘避让)');
+    expect(
+      bottoms,
+      contains(const EdgeInsets.only(bottom: 200)),
+      reason: '键盘顶起弹层(A4 键盘避让)',
+    );
   });
 
   testWidgets('无标题短菜单形态:不渲染标题行,内容自适应', (tester) async {
-    await tester.pumpWidget(const MaterialApp(
-      home: Scaffold(body: SheetScaffold(child: Text('菜单项'))),
-    ));
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: SheetScaffold(child: Text('菜单项'))),
+      ),
+    );
     expect(find.byTooltip('关闭'), findsNothing, reason: '无标题无关闭钮');
     expect(find.text('菜单项'), findsOneWidget);
+  });
+
+  testWidgets('标题 20/w600;吸底按钮固定 48 高', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(Brightness.dark),
+        home: Scaffold(
+          body: SheetScaffold(
+            title: '添加成员',
+            bottomActions: [
+              FilledButton(onPressed: () {}, child: const Text('保存')),
+            ],
+            child: const Text('x'),
+          ),
+        ),
+      ),
+    );
+    final title = tester.widget<Text>(find.text('添加成员')).style!;
+    expect(title.fontSize, 20, reason: '弹层标题 §4.4 fzSection');
+    expect(title.fontWeight, FontWeight.w600);
+    expect(
+      tester.getSize(find.byType(FilledButton)).height,
+      48,
+      reason: '吸底按钮 48 高',
+    );
+  });
+
+  testWidgets('showAppSheet:拖拽把手 + 顶部 rXl 圆角(主题)', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(Brightness.dark),
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showAppSheet<void>(
+                  context: ctx,
+                  title: '选择目标',
+                  child: const Text('内容区'),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<BottomSheet>(find.byType(BottomSheet)).showDragHandle,
+      isTrue,
+      reason: 'useSafeArea + showDragHandle 形态',
+    );
+    final theme = Theme.of(tester.element(find.text('内容区')));
+    expect(
+      theme.bottomSheetTheme.dragHandleSize,
+      const Size(38, 4),
+      reason: '把手 38×4',
+    );
+    final shape = theme.bottomSheetTheme.shape! as RoundedRectangleBorder;
+    expect(
+      shape.borderRadius,
+      const BorderRadius.vertical(top: Radius.circular(24)),
+      reason: '顶部 rXl=24 圆角',
+    );
   });
 }

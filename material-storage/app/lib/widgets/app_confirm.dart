@@ -3,6 +3,9 @@
 /// DangerButton 红底(删除/撤销等);返回 `Future<bool?>`——确认 true、
 /// 取消 false、点遮罩/返回键 null(调用方按 `!= true` 视为未确认,与
 /// 存量 `ok != true` 口径一致)。
+///
+/// 外观全部交给主题(app_theme:surface 底 / rXl 圆角 / 标题 20),本件
+/// 不再自拼颜色;非危险确认钮用主题金底 FilledButton。
 library;
 
 import 'package:flutter/material.dart';
@@ -22,11 +25,9 @@ Future<bool?> showAppConfirm(
     context: context,
     barrierDismissible: barrierDismissible,
     builder: (ctx) => AlertDialog(
-      // 标题/正文走主题默认字级(M3 titleLarge/bodyMedium),与存量 AlertDialog
-      // 视觉零跳变;后续全局字阶调整只动主题一处
+      // 标题/正文走主题字级(DialogThemeData:title 20/内容 16),排版零覆盖
       title: Text(title),
-      content:
-          content == null || content.isEmpty ? null : Text(content),
+      content: content == null || content.isEmpty ? null : Text(content),
       actions: [
         TextButton(
           onPressed: () => Navigator.of(ctx).pop(false),

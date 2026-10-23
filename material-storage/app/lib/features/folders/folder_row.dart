@@ -1,16 +1,21 @@
-/// FolderRow — 文件夹树行(B2 §8.1 + app-polish E4 精修):按深度缩进+
-/// 每级 2px 竖向参考线(subtle)、计数徽标(仅列表端点回填)、
-/// 敏感锁(amber 点缀)、「⋯」图标钮菜单(在 folder_menu_sheet.dart,B6 全量)、
-/// 点行进该夹宫格上下文。E4:行尾 chevron 移除(与整行可点重复);展开箭头
-/// 触控区≥44×44。多级下钻靠树递归展开。
-/// K(2026-10-22 真机反馈 #1)+ app-polish-3 D1 定稿:计数两态 —— 直属>0
-/// 显示「N 项」徽标;直属=0 不显示任何数字(「子级 M 项」子树弱提示已整体
-/// 删除,避免「点进去为空」二次误导)。图标实心仍按子树含文件(subtree>0)
-/// 点亮。
+/// FolderRow — 文件夹树行(F7/§7.2 墨色 + 金色):40×40 图标容器
+/// (敏感=goldSoft 底 + goldInk 锁;普通=surface3 + ink2,含文件用实心
+/// folder、空夹用 folder_outlined)、名称 15.5/500、副标题 13/ink3
+/// (只表「敏感目录」/「空文件夹」)+ 敏感锁 14/warn +「⋯」44 图标钮。
+///
+/// 计数唯一入口=行尾「N 项」徽标(directFileCount,直属数,不含子树;
+/// 直属=0 不显示徽标);副标题不再承载数字(保留 app-polish-3 D1 已上线
+/// 的徽标语义,避免同一数字双写)。
+///
+/// 结构语义保持:按深度每级 16px 缩进 + 2px 竖直参考线(tk.line)、
+/// 有子级可展开/折叠(默认全展开)、整行可点进宫格、行尾无 chevron
+/// (E4 定稿);图标实心仍按子树含文件(subtree>0)点亮。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
 
+import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/badge.dart';
 import 'folder_tree.dart';
@@ -36,83 +41,137 @@ class FolderRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final f = node.folder;
     final hasChildren = node.children.isNotEmpty;
-    // P5:含文件(子树计数>0)的夹实心深色图标,对齐 web「实心=含文件」语义;
-    // 空夹维持橙色空心
     final hasFiles = f.subtreeFileCount > 0;
-    return InkWell(
-      onTap: onOpen,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(Tk.spaceSm, 0, Tk.spaceXs, 0),
-        child: Row(
-          children: [
-            // E4:层级参考线——每级 16px 缩进段首一根 2px 竖线(层次一眼可辨)
-            for (var i = 0; i < depth; i++)
-              SizedBox(
-                width: Tk.spaceLg,
-                height: 44,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: Container(width: 2, height: 28, color: Tk.border),
+    // P2-3:金底只给敏感夹;普通含文件=实心 folder + surface3 + ink2。
+    final accented = f.isSensitive;
+    final subtitle = _subtitleOf(f);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onOpen,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: 56),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(Tk.spaceSm, 0, Tk.spaceXs, 0),
+            child: Row(
+              children: [
+                // 层级参考线:每级 16 一段,段首 2px 竖线。
+                for (var i = 0; i < depth; i++)
+                  SizedBox(
+                    width: Tk.spaceLg,
+                    height: 56,
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Container(width: 2, height: 28, color: tk.line),
+                    ),
+                  ),
+                // 展开箭头:无子级占位对齐;44×44 触控区。
+                SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: hasChildren
+                      ? IconButton(
+                          padding: EdgeInsets.zero,
+                          tooltip: expanded ? '折叠' : '展开',
+                          iconSize: 22,
+                          color: tk.ink2,
+                          icon: Icon(
+                            expanded ? Icons.expand_more : Icons.chevron_right,
+                          ),
+                          onPressed: onToggle,
+                        )
+                      : const SizedBox.shrink(),
                 ),
-              ),
-            // 展开箭头:无子级占位对齐;有子级可折叠(默认全展开)。
-            // E4:触控区≥44×44(含 padding 的实心 IconButton)
-            SizedBox(
-              width: 44,
-              height: 44,
-              child: hasChildren
-                  ? IconButton(
-                      padding: EdgeInsets.zero,
-                      icon: Icon(
-                        expanded ? Icons.expand_more : Icons.chevron_right,
-                        size: 22,
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: accented ? tk.goldSoft : tk.surface3,
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  child: Icon(
+                    f.isSensitive
+                        ? Icons.lock_outline
+                        : hasFiles
+                        ? Icons.folder
+                        : Icons.folder_outlined,
+                    size: 20,
+                    color: accented ? tk.goldInk : tk.ink2,
+                  ),
+                ),
+                const SizedBox(width: Tk.spaceMd),
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        f.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: Tk.fzRowTitle,
+                          height: 1.4,
+                          fontWeight: FontWeight.w500,
+                          letterSpacing: -0.08,
+                          color: tk.ink,
+                        ),
                       ),
-                      onPressed: onToggle,
-                    )
-                  : const SizedBox.shrink(),
+                      if (subtitle != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: Tk.fzMd,
+                            height: 1.4,
+                            color: tk.ink3,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (f.directFileCount > 0) ...[
+                  const SizedBox(width: Tk.spaceXs),
+                  // 唯一计数位:直属数「N 项」徽标(不含子树)。
+                  Badge(
+                    label: '${f.directFileCount} 项',
+                    tone: BadgeTone.neutral,
+                  ),
+                ],
+                if (f.isSensitive) ...[
+                  const SizedBox(width: Tk.spaceXs),
+                  Icon(Icons.lock_outline, size: 14, color: tk.warn),
+                ],
+                SizedBox(
+                  width: 44,
+                  height: 44,
+                  child: IconButton(
+                    tooltip: '文件夹操作',
+                    padding: EdgeInsets.zero,
+                    iconSize: 20,
+                    color: tk.ink3,
+                    icon: const Icon(Icons.more_horiz),
+                    onPressed: () => showFolderMenu(context, folder: f),
+                  ),
+                ),
+              ],
             ),
-            Icon(
-              hasFiles ? Icons.folder : Icons.folder_outlined,
-              size: 20,
-              color: hasFiles ? Tk.fg : Tk.accent,
-            ),
-            const SizedBox(width: Tk.spaceSm),
-            Expanded(
-              child: Text(
-                f.name,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: Tk.fzTitle),
-              ),
-            ),
-            if (f.isSensitive) ...[
-              const SizedBox(width: Tk.spaceXs),
-              // E4:敏感夹 amber 小标点缀(锁图标 amber 化,弱存在感提示)
-              const Icon(Icons.lock_outline, size: 14, color: Tk.amber),
-            ],
-            if (f.directFileCount > 0) ...[
-              const SizedBox(width: Tk.spaceXs),
-              // 直属>0:「N 项」徽标(数字 = 本夹直属,不含子树)。直属=0
-              // 一律不显示数字(子树信息只由实心图标表达,D1)
-              Badge(
-                label: '${f.directFileCount} 项',
-                tone: BadgeTone.neutral,
-              ),
-            ],
-            // ⋯ 菜单:回收站 B5 点亮(入口三态闸门);其余管理动作 B6 填。
-            // E4:「⋯」图标钮化(IconButton,视觉提权 muted→fg)
-            IconButton(
-              tooltip: '文件夹操作',
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.more_horiz, size: 20, color: Tk.muted),
-              onPressed: () => showFolderMenu(context, folder: f),
-            ),
-            // E4:行尾 chevron 移除——整行可点已表意,三重导航符号减为两层
-          ],
+          ),
         ),
       ),
     );
+  }
+
+  /// 副标题:只表敏感目录/空文件夹;直属计数由行尾「N 项」徽标唯一承担。
+  String? _subtitleOf(Folder f) {
+    if (f.isSensitive) return '敏感目录';
+    if (f.directFileCount > 0) return null;
+    return '空文件夹';
   }
 }

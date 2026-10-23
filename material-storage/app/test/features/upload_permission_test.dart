@@ -33,7 +33,8 @@ void main() {
 
     testWidgets('Android:标题/正文中文,按钮为「去设置」+「取消」', (tester) async {
       await tester.pumpWidget(
-          const MaterialApp(home: Scaffold(body: SizedBox.shrink())));
+        const MaterialApp(home: Scaffold(body: SizedBox.shrink())),
+      );
       final dialog = showAlbumPermissionDialog(
         hostContext(tester),
         isAndroid: true,
@@ -51,7 +52,8 @@ void main() {
 
     testWidgets('iOS:按钮为「重新尝试」+「取消」', (tester) async {
       await tester.pumpWidget(
-          const MaterialApp(home: Scaffold(body: SizedBox.shrink())));
+        const MaterialApp(home: Scaffold(body: SizedBox.shrink())),
+      );
       final dialog = showAlbumPermissionDialog(
         hostContext(tester),
         isAndroid: false,
@@ -66,7 +68,8 @@ void main() {
 
     testWidgets('取消返回 null(不算上传)', (tester) async {
       await tester.pumpWidget(
-          const MaterialApp(home: Scaffold(body: SizedBox.shrink())));
+        const MaterialApp(home: Scaffold(body: SizedBox.shrink())),
+      );
       final dialog = showAlbumPermissionDialog(
         hostContext(tester),
         isAndroid: true,
@@ -97,11 +100,11 @@ void main() {
         tester.element(find.byType(Scaffold));
 
     Future<void> pumpHost(WidgetTester tester) => tester.pumpWidget(
-        const MaterialApp(home: Scaffold(body: SizedBox.shrink())));
+      const MaterialApp(home: Scaffold(body: SizedBox.shrink())),
+    );
 
     /// 注入版依赖:check 按队列逐次返回,calls 记录调用序列。
-    Future<bool> Function() stagedCheck(
-            List<bool> queue, List<String> calls) =>
+    Future<bool> Function() stagedCheck(List<bool> queue, List<String> calls) =>
         () async {
           calls.add('check');
           return queue.removeAt(0);
@@ -114,7 +117,10 @@ void main() {
         hostContext(tester),
         checkPermission: stagedCheck([true], calls),
         openSettings: () async => calls.add('settings'),
-        waitResume: () async { calls.add('resume'); return true; },
+        waitResume: () async {
+          calls.add('resume');
+          return true;
+        },
       );
       expect(r, isTrue);
       expect(calls, ['check']);
@@ -128,7 +134,10 @@ void main() {
         hostContext(tester),
         checkPermission: stagedCheck([false], calls),
         openSettings: () async => calls.add('settings'),
-        waitResume: () async { calls.add('resume'); return true; },
+        waitResume: () async {
+          calls.add('resume');
+          return true;
+        },
       );
       await tester.pumpAndSettle(); // 引导框出现
       expect(find.text('需要相册访问权限'), findsOneWidget);
@@ -138,8 +147,7 @@ void main() {
       expect(calls, ['check'], reason: '取消后不跳设置、不等前台');
     });
 
-    testWidgets('P2-1 Android 去设置→回前台已授权:等 resumed 后再判→true',
-        (tester) async {
+    testWidgets('P2-1 Android 去设置→回前台已授权:等 resumed 后再判→true', (tester) async {
       await pumpHost(tester);
       final calls = <String>[];
       final f = ensureAlbumPermissionGuided(
@@ -147,7 +155,10 @@ void main() {
         isAndroid: true,
         checkPermission: stagedCheck([false, true], calls),
         openSettings: () async => calls.add('settings'),
-        waitResume: () async { calls.add('resume'); return true; },
+        waitResume: () async {
+          calls.add('resume');
+          return true;
+        },
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('去设置'));
@@ -157,8 +168,7 @@ void main() {
       expect(calls, ['check', 'settings', 'resume', 'check']);
     });
 
-    testWidgets('P2-1 去设置后超时未回前台:false 且不再重判(无陈旧框)',
-        (tester) async {
+    testWidgets('P2-1 去设置后超时未回前台:false 且不再重判(无陈旧框)', (tester) async {
       await pumpHost(tester);
       final calls = <String>[];
       final f = ensureAlbumPermissionGuided(
@@ -167,14 +177,20 @@ void main() {
         checkPermission: stagedCheck([false], calls),
         openSettings: () async => calls.add('settings'),
         // 超时未回前台:等前台以 false 收场
-        waitResume: () async { calls.add('resume'); return false; },
+        waitResume: () async {
+          calls.add('resume');
+          return false;
+        },
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('去设置'));
       await tester.pumpAndSettle();
       expect(await f, isFalse);
-      expect(calls, ['check', 'settings', 'resume'],
-          reason: '超时路径放弃本次,不再触发第二次重判');
+      expect(calls, [
+        'check',
+        'settings',
+        'resume',
+      ], reason: '超时路径放弃本次,不再触发第二次重判');
     });
 
     testWidgets('去设置→回前台仍未授权→再弹引导→取消:false', (tester) async {
@@ -185,7 +201,10 @@ void main() {
         isAndroid: true,
         checkPermission: stagedCheck([false, false], calls),
         openSettings: () async => calls.add('settings'),
-        waitResume: () async { calls.add('resume'); return true; },
+        waitResume: () async {
+          calls.add('resume');
+          return true;
+        },
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('去设置'));
@@ -206,7 +225,10 @@ void main() {
         isAndroid: false,
         checkPermission: stagedCheck([false, true], calls),
         openSettings: () async => calls.add('settings'),
-        waitResume: () async { calls.add('resume'); return true; },
+        waitResume: () async {
+          calls.add('resume');
+          return true;
+        },
       );
       await tester.pumpAndSettle();
       await tester.tap(find.text('重新尝试'));
@@ -275,8 +297,7 @@ void main() {
       await tester.pump(); // 超时定时器应已取消,无 pending timer
     });
 
-    testWidgets('后台等待→超时未回前台→false(防死等,定时器可取消)',
-        (tester) async {
+    testWidgets('后台等待→超时未回前台→false(防死等,定时器可取消)', (tester) async {
       await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
       toBackground(tester);
       final f = waitForAppResume(

@@ -1,12 +1,12 @@
-/// 管理后台表单通用骨架(B8 拆件;app-polish F5 扩展):滚动 + 键盘避让 +
-/// 错误行 + 提交按钮;建号/编辑等 sheet 共用,内容超视口时可滚(ensureVisible
-/// 提交键可达)。可选 [maxHeightFactor] 约束弹层最大高度(视口高度系数),
-/// 供模板表单等长表单限高 0.85——不传保持原行为(API 向后兼容)。
+/// 管理后台表单通用骨架(B8 拆件;app-polish F5 扩展,墨金重做):
+/// SheetScaffold 收口(键盘避让 + 限高滚动 + 标题 + 错误行 + 吸底提交键);
+/// 建号/编辑/模板等 sheet 共用。可选 [maxHeightFactor] 约束弹层最大高度
+/// (缺省 0.9),供模板表单等长表单限高。
 library;
 
 import 'package:flutter/material.dart';
 
-import '../../theme/tokens.dart';
+import '../../widgets/sheet_scaffold.dart';
 
 /// 必填/长度校验(表单轻校验;后端 422 detail 仍透传兜底)。
 /// [min] 最短长度(默认 1 仅要求非空;建号登录名传 2 = web/后端同款 2-64)。
@@ -39,53 +39,28 @@ class FormSkeleton extends StatelessWidget {
   final String? error;
   final bool submitEnabled;
 
-  /// 视口高度系数上限(如 0.85);null = 不限高(原有调用方行为不变)。
+  /// 视口高度系数上限(如 0.85);null = 默认 0.9。
   final double? maxHeightFactor;
 
   @override
   Widget build(BuildContext context) {
-    Widget body = SafeArea(
-      child: Padding(
-        padding: EdgeInsets.fromLTRB(Tk.spaceXl, 0, Tk.spaceXl,
-            Tk.spaceLg + MediaQuery.of(context).viewInsets.bottom),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: Tk.spaceMd),
-              ...children,
-              if (error != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: Tk.spaceSm),
-                  child: Text(error!,
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.error,
-                          fontSize: Tk.fzSm)),
-                ),
-              const SizedBox(height: Tk.spaceLg),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: submitting || !submitEnabled ? null : onSubmit,
-                  child: Text(submitting ? '提交中…' : submitLabel),
-                ),
-              ),
-            ],
-          ),
+    return SheetScaffold(
+      title: title,
+      // 保持原行为:表单标题行不带关闭钮(把手/遮罩/返回键关闭)
+      showClose: false,
+      errorText: error,
+      maxHeightFactor: maxHeightFactor ?? 0.9,
+      bottomActions: [
+        FilledButton(
+          onPressed: submitting || !submitEnabled ? null : onSubmit,
+          child: Text(submitting ? '提交中…' : submitLabel),
         ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: children,
       ),
     );
-    final factor = maxHeightFactor;
-    if (factor != null) {
-      body = ConstrainedBox(
-        constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * factor),
-        child: body,
-      );
-    }
-    return body;
   }
 }
-

@@ -14,6 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/api/baidu_api.dart';
 import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/features/baidu/bind_code_page.dart';
+import 'package:ms_app/widgets/badge.dart' as app_badge;
 
 /// 非 null 时 authorize-url 直接回该状态码(对齐后端 503=凭证未配置)
 int? forceAuthorizeStatus;
@@ -27,20 +28,27 @@ class _FakeBaiduAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 
   @override
-  Future<ResponseBody> fetch(RequestOptions options, Stream<Uint8List>? requestStream,
-      Future<void>? cancelFuture) async {
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
     final bodyText = await (requestStream ?? const Stream<Uint8List>.empty())
         .cast<List<int>>()
         .transform(utf8.decoder)
         .join();
     Map<String, dynamic> body = const {};
-    if (bodyText.isNotEmpty) body = jsonDecode(bodyText) as Map<String, dynamic>;
+    if (bodyText.isNotEmpty) {
+      body = jsonDecode(bodyText) as Map<String, dynamic>;
+    }
 
     ResponseBody ok(Object data, [int status = 200]) => ResponseBody.fromString(
-        jsonEncode(data), status,
-        headers: {
-          Headers.contentTypeHeader: [Headers.jsonContentType],
-        });
+      jsonEncode(data),
+      status,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
 
     final path = options.uri.path;
     if (path == '/api/v1/baidu/backup/binding/authorize-url') {
@@ -50,7 +58,8 @@ class _FakeBaiduAdapter implements HttpClientAdapter {
         }, forceAuthorizeStatus!);
       }
       return ok({
-        'url': 'https://openapi.baidu.com/oauth/2.0/authorize'
+        'url':
+            'https://openapi.baidu.com/oauth/2.0/authorize'
             '?client_id=abc&redirect_uri=oob',
       });
     }
@@ -69,9 +78,7 @@ class _FakeBaiduAdapter implements HttpClientAdapter {
           'nickname': '测试盘',
         });
       }
-      return ok(const {
-        'detail': '授权码无效或已过期,请重新获取授权码后再试(授权码 10 分钟内单次有效)',
-      }, 400);
+      return ok(const {'detail': '授权码无效或已过期,请重新获取授权码后再试(授权码 10 分钟内单次有效)'}, 400);
     }
     return ok(const {'detail': 'no route'}, 404);
   }
@@ -89,8 +96,14 @@ void main() {
   });
 
   Future<void> pumpPage(WidgetTester tester, {bool enabled = true}) async {
-    await tester
-        .pumpWidget(MaterialApp(home: BindCodePage(api: api, enabled: enabled)));
+    tester.view.physicalSize = const Size(800, 1200);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: BindCodePage(api: api, enabled: enabled),
+      ),
+    );
     await tester.pumpAndSettle();
   }
 
@@ -105,6 +118,8 @@ void main() {
 
   testWidgets('生成链接 → 展示授权链接与步骤引导', (tester) async {
     await pumpPage(tester);
+    expect(find.text('绑定百度网盘账号'), findsOneWidget);
+    expect(find.text('通过授权码完成一次绑定'), findsOneWidget);
     expect(find.textContaining('当前未绑定'), findsOneWidget);
     await tester.tap(find.text('生成授权链接'));
     await tester.pumpAndSettle();
@@ -112,6 +127,16 @@ void main() {
     expect(find.text('复制链接'), findsOneWidget);
     expect(find.text('浏览器打开'), findsOneWidget);
     expect(find.textContaining('单次有效约 10 分钟'), findsOneWidget);
+    // 步骤徽标金:步骤 1 完成态 + 步骤 2 待输入
+    expect(
+      tester
+          .widget<app_badge.Badge>(
+            find.widgetWithText(app_badge.Badge, '步骤 1 / 2'),
+          )
+          .tone,
+      app_badge.BadgeTone.gold,
+    );
+    expect(find.text('步骤 2 / 2'), findsOneWidget);
   });
 
   testWidgets('提交成功:请求体恰为 {code};输入态清空 + 成功文案 + 状态行更新', (tester) async {
@@ -124,8 +149,11 @@ void main() {
     expect(adapter.lastBindCode, 'GOODCODE');
     expect(adapter.lastBindBodyKeys, {'code'});
     // 成功后回步骤 0:输入卡片收起(授权码已消费,重绑需重新生成链接)
-    expect(find.byType(TextField), findsNothing,
-        reason: '输入态一次性消费:成功后输入卡片不再呈现');
+    expect(
+      find.byType(TextField),
+      findsNothing,
+      reason: '输入态一次性消费:成功后输入卡片不再呈现',
+    );
     expect(find.textContaining('绑定成功'), findsOneWidget);
     expect(find.textContaining('当前已绑定'), findsOneWidget);
   });
@@ -158,16 +186,24 @@ void main() {
     expect(codeField(tester).controller!.text, '');
   });
 
-  testWidgets('生成链接遇 503:展示后端中文 detail,不裸渲染 DioException(P1-1)', (tester) async {
+  testWidgets('生成链接遇 503:展示后端中文 detail,不裸渲染 DioException(P1-1)', (
+    tester,
+  ) async {
     forceAuthorizeStatus = 503;
     addTearDown(() => forceAuthorizeStatus = null);
     await pumpPage(tester);
     await tester.tap(find.text('生成授权链接'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('百度应用凭证未配置'), findsOneWidget,
-        reason: '后端中文 detail 透传');
-    expect(find.textContaining('DioException'), findsNothing,
-        reason: '勿渲染原始异常对象');
+    expect(
+      find.textContaining('百度应用凭证未配置'),
+      findsOneWidget,
+      reason: '后端中文 detail 透传',
+    );
+    expect(
+      find.textContaining('DioException'),
+      findsNothing,
+      reason: '勿渲染原始异常对象',
+    );
     expect(find.textContaining('Exception'), findsNothing);
     // 失败态可重走:按钮恢复可点,输入卡片未展开
     expect(find.text('生成授权链接'), findsOneWidget);

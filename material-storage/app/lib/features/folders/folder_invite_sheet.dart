@@ -1,9 +1,8 @@
-/// FolderInviteSheet — 敏感夹邀请管理(B6 §8.4;web FolderInvitePanel 移动版):
-/// 成员列表(等级徽章 + 永久/到期)+ 撤销;邀请表单 = SubjectPicker + 等级
-/// viewer/downloader + **有效期预设档位 = web DUR_OPTIONS 实况**(永久/1h/24h/
-/// 7d/30d,多主体逐个 POST,部分失败计数提示)。入口仅敏感夹(folder_row)。
-/// app-polish D1:骨架迁移 SheetScaffold(标题/列表定高内滚/PrimaryXl 吸底);
-/// 撤销确认统一 showAppConfirm(danger);错误收口 toast+errorMessage(E14)。
+/// FolderInviteSheet — 敏感夹邀请管理(B6 §8.4;F7 统一墨色 + 金色):
+/// 成员列表(等级 + 永久/到期)+ 撤销;邀请表单 = SubjectPicker + 等级
+/// viewer/downloader + 有效期预设(web DUR_OPTIONS 实况,多主体逐个 POST)。
+/// 入口仅敏感夹(folder_row)。SheetScaffold 吸底金主按钮;撤销确认统一
+/// showAppConfirm(danger);错误收口 toast+errorMessage。
 library;
 
 export 'folder_invite_form.dart'
@@ -14,13 +13,16 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/fmt.dart' show fmtIsoShort;
 import '../../core/session.dart';
-import 'folder_invite_form.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/buttons.dart';
+import '../../widgets/empty_state.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
+import 'folder_invite_form.dart';
 
 /// 打开敏感夹邀请管理面板(对外 API 不变)。
 Future<void> showFolderInviteSheet(
@@ -69,11 +71,11 @@ class _InviteSheetState extends State<_InviteSheet> {
         level: m.level,
         permanent: m.permanent,
       );
+      if (!mounted) return;
       _reload();
     } catch (e) {
       if (!mounted) return;
-      toast(context, '撤销失败:${errorMessage(e, '请稍后重试')}',
-          tone: ToastTone.error);
+      toast(context, '撤销失败:${errorMessage(e, '请稍后重试')}', tone: ToastTone.error);
     }
   }
 
@@ -92,20 +94,24 @@ class _InviteSheetState extends State<_InviteSheet> {
               ),
             ],
       child: _showForm
-          ? FolderInviteForm(folder: widget.folder, onDone: () {
-              setState(() {
-                _showForm = false;
-                _members = _load();
-              });
-            })
+          ? FolderInviteForm(
+              folder: widget.folder,
+              onDone: () {
+                setState(() {
+                  _showForm = false;
+                  _members = _load();
+                });
+              },
+            )
           : Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('敏感目录仅被邀请成员可见;邀请可设有效期',
-                    style: Theme.of(context).textTheme.bodySmall),
+                Text(
+                  '敏感目录仅被邀请成员可见;邀请可设有效期',
+                  style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3),
+                ),
                 const SizedBox(height: Tk.spaceSm),
-                // 列表定高内滚(外层 SheetScaffold 已管总高与吸底钮)
                 SizedBox(
                   height: MediaQuery.of(context).size.height * 0.45,
                   child: _memberList(),
@@ -124,60 +130,39 @@ class _InviteSheetState extends State<_InviteSheet> {
         }
         if (snap.hasError) {
           return Center(
-            child: Text('加载失败:${errorMessage(snap.error!, '请稍后重试')}',
-                style: Theme.of(context).textTheme.bodySmall),
+            child: Text(
+              '加载失败:${errorMessage(snap.error!, '请稍后重试')}',
+              style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3),
+            ),
           );
         }
         final members = snap.data ?? const <FolderMemberRow>[];
         if (members.isEmpty) {
-          return const Center(
-            child: Text('还没人被邀请\n点击下方「邀请成员」开始',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: Tk.fzMd, color: Tk.subtle)),
+          return const EmptyState(
+            icon: Icons.mail_outline,
+            message: '还没人被邀请',
+            description: '点击下方「邀请成员」开始',
           );
         }
         return ListView.separated(
           itemCount: members.length,
-          separatorBuilder: (_, _) => const Divider(height: 1),
+          separatorBuilder: (_, _) =>
+              Divider(height: 1, thickness: 1, color: context.tk.line),
           itemBuilder: (context, i) {
             final m = members[i];
-            return ListTile(
-              visualDensity: VisualDensity.compact,
-              contentPadding: EdgeInsets.zero,
-              leading: CircleAvatar(
-                radius: 13,
-                backgroundColor: m.kind == 'user' ? Tk.fg : Tk.border,
-                child: Text(
-                  m.kind == 'user'
-                      ? (m.name ?? '?').isEmpty
-                          ? '?'
-                          : m.name!.characters.first.toUpperCase()
-                      : '群',
-                  style: TextStyle(
-                      fontSize: Tk.fzXs,
-                      color: m.kind == 'user' ? Tk.surface : Tk.muted),
-                ),
-              ),
-              title: Text(m.name ?? m.subjectId,
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500)),
-              subtitle: Row(children: [
-                Text(m.level.toUpperCase(),
-                    style: const TextStyle(
-                        fontSize: Tk.fzXs,
-                        letterSpacing: 0.3,
-                        color: Tk.muted)),
-                const SizedBox(width: Tk.spaceSm),
-                Text(
-                  m.permanent
-                      ? '永久'
-                      : (m.expiresAt == null ? '临时' : '到期 ${fmtIsoShort(m.expiresAt!)}'),
-                  style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle),
-                ),
-              ]),
+            final expiry = m.permanent
+                ? '永久'
+                : (m.expiresAt == null
+                      ? '临时'
+                      : '到期 ${fmtIsoShort(m.expiresAt!)}');
+            return AppRow(
+              leading: _Avatar(name: m.name, kind: m.kind),
+              title: m.name ?? m.subjectId,
+              subtitle: '${m.level.toUpperCase()} · $expiry',
+              showChevron: false,
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline, size: 18),
+                color: context.tk.danger,
                 tooltip: '撤销',
                 onPressed: () => _revoke(m),
               ),
@@ -185,6 +170,41 @@ class _InviteSheetState extends State<_InviteSheet> {
           },
         );
       },
+    );
+  }
+}
+
+/// 用户/用户组首字头像(goldSoft 底 + goldInk 字)。
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.name, required this.kind});
+
+  final String? name;
+  final String kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    final user = kind == 'user';
+    return Container(
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: user ? tk.goldSoft : tk.surface3,
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        user
+            ? ((name ?? '').isEmpty
+                  ? '?'
+                  : name!.characters.first.toUpperCase())
+            : '群',
+        style: TextStyle(
+          fontSize: Tk.fzXs,
+          fontWeight: FontWeight.w600,
+          color: user ? tk.goldInk : tk.ink2,
+        ),
+      ),
     );
   }
 }

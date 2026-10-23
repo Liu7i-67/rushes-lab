@@ -1,14 +1,19 @@
-/// FolderInviteForm — 敏感夹邀请表单(B6;自 folder_invite_sheet.dart 拆分):
-/// SubjectPicker + 等级 viewer/downloader + 有效期预设档位(web DUR_OPTIONS 实况),
-/// 多主体逐个 POST;成功回调刷新成员列表。
+/// FolderInviteForm — 敏感夹邀请表单(B6;F7):SubjectPicker + 等级
+/// viewer/downloader + 有效期预设档位(web DUR_OPTIONS 实况),多主体
+/// 逐个 POST;成功回调刷新成员列表。等级/有效期用 AppChip,吸底
+/// ghost 返回 + 金主邀请。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_chip.dart';
+import '../../widgets/buttons.dart';
 import '../../widgets/pickers/subject_picker.dart';
+import '../../widgets/toast.dart';
 
 /// 敏感夹邀请有效期预设(web FolderInvitePanel DUR_OPTIONS 实况,值=秒;
 /// 0=永久 → duration_seconds 省略)。
@@ -27,7 +32,11 @@ const kInviteLevels = <(String, String)>[
 ];
 
 class FolderInviteForm extends StatefulWidget {
-  const FolderInviteForm({super.key, required this.folder, required this.onDone});
+  const FolderInviteForm({
+    super.key,
+    required this.folder,
+    required this.onDone,
+  });
 
   final Folder folder;
   final VoidCallback onDone;
@@ -74,8 +83,11 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
     if (!mounted) return;
     setState(() => _submitting = false);
     if (ok > 0) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(SnackBar(
-          content: Text('邀请成功 $ok 个主体${fail > 0 ? ' · 失败 $fail' : ''}')));
+      toast(
+        context,
+        '邀请成功 $ok 个主体${fail > 0 ? ' · 失败 $fail' : ''}',
+        tone: ToastTone.success,
+      );
       widget.onDone();
       return;
     }
@@ -84,101 +96,102 @@ class _FolderInviteFormState extends State<FolderInviteForm> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
+    final tk = context.tk;
+    final labelStyle = TextStyle(fontSize: Tk.fzMd, color: tk.ink3);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '邀请 → ${widget.folder.name}',
+          style: TextStyle(
+            fontSize: Tk.fzRowTitle,
+            fontWeight: FontWeight.w600,
+            color: tk.ink,
+          ),
+        ),
+        const SizedBox(height: Tk.spaceMd),
+        Text('邀请主体(用户 / 用户组)', style: labelStyle),
+        SubjectPicker(
+          value: _subjects,
+          onChanged: (v) => setState(() {
+            _subjects = v;
+            _error = null;
+          }),
+          preset: mePreset(),
+        ),
+        const SizedBox(height: Tk.spaceMd),
+        Text('权限等级', style: labelStyle),
+        const SizedBox(height: Tk.spaceXs),
+        Wrap(
+          spacing: Tk.spaceSm,
+          runSpacing: Tk.spaceSm,
           children: [
-            Text('邀请 → ${widget.folder.name}',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            const Text('邀请主体(用户 / 用户组)',
-                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-            SubjectPicker(
-              value: _subjects,
-              onChanged: (v) => setState(() {
-                _subjects = v;
-                _error = null;
-              }),
-              preset: mePreset(),
-            ),
-            const SizedBox(height: 12),
-            const Text('权限等级',
-                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              children: [
-                for (final (value, label) in kInviteLevels)
-                  ChoiceChip(
-                    label: Text(label),
-                    selected: _level == value,
-                    onSelected: (_) => setState(() => _level = value),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            const Text('有效期',
-                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-            const SizedBox(height: 4),
-            Wrap(
-              spacing: 8,
-              runSpacing: 4,
-              children: [
-                for (var i = 0; i < kInviteDurationOptions.length; i++)
-                  ChoiceChip(
-                    label: Text(kInviteDurationOptions[i].$1),
-                    selected: _durationIndex == i,
-                    onSelected: (_) => setState(() => _durationIndex = i),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: Tk.accentFaint,
-                borderRadius: BorderRadius.circular(Tk.rSm),
+            for (final (value, label) in kInviteLevels)
+              AppChip(
+                label: label,
+                selected: _level == value,
+                onTap: () => setState(() => _level = value),
               ),
-              child: Text(
-                '被邀请人将能${_level == 'downloader' ? '查看 + 下载' : '查看'}'
-                '「${widget.folder.name}」内全部文件。'
-                '${kInviteDurationOptions[_durationIndex].$2 > 0 ? '到期自动失效。' : ''}',
-                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
-              ),
-            ),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(_error!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontSize: Tk.fzSm)),
-              ),
-            const SizedBox(height: 16),
-            Row(children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _submitting ? null : widget.onDone,
-                  child: const Text('返回'),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton(
-                  onPressed: _submitting ? null : _submit,
-                  child: Text(_submitting ? '邀请中…' : '邀请'),
-                ),
-              ),
-            ]),
           ],
         ),
-      ),
+        const SizedBox(height: Tk.spaceMd),
+        Text('有效期', style: labelStyle),
+        const SizedBox(height: Tk.spaceXs),
+        Wrap(
+          spacing: Tk.spaceSm,
+          runSpacing: Tk.spaceSm,
+          children: [
+            for (var i = 0; i < kInviteDurationOptions.length; i++)
+              AppChip(
+                label: kInviteDurationOptions[i].$1,
+                selected: _durationIndex == i,
+                onTap: () => setState(() => _durationIndex = i),
+              ),
+          ],
+        ),
+        const SizedBox(height: Tk.spaceMd),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: tk.goldSoft,
+            borderRadius: BorderRadius.circular(Tk.rSm),
+          ),
+          child: Text(
+            '被邀请人将能${_level == 'downloader' ? '查看 + 下载' : '查看'}'
+            '「${widget.folder.name}」内全部文件。'
+            '${kInviteDurationOptions[_durationIndex].$2 > 0 ? '到期自动失效。' : ''}',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.goldInk),
+          ),
+        ),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.only(top: Tk.spaceSm),
+            child: Text(
+              _error!,
+              style: TextStyle(fontSize: Tk.fzMd, color: tk.danger),
+            ),
+          ),
+        const SizedBox(height: Tk.spaceLg),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _submitting ? null : widget.onDone,
+                child: const Text('返回'),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: PrimaryXl(
+                onPressed: _submitting ? null : _submit,
+                label: _submitting ? '邀请中…' : '邀请',
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

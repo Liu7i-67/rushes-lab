@@ -1,9 +1,9 @@
 /// 打标/改标 bottom sheet(B5 功能点 1「⋯ 批量打标」+ 功能点 3「详情打标」):
-/// - 批量(操作栏 ⋯):merge/replace 显式选择(默认 merge=web 批量实况
-///   BulkTagModal 硬编码 merge),逐 id PATCH;user_labels ≤50 前端明示校验
-///   (后端 _normalize_labels 静默截断,web 不提示,App 增强);notes 留空=不改。
-/// - 单条(预览页元数据卡「编辑」=AssetTagEditor 移动版):**不传 labels_mode**
-///   (后端默认 replace,web 单条实况);无变化不提交;返回更新后 Asset 供回填。
+/// - 批量(操作栏 ⋯):merge/replace 显式选择(默认 merge=web 批量实况),
+///   逐 id PATCH;user_labels ≤50 前端明示校验;notes 留空=不改。
+/// - 单条(预览页元数据卡「编辑」):**不传 labels_mode**(后端默认 replace);
+///   无变化不提交;返回更新后 Asset 供回填。
+/// 视觉迁移:SheetScaffold(吸底主按钮)+ AppSegmented + 令牌输入。
 library;
 
 import 'package:flutter/material.dart';
@@ -12,11 +12,15 @@ import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_segmented.dart';
+import '../../widgets/buttons.dart';
+import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
 import 'asset_writeback.dart';
 
-/// 标签解析:逗号/、/换行分隔 → trim → 去空 → 去重(保序;web tags 输入同口径)。
+/// 标签解析:逗号/、/换行分隔 → trim → 去空 → 去重(保序;web tags 同口径)。
 List<String> parseLabels(String raw) {
   final out = <String>[];
   for (final part in raw.split(RegExp('[,，、\n]'))) {
@@ -26,53 +30,48 @@ List<String> parseLabels(String raw) {
   return out;
 }
 
-/// 上限校验(≤50):null=合法。批量空标签由「提交」禁用态表达(web 同口径),
-/// 不走此函数。
+/// 上限校验(≤50):null=合法。批量空标签由「提交」禁用态表达(web 同口径)。
 String? tagLabelsError(List<String> labels) {
   if (labels.length > 50) return '最多 50 个标签(当前 ${labels.length} 个)';
   return null;
 }
 
 bool _listEq(List<String> a, List<String> b) =>
-    a.length == b.length && List.generate(a.length, (i) => a[i] == b[i]).every((e) => e);
+    a.length == b.length &&
+    List.generate(a.length, (i) => a[i] == b[i]).every((e) => e);
 
 /// 单条编辑(预览页):返回更新后 Asset(无变化/失败 = null)。
-Future<Asset?> showTagEditSheet(BuildContext context,
-    {required Asset asset, required String folderId}) {
+Future<Asset?> showTagEditSheet(
+  BuildContext context, {
+  required Asset asset,
+  required String folderId,
+}) {
   return showModalBottomSheet<Asset>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
-    builder: (sheetCtx) => Padding(
-      padding:
-          EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
-      child: _TagEditSheet(
-        folderId: folderId,
-        batch: false,
-        initialLabels: asset.userLabels,
-        initialNotes: asset.notes ?? '',
-        assetIds: [asset.id],
-      ),
+    builder: (_) => _TagEditSheet(
+      folderId: folderId,
+      batch: false,
+      initialLabels: asset.userLabels,
+      initialNotes: asset.notes ?? '',
+      assetIds: [asset.id],
     ),
   );
 }
 
 /// 批量打标(操作栏 ⋯):返回是否有任一成功(调用方据此清选中态)。
-Future<bool> showBatchTagSheet(BuildContext context,
-    {required List<String> assetIds, required String folderId}) async {
+Future<bool> showBatchTagSheet(
+  BuildContext context, {
+  required List<String> assetIds,
+  required String folderId,
+}) async {
   final ok = await showModalBottomSheet<bool>(
     context: context,
     showDragHandle: true,
     isScrollControlled: true,
-    builder: (sheetCtx) => Padding(
-      padding:
-          EdgeInsets.only(bottom: MediaQuery.of(sheetCtx).viewInsets.bottom),
-      child: _TagEditSheet(
-        folderId: folderId,
-        batch: true,
-        assetIds: assetIds,
-      ),
-    ),
+    builder: (_) =>
+        _TagEditSheet(folderId: folderId, batch: true, assetIds: assetIds),
   );
   return ok ?? false;
 }
@@ -98,9 +97,11 @@ class _TagEditSheet extends StatefulWidget {
 
 class _TagEditSheetState extends State<_TagEditSheet> {
   late final TextEditingController _labels = TextEditingController(
-      text: widget.initialLabels.join(', '));
-  late final TextEditingController _notes =
-      TextEditingController(text: widget.initialNotes);
+    text: widget.initialLabels.join(', '),
+  );
+  late final TextEditingController _notes = TextEditingController(
+    text: widget.initialNotes,
+  );
   String _mode = 'merge'; // 批量默认 merge(web 实况)
   var _submitting = false;
 
@@ -125,9 +126,11 @@ class _TagEditSheetState extends State<_TagEditSheet> {
           Navigator.of(context).pop(); // 无变化不提交(web 实况)
           return;
         }
-        final updated = await session.api!.ops.updateMeta(widget.assetIds.first,
-            userLabels: labelsChanged ? labels : null,
-            notes: notesChanged ? notesText : null);
+        final updated = await session.api!.ops.updateMeta(
+          widget.assetIds.first,
+          userLabels: labelsChanged ? labels : null,
+          notes: notesChanged ? notesText : null,
+        );
         notifyAssetMutation(widget.folderId);
         if (!mounted) return;
         Navigator.of(context).pop(updated);
@@ -137,10 +140,12 @@ class _TagEditSheetState extends State<_TagEditSheet> {
       var fail = 0;
       for (final id in widget.assetIds) {
         try {
-          await session.api!.ops.updateMeta(id,
-              userLabels: labels,
-              notes: notesText.isEmpty ? null : notesText,
-              labelsMode: _mode);
+          await session.api!.ops.updateMeta(
+            id,
+            userLabels: labels,
+            notes: notesText.isEmpty ? null : notesText,
+            labelsMode: _mode,
+          );
           ok++;
         } catch (e) {
           fail++;
@@ -150,36 +155,41 @@ class _TagEditSheetState extends State<_TagEditSheet> {
       if (ok > 0) notifyAssetMutation(widget.folderId);
       if (!mounted) return;
       Navigator.of(context).pop(ok > 0);
-      toast(context, '已为 $ok 个文件打标${fail > 0 ? ' · 失败 $fail' : ''}',
-          tone: fail > 0 ? ToastTone.error : ToastTone.success);
+      toast(
+        context,
+        '已为 $ok 个文件打标${fail > 0 ? ' · 失败 $fail' : ''}',
+        tone: fail > 0 ? ToastTone.error : ToastTone.success,
+      );
     } catch (e) {
       if (!mounted) return;
       setState(() => _submitting = false);
-      toast(context, errorMessage(e, '标签保存失败,请稍后重试'),
-          tone: ToastTone.error);
+      toast(context, errorMessage(e, '标签保存失败,请稍后重试'), tone: ToastTone.error);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final labels = parseLabels(_labels.text);
     final err = tagLabelsError(labels);
     final batchEmpty = widget.batch && labels.isEmpty;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-        // 标签多时 chips 撑高(≤50):内容可滚,防小屏 RenderFlex overflow
-        child: SingleChildScrollView(
-          child: Column(mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(widget.batch ? '批量打标(${widget.assetIds.length} 个文件)' : '编辑标签与备注',
-              style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: Tk.spaceXs),
+    return SheetScaffold(
+      title: widget.batch ? '批量打标(${widget.assetIds.length} 个文件)' : '编辑标签与备注',
+      maxHeightFactor: 0.85,
+      bottomActions: [
+        PrimaryXl(
+          onPressed: _submitting || err != null || batchEmpty ? null : _submit,
+          label: _submitting ? '提交中…' : (widget.batch ? '打标' : '保存'),
+        ),
+      ],
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
           Text(
-              widget.batch
-                  ? '给选中文件统一打标;输入后逗号分隔,多个标签。'
-                  : '逗号分隔多个标签;备注留空保存即清空。',
-              style: Theme.of(context).textTheme.bodySmall),
+            widget.batch ? '给选中文件统一打标;输入后逗号分隔,多个标签。' : '逗号分隔多个标签;备注留空保存即清空。',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+          ),
           const SizedBox(height: Tk.spaceMd),
           TextField(
             controller: _labels,
@@ -193,40 +203,37 @@ class _TagEditSheetState extends State<_TagEditSheet> {
           ),
           if (labels.isNotEmpty) ...[
             const SizedBox(height: Tk.spaceSm),
-            Wrap(spacing: 6, runSpacing: 6, children: [
-              for (final l in labels) Chip(label: Text(l), visualDensity: VisualDensity.compact),
-            ]),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final l in labels)
+                  Chip(label: Text(l), visualDensity: VisualDensity.compact),
+              ],
+            ),
           ],
           const SizedBox(height: Tk.spaceMd),
           TextField(
             controller: _notes,
             decoration: InputDecoration(
-                labelText: '备注',
-                hintText: widget.batch ? '留空 = 不改备注' : null),
+              labelText: '备注',
+              hintText: widget.batch ? '留空 = 不改备注' : null,
+            ),
             minLines: 1,
             maxLines: 3,
           ),
           if (widget.batch) ...[
             const SizedBox(height: Tk.spaceMd),
-            SegmentedButton<String>(
+            AppSegmented<String>(
               segments: const [
-                ButtonSegment(value: 'merge', label: Text('合并已有标签')),
-                ButtonSegment(value: 'replace', label: Text('替换已有标签')),
+                Segment(value: 'merge', label: '合并已有标签'),
+                Segment(value: 'replace', label: '替换已有标签'),
               ],
-              selected: {_mode},
-              onSelectionChanged: (s) => setState(() => _mode = s.first),
+              value: _mode,
+              onChanged: (s) => setState(() => _mode = s),
             ),
           ],
-          const SizedBox(height: Tk.spaceLg),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: _submitting || err != null || batchEmpty ? null : _submit,
-              child: Text(_submitting ? '提交中…' : (widget.batch ? '打标' : '保存')),
-            ),
-          ),
-        ]),
-        ),
+        ],
       ),
     );
   }

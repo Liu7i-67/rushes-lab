@@ -1,7 +1,8 @@
-/// AssetGridTile — 宫格块(B2 §8.1):缩略图/类型色块 + 文件名 + livp 实况角标;
-/// 多选态选中打勾。视频时长角标不做——契约核对 AssetOut 无 duration 字段(2026-10-20)。
-/// app-polish:B2 长按进多选 Haptics.medium、多选态点选 Haptics.select、
-/// 选中缩放+对勾切换动效;B7 文件名/元信息按 token 收敛,元信息 subtle→muted。
+/// AssetGridTile — 宫格块(F8):1:1.06 媒体块(圆角 12)+ 文件名 12.5/ink2 +
+/// 元信息 11(ink3 由 DefaultTextStyle 继承);无缩略图/失败用 AssetPlate 打样卡
+/// (seed=宫格下标),真实缩略图仍走 ThumbnailImage。右上类型角标,左上选中勾;
+/// 选中态 160ms 缩放 + 2px 金环 + 4px 柔光。
+/// 视频时长角标不做——契约核对 AssetOut 无 duration 字段(2026-10-20)。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,8 +10,14 @@ import 'package:flutter/material.dart';
 import '../../core/fmt.dart';
 import '../../core/haptics.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/asset_plate.dart';
+import 'asset_kind_tag.dart';
 import 'thumbnail_image.dart';
+
+/// 媒体块圆角(F8 定稿 12,与 rMd 14 区分)。
+const double assetMediaRadius = 12;
 
 class AssetGridTile extends StatelessWidget {
   const AssetGridTile({
@@ -20,6 +27,7 @@ class AssetGridTile extends StatelessWidget {
     required this.selecting,
     required this.onTap,
     required this.onLongPress,
+    this.index = 0,
   });
 
   final Asset asset;
@@ -28,8 +36,18 @@ class AssetGridTile extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
+  /// 打样卡种子(宫格下标;无缩略图/失败时编号与配色来源)。
+  final int index;
+
+  static const _radius = BorderRadius.all(Radius.circular(assetMediaRadius));
+
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
+    // P2-7:reduced-motion 下选中缩放/金环/勾选切换瞬时完成。
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 160);
     return InkWell(
       // B2:多选态点选=细粒度 selection 触觉;浏览态点按进预览不扰。
       onTap: () {
@@ -45,57 +63,67 @@ class AssetGridTile extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Expanded(
-            // B2:选中缩放动效(轻微收拢示意「已抓起」)。
-            child: AnimatedScale(
-              scale: selected ? 0.94 : 1.0,
-              duration: const Duration(milliseconds: 150),
-              curve: Curves.easeOut,
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(Tk.rMd),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    ThumbnailImage(asset: asset),
-                    // livp 实况角标(.livp 扩展名 endswith 判定)
-                    if (asset.isLivp)
-                      Positioned(
-                        left: Tk.spaceSm,
-                        bottom: Tk.spaceSm,
-                        child: _pill('实况'),
-                      ),
-                    if (selected) const Positioned.fill(child: ColoredBox(color: Colors.black26)),
-                    if (selecting)
-                      Positioned(
-                        top: Tk.spaceSm,
-                        right: Tk.spaceSm,
-                        // B2:对勾切换动效(fade+scale)。
-                        child: AnimatedSwitcher(
-                          duration: const Duration(milliseconds: 150),
-                          transitionBuilder: (child, anim) => FadeTransition(
-                            opacity: anim,
-                            child: ScaleTransition(scale: anim, child: child),
+            child: Center(
+              child: AspectRatio(
+                aspectRatio: 1 / 1.06,
+                child: AnimatedContainer(
+                  duration: duration,
+                  curve: Curves.easeOut,
+                  decoration: BoxDecoration(
+                    borderRadius: _radius,
+                    // 选中:2px 金环 + 4px 金色柔光(向外扩,不挤占布局)。
+                    boxShadow: selected
+                        ? [
+                            BoxShadow(
+                              color: tk.goldBright,
+                              spreadRadius: 2,
+                              blurRadius: 0,
+                            ),
+                            BoxShadow(
+                              color: tk.gold.withValues(alpha: 0.22),
+                              spreadRadius: 4,
+                              blurRadius: 0,
+                            ),
+                          ]
+                        : null,
+                  ),
+                  child: AnimatedScale(
+                    scale: selected ? 0.96 : 1,
+                    duration: duration,
+                    curve: Curves.easeOut,
+                    child: ClipRRect(
+                      borderRadius: _radius,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          ThumbnailImage(
+                            asset: asset,
+                            fallback: AssetPlate(
+                              seed: index,
+                              borderRadius: _radius,
+                            ),
                           ),
-                          child: Icon(
-                            selected
-                                ? Icons.check_circle
-                                : Icons.radio_button_unchecked,
-                            // key 切换触发 AnimatedSwitcher
-                            key: ValueKey(selected),
-                            size: 22,
-                            color: selected ? Tk.accent : Colors.white,
-                            shadows: const [
-                              Shadow(blurRadius: 4, color: Colors.black38)
-                            ],
+                          Positioned(
+                            top: 6,
+                            right: 6,
+                            child: AssetKindTag(asset: asset),
                           ),
-                        ),
+                          if (selecting)
+                            Positioned(
+                              left: 7,
+                              top: 7,
+                              child: _SelectCheck(selected: selected),
+                            ),
+                        ],
                       ),
-                  ],
+                    ),
+                  ),
                 ),
               ),
             ),
           ),
           Padding(
-            padding: const EdgeInsets.only(top: Tk.spaceXs, left: 2, right: 2),
+            padding: const EdgeInsets.only(top: 6, left: 2, right: 2),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -103,15 +131,23 @@ class AssetGridTile extends StatelessWidget {
                   asset.filename,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: Tk.fzSm),
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    height: 1.35,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: -0.1,
+                    color: tk.ink2,
+                  ),
                 ),
-                // B7:元信息 10px→fzXs(11 下限)、subtle→muted 提对比;仍小于
-                // 文件名(fzSm)层级不倒置。
-                Text(
-                  '${fmtBytes(asset.sizeBytes)} · ${fmtDate(asset.createdAt)}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
+                // 颜色由 DefaultTextStyle 继承 ink3(字号在 Text 上显式声明)。
+                DefaultTextStyle(
+                  style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+                  child: Text(
+                    '${fmtBytes(asset.sizeBytes)} · ${fmtDate(asset.createdAt)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: Tk.fzXs),
+                  ),
                 ),
               ],
             ),
@@ -120,17 +156,46 @@ class AssetGridTile extends StatelessWidget {
       ),
     );
   }
+}
 
-  Widget _pill(String label) => Container(
-        padding: const EdgeInsets.symmetric(
-            horizontal: Tk.spaceSm, vertical: 2), // 2=胶囊上下微缝(<4 保留)
-        decoration: const BoxDecoration(
-          color: Colors.black54,
-          borderRadius: BorderRadius.all(Radius.circular(Tk.rPill)),
+/// 左上选中圆勾:22 直径,选中金底深墨勾;未选中多选态白描边半透明底。
+class _SelectCheck extends StatelessWidget {
+  const _SelectCheck({required this.selected});
+
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    // P2-7:reduced-motion 下勾底/勾形切换瞬时完成。
+    final duration = MediaQuery.disableAnimationsOf(context)
+        ? Duration.zero
+        : const Duration(milliseconds: 160);
+    return AnimatedContainer(
+      duration: duration,
+      width: 22,
+      height: 22,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: selected ? tk.goldBright : const Color(0x4712110C),
+        border: Border.all(
+          color: selected
+              ? tk.goldBright
+              : Colors.white.withValues(alpha: 0.85),
+          width: 1.5,
         ),
-        child: Text(
-          label,
-          style: const TextStyle(color: Colors.white, fontSize: Tk.fzXs),
-        ),
-      );
+      ),
+      child: AnimatedSwitcher(
+        duration: duration,
+        child: selected
+            ? const Icon(
+                Icons.check,
+                key: ValueKey(true),
+                size: 14,
+                color: Color(0xFF231C0C),
+              )
+            : const SizedBox.shrink(key: ValueKey(false)),
+      ),
+    );
+  }
 }

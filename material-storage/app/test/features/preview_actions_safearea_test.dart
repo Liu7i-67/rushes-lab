@@ -20,28 +20,29 @@ Future<void> pumpActions(
   WidgetTester tester, {
   required double bottomPadding,
 }) async {
-  await tester.pumpWidget(MaterialApp(
-    home: MediaQuery(
-      data: MediaQueryData(padding: EdgeInsets.only(bottom: bottomPadding)),
-      child: Scaffold(
-        body: Align(
-          alignment: Alignment.bottomCenter,
-          child: PreviewActions(
-            canDownload: true,
-            onDownload: () {},
-            onShare: () {},
-            onRequest: () {},
+  await tester.pumpWidget(
+    MaterialApp(
+      home: MediaQuery(
+        data: MediaQueryData(padding: EdgeInsets.only(bottom: bottomPadding)),
+        child: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: PreviewActions(
+              canDownload: true,
+              onDownload: () {},
+              onShare: () {},
+              onRequest: () {},
+            ),
           ),
         ),
       ),
     ),
-  ));
+  );
   await tester.pump();
 }
 
 void main() {
-  testWidgets('有虚拟导航栏(bottom padding 40):SafeArea 结构存在,三钮不被遮挡',
-      (tester) async {
+  testWidgets('有虚拟导航栏(bottom padding 40):SafeArea 结构存在,三钮不被遮挡', (tester) async {
     await pumpActions(tester, bottomPadding: _navBarHeight);
 
     // 结构:SafeArea(top:false) 在 PreviewActions 子树内
@@ -64,24 +65,30 @@ void main() {
       );
     }
 
-    // 视觉:操作栏底色 darkSurface(背景延伸进导航栏区域不露底色)
+    // 视觉:操作栏底色 previewSurface(背景延伸进导航栏区域不露底色)
     expect(
-      find.byWidgetPredicate((w) => w is Container && w.color == Tk.darkSurface),
+      find.byWidgetPredicate(
+        (w) => w is Container && w.color == Tk.previewSurface,
+      ),
       findsWidgets,
     );
   });
 
   testWidgets('无虚拟导航栏(padding=0):三钮齐全可点,点按照常(回归)', (tester) async {
     var downloads = 0;
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Align(
-          alignment: Alignment.bottomCenter,
-          child:
-              PreviewActions(canDownload: true, onDownload: () => downloads++),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Align(
+            alignment: Alignment.bottomCenter,
+            child: PreviewActions(
+              canDownload: true,
+              onDownload: () => downloads++,
+            ),
+          ),
         ),
       ),
-    ));
+    );
     await tester.pump();
 
     expect(find.text('下载'), findsOneWidget);

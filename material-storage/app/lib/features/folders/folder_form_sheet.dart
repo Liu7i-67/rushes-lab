@@ -1,8 +1,7 @@
 /// FolderFormSheet — 新建子夹 / 项目根新建 / 重命名 三态表单(B6 §8.4):
 /// 子夹仅名称(敏感夹只能直挂项目一级,后端 400);项目根新建带敏感开关;
 /// 重命名预填现名。成功 invalidate folders scope;4xx detail 透传。
-/// app-polish D1:骨架迁移 SheetScaffold(标题/滚动区/errorText 位/PrimaryXl
-/// 吸底,键盘避让由骨架统一);错误 errorMessage 兜底(E14)。
+/// F7:AppTextField + 令牌化开关;SheetScaffold 吸底金主按钮。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,8 +10,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/buttons.dart';
+import '../../widgets/form_text_field.dart';
 import '../../widgets/sheet_scaffold.dart';
 
 enum FolderFormMode { createChild, createRoot, rename }
@@ -44,8 +45,7 @@ Future<bool> showFolderFormSheet(
 /// code 前端 pattern 同后端(ProjectCreateIn;新建项目表单共用)。
 final RegExp kProjectCodePattern = RegExp(r'^[a-z0-9][a-z0-9-]*$');
 
-/// 文件夹名前端校验(后端 422 同口径:非空、拒首尾空白;段名字符集交后端
-/// check_segment_name 透传)。
+/// 文件夹名前端校验(后端 422 同口径:非空、拒首尾空白)。
 String? folderNameError(String? v) {
   final name = v?.trim() ?? '';
   if (name.isEmpty) return '请输入名称';
@@ -74,7 +74,8 @@ class _FolderFormSheet extends StatefulWidget {
 
 class _FolderFormSheetState extends State<_FolderFormSheet> {
   late final TextEditingController _name = TextEditingController(
-      text: widget.mode == FolderFormMode.rename ? widget.folder!.name : '');
+    text: widget.mode == FolderFormMode.rename ? widget.folder!.name : '',
+  );
   bool _sensitive = false;
   var _submitting = false;
   String? _error;
@@ -115,8 +116,10 @@ class _FolderFormSheetState extends State<_FolderFormSheet> {
             isSensitive: _sensitive,
           );
         case FolderFormMode.rename:
-          await session.api!.foldersOps
-              .rename(widget.folder!.id, name: _name.text.trim());
+          await session.api!.foldersOps.rename(
+            widget.folder!.id,
+            name: _name.text.trim(),
+          );
       }
       RefreshBus.I.invalidate('folders');
       if (!mounted) return;
@@ -138,11 +141,12 @@ class _FolderFormSheetState extends State<_FolderFormSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final target = widget.mode == FolderFormMode.rename
         ? '「${widget.folder!.name}」'
         : widget.parentLabel == null
-            ? ''
-            : '「${widget.parentLabel}」下';
+        ? ''
+        : '「${widget.parentLabel}」下';
     return SheetScaffold(
       title: '$_title$target',
       errorText: _error,
@@ -156,25 +160,27 @@ class _FolderFormSheetState extends State<_FolderFormSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
+          AppTextField(
             controller: _name,
-            autofocus: true,
-            decoration: const InputDecoration(
-              labelText: '名称',
-              border: OutlineInputBorder(),
-            ),
-            onSubmitted: (_) => _submit(),
+            label: '名称',
+            textInputAction: TextInputAction.done,
+            onChanged: (_) {
+              if (_error != null) setState(() => _error = null);
+            },
           ),
-          // 敏感开关仅项目根新建出现(子夹恒普通:后端 400「sensitive folder
-          // 只能直挂 project 一级」;重命名不改敏感性)
+          // 敏感开关仅项目根新建出现(子夹恒普通:后端 400;重命名不改敏感性)
           if (widget.mode == FolderFormMode.createRoot) ...[
             const SizedBox(height: Tk.spaceXs),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('敏感文件夹',
-                  style: TextStyle(fontSize: Tk.fzBody)),
-              subtitle: const Text('仅被邀请的成员可见;不可再建子夹、不可移动',
-                  style: TextStyle(fontSize: Tk.fzSm)),
+              title: Text(
+                '敏感文件夹',
+                style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+              ),
+              subtitle: Text(
+                '仅被邀请的成员可见;不可再建子夹、不可移动',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+              ),
               value: _sensitive,
               onChanged: (v) => setState(() => _sensitive = v),
             ),

@@ -1,7 +1,6 @@
 /// BaiduPage — 网盘备份用户侧完整页(B9 §8.10,web BaiduBackupDrawer 移动版):
-/// 绑定状态卡(已绑定/已过期/未绑定 + 账号·授权期 + 绑定/重绑/切换账号 +
-/// 解绑确认 + 新建备份任务闸门)+ 任务列表(仅本人,服务端分页「加载更多」;
-/// 行=状态徽标/进度/字节/ETA/失败原因 + 取消/全部重试失败/删除/查看)。
+/// 页首(返回 + 绑定账号入口)+ 绑定状态卡 + 任务列表(SectionLabel 计数,
+/// 每任务独立 AppCard;服务端分页「加载更多」)+ 解绑/行操作确认。
 /// 状态文案与频控、key 冲突语义透传后端 detail(baidu_task_labels 中文映射)。
 library;
 
@@ -13,9 +12,11 @@ import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
-import '../../widgets/empty_state.dart';
 import '../../widgets/app_confirm.dart';
+import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
+import '../../widgets/section_label.dart';
 import '../../widgets/toast.dart';
 import 'baidu_binding_card.dart';
 import 'baidu_task_card.dart';
@@ -94,8 +95,7 @@ class _BaiduPageState extends State<BaiduPage> {
     } catch (e) {
       // E12:静默失败改可见 toast;点「加载更多」即可重试
       if (mounted) {
-        toast(context, errorMessage(e, '加载更多失败,请重试'),
-            tone: ToastTone.error);
+        toast(context, errorMessage(e, '加载更多失败,请重试'), tone: ToastTone.error);
       }
     }
   }
@@ -153,9 +153,7 @@ class _BaiduPageState extends State<BaiduPage> {
         case 'cancel':
           final r = await _api.cancelTask(t.id);
           if (!mounted) return;
-          toast(context, r.finalized
-              ? '任务已取消'
-              : '取消请求已提交,任务将在最近检查点停止');
+          toast(context, r.finalized ? '任务已取消' : '取消请求已提交,任务将在最近检查点停止');
         case 'retry-failed':
           await _api.retryFailed(t.id);
           if (!mounted) return;
@@ -178,62 +176,96 @@ class _BaiduPageState extends State<BaiduPage> {
     await _reload();
   }
 
+  Future<void> _openBind() async {
+    await Navigator.of(context).pushNamed('/baidu-bind');
+    await _reload();
+  }
+
+  Future<void> _openNewTask() async {
+    final created = await Navigator.of(context).pushNamed('/baidu-new-task');
+    if (created == true) await _reload();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('网盘备份')),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-              ? ErrorView(message: _error!, onRetry: _reload)
-              : RefreshIndicator(
-                  onRefresh: _reload,
-                  child: ListView(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-                    children: [
-                      _bindingCard(),
-                      const SizedBox(height: Tk.spaceMd),
-                      if (_tasks.isEmpty)
-                        // E12:空态统一 EmptyState(原裸文本居中)
-                        const Padding(
-                          padding: EdgeInsets.symmetric(vertical: 48),
-                          child: EmptyState(
-                            icon: Icons.cloud_upload_outlined,
-                            message: '暂无备份任务 · 绑定账号后点「新建备份任务」开始',
-                          ),
-                        )
-                      else
-                        for (final t in _tasks)
-                          BaiduTaskCard(
-                            task: t,
-                            busy: _busy,
-                            onAction: (a) => _rowAction(t, a),
-                          ),
-                      if (_tasks.length < _total)
-                        Padding(
-                          padding: const EdgeInsets.only(top: Tk.spaceSm),
-                          child: OutlinedButton(
-                              onPressed: _loadMore,
-                              child: const Text('加载更多')),
-                        ),
-                    ],
-                  ),
-                ),
+      body: Column(
+        children: [
+          PageHeader(
+            back: true,
+            title: '网盘备份',
+            subtitle: '素材异地留档，按任务增量同步',
+            actions: [
+              IconButton(
+                tooltip: '绑定账号',
+                icon: const Icon(Icons.link, size: 22),
+                onPressed: _openBind,
+              ),
+            ],
+          ),
+          Expanded(child: _body()),
+        ],
+      ),
+    );
+  }
+
+  Widget _body() {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_error != null) {
+      return ErrorView(message: _error!, onRetry: _reload);
+    }
+    return RefreshIndicator(
+      onRefresh: _reload,
+      child: ListView(
+        padding: const EdgeInsets.fromLTRB(
+          Tk.spacePage,
+          Tk.spaceLg,
+          Tk.spacePage,
+          Tk.spaceXl,
+        ),
+        children: [
+          _bindingCard(),
+          const SizedBox(height: Tk.spaceXl),
+          SectionLabel(title: '备份任务', hint: '$_total 个'),
+          if (_tasks.isEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 40),
+              child: EmptyState(
+                icon: Icons.cloud_upload_outlined,
+                message: '暂无备份任务',
+                description: _binding?.bound == true
+                    ? '点「新建备份任务」选择网盘目录开始备份'
+                    : '绑定账号后点「新建备份任务」开始',
+              ),
+            )
+          else
+            for (final t in _tasks)
+              BaiduTaskCard(
+                task: t,
+                busy: _busy,
+                onAction: (a) => _rowAction(t, a),
+              ),
+          if (_tasks.length < _total)
+            Padding(
+              padding: const EdgeInsets.only(top: Tk.spaceSm),
+              child: OutlinedButton(
+                onPressed: _loadMore,
+                child: const Text('加载更多'),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
   Widget _bindingCard() => BaiduBindingCard(
-        binding: _binding,
-        loaded: _bindingLoaded,
-        busy: _busy,
-        onBind: () async {
-          await Navigator.of(context).pushNamed('/baidu-bind');
-          await _reload();
-        },
-        onNewTask: () async {
-          final created = await Navigator.of(context).pushNamed('/baidu-new-task');
-          if (created == true) await _reload();
-        },
-        onUnbind: _unbind,
-      );
+    binding: _binding,
+    loaded: _bindingLoaded,
+    busy: _busy,
+    onBind: _openBind,
+    onNewTask: _openNewTask,
+    onUnbind: _unbind,
+  );
 }

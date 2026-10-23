@@ -14,24 +14,27 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/features/assets/upload_pick.dart';
 
 void main() {
-  Future<void> pumpTrigger(WidgetTester tester,
-      Future<void> Function(BuildContext ctx) onTap) async {
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => onTap(ctx),
-              child: const Text('go'),
+  Future<void> pumpTrigger(
+    WidgetTester tester,
+    Future<void> Function(BuildContext ctx) onTap,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => onTap(ctx),
+                child: const Text('go'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
   }
 
-  testWidgets('D6:有跳过 → toast 带「查看」,点开显示跳过清单(文件名+原因+目标夹名)',
-      (tester) async {
+  testWidgets('D6:有跳过 → toast 带「查看」,点开显示跳过清单(文件名+原因+目标夹名)', (tester) async {
     await pumpTrigger(tester, (ctx) {
       return enqueueNamedBatchAndReport(
         ctx,
@@ -46,20 +49,29 @@ void main() {
     });
     await tester.tap(find.text('go'));
     await tester.pump();
-    expect(find.text('已入队 2 个,跳过 1 个'), findsOneWidget,
-        reason: 'D6:汇总口径与原 batchSummary 一致(入队数/跳过数不变)');
+    expect(
+      find.text('已入队 2 个,跳过 1 个'),
+      findsOneWidget,
+      reason: 'D6:汇总口径与原 batchSummary 一致(入队数/跳过数不变)',
+    );
     // 等 SnackBar 滑入动画落定再点 action(3s 自动收起前,400ms 足够)
     await tester.pump(const Duration(milliseconds: 400));
 
     // toast「查看」action → 跳过清单 sheet
     await tester.tap(find.text('查看'));
     await tester.pumpAndSettle();
-    expect(find.text('跳过的文件 · 档案夹'), findsOneWidget,
-        reason: 'D6:清单标题带目标文件夹名(where 末段)');
+    expect(
+      find.text('跳过的文件 · 档案夹'),
+      findsOneWidget,
+      reason: 'D6:清单标题带目标文件夹名(where 末段)',
+    );
     expect(find.text('坏图.png'), findsOneWidget, reason: 'D6:清单显示文件名');
     // StateError 非 ApiException → errorMessage 落中文兜底,不直出异常原文
-    expect(find.text('无法读取该文件,已跳过'), findsOneWidget,
-        reason: 'D6:原因经 errorMessage 中文兜底');
+    expect(
+      find.text('无法读取该文件,已跳过'),
+      findsOneWidget,
+      reason: 'D6:原因经 errorMessage 中文兜底',
+    );
     // 收尾:排空 toast/sheet 计时器
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();

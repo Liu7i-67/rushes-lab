@@ -6,13 +6,11 @@
 /// dense 会把竖向 contentPadding 压到最小,浮起 label 的上半截被
 /// InputDecorator 裁掉(真机 0.1.2+6「MinIO bucket(必填)」只显示下半截)。
 /// 故此处显式 `isDense: false`(不用 isCollapsed),contentPadding 统一
-/// 12/12(Tk.spaceMd);后续新增表单字段一律复用本组件,不再各自手写
-/// decoration,避免再犯。
+/// 12/12;border/填充/聚焦金边/错误色全部由主题 InputDecorationTheme 给,
+/// 后续新增表单字段一律复用本组件,不再各自手写 decoration。
 library;
 
 import 'package:flutter/material.dart';
-
-import '../theme/tokens.dart';
 
 /// 表单文本字段(label 浮起;controller 与 initialValue 二选一)。
 class AppTextField extends StatelessWidget {
@@ -33,9 +31,9 @@ class AppTextField extends StatelessWidget {
     this.errorText,
     this.counterText,
   }) : assert(
-          controller == null || initialValue == null,
-          'controller 与 initialValue 二选一,不可同时提供',
-        );
+         controller == null || initialValue == null,
+         'controller 与 initialValue 二选一,不可同时提供',
+       );
 
   final TextEditingController? controller;
   final String? initialValue;
@@ -74,11 +72,14 @@ class AppTextField extends StatelessWidget {
         hintText: hint,
         errorText: errorText,
         counterText: counterText,
+        // border 交给主题(OutlineInputBorder + rSm + controlBorder)
         border: const OutlineInputBorder(),
-        // 显式 isDense: false(D6,见文件头;F 包测试断言依据),不设 isCollapsed
+        // 显式 isDense: false(D6,见文件头;测试断言依据),不设 isCollapsed
         isDense: false,
         contentPadding: const EdgeInsets.symmetric(
-            horizontal: Tk.spaceMd, vertical: Tk.spaceMd),
+          horizontal: 12,
+          vertical: 12,
+        ),
       ),
     );
   }

@@ -1,18 +1,17 @@
 /// FolderTemplateField — 新建项目目录模板选择(B6;自 new_project_sheet.dart
-/// 拆分):拉 GET /admin/folder-templates(失败静默降级为「不使用模板」),
-/// 选中提交 folder_template_id,选中后展示路径预览(目录树由后端创建流程建立)。
-/// app-polish-2 I2(#6):下拉改「只读字段+弹层选择器」(PickerField +
-/// showPickerSheet,可搜索);「不使用模板(默认)」null 项经 PickerOption 包装
-/// 保留语义——选中 null 项=回退到不使用,取消弹层=维持现状,两者可区分;
-/// 传入 value 不在已加载列表时按未选渲染(无下拉 value 命中断言问题,语义不变)。
+/// 拆分;2026-10 墨金重做):拉 GET /admin/folder-templates(失败静默降级为
+/// 仅「空目录」),选中提交 folder_template_id;选中后展示路径预览(目录树由
+/// 后端创建流程建立)。形态=AppChip 横轨单选:「空目录」=不使用模板(null),
+/// 模板项=预填并预览;再次点「空目录」可回退。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
-import '../../widgets/pickers/picker_sheet.dart';
+import '../../widgets/app_chip.dart';
 
 class FolderTemplateField extends StatefulWidget {
   const FolderTemplateField({
@@ -40,35 +39,12 @@ class _FolderTemplateFieldState extends State<FolderTemplateField> {
     }
   }
 
-  /// 模板展示文案(字段关闭态与弹层行共用;含「不使用模板(默认)」null 项)。
-  static String _label(FolderTemplate? t) => t == null
-      ? '不使用模板(默认)'
-      : '${t.name}(${t.entryCount} 个目录)';
-
-  /// 弹层选择(I2):null 项经 PickerOption 包装——选中它返回非 null option
-  /// (value=null → 回退),取消返回 null(维持现状),语义与原下拉完全一致。
-  Future<void> _pick(BuildContext context, List<FolderTemplate> templates) async {
-    FolderTemplate? selected;
-    for (final t in templates) {
-      if (t.id == widget.value) selected = t;
-    }
-    final picked = await showPickerSheet<PickerOption<FolderTemplate>>(
-      context: context,
-      title: '目录模板',
-      items: [
-        const PickerOption<FolderTemplate>(null),
-        for (final t in templates) PickerOption<FolderTemplate>(t),
-      ],
-      initial: PickerOption<FolderTemplate>(selected),
-      labelOf: (o) => _label(o.value),
-      searchTextHint: '搜索模板…',
-    );
-    if (picked == null || !mounted) return; // 取消 = 维持现状
-    widget.onChanged(picked.value?.id);
-  }
+  /// 模板展示文案(选中态与 chip 共用)。
+  static String _label(FolderTemplate t) => '${t.name}(${t.entryCount} 个目录)';
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return FutureBuilder<List<FolderTemplate>>(
       future: _templates,
       builder: (context, snap) {
@@ -80,28 +56,50 @@ class _FolderTemplateFieldState extends State<FolderTemplateField> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            PickerField(
-              value: selected == null ? null : _label(selected),
-              hint: '不使用模板(默认)',
-              onTap: () => _pick(context, templates),
+            // 横轨单选:空目录 + 全部模板(chip 44 高,小屏横向滚动)
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  AppChip(
+                    label: '空目录',
+                    selected: selected == null,
+                    onTap: () => widget.onChanged(null),
+                  ),
+                  for (final t in templates) ...[
+                    const SizedBox(width: Tk.spaceSm),
+                    AppChip(
+                      label: _label(t),
+                      selected: selected?.id == t.id,
+                      onTap: () => widget.onChanged(t.id),
+                    ),
+                  ],
+                ],
+              ),
             ),
-            if (selected != null)
+            if (selected != null) ...[
               Container(
-                margin: const EdgeInsets.only(top: Tk.spaceSm - 2),
-                padding: const EdgeInsets.all(10),
+                margin: const EdgeInsets.only(top: Tk.spaceSm),
+                padding: const EdgeInsets.all(Tk.spaceMd),
                 constraints: const BoxConstraints(maxHeight: 140),
                 width: double.infinity,
                 decoration: BoxDecoration(
-                  color: Tk.surface2,
+                  color: tk.surface2,
+                  border: Border.all(color: tk.line),
                   borderRadius: BorderRadius.circular(Tk.rSm),
                 ),
                 child: SingleChildScrollView(
                   child: Text(
                     '目录树预览:${selected.entries.map((e) => e.path).join('\n')}',
-                    style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted),
+                    style: TextStyle(
+                      fontSize: Tk.fzXs,
+                      height: 1.55,
+                      color: tk.ink3,
+                    ),
                   ),
                 ),
               ),
+            ],
           ],
         );
       },

@@ -13,8 +13,11 @@ import 'package:ms_app/models/models.dart';
 import '../helpers/api_harness.dart';
 
 Asset _asset(String name) => Asset(
-    id: 'id-$name', filename: name, sizeBytes: 1,
-    createdAt: '2026-10-20T10:00:00Z');
+  id: 'id-$name',
+  filename: name,
+  sizeBytes: 1,
+  createdAt: '2026-10-20T10:00:00Z',
+);
 
 void main() {
   test('prefixErrorOf:web BatchPrefixModal 实况三则', () {
@@ -26,8 +29,11 @@ void main() {
   });
 
   test('previewRename:加/去预览与跳过口径(web 同)', () {
-    expect(previewRename('a.jpg', 'p-', 'add'),
-        (before: 'a.jpg', after: 'p-a.jpg', skip: null));
+    expect(previewRename('a.jpg', 'p-', 'add'), (
+      before: 'a.jpg',
+      after: 'p-a.jpg',
+      skip: null,
+    ));
     expect(previewRename('p-a.jpg', 'p-', 'add').skip, '已带该前缀');
     expect(previewRename('p-a.jpg', 'p-', 'remove').after, 'a.jpg');
     expect(previewRename('a.jpg', 'p-', 'remove').skip, '前缀不匹配');
@@ -39,22 +45,26 @@ void main() {
     required List<Asset> assets,
     required List<String> selectedIds,
   }) async {
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showBatchPrefixSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showBatchPrefixSheet(
+                  ctx,
                   assets: assets,
                   selectedIds: selectedIds,
                   folderId: 'f1',
-                  onSettle: (_) {}),
-              child: const Text('open'),
+                  onSettle: (_) {},
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
   }
@@ -62,8 +72,11 @@ void main() {
   testWidgets('非法前缀(空/含 /)禁提交不发请求', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await pumpOpener(tester,
-        assets: [_asset('a.jpg')], selectedIds: ['id-a.jpg']);
+    await pumpOpener(
+      tester,
+      assets: [_asset('a.jpg')],
+      selectedIds: ['id-a.jpg'],
+    );
     // 空文本:禁用
     await tester.tap(find.text('执行改名'), warnIfMissed: false);
     await tester.pump();
@@ -77,8 +90,7 @@ void main() {
     expect(api.ops.prefixCalls, isEmpty);
   });
 
-  testWidgets('加前缀:入参 action=add + prefix(trim 后);成功失效两 scope',
-      (tester) async {
+  testWidgets('加前缀:入参 action=add + prefix(trim 后);成功失效两 scope', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
     var assets = 0;
@@ -92,8 +104,11 @@ void main() {
       RefreshBus.I.removeListener('folders', onFolders);
     });
 
-    await pumpOpener(tester,
-        assets: [_asset('a.jpg')], selectedIds: ['id-a.jpg']);
+    await pumpOpener(
+      tester,
+      assets: [_asset('a.jpg')],
+      selectedIds: ['id-a.jpg'],
+    );
     await tester.enterText(find.byType(TextField), '  2026-09- ');
     await tester.pump();
     // 预览行(近似口径)
@@ -108,17 +123,21 @@ void main() {
     expect(folders, greaterThan(0));
   });
 
-  testWidgets('去前缀:入参 action=remove;skipped_reasons 中文汇总 toast',
-      (tester) async {
+  testWidgets('去前缀:入参 action=remove;skipped_reasons 中文汇总 toast', (
+    tester,
+  ) async {
     final api = installFakeApi();
-    api.ops.prefixStaged =
-        AssetBatchPrefixResult(renamed: 1, skipped: 2, skippedReasons: {
-      'no_match': 1,
-      'already_prefixed': 1,
-    });
+    api.ops.prefixStaged = AssetBatchPrefixResult(
+      renamed: 1,
+      skipped: 2,
+      skippedReasons: {'no_match': 1, 'already_prefixed': 1},
+    );
     addTearDown(() => session.api = null);
-    await pumpOpener(tester,
-        assets: [_asset('p-a.jpg')], selectedIds: ['id-p-a.jpg']);
+    await pumpOpener(
+      tester,
+      assets: [_asset('p-a.jpg')],
+      selectedIds: ['id-p-a.jpg'],
+    );
     await tester.tap(find.text('去前缀'));
     await tester.pump();
     await tester.enterText(find.byType(TextField), 'p-');

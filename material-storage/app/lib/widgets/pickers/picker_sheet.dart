@@ -13,6 +13,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../search_field.dart';
 import '../sheet_scaffold.dart';
@@ -91,11 +92,14 @@ class _PickerSheetBodyState<T> extends State<_PickerSheetBody<T>> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final filtered = _filtered;
     // 列表自封顶内滚(搜索框恒在顶):高度余量交给 SheetScaffold 的 maxHeight
     // 收口,不与外层滚动区叠加;小屏降到底线 160,大屏封顶 420
-    final listMax =
-        (MediaQuery.sizeOf(context).height * 0.45).clamp(160.0, 420.0);
+    final listMax = (MediaQuery.sizeOf(context).height * 0.45).clamp(
+      160.0,
+      420.0,
+    );
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -110,16 +114,17 @@ class _PickerSheetBodyState<T> extends State<_PickerSheetBody<T>> {
         Container(
           constraints: BoxConstraints(maxHeight: listMax),
           decoration: BoxDecoration(
-            border: Border.all(color: Theme.of(context).dividerColor),
+            border: Border.all(color: tk.line),
             borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: filtered.isEmpty
               ? Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(Tk.spaceMd),
                   child: Center(
-                    child: Text('无匹配',
-                        style:
-                            const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
+                    child: Text(
+                      '无匹配',
+                      style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                    ),
                   ),
                 )
               : ListView.builder(
@@ -130,19 +135,23 @@ class _PickerSheetBodyState<T> extends State<_PickerSheetBody<T>> {
                     final selected = item == widget.initial;
                     return ListTile(
                       dense: true,
+                      selected: selected,
+                      selectedTileColor: tk.goldSoft,
                       title: Text(
                         widget.labelOf(item),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: Tk.fzMd,
-                          // 当前项高亮 accent + 对勾(I1)
-                          color: selected ? Tk.accent : null,
-                          fontWeight: selected ? FontWeight.w600 : null,
+                          fontSize: Tk.fzRowTitle,
+                          // 当前项高亮(金浅底 + 金字)+ 对勾(I1)
+                          color: selected ? tk.goldInk : tk.ink,
+                          fontWeight: selected
+                              ? FontWeight.w600
+                              : FontWeight.w500,
                         ),
                       ),
                       trailing: selected
-                          ? const Icon(Icons.check, size: 18, color: Tk.accent)
+                          ? Icon(Icons.check, size: 18, color: tk.gold)
                           : null,
                       // 点选即返回(I1:确认即选即关)
                       onTap: () => Navigator.of(context).pop(item),
@@ -207,20 +216,23 @@ class _PickerFieldState extends State<PickerField> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return TextField(
       controller: _controller,
       readOnly: true,
       onTap: widget.onTap,
-      style: const TextStyle(fontSize: Tk.fzBody, color: Tk.fg),
+      style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
       decoration: InputDecoration(
         // app-polish-3 D6:isDense 在 filled+outline 组合下压缩竖向内边距,
         // 浮起 label 上半截被 InputDecorator 裁掉 → 去 isDense,显式内边距
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: Tk.spaceMd, vertical: Tk.spaceMd),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: Tk.spaceMd,
+          vertical: Tk.spaceMd,
+        ),
         labelText: widget.label,
         hintText: widget.hint,
         border: const OutlineInputBorder(),
-        suffixIcon: const Icon(Icons.expand_more, size: 20),
+        suffixIcon: Icon(Icons.expand_more, size: 20, color: tk.ink3),
       ),
     );
   }

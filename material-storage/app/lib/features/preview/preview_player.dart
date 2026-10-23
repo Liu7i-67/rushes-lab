@@ -119,7 +119,8 @@ class _MediaVideoPlayerState extends State<MediaVideoPlayer> {
     if (!_ready || c == null) {
       // 起播中转圈;失败态父级已切换呈现,这里兜底同款转圈
       return const Center(
-          child: CircularProgressIndicator(color: Colors.white70));
+        child: CircularProgressIndicator(color: Tk.previewFg2),
+      );
     }
     final v = c.value;
     return AspectRatio(
@@ -145,7 +146,7 @@ class _MediaVideoPlayerState extends State<MediaVideoPlayer> {
             VideoProgressIndicator(
               c,
               allowScrubbing: true, // P2-1:进度条可拖动
-              colors: const VideoProgressColors(playedColor: Tk.accent),
+              colors: const VideoProgressColors(playedColor: Tk.previewGold),
             ),
             // P2-1:进度/时长角标(悬于进度条上方右侧)
             Positioned(
@@ -154,9 +155,10 @@ class _MediaVideoPlayerState extends State<MediaVideoPlayer> {
               child: Text(
                 '${videoClock(v.position)} / ${videoClock(v.duration)}',
                 style: const TextStyle(
-                    color: Colors.white70,
-                    fontSize: Tk.fzXs,
-                    fontFeatures: [FontFeature.tabularFigures()]),
+                  color: Tk.previewFg2,
+                  fontSize: Tk.fzXs,
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
               ),
             ),
           ],

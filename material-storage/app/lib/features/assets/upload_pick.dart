@@ -1,71 +1,52 @@
-/// 上传选择器与面板(从 upload_sheet.dart 拆出,B3 遗留 348 行拆分件):
+/// 上传选择器与入队(从 upload_sheet.dart 拆出,B3 遗留 348 行拆分件):
 /// 统一上传面板两入口(相册多选/文件多选)+ 逐项打包入队 + 汇总 toast
 /// (app-polish D6:汇总走 [enqueueNamedBatchAndReport]——带名收集跳过明细,
-/// toast 带「查看」打开跳过清单)。
-/// 入队与纯函数主体仍在 upload_sheet.dart(enqueueLocalUpload/enqueueBatch)。
+/// toast 带「查看」打开跳过清单)。来源面板与授权引导 UI 见
+/// upload_source_sheet.dart(§5.6 行数约束);入队与纯函数主体仍在
+/// upload_sheet.dart(enqueueLocalUpload/enqueueBatch)。
 library;
 
 import 'dart:async' show Completer, Timer;
-import 'dart:io' show Platform;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:wechat_assets_picker/wechat_assets_picker.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
 import '../../services/album.dart';
 import '../../services/app_log.dart';
 import '../../services/livp.dart';
-import '../../theme/tokens.dart';
-import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
 import 'upload_sheet.dart';
+import 'upload_source_sheet.dart';
 
-/// P2:相册权限被拒引导对话框的用户动作。
-enum AlbumPermissionAction { openSettings, retry }
+// 授权引导对话框/「去设置」URI 已随 UI 拆到 upload_source_sheet.dart;
+// 此处转出,既有 `import 'upload_pick.dart'` 的调用方(含用例)零改动。
+export 'upload_source_sheet.dart'
+    show
+        AlbumPermissionAction,
+        androidAppDetailsSettingsUri,
+        kAndroidAppPackage,
+        openAlbumPermissionSettings,
+        showAlbumPermissionDialog;
 
 /// B8:相册单次选择上限(与 wechat_assets_picker maxAssets 同源,勿再散写)。
 const kAlbumPickLimit = 99;
 
 /// 打开统一上传面板(宫格页两入口共用;app-polish B8:标题「上传到 <文件夹>」)。
+/// 面板 UI 在 upload_source_sheet.dart;此处注入两路选择器回调,保持既有
+/// `showUploadSheet(context, folderId:, where:)` 签名不变。
 Future<void> showUploadSheet(
   BuildContext context, {
   required String folderId,
   required String where,
-}) {
-  // where=「项目/夹」归属路径,取末段即文件夹名
-  final folderName = where.split('/').last;
-  return showAppSheet<void>(
-    context: context,
-    title: '上传到 $folderName',
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        ListTile(
-          leading: const Icon(Icons.photo_library_outlined),
-          title: const Text('从相册选择'),
-          subtitle: const Text(
-              '实况照片自动打包 .livp;图/视频传原文件,单次最多 $kAlbumPickLimit 个'),
-          onTap: () {
-            Navigator.pop(context);
-            _pickFromAlbum(context, folderId: folderId, where: where);
-          },
-        ),
-        ListTile(
-          leading: const Icon(Icons.folder_open_outlined),
-          title: const Text('选择文件'),
-          subtitle: const Text('原文件直传,支持多选(含 .livp)'),
-          onTap: () {
-            Navigator.pop(context);
-            _pickFiles(context, folderId: folderId, where: where);
-          },
-        ),
-        const SizedBox(height: Tk.spaceSm),
-      ],
-    ),
-  );
-}
+}) => showUploadSourceSheet(
+  context,
+  where: where,
+  albumPickLimit: kAlbumPickLimit,
+  onPickAlbum: () => _pickFromAlbum(context, folderId: folderId, where: where),
+  onPickFiles: () => _pickFiles(context, folderId: folderId, where: where),
+);
 
 /// 相册多选(RequestType.all;iOS 实况 → livp 小包轨,其余原文件流式轨;
 /// Android 全原文件)。逐项打包+入队收进 [enqueueNamedBatchAndReport]
@@ -79,8 +60,7 @@ Future<void> _pickFromAlbum(
   if (picked == null || picked.isEmpty) return; // 用户取消:不算上传
   // B8:相册上限提示(选择器已硬顶 99,选满即提示分批)
   if (picked.length >= kAlbumPickLimit && context.mounted) {
-    toast(context,
-        '单次最多上传 $kAlbumPickLimit 个,本次已选满;更多素材请分批上传');
+    toast(context, '单次最多上传 $kAlbumPickLimit 个,本次已选满;更多素材请分批上传');
   }
   // D6:改带名收集(文件名+跳过原因),汇总 toast 有跳过带「查看」action
   // 打开跳过清单(语义不变:入队数/跳过数同口径,单点失败不中断)。
@@ -90,10 +70,12 @@ Future<void> _pickFromAlbum(
   await enqueueNamedBatchAndReport(
     context,
     where: where,
-    items: picked.map((e) => (
-      _albumDisplayName(e),
-      () => _enqueueAlbumAsset(e, folderId: folderId, where: where),
-    )),
+    items: picked.map(
+      (e) => (
+        _albumDisplayName(e),
+        () => _enqueueAlbumAsset(e, folderId: folderId, where: where),
+      ),
+    ),
   );
 }
 
@@ -119,8 +101,12 @@ Future<void> enqueueNamedBatchAndReport(
     onError: (f, e) => AppLog.error('upload', '单项入队失败,已跳过:$f', e),
   );
   if (!context.mounted) return;
-  showUploadBatchToast(context,
-      enqueued: enqueued, skips: skips, where: where.split('/').last);
+  showUploadBatchToast(
+    context,
+    enqueued: enqueued,
+    skips: skips,
+    where: where.split('/').last,
+  );
 }
 
 /// P2 权限引导循环(拒绝态不再抛 StateError):授权/limited 返回 true;
@@ -142,8 +128,10 @@ Future<bool> ensureAlbumPermissionGuided(
       return true;
     }
     if (!context.mounted) return false;
-    final action =
-        await showAlbumPermissionDialog(context, isAndroid: isAndroid);
+    final action = await showAlbumPermissionDialog(
+      context,
+      isAndroid: isAndroid,
+    );
     if (action == null) return false; // 取消/关闭:不算上传
     if (action == AlbumPermissionAction.openSettings) {
       await (openSettings?.call() ?? openAlbumPermissionSettings());
@@ -163,7 +151,10 @@ Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
   try {
     if (!await ensureAlbumPermissionGuided(context)) return null;
     if (!context.mounted) return null;
-    return await AssetPicker.pickAssets(context, pickerConfig: albumPickerConfig());
+    return await AssetPicker.pickAssets(
+      context,
+      pickerConfig: albumPickerConfig(),
+    );
   } catch (e) {
     AppLog.error('upload', '相册选择失败', e);
     if (context.mounted) {
@@ -178,67 +169,10 @@ Future<List<AssetEntity>?> _pickAssets(BuildContext context) async {
 /// 选择器内置界面(含「权限引导」覆盖层)全中文化。
 @visibleForTesting
 AssetPickerConfig albumPickerConfig() => AssetPickerConfig(
-      requestType: RequestType.all,
-      maxAssets: kAlbumPickLimit,
-      textDelegate: const AssetPickerTextDelegate(),
-    );
-
-/// P2:相册权限被拒引导对话框(自绘中文)。Android:「去设置」跳应用详情
-/// 设置页;iOS:仅「重新尝试」重走 requestPermissionExtend(系统授权弹窗)。
-/// 返回用户动作;取消/点外部关闭返回 null。
-@visibleForTesting
-Future<AlbumPermissionAction?> showAlbumPermissionDialog(
-  BuildContext context, {
-  bool? isAndroid,
-}) {
-  final android = isAndroid ?? Platform.isAndroid;
-  return showDialog<AlbumPermissionAction>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('需要相册访问权限'),
-      content: const Text('选择照片、视频上传时需要访问相册,请授权后重试。'),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(ctx).pop(),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(ctx).pop(
-            android
-                ? AlbumPermissionAction.openSettings
-                : AlbumPermissionAction.retry,
-          ),
-          child: Text(android ? '去设置' : '重新尝试'),
-        ),
-      ],
-    ),
-  );
-}
-
-/// Android 应用包名(构建 applicationId;跳应用详情设置页用)。
-const kAndroidAppPackage = 'com.rushes.lab.tx';
-
-/// P2:「去设置」跳应用详情设置页(ACTION_APPLICATION_DETAILS_SETTINGS)。
-/// url_launcher 走 ACTION_VIEW+data,系统设置对 `package:` scheme 的 VIEW
-/// 意图即应用详情页;启动失败(未解析到处理方)回退 photo_manager 的
-/// openSetting(同为应用设置页)。
-@visibleForTesting
-Uri androidAppDetailsSettingsUri({String packageName = kAndroidAppPackage}) =>
-    Uri.parse('package:$packageName');
-
-Future<void> openAlbumPermissionSettings() async {
-  try {
-    final launched = await launchUrl(
-      androidAppDetailsSettingsUri(),
-      mode: LaunchMode.externalApplication,
-    );
-    if (launched) return;
-    AppLog.info('upload', 'package: 意图未启动,回退 openSetting');
-  } catch (e) {
-    AppLog.error('upload', '跳应用详情设置页失败,回退 openSetting', e);
-  }
-  await PhotoManager.openSetting();
-}
+  requestType: RequestType.all,
+  maxAssets: kAlbumPickLimit,
+  textDelegate: const AssetPickerTextDelegate(),
+);
 
 /// P2-1:等待 App 回到前台(resumed)再续判。「去设置」跳系统页后 App 转后台,
 /// 须等用户操作完毕返回(授权与否都回)才重判真实权限态;已在前台(桌面端/
@@ -291,8 +225,10 @@ Future<void> _enqueueAlbumAsset(
   await enqueueLocalUpload(
     folderId: folderId,
     where: where,
-    filename: sanitizeUploadName(e.title ?? f.path.split('/').last,
-        fallback: 'IMG_${e.id}'),
+    filename: sanitizeUploadName(
+      e.title ?? f.path.split('/').last,
+      fallback: 'IMG_${e.id}',
+    ),
     path: f.path,
   );
 }
@@ -311,21 +247,23 @@ Future<void> _pickFiles(
   await enqueueNamedBatchAndReport(
     context,
     where: where,
-    items: files.map((f) => (
-      sanitizeUploadName(f.name),
-      () async {
-        final p = f.path;
-        if (p == null) {
-          throw StateError('无本地路径 file=${f.name}');
-        }
-        await enqueueLocalUpload(
-          folderId: folderId,
-          where: where,
-          filename: sanitizeUploadName(f.name),
-          path: p,
-        );
-      },
-    )),
+    items: files.map(
+      (f) => (
+        sanitizeUploadName(f.name),
+        () async {
+          final p = f.path;
+          if (p == null) {
+            throw StateError('无本地路径 file=${f.name}');
+          }
+          await enqueueLocalUpload(
+            folderId: folderId,
+            where: where,
+            filename: sanitizeUploadName(f.name),
+            path: p,
+          );
+        },
+      ),
+    ),
   );
 }
 

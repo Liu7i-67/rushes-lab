@@ -79,8 +79,7 @@ void main() {
       );
     });
 
-    test('本地 build 字符串解析失败的兜底口径:build=0(PackageInfo.buildNumber',
-        () {
+    test('本地 build 字符串解析失败的兜底口径:build=0(PackageInfo.buildNumber', () {
       // 生产路径 _readLocalVersion:int.tryParse('') ?? 0 → 本地 build=0。
       // 这里固化 build=0 时的比较与展示行为,防止兜底口径被无意改动。
       expect(
@@ -93,8 +92,11 @@ void main() {
         isFalse,
         reason: 'version 平局 + build 平局(0 vs 0)→ 不提示',
       );
-      expect(localVersionLabel((version: '1.2.3', build: 0)), '1.2.3+0',
-          reason: 'build 兜底 0 的展示口径');
+      expect(
+        localVersionLabel((version: '1.2.3', build: 0)),
+        '1.2.3+0',
+        reason: 'build 兜底 0 的展示口径',
+      );
     });
 
     test('大段号与多段混合不崩(10.20.30 vs 9.99.99.99.99)', () {
@@ -108,14 +110,12 @@ void main() {
 
   group('AppVersionInfo.fromJson 边界补测(嵌套 null 与展示口径)', () {
     Map<String, dynamic> base() => {
-          'version': '1.2.3',
-          'build': 4,
-          'changelog': '',
-          'force': false,
-          'android': {
-            'url': 'https://resources.taoxiplan.com/huanhuashijie/a.apk',
-          },
-        };
+      'version': '1.2.3',
+      'build': 4,
+      'changelog': '',
+      'force': false,
+      'android': {'url': 'https://resources.taoxiplan.com/huanhuashijie/a.apk'},
+    };
 
     test('android 显式 null(嵌套 null)→ FormatException', () {
       final j = base()..['android'] = null;

@@ -16,6 +16,7 @@ import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/haptics.dart';
 import '../../core/session.dart';
 import '../../services/app_log.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
@@ -32,7 +33,10 @@ Future<bool> showRequestAccessSheet(
     context: context,
     title: '申请 — $targetName',
     child: _RequestAccessSheet(
-        targetType: targetType, targetId: targetId, targetName: targetName),
+      targetType: targetType,
+      targetId: targetId,
+      targetName: targetName,
+    ),
   );
   if (ok == true) {
     if (!context.mounted) return true; // sheet 已连带给页面卸载(路由层)时不再 toast
@@ -46,8 +50,7 @@ List<String> allowedActionsOf(String targetType) =>
     targetType == 'sensitive_folder' ? ['access', 'download'] : ['download'];
 
 /// reason 前端校验(web min:4 message=「理由至少 4 个字」):null=合法。
-String? reasonError(String raw) =>
-    raw.trim().length < 4 ? '理由至少 4 个字' : null;
+String? reasonError(String raw) => raw.trim().length < 4 ? '理由至少 4 个字' : null;
 
 class _RequestAccessSheet extends StatefulWidget {
   const _RequestAccessSheet({
@@ -95,8 +98,10 @@ class _RequestAccessSheetState extends State<_RequestAccessSheet> {
         durationSeconds: _action == 'download' ? _duration : null,
         reason: _reason.text.trim(),
       );
-      AppLog.info('approval',
-          '申请已提交:${widget.targetType}/$_action/${widget.targetName}');
+      AppLog.info(
+        'approval',
+        '申请已提交:${widget.targetType}/$_action/${widget.targetName}',
+      );
       if (!mounted) return;
       Haptics.light(); // G2:提交成功轻触
       Navigator.of(context).pop(true); // 成功 toast 由 opener 呈现
@@ -124,25 +129,28 @@ class _RequestAccessSheetState extends State<_RequestAccessSheet> {
           onChanged: (v) {
             if (v != null) setState(() => _action = v);
           },
-          child: Column(children: [
-            RadioListTile<String>(
-              value: 'access',
-              title: const Text('访问(进入敏感目录)'),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              visualDensity: VisualDensity.compact,
-              // 非 sensitive_folder 禁选(web 同款)
-              enabled: allowed.contains('access'),
-            ),
-            RadioListTile<String>(
-              value: 'download',
-              title:
-                  Text('下载(${widget.targetType == 'asset' ? '单文件' : '批量'})'),
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              visualDensity: VisualDensity.compact,
-            ),
-          ]),
+          child: Column(
+            children: [
+              RadioListTile<String>(
+                value: 'access',
+                title: const Text('访问(进入敏感目录)'),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+                // 非 sensitive_folder 禁选(web 同款)
+                enabled: allowed.contains('access'),
+              ),
+              RadioListTile<String>(
+                value: 'download',
+                title: Text(
+                  '下载(${widget.targetType == 'asset' ? '单文件' : '批量'})',
+                ),
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
         ),
         if (_action == 'download') ...[
           const Text('有效期'),
@@ -188,14 +196,19 @@ class _RequestAccessSheetState extends State<_RequestAccessSheet> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Icon(Icons.error_outline,
-                          size: 16, color: Tk.red),
+                      Icon(
+                        Icons.error_outline,
+                        size: 16,
+                        color: context.tk.danger,
+                      ),
                       const SizedBox(width: Tk.spaceXs),
                       Expanded(
                         child: Text(
                           _submitError!,
-                          style: const TextStyle(
-                              fontSize: Tk.fzSm, color: Tk.red),
+                          style: TextStyle(
+                            fontSize: Tk.fzSm,
+                            color: context.tk.danger,
+                          ),
                         ),
                       ),
                     ],

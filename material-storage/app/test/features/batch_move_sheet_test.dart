@@ -11,29 +11,37 @@ import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/assets/batch_move_sheet.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/widgets/app_row.dart';
 
 import '../helpers/api_harness.dart';
 
-Folder _folder(String id, String name,
-        {String? parent, bool sensitive = false}) =>
-    Folder(
-        id: id,
-        name: name,
-        parentFolderId: parent,
-        projectId: 'p1',
-        isSensitive: sensitive);
+Folder _folder(
+  String id,
+  String name, {
+  String? parent,
+  bool sensitive = false,
+}) => Folder(
+  id: id,
+  name: name,
+  parentFolderId: parent,
+  projectId: 'p1',
+  isSensitive: sensitive,
+);
 
 void main() {
   test('batchMoveBlockReason:混批多项目整批禁用+上限,与后端 400 detail 同文案', () {
-    expect(batchMoveBlockReason(projectIds: {'p1', 'p2'}, selectedCount: 3),
-        '所选文件属于多个项目,一期仅支持同一项目内批量移动');
-    expect(batchMoveBlockReason(projectIds: {'p1'}, selectedCount: 1001),
-        contains('1000'));
+    expect(
+      batchMoveBlockReason(projectIds: {'p1', 'p2'}, selectedCount: 3),
+      '所选文件属于多个项目,一期仅支持同一项目内批量移动',
+    );
+    expect(
+      batchMoveBlockReason(projectIds: {'p1'}, selectedCount: 1001),
+      contains('1000'),
+    );
     expect(batchMoveBlockReason(projectIds: {'p1'}, selectedCount: 3), isNull);
   });
 
-  test('sensitiveCascadeIds:sensitive 及其子树级联;断链不误禁(web ancestorDisabled)',
-      () {
+  test('sensitiveCascadeIds:sensitive 及其子树级联;断链不误禁(web ancestorDisabled)', () {
     final folders = [
       _folder('f1', '普通'),
       _folder('f2', '敏感', sensitive: true),
@@ -44,8 +52,7 @@ void main() {
     expect(sensitiveCascadeIds(folders), {'f2', 'f3', 'f4'});
   });
 
-  testWidgets('项目固定展示;敏感夹及其子夹禁选、源夹自身禁选;选普通夹提交成功并失效',
-      (tester) async {
+  testWidgets('项目固定展示;敏感夹及其子夹禁选、源夹自身禁选;选普通夹提交成功并失效', (tester) async {
     final api = installFakeApi();
     api.folders.listResult = [
       _folder('f1', '当前夹'),
@@ -65,22 +72,26 @@ void main() {
       RefreshBus.I.removeListener('folders', onFolders);
     });
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showBatchMoveSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showBatchMoveSheet(
+                  ctx,
                   selectedIds: const ['a1', 'a2', 'a3'],
                   sourceFolderId: 'f1',
                   projectId: 'p1',
-                  projectLabel: '医美项目'),
-              child: const Text('open'),
+                  projectLabel: '医美项目',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -89,10 +100,13 @@ void main() {
     expect(find.textContaining('一期仅支持项目内移动'), findsOneWidget);
 
     // 敏感夹/其子夹禁选(点按不选):ListTile enabled=false
-    bool tileEnabled(String name) => tester
-        .widget<ListTile>(find.ancestor(
-            of: find.text(name), matching: find.byType(ListTile)))
-        .enabled;
+    bool tileEnabled(String name) =>
+        tester
+            .widget<AppRow>(
+              find.ancestor(of: find.text(name), matching: find.byType(AppRow)),
+            )
+            .onTap !=
+        null;
     expect(tileEnabled('敏感夹'), isFalse, reason: 'sensitive 禁选');
     expect(tileEnabled('敏感子夹'), isFalse, reason: 'sensitive 子树级联禁选');
     expect(tileEnabled('当前夹'), isFalse, reason: '源夹自身禁选');
@@ -116,32 +130,39 @@ void main() {
     await tester.pumpAndSettle();
   });
 
-  testWidgets('结果视图:skipped/fga_pending 中文与主行(moved=0 警示口径)',
-      (tester) async {
+  testWidgets('结果视图:skipped/fga_pending 中文与主行(moved=0 警示口径)', (tester) async {
     final api = installFakeApi();
     api.folders.listResult = [_folder('f1', '当前夹'), _folder('f2', '目标夹')];
-    api.ops.moveStaged = AssetBatchMoveResult(movedCount: 0, skipped: [
-      AssetBatchMoveSkip(assetId: 'a2', reason: 'duplicate_location'),
-      AssetBatchMoveSkip(assetId: 'a3', reason: 'duplicate_filename'),
-    ], fgaPending: ['a4']);
+    api.ops.moveStaged = AssetBatchMoveResult(
+      movedCount: 0,
+      skipped: [
+        AssetBatchMoveSkip(assetId: 'a2', reason: 'duplicate_location'),
+        AssetBatchMoveSkip(assetId: 'a3', reason: 'duplicate_filename'),
+      ],
+      fgaPending: ['a4'],
+    );
     addTearDown(() => session.api = null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showBatchMoveSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showBatchMoveSheet(
+                  ctx,
                   selectedIds: const ['a1', 'a2', 'a3', 'a4'],
                   sourceFolderId: 'f1',
                   projectId: 'p1',
-                  projectLabel: '医美项目'),
-              child: const Text('open'),
+                  projectLabel: '医美项目',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('目标夹'));
@@ -159,25 +180,28 @@ void main() {
   testWidgets('400 detail 透传(混批多项目漏检/目标跨项目由后端兜底)', (tester) async {
     final api = installFakeApi();
     api.folders.listResult = [_folder('f1', '当前夹'), _folder('f2', '目标夹')];
-    api.ops.moveStaged =
-        ApiException(400, '目标文件夹与所选文件不属于同一个项目');
+    api.ops.moveStaged = ApiException(400, '目标文件夹与所选文件不属于同一个项目');
     addTearDown(() => session.api = null);
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showBatchMoveSheet(ctx,
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showBatchMoveSheet(
+                  ctx,
                   selectedIds: const ['a1'],
                   sourceFolderId: 'f1',
                   projectId: 'p1',
-                  projectLabel: '医美项目'),
-              child: const Text('open'),
+                  projectLabel: '医美项目',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('目标夹'));

@@ -4,23 +4,30 @@
 /// 成功增删后抽屉**驻留**(刷新成员列表,不自动关闭;web 同款),调用方在
 /// 抽屉关闭后刷新组列表。
 /// app-polish-3 E5:添加成员改 UserPickerField 弹层形态(点按弹层搜索勾选,
-/// 底部「完成(N)」回填;选后仍走下方「添加所选成员」批量提交,数据流不变)。
+/// 底部「完成(N)」回填;选后仍走底部「添加所选成员」批量提交,数据流不变)。
 library;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
 import '../../widgets/app_confirm.dart';
+import '../../widgets/app_row.dart';
+import '../../widgets/badge.dart';
 import '../../widgets/pickers/user_picker_field.dart';
 import '../../widgets/search_field.dart';
+import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
 
 /// 打开成员管理;增删成功抽屉驻留(web 同款),关闭后调用方刷新组列表。
 Future<void> showGroupMembersSheet(
-    BuildContext context, DirectoryGroup group) async {
+  BuildContext context,
+  DirectoryGroup group,
+) async {
   await showModalBottomSheet<void>(
     context: context,
     showDragHandle: true,
@@ -74,8 +81,13 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
     final kw = _memberQ.trim().toLowerCase();
     if (kw.isEmpty) return _members;
     return _members
-        .where((m) => [m.username, m.name, m.email]
-            .any((v) => (v ?? '').toLowerCase().contains(kw)))
+        .where(
+          (m) => [
+            m.username,
+            m.name,
+            m.email,
+          ].any((v) => (v ?? '').toLowerCase().contains(kw)),
+        )
         .toList();
   }
 
@@ -135,90 +147,105 @@ class _GroupMembersSheetState extends State<_GroupMembersSheet> {
   @override
   Widget build(BuildContext context) {
     final filtered = _filtered;
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.8,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(Tk.spaceXl, 0, Tk.spaceXl, Tk.spaceLg),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('成员 — ${widget.group.name}(${_members.length} 人)',
-                  style: Theme.of(context).textTheme.titleMedium),
-              const SizedBox(height: Tk.spaceMd),
-              UserPickerField(
-                value: _selected,
-                multiple: true,
-                label: '添加成员',
-                hint: '搜索并选择用户',
-                onChanged: (v) => setState(() => _selected = v),
-              ),
-              const SizedBox(height: Tk.spaceSm),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton(
-                  onPressed: _selected.isEmpty || _busy ? null : _addSelected,
-                  child: Text(_busy ? '添加中…' : '添加所选成员'),
-                ),
-              ),
-              const SizedBox(height: Tk.spaceSm),
-              SearchField(
-                hintText: '在组内搜索 — 用户名 / 姓名 / 邮箱',
-                onChanged: (v) => setState(() => _memberQ = v),
-              ),
-              const SizedBox(height: Tk.spaceSm),
-              Expanded(child: _list(filtered)),
-            ],
-          ),
+    return SheetScaffold(
+      title: '成员 — ${widget.group.name}(${_members.length} 人)',
+      // 保持原行为:标题行不带关闭钮(把手/遮罩/返回键关闭)
+      showClose: false,
+      maxHeightFactor: 0.85,
+      bottomActions: [
+        FilledButton(
+          onPressed: _selected.isEmpty || _busy ? null : _addSelected,
+          child: Text(_busy ? '添加中…' : '添加所选成员'),
         ),
+      ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          UserPickerField(
+            value: _selected,
+            multiple: true,
+            label: '添加成员',
+            hint: '搜索并选择用户',
+            onChanged: (v) => setState(() => _selected = v),
+          ),
+          const SizedBox(height: Tk.spaceSm),
+          SearchField(
+            hintText: '在组内搜索 — 用户名 / 姓名 / 邮箱',
+            onChanged: (v) => setState(() => _memberQ = v),
+          ),
+          const SizedBox(height: Tk.spaceSm),
+          _list(filtered),
+        ],
       ),
     );
   }
 
   Widget _list(List<GroupMember> filtered) {
+    final tk = context.tk;
     if (_loading) {
-      return const Center(child: CircularProgressIndicator());
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: Tk.spaceXl),
+        child: Center(child: CircularProgressIndicator()),
+      );
     }
     if (_error != null) {
-      return Center(
-          child: Text(_error!,
-              style: const TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: Tk.spaceLg),
+        child: Text(
+          _error!,
+          textAlign: TextAlign.center,
+          style: TextStyle(color: tk.ink3, fontSize: Tk.fzMd),
+        ),
+      );
     }
     if (filtered.isEmpty) {
-      return const Center(
-          child: Text('暂无成员',
-              style: TextStyle(color: Tk.muted, fontSize: Tk.fzSm)));
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: Tk.spaceXl),
+        child: Text(
+          '暂无成员',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: tk.ink3, fontSize: Tk.fzMd),
+        ),
+      );
     }
-    return ListView.builder(
-      itemCount: filtered.length,
-      itemBuilder: (context, i) {
-        final m = filtered[i];
-        final sub = StringBuffer(m.username ?? '—');
-        if (m.email != null && m.email!.isNotEmpty) sub.write(' · ${m.email}');
-        return ListTile(
-          visualDensity: VisualDensity.compact,
-          title: Row(children: [
-            Flexible(
-                child: Text(m.name,
-                    maxLines: 1, overflow: TextOverflow.ellipsis)),
-            if (!m.isActive)
-              const Padding(
-                padding: EdgeInsets.only(left: 6),
-                child: Text('已停用',
-                    style: TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
-              ),
-          ]),
-          subtitle: Text(sub.toString(),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: Tk.fzXs)),
-          trailing: TextButton(
-            onPressed: () => _remove(m),
-            child: const Text('移出', style: TextStyle(color: Tk.red)),
+    return SectionCard(children: [for (final m in filtered) _memberRow(m)]);
+  }
+
+  Widget _memberRow(GroupMember m) {
+    final tk = context.tk;
+    final sub = StringBuffer(m.username ?? '—');
+    if (m.email != null && m.email!.isNotEmpty) sub.write(' · ${m.email}');
+    return AppRow(
+      leading: Container(
+        width: 34,
+        height: 34,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: tk.goldSoft,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Text(
+          m.name.trim().isEmpty ? '?' : m.name.trim().substring(0, 1),
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: tk.goldInk,
           ),
-        );
-      },
+        ),
+      ),
+      title: m.name,
+      subtitle: sub.toString(),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (!m.isActive) const Badge(label: '已停用', tone: BadgeTone.danger),
+          TextButton(
+            onPressed: () => _remove(m),
+            child: Text('移出', style: TextStyle(color: tk.danger)),
+          ),
+        ],
+      ),
+      showChevron: false,
     );
   }
 }

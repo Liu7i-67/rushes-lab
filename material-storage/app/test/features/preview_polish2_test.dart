@@ -16,7 +16,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/session.dart';
-import 'package:ms_app/features/assets/thumbnail_image.dart' show ThumbnailImage, thumbnailCache;
+import 'package:ms_app/features/assets/thumbnail_image.dart'
+    show ThumbnailImage, thumbnailCache;
 import 'package:ms_app/features/preview/filmstrip.dart';
 import 'package:ms_app/features/preview/preview_media.dart';
 import 'package:ms_app/features/preview/preview_page.dart';
@@ -26,11 +27,11 @@ import 'package:ms_app/theme/tokens.dart';
 import '../helpers/api_harness.dart';
 
 // filmstrip.dart 布局常量同源(与 build 段保持一致,常量私有故此处钉值):
-// 小格 48 + 间隔 8(_kGap=Tk.spaceSm,旧值 6 就近归档到 8)+ 条水平 padding 12。
-// 改因(G1 交付自查):步距以 build 内实际渲染为准 = 48+8=56(原拟 54 有误)。
+// 小格 48 + 间隔 8(_kGap=Tk.spaceSm)+ 条内水平 padding 8;浮层卡另有页面
+// 留边 12(只影响滚动视口宽度,公式里用 viewportDimension 自适应)。
 const double _kThumb = 48;
 const double _kStride = 56;
-const double _kEdgePad = 12;
+const double _kEdgePad = 8;
 
 /// G1/G2 假 assets API:thumbnailUrl 记录调用并即回假地址;downloadLink
 /// 记录调用、结果可编排(403 注入测「保持缩略图+提示」)。
@@ -44,7 +45,10 @@ class _G2AssetsApi extends FakeAssetsApi {
   Object? downloadLinkStaged;
 
   @override
-  Future<String> downloadLink(String assetId, {bool asAttachment = true}) async {
+  Future<String> downloadLink(
+    String assetId, {
+    bool asAttachment = true,
+  }) async {
     downloadLinkCalls.add(assetId);
     final staged = downloadLinkStaged;
     if (staged is Exception) throw staged;
@@ -66,45 +70,52 @@ class _G2FakeMsApi extends FakeMsApi {
 }
 
 Asset _img(String id) => Asset(
-      id: id,
-      filename: '$id.jpg',
-      sizeBytes: 4,
-      contentType: 'image/jpeg',
-      createdAt: '2026-10-20T10:00:00Z',
-      tags: const {'thumbnail_key': 'k'},
-    );
+  id: id,
+  filename: '$id.jpg',
+  sizeBytes: 4,
+  contentType: 'image/jpeg',
+  createdAt: '2026-10-20T10:00:00Z',
+  tags: const {'thumbnail_key': 'k'},
+);
 
 /// 挂预览页并落定首轮 loading(逐 pump,不用 pumpAndSettle)。
 /// [linkStaged] 非 null 且为 Exception 时 download-link 抛错。
-Future<_G2AssetsApi> _pumpPreview(WidgetTester tester, PreviewArgs args,
-    {Object? linkStaged}) async {
+Future<_G2AssetsApi> _pumpPreview(
+  WidgetTester tester,
+  PreviewArgs args, {
+  Object? linkStaged,
+}) async {
   tester.view.physicalSize = const Size(1080, 1920);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
   final fake = installFakeApi(_G2FakeMsApi()) as _G2FakeMsApi;
   fake.assets.downloadLinkStaged = linkStaged;
   addTearDown(() => session.api = null);
-  await tester.pumpWidget(MaterialApp(
-    home: MediaQuery(
-      // 缩略图签名桩即回 → 胶片条小格落 TypeBlock,Ahem 字体 48px 格会假性
-      // 溢出;缩字度量仅影响测试渲染(同 preview_swipe_test 口径)
-      data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
-      child: PreviewPage(args: args),
+  await tester.pumpWidget(
+    MaterialApp(
+      home: MediaQuery(
+        // 缩略图签名桩即回 → 胶片条小格落 TypeBlock,Ahem 字体 48px 格会假性
+        // 溢出;缩字度量仅影响测试渲染(同 preview_swipe_test 口径)
+        data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
+        child: PreviewPage(args: args),
+      ),
     ),
-  ));
+  );
   await tester.pump();
   await tester.pump();
   return fake.assets;
 }
 
-/// 胶片条里「当前张」小格(accent 高亮描边,区别于其余 white24)。
+/// 胶片条里「当前张」小格(previewGold 高亮描边,区别于其余 previewLine)。
 Finder _currentStripItem() => find.descendant(
-      of: find.byType(Filmstrip),
-      matching: find.byWidgetPredicate((w) =>
-          w is Container &&
-          w.decoration is BoxDecoration &&
-          (w.decoration as BoxDecoration).border?.top.color == Tk.accent),
-    );
+  of: find.byType(Filmstrip),
+  matching: find.byWidgetPredicate(
+    (w) =>
+        w is Container &&
+        w.decoration is BoxDecoration &&
+        (w.decoration as BoxDecoration).border?.top.color == Tk.previewGold,
+  ),
+);
 
 /// 胶片条横向滚动位置(Filmstrip 内 Scrollable 的 pixels;私有 controller
 /// 不直取,按 preview_polish_test C1 口径读 ScrollableState)。
@@ -153,8 +164,7 @@ void main() {
   setUp(() => thumbnailCache.clear());
 
   // ── G1 胶片条恒居中跟随 ──────────────────────────────────────────────────
-  testWidgets('G1:点选视口内贴边可见缩略图后,当前项滚至条中央(offset 断言)',
-      (tester) async {
+  testWidgets('G1:点选视口内贴边可见缩略图后,当前项滚至条中央(offset 断言)', (tester) async {
     final args = PreviewArgs(
       items: [for (var i = 1; i <= 60; i++) _img('g1-$i')],
       index: 0,
@@ -174,14 +184,20 @@ void main() {
     expect(find.text('17 / 60'), findsOneWidget, reason: '前置:点选切张生效');
 
     final pos = _stripPosition(tester);
-    expect(_stripPixels(tester), closeTo(_expectedCenterPixels(pos, tapIndex), 1.5),
-        reason: 'G1:去掉守卫后当前张恒 animateTo 居中');
+    expect(
+      _stripPixels(tester),
+      closeTo(_expectedCenterPixels(pos, tapIndex), 1.5),
+      reason: 'G1:去掉守卫后当前张恒 animateTo 居中',
+    );
 
     // 几何复核:当前张中心与条视口中心几乎重合(行为级「居中」)
     final stripRect = tester.getRect(find.byType(Filmstrip));
     final itemRect = tester.getRect(_currentStripItem());
-    expect((itemRect.center.dx - stripRect.center.dx).abs(), lessThan(3),
-        reason: 'G1:当前张视觉居中(选中框恒在条中央)');
+    expect(
+      (itemRect.center.dx - stripRect.center.dx).abs(),
+      lessThan(3),
+      reason: 'G1:当前张视觉居中(选中框恒在条中央)',
+    );
   });
 
   testWidgets('G1:横滑到屏外张后胶片条跟随居中(保留语义回归锚)', (tester) async {
@@ -199,7 +215,11 @@ void main() {
     // 连续 4 次横滑到 index 20:逐张重居中语义下条随动(若跟随失效,当前张
     // 即漂出视口右缘——本用例即回归锚)
     for (var n = 0; n < 4; n++) {
-      await tester.fling(find.byType(PreviewMedia), const Offset(-300, 0), 1200);
+      await tester.fling(
+        find.byType(PreviewMedia),
+        const Offset(-300, 0),
+        1200,
+      );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 400));
       await tester.pump(const Duration(milliseconds: 400));
@@ -208,18 +228,22 @@ void main() {
 
     // 屏外张跟随(旧实现亦滚;G1 后语义不变且恒居中)
     final pos = _stripPosition(tester);
-    expect(_stripPixels(tester),
-        closeTo(_expectedCenterPixels(pos, 20), 1.5),
-        reason: 'G1:横滑到不可见张,条滚到当前张居中');
+    expect(
+      _stripPixels(tester),
+      closeTo(_expectedCenterPixels(pos, 20), 1.5),
+      reason: 'G1:横滑到不可见张,条滚到当前张居中',
+    );
     final stripRect = tester.getRect(find.byType(Filmstrip));
     final itemRect = tester.getRect(_currentStripItem());
-    expect((itemRect.center.dx - stripRect.center.dx).abs(), lessThan(3),
-        reason: 'G1:屏外张视觉居中');
+    expect(
+      (itemRect.center.dx - stripRect.center.dx).abs(),
+      lessThan(3),
+      reason: 'G1:屏外张视觉居中',
+    );
   });
 
   // ── G2 缩略图优先+放大换原图 ─────────────────────────────────────────────
-  testWidgets('G2:进入预览仅请求 thumbnail-url,未签 download-link',
-      (tester) async {
+  testWidgets('G2:进入预览仅请求 thumbnail-url,未签 download-link', (tester) async {
     final api = await _pumpPreview(
       tester,
       PreviewArgs(
@@ -229,10 +253,16 @@ void main() {
         canDownload: true,
       ),
     );
-    expect(api.thumbCalls, contains('g2a'),
-        reason: 'G2:进入即签缩略图(thumbnail-url)');
-    expect(api.downloadLinkCalls, isEmpty,
-        reason: 'G2:默认不签原图 download-link(放大超过 1.5x 才签)');
+    expect(
+      api.thumbCalls,
+      contains('g2a'),
+      reason: 'G2:进入即签缩略图(thumbnail-url)',
+    );
+    expect(
+      api.downloadLinkCalls,
+      isEmpty,
+      reason: 'G2:默认不签原图 download-link(放大超过 1.5x 才签)',
+    );
     expect(find.text('预览加载失败'), findsNothing, reason: '缩略图就绪非失败卡');
   });
 
@@ -254,8 +284,11 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400)); // 220ms 缩放动画
     await tester.pump();
     await tester.pump();
-    expect(_mediaScale(tester), greaterThan(1.05),
-        reason: '前置(既有 C3):双击放大到 2.5x(>1.5x 阈值)');
+    expect(
+      _mediaScale(tester),
+      greaterThan(1.05),
+      reason: '前置(既有 C3):双击放大到 2.5x(>1.5x 阈值)',
+    );
 
     expect(api.downloadLinkCalls, ['g2b'], reason: 'G2:放大触发原图签发恰好一次');
 
@@ -267,8 +300,7 @@ void main() {
     expect(api.downloadLinkCalls, ['g2b'], reason: 'G2:复位不再签发(仍一次)');
   });
 
-  testWidgets('G2:放大签发 403 → 保持缩略图 + P7 式小字提示(非失败卡)',
-      (tester) async {
+  testWidgets('G2:放大签发 403 → 保持缩略图 + P7 式小字提示(非失败卡)', (tester) async {
     final api = await _pumpPreview(
       tester,
       PreviewArgs(
@@ -291,11 +323,12 @@ void main() {
     expect(api.downloadLinkCalls, ['g2c'], reason: 'G2:放大签发原图(403)');
 
     // 403 保持缩略图 + P7 式不打断小字提示(复用既有降级文案)
-    expect(find.textContaining('原图不可用'), findsOneWidget,
-        reason: 'G2:原图签发失败保持缩略图并叠提示');
-    expect(find.text('预览加载失败'), findsNothing,
-        reason: 'G2:有缩略图不出失败卡');
-    expect(api.thumbCalls.length, 1,
-        reason: '缩略图经缓存去重,不因原图失败重签');
+    expect(
+      find.textContaining('原图不可用'),
+      findsOneWidget,
+      reason: 'G2:原图签发失败保持缩略图并叠提示',
+    );
+    expect(find.text('预览加载失败'), findsNothing, reason: 'G2:有缩略图不出失败卡');
+    expect(api.thumbCalls.length, 1, reason: '缩略图经缓存去重,不因原图失败重签');
   });
 }

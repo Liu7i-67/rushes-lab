@@ -38,36 +38,43 @@ void main() {
     expect(tagLabelsError(List.generate(51, (i) => 'l$i')), contains('50'));
   });
 
-  testWidgets('批量打标:默认 merge,逐 id PATCH 带 labels_mode=merge;成功失效两 scope',
-      (tester) async {
+  testWidgets('批量打标:默认 merge,逐 id PATCH 带 labels_mode=merge;成功失效两 scope', (
+    tester,
+  ) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
     final assetsCount = countScopes().$1;
     final foldersCount = countScopes().$2;
 
-    await _open(tester, (ctx) =>
-        showBatchTagSheet(ctx, assetIds: const ['a1', 'a2'], folderId: 'f1'));
+    await _open(
+      tester,
+      (ctx) =>
+          showBatchTagSheet(ctx, assetIds: const ['a1', 'a2'], folderId: 'f1'),
+    );
     await tester.enterText(find.byType(TextField).first, '棚拍, 现场');
     await tester.pump(); // 刷帧:提交钮由禁用(空标签)转可用
     await tester.tap(find.text('打标'));
     await tester.pumpAndSettle();
 
     expect(api.ops.metaCalls, hasLength(2), reason: '逐 id PATCH');
+    expect(api.ops.metaCalls.map((c) => c.id).toSet(), {'a1', 'a2'});
     expect(
-        api.ops.metaCalls.map((c) => c.id).toSet(), {'a1', 'a2'});
-    expect(api.ops.metaCalls.every((c) => c.mode == 'merge'), isTrue,
-        reason: '批量默认 merge(web 实况)');
+      api.ops.metaCalls.every((c) => c.mode == 'merge'),
+      isTrue,
+      reason: '批量默认 merge(web 实况)',
+    );
     expect(api.ops.metaCalls.first.labels, ['棚拍', '现场']);
     expect(assetsCount(), greaterThan(0));
     expect(foldersCount(), greaterThan(0));
   });
 
-  testWidgets('批量打标:切 replace 后 labels_mode=replace;空标签提交禁用',
-      (tester) async {
+  testWidgets('批量打标:切 replace 后 labels_mode=replace;空标签提交禁用', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await _open(tester, (ctx) =>
-        showBatchTagSheet(ctx, assetIds: const ['a1'], folderId: 'f1'));
+    await _open(
+      tester,
+      (ctx) => showBatchTagSheet(ctx, assetIds: const ['a1'], folderId: 'f1'),
+    );
     // 空标签:提交禁用
     await tester.tap(find.text('打标'), warnIfMissed: false);
     await tester.pump();
@@ -85,8 +92,10 @@ void main() {
   testWidgets('批量打标:>50 个标签提交禁用', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await _open(tester, (ctx) =>
-        showBatchTagSheet(ctx, assetIds: const ['a1'], folderId: 'f1'));
+    await _open(
+      tester,
+      (ctx) => showBatchTagSheet(ctx, assetIds: const ['a1'], folderId: 'f1'),
+    );
     final many = List.generate(51, (i) => '标签$i').join(',');
     await tester.enterText(find.byType(TextField).first, many);
     await tester.pump();
@@ -96,14 +105,21 @@ void main() {
     expect(api.ops.metaCalls, isEmpty, reason: '超限禁提交');
   });
 
-  testWidgets('单条(预览页):不传 labels_mode;只改 notes 时仅提 notes;无变化不提交',
-      (tester) async {
+  testWidgets('单条(预览页):不传 labels_mode;只改 notes 时仅提 notes;无变化不提交', (
+    tester,
+  ) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
 
     // 只改 notes:labels 不变 → body 无 labels_mode、无 user_labels
-    await _open(tester, (ctx) => showTagEditSheet(ctx,
-        asset: fakeAsset('a1', labels: ['棚拍']), folderId: 'f1'));
+    await _open(
+      tester,
+      (ctx) => showTagEditSheet(
+        ctx,
+        asset: fakeAsset('a1', labels: ['棚拍']),
+        folderId: 'f1',
+      ),
+    );
     expect(find.text('替换已有标签'), findsNothing, reason: '单条不渲染模式选择');
     await tester.enterText(find.byType(TextField).at(1), '新备注');
     await tester.tap(find.text('保存'));
@@ -114,8 +130,14 @@ void main() {
     expect(call.notes, '新备注');
 
     // 无变化:不提交直接关闭
-    await _open(tester, (ctx) => showTagEditSheet(ctx,
-        asset: fakeAsset('a1', labels: ['棚拍'], notes: '新备注'), folderId: 'f1'));
+    await _open(
+      tester,
+      (ctx) => showTagEditSheet(
+        ctx,
+        asset: fakeAsset('a1', labels: ['棚拍'], notes: '新备注'),
+        folderId: 'f1',
+      ),
+    );
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
     expect(api.ops.metaCalls, hasLength(1), reason: '无变化不提交(web 实况)');
@@ -123,23 +145,27 @@ void main() {
 }
 
 Future<void> _open(
-    WidgetTester tester, Future<Object?> Function(BuildContext) open) async {
+  WidgetTester tester,
+  Future<Object?> Function(BuildContext) open,
+) async {
   late BuildContext captured;
-  await tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: Builder(
-        builder: (ctx) {
-          captured = ctx;
-          return Center(
-            child: FilledButton(
-              onPressed: () => open(captured),
-              child: const Text('open'),
-            ),
-          );
-        },
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) {
+            captured = ctx;
+            return Center(
+              child: FilledButton(
+                onPressed: () => open(captured),
+                child: const Text('open'),
+              ),
+            );
+          },
+        ),
       ),
     ),
-  ));
+  );
   await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
 }

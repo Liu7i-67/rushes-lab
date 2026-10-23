@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../buttons.dart';
 import '../search_field.dart';
@@ -34,8 +35,9 @@ Future<List<Subject>?> showSubjectPickerSheet({
       ValueListenableBuilder<List<Subject>>(
         valueListenable: selected,
         builder: (nctx, sel, _) => PrimaryXl(
-            label: '完成(${sel.length})',
-            onPressed: () => Navigator.of(nctx).pop(List<Subject>.of(sel))),
+          label: '完成(${sel.length})',
+          onPressed: () => Navigator.of(nctx).pop(List<Subject>.of(sel)),
+        ),
       ),
     ],
     child: _SubjectPickerBody(selected: selected, preset: preset),
@@ -67,9 +69,9 @@ class _SubjectPickerBodyState extends State<_SubjectPickerBody> {
         RemoteSearcher<UserBrief>((q) => session.api!.users.searchUsers(q: q))
           ..addListener(_rebuild)
           ..search('');
-    _groupSearcher =
-        RemoteSearcher<GroupBrief>((q) => session.api!.users.searchGroups(q: q))
-          ..addListener(_rebuild);
+    _groupSearcher = RemoteSearcher<GroupBrief>(
+      (q) => session.api!.users.searchGroups(q: q),
+    )..addListener(_rebuild);
     widget.selected.addListener(_rebuild);
   }
 
@@ -122,72 +124,102 @@ class _SubjectPickerBodyState extends State<_SubjectPickerBody> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(mainAxisSize: MainAxisSize.min, children: [
-      SegmentedButton<SubjectKind>(
-        segments: const [
-          ButtonSegment(
+    final tk = context.tk;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SegmentedButton<SubjectKind>(
+          segments: const [
+            ButtonSegment(
               value: SubjectKind.user,
               icon: Icon(Icons.person_outline, size: 16),
-              label: Text('用户')),
-          ButtonSegment(
+              label: Text('用户'),
+            ),
+            ButtonSegment(
               value: SubjectKind.group,
               icon: Icon(Icons.groups_outlined, size: 16),
-              label: Text('用户组')),
-        ],
-        selected: {_kind},
-        onSelectionChanged: (s) => _switchKind(s.first),
-        showSelectedIcon: false,
-      ),
-      Padding(
-        padding: const EdgeInsets.symmetric(vertical: Tk.spaceSm),
-        child: SearchField(
-            controller: _query, hintText: '搜索…', onChanged: _runSearch),
-      ),
-      // 列表自封顶内滚(口径同 C1/ showPickerSheet,底线 200)
-      Container(
-        constraints: BoxConstraints(
-            maxHeight: (MediaQuery.sizeOf(context).height * 0.45)
-                .clamp(200.0, 420.0)),
-        decoration: BoxDecoration(
-            border: Border.all(color: Theme.of(context).dividerColor),
-            borderRadius: BorderRadius.circular(Tk.rSm)),
-        child: _kind == SubjectKind.user ? _userList() : _groupList(),
-      ),
-    ]);
+              label: Text('用户组'),
+            ),
+          ],
+          selected: {_kind},
+          onSelectionChanged: (s) => _switchKind(s.first),
+          showSelectedIcon: false,
+          style: SegmentedButton.styleFrom(
+            backgroundColor: tk.surface2,
+            foregroundColor: tk.ink2,
+            selectedBackgroundColor: tk.goldSoft,
+            selectedForegroundColor: tk.goldInk,
+            // 可切换控件:描边用 controlBorder(≥3:1)。
+            side: BorderSide(color: tk.controlBorder),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(Tk.rSm),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: Tk.spaceSm),
+          child: SearchField(
+            controller: _query,
+            hintText: '搜索…',
+            onChanged: _runSearch,
+          ),
+        ),
+        // 列表自封顶内滚(口径同 C1/ showPickerSheet,底线 200)
+        Container(
+          constraints: BoxConstraints(
+            maxHeight: (MediaQuery.sizeOf(context).height * 0.45).clamp(
+              200.0,
+              420.0,
+            ),
+          ),
+          decoration: BoxDecoration(
+            border: Border.all(color: tk.line),
+            borderRadius: BorderRadius.circular(Tk.rSm),
+          ),
+          child: _kind == SubjectKind.user ? _userList() : _groupList(),
+        ),
+      ],
+    );
   }
 
   Widget _userList() {
     final options = _visibleUsers;
-    if (options.isEmpty) return remoteStatus(_userSearcher.fetching);
+    if (options.isEmpty) return remoteStatus(context, _userSearcher.fetching);
     return ListView.builder(
       shrinkWrap: true,
       itemCount: options.length,
       itemBuilder: (context, i) {
         final u = options[i];
         return remoteTileOf(
-            u,
-            selected: widget.selected.value
-                .contains(Subject(kind: SubjectKind.user, id: u.id, name: '')),
-            onTap: () => _toggle(
-                Subject(kind: SubjectKind.user, id: u.id, name: u.name)));
+          context,
+          u,
+          selected: widget.selected.value.contains(
+            Subject(kind: SubjectKind.user, id: u.id, name: ''),
+          ),
+          onTap: () =>
+              _toggle(Subject(kind: SubjectKind.user, id: u.id, name: u.name)),
+        );
       },
     );
   }
 
   Widget _groupList() {
     final options = _groupSearcher.options;
-    if (options.isEmpty) return remoteStatus(_groupSearcher.fetching);
+    if (options.isEmpty) return remoteStatus(context, _groupSearcher.fetching);
     return ListView.builder(
       shrinkWrap: true,
       itemCount: options.length,
       itemBuilder: (context, i) {
         final g = options[i];
         return remoteTileOf(
-            g,
-            selected: widget.selected.value
-                .contains(Subject(kind: SubjectKind.group, id: g.id, name: '')),
-            onTap: () => _toggle(
-                Subject(kind: SubjectKind.group, id: g.id, name: g.name)));
+          context,
+          g,
+          selected: widget.selected.value.contains(
+            Subject(kind: SubjectKind.group, id: g.id, name: ''),
+          ),
+          onTap: () =>
+              _toggle(Subject(kind: SubjectKind.group, id: g.id, name: g.name)),
+        );
       },
     );
   }

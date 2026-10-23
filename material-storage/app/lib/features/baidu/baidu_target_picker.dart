@@ -8,7 +8,10 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
+import '../../widgets/app_row.dart';
 import '../folders/folder_tree.dart';
 
 /// 目标:{项目根} | {某文件夹}。
@@ -18,8 +21,7 @@ class BaiduTarget {
 
   final Folder? folder;
   bool get isRoot => folder == null;
-  String get label =>
-      isRoot ? '项目根(自动创建承接夹)' : '目录「${folder!.name}」';
+  String get label => isRoot ? '项目根(自动创建承接夹)' : '目录「${folder!.name}」';
 }
 
 /// 项目可承接判定(web creatableProjects 同口径)。
@@ -32,10 +34,8 @@ bool projectAcceptsTask(Project p, Me? me) =>
 Set<String> sensitiveSubtreeIds(List<Folder> all) {
   final blocked = <String>{};
   final byParent = <String?, List<String>>{};
-  final nameOf = <String, String>{};
   for (final f in all) {
     byParent.putIfAbsent(f.parentFolderId, () => []).add(f.id);
-    nameOf[f.id] = f.name;
   }
   void blockSubtree(String id) {
     if (!blocked.add(id)) return;
@@ -50,7 +50,7 @@ Set<String> sensitiveSubtreeIds(List<Folder> all) {
   return blocked;
 }
 
-/// 目标夹选择列表(项目根选项 + 树形行;value/onChanged 受控)。
+/// 目标夹选择列表(项目根选项 + 树形 AppRow;value/onChanged 受控)。
 class BaiduTargetPicker extends StatelessWidget {
   const BaiduTargetPicker({
     super.key,
@@ -83,73 +83,82 @@ class BaiduTargetPicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final blocked = sensitiveSubtreeIds(folders);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('导入到哪个目录(敏感目录及其子目录不可选)',
-            style: TextStyle(fontSize: Tk.fzSm, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 4),
-        _rootRow(context),
-        Container(
-          constraints: const BoxConstraints(maxHeight: 240),
-          decoration: BoxDecoration(
-            border: Border.all(color: Tk.border),
-            borderRadius: BorderRadius.circular(Tk.rSm),
+        Text(
+          '导入到哪个目录(敏感目录及其子目录不可选)',
+          style: TextStyle(fontSize: Tk.fzSm, color: tk.ink3),
+        ),
+        const SizedBox(height: Tk.spaceSm),
+        AppCard(
+          padding: EdgeInsets.zero,
+          child: Column(
+            children: [
+              _rootRow(context),
+              if (folders.isNotEmpty)
+                Divider(height: 1, thickness: 1, color: tk.line),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 240),
+                child: folders.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.all(Tk.spaceLg),
+                        child: Text(
+                          '项目暂无文件夹',
+                          style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                        ),
+                      )
+                    : ListView(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.symmetric(
+                          vertical: Tk.spaceXs,
+                        ),
+                        children: [
+                          for (final (node, depth) in _rows(
+                            buildFolderTree(folders),
+                          ))
+                            if (!blocked.contains(node.folder.id))
+                              Padding(
+                                padding: EdgeInsets.only(left: depth * 16.0),
+                                child: _folderRow(context, node.folder),
+                              ),
+                        ],
+                      ),
+              ),
+            ],
           ),
-          child: folders.isEmpty
-              ? const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Center(
-                      child: Text('项目暂无文件夹',
-                          style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted))),
-                )
-              : ListView(
-                  shrinkWrap: true,
-                  children: [
-                    for (final (node, depth) in _rows(buildFolderTree(folders)))
-                      if (!blocked.contains(node.folder.id))
-                        _folderRow(node.folder, depth),
-                  ],
-                ),
         ),
       ],
     );
   }
 
   Widget _rootRow(BuildContext context) {
+    final tk = context.tk;
     final selected = value.isRoot;
-    return ListTile(
-      visualDensity: VisualDensity.compact,
-      contentPadding: EdgeInsets.zero,
-      leading: const Icon(Icons.folder_special_outlined,
-          size: 20, color: Tk.muted),
-      title: Text('项目根',
-          style: TextStyle(
-              fontSize: Tk.fzMd,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
-              color: selected ? Tk.accentStrong : Tk.fg)),
-      subtitle: const Text('自动创建承接文件夹(以网盘目录名命名,同名复用)',
-          style: TextStyle(fontSize: Tk.fzXs)),
-      tileColor: selected ? Tk.accentFaint : null,
+    return AppRow(
+      leading: const Icon(Icons.folder_special_outlined),
+      goldIcon: selected,
+      title: '项目根',
+      subtitle: '自动创建承接文件夹(以网盘目录名命名,同名复用)',
+      trailing: selected
+          ? Icon(Icons.check_circle, size: 20, color: tk.gold)
+          : null,
       onTap: () => onChanged(const BaiduTarget.root()),
     );
   }
 
-  Widget _folderRow(Folder f, int depth) {
+  Widget _folderRow(BuildContext context, Folder f) {
+    final tk = context.tk;
     final selected = !value.isRoot && value.folder!.id == f.id;
-    return ListTile(
-      visualDensity: VisualDensity.compact,
-      contentPadding: EdgeInsets.only(left: 8.0 + depth * 16, right: 8),
-      leading: const Icon(Icons.folder_outlined, size: 18, color: Tk.muted),
-      title: Text(f.name,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: TextStyle(
-              fontSize: Tk.fzMd,
-              color: selected ? Tk.accentStrong : Tk.fg,
-              fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
-      tileColor: selected ? Tk.accentFaint : null,
+    return AppRow(
+      leading: const Icon(Icons.folder_outlined),
+      goldIcon: selected,
+      title: f.name,
+      trailing: selected
+          ? Icon(Icons.check_circle, size: 20, color: tk.gold)
+          : null,
       onTap: () => onChanged(BaiduTarget.folderOf(f)),
     );
   }

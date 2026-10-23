@@ -14,6 +14,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/copy_button.dart';
 import '../../widgets/form_text_field.dart';
@@ -56,9 +57,9 @@ class _ArtistAccountFieldsState extends State<ArtistAccountFields> {
   }
 
   void _emit() => widget.onChanged((
-        username: _username.text.trim(),
-        name: _name.text.trim(),
-      ));
+    username: _username.text.trim(),
+    name: _name.text.trim(),
+  ));
 
   /// 登录名输入停顿 500ms 才预检;形状不合法(正则/长度)不打请求(防 422)。
   void _onUsernameChanged(String v) {
@@ -95,18 +96,19 @@ class _ArtistAccountFieldsState extends State<ArtistAccountFields> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('开通艺人账号(可选,两项都留空 = 仅创建项目)',
-            style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-        const SizedBox(height: Tk.spaceXs),
+        Text(
+          '开通艺人账号(可选,两项都留空 = 仅创建项目)',
+          style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+        ),
+        const SizedBox(height: Tk.spaceSm),
         AppTextField(
           label: '艺人登录名(字母/数字/._-,2-64 位)',
           controller: _username,
-          errorText: _conflict
-              ? '该登录名已被占用;若属该艺人本人请勿重复开通,可联系管理员加入项目成员'
-              : null,
+          errorText: _conflict ? '该登录名已被占用;若属该艺人本人请勿重复开通,可联系管理员加入项目成员' : null,
           onChanged: _onUsernameChanged,
         ),
         const SizedBox(height: Tk.spaceSm),
@@ -142,51 +144,73 @@ class ArtistResultView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return SafeArea(
       child: Padding(
         padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Icon(Icons.check_circle_outline, size: 36, color: Tk.green),
-          const SizedBox(height: Tk.spaceSm),
-          const Text('项目与艺人账号已创建',
-              style: TextStyle(fontSize: Tk.fzTitle, fontWeight: FontWeight.w600)),
-          const SizedBox(height: Tk.spaceMd),
-          _copyRow(context, '登录名', username),
-          _copyRow(context, '初始密码', password),
-          const SizedBox(height: Tk.spaceXs),
-          Text(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_circle_outline, size: 36, color: tk.ok),
+            const SizedBox(height: Tk.spaceSm),
+            Text(
+              '项目与艺人账号已创建',
+              style: TextStyle(
+                fontSize: Tk.fzTitle,
+                fontWeight: FontWeight.w600,
+                color: tk.ink,
+              ),
+            ),
+            const SizedBox(height: Tk.spaceMd),
+            _copyRow(context, '登录名', username),
+            _copyRow(context, '初始密码', password),
+            const SizedBox(height: Tk.spaceXs),
+            Text(
               '密码仅展示这一次,关闭后无法再查;请复制并转交艺人($name),'
               '首次登录将要求修改密码。',
-              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
-          const SizedBox(height: Tk.spaceLg),
-          SizedBox(
-            width: double.infinity,
-            child: FilledButton(
-              onPressed: onFinish,
-              child: const Text('我已保存,进入项目'),
+              style: TextStyle(fontSize: Tk.fzXs, height: 1.55, color: tk.warn),
             ),
-          ),
-        ]),
+            const SizedBox(height: Tk.spaceLg),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                onPressed: onFinish,
+                child: const Text('我已保存,进入项目'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _copyRow(BuildContext context, String label, String value) {
-    return Row(children: [
-      Text('$label:', style: const TextStyle(fontSize: Tk.fzMd)),
-      const SizedBox(width: Tk.spaceSm - 2),
-      Expanded(
-        child: Text(value,
-            style: const TextStyle(
-              fontSize: Tk.fzMd, fontFamily: 'monospace')),
-      ),
-      // R1:每行独立 CopyButton,成功就地名变 ✓(原「已复制」SnackBar 删除)
-      CopyButton(
-        text: value,
-        tooltip: '复制$label',
-        iconSize: 16,
-        visualDensity: VisualDensity.compact,
-      ),
-    ]);
+    final tk = context.tk;
+    return Row(
+      children: [
+        Text(
+          '$label:',
+          style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+        ),
+        const SizedBox(width: Tk.spaceSm - 2),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: Tk.fzMd,
+              fontFamily: 'monospace',
+              color: tk.ink,
+            ),
+          ),
+        ),
+        // R1:每行独立 CopyButton,成功就地名变 ✓(原「已复制」SnackBar 删除)
+        CopyButton(
+          text: value,
+          tooltip: '复制$label',
+          iconSize: 16,
+          visualDensity: VisualDensity.compact,
+        ),
+      ],
+    );
   }
 }

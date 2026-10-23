@@ -9,7 +9,9 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../core/update/update_flow.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_row.dart';
 
 class UpdateCheckTile extends StatefulWidget {
   const UpdateCheckTile({
@@ -67,28 +69,32 @@ class _UpdateCheckTileState extends State<UpdateCheckTile> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final android = widget.isAndroid ?? (!kIsWeb && Platform.isAndroid);
     final label = _local == null ? '…' : localVersionLabel(_local!);
     if (!android) {
       // iOS/web(D6):仅展示版本,无检查入口
-      return ListTile(
+      return AppRow(
         leading: const Icon(Icons.info_outline),
-        title: const Text('当前版本'),
-        trailing: Text(label, style: const TextStyle(color: Tk.subtle)),
+        title: '当前版本',
+        trailing: Text(
+          label,
+          style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+        ),
       );
     }
-    return ListTile(
+    return AppRow(
       leading: const Icon(Icons.system_update_outlined),
-      title: const Text('检查更新'),
-      subtitle: Text('当前版本 $label'),
+      title: '检查更新',
+      subtitle: '当前版本 $label',
+      onTap: _checking ? null : _check,
       trailing: _checking
           ? const SizedBox(
               width: 18,
               height: 18,
               child: CircularProgressIndicator(strokeWidth: 2),
             )
-          : const Icon(Icons.chevron_right),
-      onTap: _checking ? null : _check,
+          : Icon(Icons.chevron_right, size: 18, color: tk.ink3),
     );
   }
 }

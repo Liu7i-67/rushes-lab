@@ -13,44 +13,58 @@ import 'package:ms_app/models/models.dart';
 import '../helpers/api_harness.dart';
 
 void main() {
-  testWidgets('成员列表展示角色;点角色撤销带 subject+role;409 detail 透传',
-      (tester) async {
+  testWidgets('成员列表展示角色;点角色撤销带 subject+role;409 detail 透传', (tester) async {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     final api = installFakeApi();
     api.projectsOps.listMembersStaged = [
       ProjectMember(
-          subject: 'user:u1', kind: 'user', subjectId: 'u1', name: '甲',
-          roles: const ['admin', 'viewer']),
+        subject: 'user:u1',
+        kind: 'user',
+        subjectId: 'u1',
+        name: '甲',
+        roles: const ['admin', 'viewer'],
+      ),
       ProjectMember(
-          subject: 'group:g1#member', kind: 'group', subjectId: 'g1',
-          name: '后期组', roles: const ['uploader']),
+        subject: 'group:g1#member',
+        kind: 'group',
+        subjectId: 'g1',
+        name: '后期组',
+        roles: const ['uploader'],
+      ),
     ];
-    api.projectsOps.removeMemberStaged =
-        ApiException(409, '不允许撤销自己的项目管理员角色;请先邀请其他管理员,再让对方撤销你');
+    api.projectsOps.removeMemberStaged = ApiException(
+      409,
+      '不允许撤销自己的项目管理员角色;请先邀请其他管理员,再让对方撤销你',
+    );
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u0', name: '管');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showProjectMembersSheet(ctx,
-                  project: Project(id: 'p1', name: '演示项目', code: 'demo')),
-              child: const Text('open'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showProjectMembersSheet(
+                  ctx,
+                  project: Project(id: 'p1', name: '演示项目', code: 'demo'),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
     expect(find.text('成员 · 演示项目'), findsOneWidget);
     expect(find.text('甲'), findsWidgets, reason: '头像首字+标题');
-    expect(find.text('后期组(群组)'), findsOneWidget);
+    expect(find.text('后期组'), findsOneWidget, reason: '群组名');
+    expect(find.text('群组 · 项目成员'), findsOneWidget, reason: '来源/角色行');
     // 角色徽章按 ROLE_ORDER 序(admin>uploader>downloader>viewer);
     // app-polish E13:徽章不再带「×」文案,撤销入口=徽章行尾显式移除图标钮
     expect(find.text('管理'), findsOneWidget);
@@ -62,8 +76,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '撤销'));
     await tester.pumpAndSettle();
-    expect(api.projectsOps.removeMemberCalls.single,
-        (projectId: 'p1', subject: 'user:u1', role: 'admin'));
+    expect(api.projectsOps.removeMemberCalls.single, (
+      projectId: 'p1',
+      subject: 'user:u1',
+      role: 'admin',
+    ));
     expect(find.textContaining('不允许撤销自己的项目管理员角色'), findsOneWidget);
     await tester.pump(const Duration(seconds: 6)); // 清 SnackBar timer
     await tester.pumpAndSettle();
@@ -78,19 +95,23 @@ void main() {
     addTearDown(() => session.api = null);
     session.me = Me(id: 'me1', name: '甲');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showProjectMembersSheet(ctx,
-                  project: Project(id: 'p1', name: '演示项目', code: 'demo')),
-              child: const Text('open'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showProjectMembersSheet(
+                  ctx,
+                  project: Project(id: 'p1', name: '演示项目', code: 'demo'),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -121,8 +142,12 @@ void main() {
     final call = api.projectsOps.addMemberCalls.single;
     expect(call.projectId, 'p1');
     expect(call.groupId, 'g1');
-    expect(call.roles, ['admin', 'viewer'],
-        reason: 'roles 固定序=kProjectRoles(admin/uploader/downloader/viewer,web 同款)');
+    expect(
+      call.roles,
+      ['admin', 'viewer'],
+      reason:
+          'roles 固定序=kProjectRoles(admin/uploader/downloader/viewer,web 同款)',
+    );
     // 成功回成员列表
     expect(find.text('成员 · 演示项目'), findsOneWidget);
     await tester.pump(const Duration(seconds: 6));
@@ -136,28 +161,39 @@ void main() {
     final api = installFakeApi();
     api.projectsOps.listGrantsStaged = [
       ProjectGrantRow(
-          subject: 'user:u2', kind: 'user', subjectId: 'u2', name: '乙',
-          objectType: 'sensitive_folder', objectId: 'sf1',
-          objectName: '敏感夹', relation: 'explicit_invited_downloader',
-          level: 'download', permanent: false,
-          expiresAt: '2026-10-25T10:00:00Z'),
+        subject: 'user:u2',
+        kind: 'user',
+        subjectId: 'u2',
+        name: '乙',
+        objectType: 'sensitive_folder',
+        objectId: 'sf1',
+        objectName: '敏感夹',
+        relation: 'explicit_invited_downloader',
+        level: 'download',
+        permanent: false,
+        expiresAt: '2026-10-25T10:00:00Z',
+      ),
     ];
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u0', name: '管');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showProjectMembersSheet(ctx,
-                  project: Project(id: 'p1', name: '演示项目', code: 'demo')),
-              child: const Text('open'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showProjectMembersSheet(
+                  ctx,
+                  project: Project(id: 'p1', name: '演示项目', code: 'demo'),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -166,14 +202,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '撤回'));
     await tester.pumpAndSettle();
-    expect(api.projectsOps.revokeGrantCalls.single,
-        (
-          projectId: 'p1',
-          objectType: 'sensitive_folder',
-          objectId: 'sf1',
-          subject: 'user:u2',
-          relation: 'explicit_invited_downloader',
-        ));
+    expect(api.projectsOps.revokeGrantCalls.single, (
+      projectId: 'p1',
+      objectType: 'sensitive_folder',
+      objectId: 'sf1',
+      subject: 'user:u2',
+      relation: 'explicit_invited_downloader',
+    ));
     await tester.pump(const Duration(seconds: 6));
     await tester.pumpAndSettle();
   });

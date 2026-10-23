@@ -8,12 +8,16 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/form_text_field.dart';
 import 'admin_form_skeleton.dart';
 
 /// 打开建/编组表单;返回是否成功提交。
-Future<bool> showGroupFormSheet(BuildContext context,
-    {DirectoryGroup? group}) async {
+Future<bool> showGroupFormSheet(
+  BuildContext context, {
+  DirectoryGroup? group,
+}) async {
   final ok = await showModalBottomSheet<bool>(
     context: context,
     showDragHandle: true,
@@ -33,10 +37,12 @@ class _GroupFormSheet extends StatefulWidget {
 }
 
 class _GroupFormSheetState extends State<_GroupFormSheet> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.group?.name ?? '');
-  late final TextEditingController _desc =
-      TextEditingController(text: widget.group?.description ?? '');
+  late final TextEditingController _name = TextEditingController(
+    text: widget.group?.name ?? '',
+  );
+  late final TextEditingController _desc = TextEditingController(
+    text: widget.group?.description ?? '',
+  );
   late final _flags = <String, bool>{
     'can_create_project': widget.group?.canCreateProject ?? false,
     'can_delete_project': widget.group?.canDeleteProject ?? false,
@@ -130,19 +136,9 @@ class _GroupFormSheetState extends State<_GroupFormSheet> {
       onSubmit: _submit,
       error: _error,
       children: [
-        TextField(
-          controller: _name,
-          autofocus: !_isEdit,
-          decoration: const InputDecoration(
-              labelText: '组名', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _name, label: '组名'),
         const SizedBox(height: 10),
-        TextField(
-          controller: _desc,
-          maxLength: 1024,
-          decoration: const InputDecoration(
-              labelText: '描述(可选)', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _desc, label: '描述(可选)', maxLength: 1024),
         _flagTile(
           'can_create_project',
           '允许组成员新建项目',
@@ -178,12 +174,21 @@ class _GroupFormSheetState extends State<_GroupFormSheet> {
     );
   }
 
-  Widget _flagTile(String key, String label, String tip) => SwitchListTile(
-        contentPadding: EdgeInsets.zero,
-        dense: true,
-        title: Text(label, style: const TextStyle(fontSize: Tk.fzBody)),
-        subtitle: Text(tip, style: const TextStyle(fontSize: Tk.fzXs)),
-        value: _flags[key] ?? false,
-        onChanged: (v) => _setFlag(key, v),
-      );
+  Widget _flagTile(String key, String label, String tip) {
+    final tk = context.tk;
+    return SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      dense: true,
+      title: Text(
+        label,
+        style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+      ),
+      subtitle: Text(
+        tip,
+        style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3, height: 1.5),
+      ),
+      value: _flags[key] ?? false,
+      onChanged: (v) => _setFlag(key, v),
+    );
+  }
 }

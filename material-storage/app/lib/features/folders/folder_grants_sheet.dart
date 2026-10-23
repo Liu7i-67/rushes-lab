@@ -1,9 +1,8 @@
-/// FolderGrantsSheet — 普通一级夹 explicit grant 管理(B6 §8.4;web
-/// FolderGrantsPanel 移动版):grants 列表 + 添加(SubjectPicker + 多 level
-/// viewer/downloader/uploader chips,一次授多 level)+ 撤销。**无有效期/倒计时
-/// 控件**——后端只收 levels+主体,恒永久(web 同款勿造假 UI)。入口仅普通一级夹。
-/// app-polish D1:骨架迁移 SheetScaffold(标题/列表定高内滚/PrimaryXl 吸底);
-/// 撤销确认统一 showAppConfirm(danger);错误收口 toast+errorMessage(E14)。
+/// FolderGrantsSheet — 普通一级夹 explicit grant 管理(B6 §8.4;F7 统一):
+/// grants 列表 + 添加(SubjectPicker + 多 level chips,一次授多 level)+
+/// 撤销。**无有效期/倒计时控件**——后端只收 levels+主体,恒永久
+/// (web 同款勿造假 UI)。入口仅普通一级夹。撤销确认统一
+/// showAppConfirm(danger);错误收口 toast+errorMessage。
 library;
 
 export 'folder_grants_form.dart'
@@ -13,13 +12,16 @@ import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/session.dart';
-import 'folder_grants_form.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/buttons.dart';
+import '../../widgets/empty_state.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../../widgets/toast.dart';
+import 'folder_grants_form.dart';
 
 /// 打开普通一级夹授权管理面板(对外 API 不变)。
 Future<void> showFolderGrantsSheet(
@@ -56,8 +58,7 @@ class _GrantsSheetState extends State<_GrantsSheet> {
     final ok = await showAppConfirm(
       context,
       title: '撤销此 grant?',
-      content: '将撤 ${g.name ?? g.subjectId} 的'
-          '${grantLevelLabel(g.level)}权限',
+      content: '将撤 ${g.name ?? g.subjectId} 的${grantLevelLabel(g.level)}权限',
       confirmLabel: '撤销',
       danger: true,
     );
@@ -68,11 +69,11 @@ class _GrantsSheetState extends State<_GrantsSheet> {
         subject: g.subject,
         level: g.level,
       );
+      if (!mounted) return;
       _reload();
     } catch (e) {
       if (!mounted) return;
-      toast(context, '撤销失败:${errorMessage(e, '请稍后重试')}',
-          tone: ToastTone.error);
+      toast(context, '撤销失败:${errorMessage(e, '请稍后重试')}', tone: ToastTone.error);
     }
   }
 
@@ -91,21 +92,24 @@ class _GrantsSheetState extends State<_GrantsSheet> {
               ),
             ],
       child: _showForm
-          ? FolderGrantForm(folder: widget.folder, onDone: () {
-              setState(() {
-                _showForm = false;
-                _grants = _load();
-              });
-            })
+          ? FolderGrantForm(
+              folder: widget.folder,
+              onDone: () {
+                setState(() {
+                  _showForm = false;
+                  _grants = _load();
+                });
+              },
+            )
           : Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                    '补充给特定人/组的夹级权限,与项目级取并集(恒永久)',
-                    style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+                Text(
+                  '补充给特定人/组的夹级权限,与项目级取并集(恒永久)',
+                  style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3),
+                ),
                 const SizedBox(height: Tk.spaceSm),
-                // 列表定高内滚(外层 SheetScaffold 已管总高与吸底钮)
                 SizedBox(
                   height: MediaQuery.of(context).size.height * 0.45,
                   child: _grantList(),
@@ -124,48 +128,34 @@ class _GrantsSheetState extends State<_GrantsSheet> {
         }
         if (snap.hasError) {
           return Center(
-            child: Text('加载失败:${errorMessage(snap.error!, '请稍后重试')}',
-                style: Theme.of(context).textTheme.bodySmall),
+            child: Text(
+              '加载失败:${errorMessage(snap.error!, '请稍后重试')}',
+              style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3),
+            ),
           );
         }
         final grants = snap.data ?? const <FolderGrantRow>[];
         if (grants.isEmpty) {
-          return const Center(
-            child: Text('还没设置 explicit grant\n该夹沿用项目级权限',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: Tk.fzMd, color: Tk.subtle)),
+          return const EmptyState(
+            icon: Icons.admin_panel_settings_outlined,
+            message: '还没设置 explicit grant',
+            description: '该夹沿用项目级权限',
           );
         }
         return ListView.separated(
           itemCount: grants.length,
-          separatorBuilder: (_, _) => const Divider(height: 1),
+          separatorBuilder: (_, _) =>
+              Divider(height: 1, thickness: 1, color: context.tk.line),
           itemBuilder: (context, i) {
             final g = grants[i];
-            return ListTile(
-              visualDensity: VisualDensity.compact,
-              contentPadding: EdgeInsets.zero,
-              leading: CircleAvatar(
-                radius: 13,
-                backgroundColor: g.kind == 'user' ? Tk.fg : Tk.border,
-                child: Text(
-                  g.kind == 'user'
-                      ? (g.name ?? '?').isEmpty
-                          ? '?'
-                          : g.name!.characters.first.toUpperCase()
-                      : '群',
-                  style: TextStyle(
-                      fontSize: Tk.fzXs,
-                      color: g.kind == 'user' ? Tk.surface : Tk.muted),
-                ),
-              ),
-              title: Text(g.name ?? g.subjectId,
-                  maxLines: 1, overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500)),
-              subtitle: Text(grantLevelLabel(g.level),
-                  style: const TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
+            return AppRow(
+              leading: _Avatar(name: g.name, kind: g.kind),
+              title: g.name ?? g.subjectId,
+              subtitle: grantLevelLabel(g.level),
+              showChevron: false,
               trailing: IconButton(
                 icon: const Icon(Icons.delete_outline, size: 18),
+                color: context.tk.danger,
                 tooltip: '撤销',
                 onPressed: () => _revoke(g),
               ),
@@ -173,6 +163,41 @@ class _GrantsSheetState extends State<_GrantsSheet> {
           },
         );
       },
+    );
+  }
+}
+
+/// 用户/用户组首字头像(goldSoft 底 + goldInk 字)。
+class _Avatar extends StatelessWidget {
+  const _Avatar({required this.name, required this.kind});
+
+  final String? name;
+  final String kind;
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    final user = kind == 'user';
+    return Container(
+      width: 32,
+      height: 32,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: user ? tk.goldSoft : tk.surface3,
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        user
+            ? ((name ?? '').isEmpty
+                  ? '?'
+                  : name!.characters.first.toUpperCase())
+            : '群',
+        style: TextStyle(
+          fontSize: Tk.fzXs,
+          fontWeight: FontWeight.w600,
+          color: user ? tk.goldInk : tk.ink2,
+        ),
+      ),
     );
   }
 }

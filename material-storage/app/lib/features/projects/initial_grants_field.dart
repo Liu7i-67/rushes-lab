@@ -1,22 +1,18 @@
-/// InitialGrantsField — 新建项目初始权限编辑器(B6 §8.5;web NewProjectModal
-/// 权限组移动版):顶部权限模板选择(仅显式选中时把模板条目展开为
-/// initial_grants 行,可再增删改——后端无模板 id 入参)+ SubjectPicker 手选
-/// + 每行主体各自 RoleChips + 移除。行上限 50(后端 INITIAL_GRANTS_MAX)。
-/// app-polish-2 I2(#6):模板下拉改「只读字段+弹层选择器」(PickerField +
-/// showPickerSheet,可搜索);「不使用模板」null 项经 PickerOption 包装保留
-/// 语义(选中=清空重来,取消=维持现状)。
+/// InitialGrantsField — 新建项目初始权限编辑器(B6 §8.5):权限模板选择
+/// (展开为 initial_grants 行)+ SubjectPicker + 每行 RoleChips + 移除;
+/// 行上限 50,「不使用模板」=清空重来,取消=维持现状。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/pickers/picker_sheet.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/role_chips.dart';
 
-/// initial_grants 条数上限(routers/projects.py INITIAL_GRANTS_MAX)。
 const kInitialGrantsMax = 50;
 
 /// 一行初始权限:主体 + 该行自己的角色集(key=kind:id 稳定去重)。
@@ -38,13 +34,16 @@ class GrantRowData {
   String get key => '$kind:$id';
 }
 
-/// 模板条目 → 行(角色集拷贝;web templateRows 同构)。
 List<GrantRowData> templateToRows(GrantTemplate t) => [
-      for (final it in t.items)
-        GrantRowData(
-            kind: it.kind, id: it.id, name: it.name,
-            roles: {...it.roles}, missing: it.missing),
-    ];
+  for (final it in t.items)
+    GrantRowData(
+      kind: it.kind,
+      id: it.id,
+      name: it.name,
+      roles: {...it.roles},
+      missing: it.missing,
+    ),
+];
 
 class InitialGrantsField extends StatefulWidget {
   const InitialGrantsField({
@@ -92,8 +91,11 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
       for (final s in subjects)
         byKey['${s.kind.name}:${s.id}'] ??
             GrantRowData(
-                kind: s.kind.name, id: s.id, name: s.name,
-                roles: {'viewer'}),
+              kind: s.kind.name,
+              id: s.id,
+              name: s.name,
+              roles: {'viewer'},
+            ),
     ]);
   }
 
@@ -133,6 +135,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -151,24 +154,29 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
           },
         ),
         const SizedBox(height: Tk.spaceSm),
-        const Text('选模板预填后可增删行/改角色,或直接手选主体:',
-            style: TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+        Text(
+          '选模板预填后可增删行/改角色,或直接手选主体:',
+          style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+        ),
         const SizedBox(height: Tk.spaceXs),
         SubjectPicker(
           value: [
             for (final r in widget.value)
               Subject(
-                  kind: r.kind == 'user' ? SubjectKind.user : SubjectKind.group,
-                  id: r.id,
-                  name: _rowName(r)),
+                kind: r.kind == 'user' ? SubjectKind.user : SubjectKind.group,
+                id: r.id,
+                name: _rowName(r),
+              ),
           ],
           onChanged: _applySubjects,
           preset: mePreset(),
         ),
         if (widget.value.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Text('${widget.value.length}/$kInitialGrantsMax 行',
-              style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+          const SizedBox(height: Tk.spaceSm),
+          Text(
+            '${widget.value.length}/$kInitialGrantsMax 行',
+            style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+          ),
           for (final r in widget.value)
             _RowCard(
               row: r,
@@ -177,13 +185,18 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
                 for (final x in widget.value)
                   if (x.key == r.key)
                     GrantRowData(
-                        kind: x.kind, id: x.id, name: x.name,
-                        roles: roles, missing: x.missing)
+                      kind: x.kind,
+                      id: x.id,
+                      name: x.name,
+                      roles: roles,
+                      missing: x.missing,
+                    )
                   else
                     x,
               ]),
-              onRemove: () => widget
-                  .onChanged(widget.value.where((x) => x.key != r.key).toList()),
+              onRemove: () => widget.onChanged(
+                widget.value.where((x) => x.key != r.key).toList(),
+              ),
             ),
         ],
       ],
@@ -201,8 +214,7 @@ class _InitialGrantsFieldState extends State<InitialGrantsField> {
   }
 }
 
-/// 初始权限的一行:主体(名/类型)+ 该行自己的 RoleChips + 移除按钮
-/// (web GrantRowCard 同构;主体已删的模板条目带「已删除」警示)。
+/// 初始权限的一行:主体(名/类型)+ RoleChips + 移除(主体已删带「已删除」)。
 class _RowCard extends StatelessWidget {
   const _RowCard({
     required this.row,
@@ -218,51 +230,68 @@ class _RowCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final isUser = row.kind == 'user';
     return Container(
       margin: const EdgeInsets.only(top: Tk.spaceSm),
-      padding: const EdgeInsets.fromLTRB(Tk.spaceMd, Tk.spaceSm, Tk.spaceMd, 10),
+      padding: const EdgeInsets.all(Tk.spaceMd),
       decoration: BoxDecoration(
-        border: Border.all(color: Theme.of(context).dividerColor),
+        color: tk.surface2,
+        border: Border.all(color: tk.line),
         borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            CircleAvatar(
-              radius: 12,
-              backgroundColor: isUser ? Tk.fg : Tk.border,
-              child: Text(
-                isUser
-                    ? (name.isEmpty ? '?' : name.characters.first.toUpperCase())
-                    : '群',
-                style:
-                    TextStyle(fontSize: Tk.fzXs, color: isUser ? Tk.surface : Tk.muted),
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 12,
+                backgroundColor: isUser ? tk.goldSoft : tk.surface3,
+                child: Text(
+                  isUser
+                      ? (name.isEmpty
+                            ? '?'
+                            : name.characters.first.toUpperCase())
+                      : '群',
+                  style: TextStyle(
+                    fontSize: Tk.fzXs,
+                    color: isUser ? tk.goldInk : tk.ink2,
+                  ),
+                ),
               ),
-            ),
-            const SizedBox(width: Tk.spaceSm),
-            Expanded(
-              child: Text(name,
+              const SizedBox(width: Tk.spaceSm),
+              Expanded(
+                child: Text(
+                  name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      fontSize: Tk.fzMd, fontWeight: FontWeight.w500)),
-            ),
-            Text(isUser ? '用户' : '群组',
-                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-            if (row.missing) ...[
-              const SizedBox(width: 6),
-              const Text('已删除',
-                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
+                  style: TextStyle(
+                    fontSize: Tk.fzMd,
+                    fontWeight: FontWeight.w500,
+                    color: tk.ink,
+                  ),
+                ),
+              ),
+              Text(
+                isUser ? '用户' : '群组',
+                style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+              ),
+              if (row.missing) ...[
+                const SizedBox(width: 6),
+                Text(
+                  '已删除',
+                  style: TextStyle(fontSize: Tk.fzXs, color: tk.warn),
+                ),
+              ],
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(Icons.delete_outline, size: 16),
+                tooltip: '移除该主体',
+                onPressed: onRemove,
+              ),
             ],
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.delete_outline, size: 16),
-              tooltip: '移除该主体',
-              onPressed: onRemove,
-            ),
-          ]),
+          ),
           RoleChips(value: row.roles, onChanged: onRoles),
         ],
       ),

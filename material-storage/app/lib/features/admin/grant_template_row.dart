@@ -1,11 +1,12 @@
 /// 权限模板表单条目行拆件(自 grant_template_form_sheet.dart 抽出,行为零变化):
-/// 单条授权行 = 主体名(群组/用户)+ 已删主体 amber 标记 + 移除按钮 + RoleChips;
+/// 单条授权行 = 主体名(群组/用户)+ 已删主体 warn 标记 + 移除按钮 + RoleChips;
 /// 容器/文案/交互与原内联版逐行一致,行数据与回调由表单页持有。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/role_chips.dart';
 
@@ -20,16 +21,16 @@ class GrantRow {
     this.missing = false,
   });
 
-  /// missing 透传(P2-3):主体已删行渲染 amber「已删除」标记(web 同款),
+  /// missing 透传(P2-3):主体已删行渲染 warn「已删除」标记(web 同款),
   /// 保存会被建项目/模板主体存在性校验 400 拦下,行上先显式提示。
   factory GrantRow.fromItem(GrantTemplateItem it) => GrantRow(
-        key: '${it.kind}:${it.id}',
-        kind: it.kind,
-        id: it.id,
-        name: it.name,
-        roles: {...it.roles},
-        missing: it.missing,
-      );
+    key: '${it.kind}:${it.id}',
+    kind: it.kind,
+    id: it.id,
+    name: it.name,
+    roles: {...it.roles},
+    missing: it.missing,
+  );
 
   final String key;
   final String kind; // user / group
@@ -54,55 +55,66 @@ class GrantTemplateRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final r = row;
     return Container(
       margin: const EdgeInsets.only(top: Tk.spaceSm),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: Tk.fill,
+        color: tk.surface2,
         borderRadius: BorderRadius.circular(Tk.rSm),
+        border: Border.all(color: tk.line),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Expanded(
-              child: Text(
-                '${r.name?.isNotEmpty == true ? r.name : r.id}'
-                '${r.kind == 'group' ? '(群组)' : '(用户)'}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                    fontSize: Tk.fzMd, fontWeight: FontWeight.w500),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${r.name?.isNotEmpty == true ? r.name : r.id}'
+                  '${r.kind == 'group' ? '(群组)' : '(用户)'}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: Tk.fzMd,
+                    fontWeight: FontWeight.w500,
+                    color: tk.ink,
+                  ),
+                ),
               ),
-            ),
-            // 已删主体 amber 标记(P2-3;web TemplateFormModal
-            // 「已删除」pill + tooltip 同语义,移动端以文案呈现)
-            if (r.missing)
-              const Padding(
-                padding: EdgeInsets.only(left: 6),
-                child: Text('已删除',
+              // 已删主体 warn 标记(P2-3;web TemplateFormModal
+              // 「已删除」pill + tooltip 同语义,移动端以文案呈现)
+              if (r.missing)
+                Padding(
+                  padding: const EdgeInsets.only(left: 6),
+                  child: Text(
+                    '已删除',
                     style: TextStyle(
-                        fontSize: Tk.fzXs,
-                        letterSpacing: 0.4,
-                        color: Tk.amber)),
+                      fontSize: Tk.fzXs,
+                      letterSpacing: 0.4,
+                      color: tk.warn,
+                    ),
+                  ),
+                ),
+              // P2-6:孤立图标钮补 tooltip(=语义标签),读屏/桌面悬停可辨。
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                tooltip: '移除该授权',
+                icon: const Icon(Icons.delete_outline, size: 18),
+                onPressed: onDelete,
               ),
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.delete_outline, size: 18),
-              onPressed: onDelete,
-            ),
-          ]),
-          if (r.missing)
-            const Padding(
-              padding: EdgeInsets.only(bottom: Tk.spaceXs),
-              child: Text('该主体已被删除,保存前请移除此行或替换主体',
-                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber)),
-            ),
-          RoleChips(
-            value: r.roles,
-            onChanged: onRolesChanged,
+            ],
           ),
+          if (r.missing)
+            Padding(
+              padding: const EdgeInsets.only(bottom: Tk.spaceXs),
+              child: Text(
+                '该主体已被删除,保存前请移除此行或替换主体',
+                style: TextStyle(fontSize: Tk.fzXs, color: tk.warn),
+              ),
+            ),
+          RoleChips(value: r.roles, onChanged: onRolesChanged),
         ],
       ),
     );

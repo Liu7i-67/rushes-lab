@@ -2,7 +2,7 @@
 /// 列表(q/is_active 筛选 + 服务端分页)+ 建号入口(带组,一次性临时密码
 /// 回显可复制);行操作(编辑/启停/重置密码/解锁)拆见 admin_user_row.dart,
 /// 表单拆件见 user_form_sheets/user_edit_sheet/temp_password_sheet。
-/// require_system_admin。
+/// require_system_admin。视觉:PageHeader + 搜索/筛选 chip 轨 + SectionCard 行卡。
 library;
 
 import 'dart:async';
@@ -13,8 +13,11 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
+import '../../widgets/app_chip.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/search_field.dart';
 import '../../widgets/toast.dart';
 import 'admin_auto_load.dart';
@@ -111,8 +114,7 @@ class _AdminUsersPageState extends State<AdminUsersPage>
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingMore = false);
-      toast(context, errorMessage(e, '加载失败,请稍后重试'),
-          tone: ToastTone.error);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'), tone: ToastTone.error);
     }
   }
 
@@ -127,29 +129,38 @@ class _AdminUsersPageState extends State<AdminUsersPage>
   Future<void> _create() async {
     final created = await showCreateUserSheet(context);
     if (created == null || !mounted) return;
-    await showTempPasswordSheet(context,
-        password: created.temporaryPassword, title: '用户已创建');
+    await showTempPasswordSheet(
+      context,
+      password: created.temporaryPassword,
+      title: '用户已创建',
+    );
     _reload();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('用户'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.person_add_alt_1),
-            tooltip: '新建用户',
-            onPressed: _create,
-          ),
-        ],
-      ),
       body: Column(
         children: [
+          PageHeader(
+            back: true,
+            title: '用户',
+            subtitle: _loading ? null : '共 $_total 名用户',
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.person_add_alt_1),
+                tooltip: '新建用户',
+                onPressed: _create,
+              ),
+            ],
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(
-                Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceXs),
+              Tk.spacePage,
+              Tk.spaceSm,
+              Tk.spacePage,
+              0,
+            ),
             child: SearchField(
               controller: _search,
               hintText: '搜用户名 / 姓名 / 邮箱…',
@@ -157,10 +168,16 @@ class _AdminUsersPageState extends State<AdminUsersPage>
             ),
           ),
           SizedBox(
-            height: 48,
-            child: Row(
+            height: 52,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(
+                Tk.spacePage,
+                Tk.spaceSm,
+                Tk.spacePage,
+                0,
+              ),
               children: [
-                const SizedBox(width: Tk.spaceMd),
                 for (final (label, value) in const [
                   ('全部', null),
                   ('启用', true),
@@ -168,20 +185,15 @@ class _AdminUsersPageState extends State<AdminUsersPage>
                 ])
                   Padding(
                     padding: const EdgeInsets.only(right: Tk.spaceSm),
-                    child: ChoiceChip(
-                      label: Text(label),
+                    child: AppChip(
+                      label: label,
                       selected: _active == value,
-                      onSelected: (_) {
+                      onTap: () {
                         setState(() => _active = value);
                         _reload();
                       },
                     ),
                   ),
-                const Spacer(),
-                Text('共 $_total 名用户',
-                    style:
-                        const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-                const SizedBox(width: Tk.spaceMd),
               ],
             ),
           ),
@@ -199,18 +211,25 @@ class _AdminUsersPageState extends State<AdminUsersPage>
       return ErrorView(message: _error!, onRetry: _reload);
     }
     if (_items.isEmpty) {
-      return const EmptyState(message: '无用户');
+      return const EmptyState(icon: Icons.person_off_outlined, message: '无用户');
     }
-    return ListView.builder(
+    return ListView(
       controller: scrollController,
-      itemCount: _items.length + (_items.length < _total ? 1 : 0),
-      itemBuilder: (context, i) {
-        if (i >= _items.length) {
-          // F6:底部自动加载指示器(到底自动触发;失败后可点重试)
-          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
-        }
-        return AdminUserRow(user: _items[i], onChanged: _reload);
-      },
+      padding: const EdgeInsets.fromLTRB(
+        Tk.spacePage,
+        Tk.spaceMd,
+        Tk.spacePage,
+        Tk.space2xl,
+      ),
+      children: [
+        SectionCard(
+          children: [
+            for (final u in _items) AdminUserRow(user: u, onChanged: _reload),
+          ],
+        ),
+        if (_items.length < _total)
+          AutoLoadFooter(loading: _loadingMore, onTap: _loadMore),
+      ],
     );
   }
 }

@@ -18,21 +18,25 @@ Future<void> _pumpOpener(
   String targetId = 't1',
   String targetName = '目标',
 }) async {
-  await tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: Builder(
-        builder: (ctx) => Center(
-          child: FilledButton(
-            onPressed: () => showRequestAccessSheet(ctx,
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) => Center(
+            child: FilledButton(
+              onPressed: () => showRequestAccessSheet(
+                ctx,
                 targetType: targetType,
                 targetId: targetId,
-                targetName: targetName),
-            child: const Text('open'),
+                targetName: targetName,
+              ),
+              child: const Text('open'),
+            ),
           ),
         ),
       ),
     ),
-  ));
+  );
   await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
 }
@@ -50,20 +54,23 @@ void main() {
     expect(reasonError(' 四个字了 '), isNull);
   });
 
-  testWidgets('asset 目标:access 禁选,download 默认;短理由被拦截不发请求',
-      (tester) async {
+  testWidgets('asset 目标:access 禁选,download 默认;短理由被拦截不发请求', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
     await _pumpOpener(tester, targetType: 'asset', targetName: 'front.jpg');
 
     // access 选项存在但禁用
-    final accessTile =
-        tester.widget<RadioListTile<String>>(find.byWidgetPredicate(
-            (w) => w is RadioListTile<String> && w.value == 'access'));
+    final accessTile = tester.widget<RadioListTile<String>>(
+      find.byWidgetPredicate(
+        (w) => w is RadioListTile<String> && w.value == 'access',
+      ),
+    );
     expect(accessTile.enabled, isFalse, reason: 'asset 目标 access 禁选(web 同款)');
-    final downloadTile =
-        tester.widget<RadioListTile<String>>(find.byWidgetPredicate(
-            (w) => w is RadioListTile<String> && w.value == 'download'));
+    final downloadTile = tester.widget<RadioListTile<String>>(
+      find.byWidgetPredicate(
+        (w) => w is RadioListTile<String> && w.value == 'download',
+      ),
+    );
     expect(downloadTile.enabled ?? true, isTrue);
     // 有效期预设区渲染(1 小时档在位)
     expect(find.text('1 小时'), findsOneWidget);
@@ -75,12 +82,17 @@ void main() {
     expect(api.approvals.calls, isEmpty, reason: '前端拦截,不发请求');
   });
 
-  testWidgets('asset 目标提交:action=download + duration_seconds=3600 + reason',
-      (tester) async {
+  testWidgets('asset 目标提交:action=download + duration_seconds=3600 + reason', (
+    tester,
+  ) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await _pumpOpener(tester,
-        targetType: 'asset', targetId: 'a1', targetName: 'front.jpg');
+    await _pumpOpener(
+      tester,
+      targetType: 'asset',
+      targetId: 'a1',
+      targetName: 'front.jpg',
+    );
     await tester.enterText(find.byType(TextField), '需要导出给设计部修图使用');
     await tester.tap(find.text('提交申请'));
     await tester.pumpAndSettle();
@@ -93,12 +105,17 @@ void main() {
     expect(find.text('申请已提交'), findsOneWidget);
   });
 
-  testWidgets('sensitive_folder 目标:access 默认可选且不携 duration_seconds',
-      (tester) async {
+  testWidgets('sensitive_folder 目标:access 默认可选且不携 duration_seconds', (
+    tester,
+  ) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await _pumpOpener(tester,
-        targetType: 'sensitive_folder', targetId: 'sf1', targetName: '敏感档案');
+    await _pumpOpener(
+      tester,
+      targetType: 'sensitive_folder',
+      targetId: 'sf1',
+      targetName: '敏感档案',
+    );
     // access 为默认动作(sensitive 首个可选),有效期区不渲染
     expect(find.text('有效期'), findsNothing);
     await tester.enterText(find.byType(TextField), '申请进入敏感目录整理档案');
@@ -112,14 +129,19 @@ void main() {
   testWidgets('后端 422:detail 透传展示(前端已过校验时兜底)', (tester) async {
     final api = installFakeApi();
     api.approvals.staged = ApiException(
-        422, 'body.reason: String should have at least 4 characters');
+      422,
+      'body.reason: String should have at least 4 characters',
+    );
     addTearDown(() => session.api = null);
     await _pumpOpener(tester, targetType: 'asset', targetName: 'front.jpg');
     await tester.enterText(find.byType(TextField), '合法理由四个字');
     await tester.tap(find.text('提交申请'));
     await tester.pumpAndSettle();
-    expect(find.textContaining('body.reason'), findsOneWidget,
-        reason: '422 detail 透传');
+    expect(
+      find.textContaining('body.reason'),
+      findsOneWidget,
+      reason: '422 detail 透传',
+    );
     expect(find.text('提交申请'), findsOneWidget, reason: '失败停留表单');
   });
 }

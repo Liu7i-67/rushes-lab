@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/assets/thumbnail_image.dart'
     show ThumbnailImage;
+import 'package:ms_app/features/preview/preview_chrome.dart';
 import 'package:ms_app/features/preview/preview_media.dart';
 import 'package:ms_app/features/preview/preview_page.dart';
 import 'package:ms_app/models/models.dart';
@@ -22,8 +23,10 @@ class _FilmAssetsApi extends FakeAssetsApi {
   _FilmAssetsApi(super.api);
 
   @override
-  Future<String> downloadLink(String assetId, {bool asAttachment = true}) async =>
-      'http://presigned/$assetId';
+  Future<String> downloadLink(
+    String assetId, {
+    bool asAttachment = true,
+  }) async => 'http://presigned/$assetId';
 
   /// 永挂起:胶片条 FutureBuilder 停在 spinner 占位。
   @override
@@ -39,22 +42,22 @@ class _FilmFakeMsApi extends FakeMsApi {
 }
 
 Asset _img(String id) => Asset(
-      id: id,
-      filename: '$id.jpg',
-      sizeBytes: 4,
-      contentType: 'image/jpeg',
-      createdAt: '2026-10-20T10:00:00Z',
-      tags: const {'thumbnail_key': 'k'},
-    );
+  id: id,
+  filename: '$id.jpg',
+  sizeBytes: 4,
+  contentType: 'image/jpeg',
+  createdAt: '2026-10-20T10:00:00Z',
+  tags: const {'thumbnail_key': 'k'},
+);
 
 Asset _video(String id) => Asset(
-      id: id,
-      filename: '$id.mp4',
-      sizeBytes: 4,
-      contentType: 'video/mp4',
-      createdAt: '2026-10-20T10:00:00Z',
-      tags: const {'thumbnail_key': 'k'},
-    );
+  id: id,
+  filename: '$id.mp4',
+  sizeBytes: 4,
+  contentType: 'video/mp4',
+  createdAt: '2026-10-20T10:00:00Z',
+  tags: const {'thumbnail_key': 'k'},
+);
 
 Future<void> _pump(WidgetTester tester, List<Asset> items) async {
   tester.view.physicalSize = const Size(1080, 1920);
@@ -62,16 +65,18 @@ Future<void> _pump(WidgetTester tester, List<Asset> items) async {
   addTearDown(tester.view.reset);
   installFakeApi(_FilmFakeMsApi());
   addTearDown(() => session.api = null);
-  await tester.pumpWidget(MaterialApp(
-    home: PreviewPage(
-      args: PreviewArgs(
-        items: items,
-        index: 0,
-        folderId: 'f1',
-        canDownload: true,
+  await tester.pumpWidget(
+    MaterialApp(
+      home: PreviewPage(
+        args: PreviewArgs(
+          items: items,
+          index: 0,
+          folderId: 'f1',
+          canDownload: true,
+        ),
       ),
     ),
-  ));
+  );
   await tester.pump();
   await tester.pump();
 }
@@ -84,9 +89,12 @@ void main() {
     expect(find.text('3 / 3'), findsOneWidget);
     expect(
       find.descendant(
-          of: find.byType(AppBar), matching: find.text('f3.jpg')),
+        of: find.byType(PreviewTopBar),
+        matching: find.text('3 / 3'),
+      ),
       findsOneWidget,
     );
+    expect(find.text('f3.jpg'), findsWidgets, reason: 'MetaPanel 文件名随切张更新');
   });
 
   testWidgets('胶片条跳到视频张后横滑仍可切页(非图片分支外层手势路)', (tester) async {

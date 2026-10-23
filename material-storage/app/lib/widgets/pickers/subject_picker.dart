@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import 'subject_picker_sheet.dart';
 
@@ -35,10 +36,7 @@ class Subject {
 /// me → 预置候选(web preset 同语义;null 安全由调用方保证已登录)。
 List<UserBrief> mePreset() {
   final me = session.me;
-  return [
-    if (me != null)
-      UserBrief(id: me.id, name: '${me.name}(自己)'),
-  ];
+  return [if (me != null) UserBrief(id: me.id, name: '${me.name}(自己)')];
 }
 
 class SubjectPicker extends StatefulWidget {
@@ -104,29 +102,35 @@ class _SelectedSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(Tk.spaceSm),
+      padding: const EdgeInsets.all(Tk.spaceMd),
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        color: tk.surface2,
+        border: Border.all(color: tk.line),
         borderRadius: BorderRadius.circular(Tk.rSm),
       ),
       child: value.isEmpty
-          ? const Text('尚未添加主体',
-              style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted))
+          ? Text(
+              '尚未添加主体',
+              style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+            )
           : Wrap(
-              spacing: Tk.spaceSm, // 6→spaceSm(A2 就近归档)
+              spacing: Tk.spaceSm,
               runSpacing: Tk.spaceXs,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Text('已选 ${value.length} 项:',
-                    style: const TextStyle(fontSize: Tk.fzXs)),
+                Text(
+                  '已选 ${value.length} 项:',
+                  style: TextStyle(fontSize: Tk.fzXs, color: tk.ink2),
+                ),
                 for (final s in value)
                   InputChip(
                     label: Text(
                       '${s.kind == SubjectKind.user ? '👤' : '🏷'} '
                       '${s.name.isEmpty ? _shortId(s.id, 12) : s.name}',
-                      style: const TextStyle(fontSize: Tk.fzXs),
+                      style: TextStyle(fontSize: Tk.fzXs, color: tk.ink2),
                     ),
                     visualDensity: VisualDensity.compact,
                     onDeleted: () => onRemove(s),
