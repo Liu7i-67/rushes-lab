@@ -231,7 +231,8 @@ class _GateNotificationsApi extends NotificationsApi {
   final listLimits = <int>[];
 
   @override
-  Future<NotificationsList> list({int limit = 50, int offset = 0}) async {
+  Future<NotificationsList> list(
+      {int limit = 50, int offset = 0, bool silent = false}) async {
     listLimits.add(limit);
     return NotificationsList(
         items: const [], total: 0, unreadCount: 3 - (listLimits.length - 1));

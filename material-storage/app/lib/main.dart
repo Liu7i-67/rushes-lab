@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 
 import 'app.dart';
 import 'core/error_boundary.dart';
+import 'core/error_report/error_report_controller.dart';
 import 'core/maintenance/banner_controller.dart';
 import 'core/polling_controller.dart';
 import 'core/session.dart';
@@ -46,6 +47,10 @@ void main() {
   // 全量日志先行(framework/zone 兜底在此挂上),UI 起来前的异常也不丢;
   // init 异步不阻塞启动,文件就绪前的日志走内存/控制台,就绪后逐条落盘
   AppLog.init();
+  // 全局报错页上报器(error-report):链式挂 FlutterError/zone 钩子并承接
+  // MsApi 的 5xx/网络异常钩子。必须在 AppLog.init 之后(转发 previous 保留
+  // 既有日志兜底),且在 installErrorBoundary 之前(渲染异常同样走 controller)
+  errorReporter.install();
   // P8(mobile-ux-polish):传输完成系统通知初始化——失败静默降级为仅应用内
   // 提示;通知权限不在此请求(首次建传输任务时经 ensurePermission 弹)
   Notifier.I.init();

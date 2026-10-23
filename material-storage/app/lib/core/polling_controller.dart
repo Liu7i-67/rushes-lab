@@ -138,7 +138,9 @@ class UnreadPoller extends PollingController {
   Future<void> performTick() async {
     final api = effectiveApi;
     if (api == null) return;
-    final list = await api.notifications.list(limit: 1);
+    // silent:未读数轮询失败由下一拍自愈,不触发全局报错页(30s 连环失败
+    // 会让 3s 冷却窗形同虚设,D6 初衷失效)。
+    final list = await api.notifications.list(limit: 1, silent: true);
     unreadCount = list.unreadCount;
   }
 }

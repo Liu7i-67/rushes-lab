@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../services/app_log.dart';
 import '../theme/tokens.dart';
+import 'error_report/error_report_controller.dart';
 
 /// main() 调用一次;幂等。[debug] 供测试注入 release 路径(P2-7;缺省随
 /// kDebugMode,main() 调用点不变)。
@@ -19,6 +20,9 @@ void installErrorBoundary({bool debug = kDebugMode}) {
   final previous = ErrorWidget.builder;
   ErrorWidget.builder = (details) {
     AppLog.error('ui', '渲染异常:${details.exception}', details.stack);
+    // 全局报错页:分流判定在 controller 内(debug 框架错误只留日志、release
+    // 才跳);此处仍在 build/layout 期,controller 内部会推迟到帧后导航
+    errorReporter.onSystemError(details.exception, details.stack, 'render');
     // debug 期保留 Flutter 原生红字细节,便于开发定位;release 走友好页
     if (debug) return previous(details);
     return const FriendlyErrorPage();

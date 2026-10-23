@@ -32,7 +32,7 @@ import 'share_api.dart';
 import 'users_api.dart';
 
 class ApiException implements Exception {
-  ApiException(this.status, this.message, {this.raw});
+  ApiException(this.status, this.message, {this.raw, this.method, this.path});
 
   final int? status;
   final String message;
@@ -40,6 +40,11 @@ class ApiException implements Exception {
   /// 原始响应体(B9:P1-1 创建项目竞态归因等结构化 detail 判定用;UI 渲染
   /// 一律走 [message],勿消费 raw 裸 toString,§4.1)。
   final Object? raw;
+
+  /// 请求方法/路径:仅 [MsApi.err] 构造时携带(全局报错页 source 拼接用);
+  /// 其余手工构造点可空,消费方需容错。
+  final String? method;
+  final String? path;
 
   @override
   String toString() => 'ApiException($status): $message';
@@ -92,6 +97,8 @@ class MsApi {
     required String baseUrl,
     CookieJar? jar,
     void Function()? onSessionExpired,
+    this.onApiError,
+    this.onNetworkError,
   }) : _http = Dio(BaseOptions(
           baseUrl: baseUrl,
           connectTimeout: const Duration(seconds: 15),
@@ -106,7 +113,7 @@ class MsApi {
     _jar = jar ?? CookieJar();
     _http.interceptors.add(CookieManager(_jar));
     // 全量 API 日志(移动端 debug 通道):方向/状态码/错误均入 AppLog
-    _http.interceptors.add(_logInterceptor());
+    _http.interceptors.add(_logInterceptor(onNetworkError: onNetworkError));
     // 401 会话失效钩子(§4.1:清会话跳登录由 Session 去抖;登录接口本身
     // 401=密码错误,不算会话失效,必须排除)
     if (onSessionExpired != null) {
@@ -132,6 +139,15 @@ class MsApi {
   late final Dio _http;
   late final Dio _put;
 
+  /// 接口错误钩子(全局报错页):[err] 在 status 为 null/5xx 时调用;
+  /// 4xx/401 不调——分别保持页面 toast 与既有跳登录语义(D1)。
+  final void Function(ApiException)? onApiError;
+
+  /// 传输层错误钩子(全局报错页):仅主 Dio 的 onError 且非 badResponse 型
+  /// 时调用;presigned 裸 Dio(_put)不挂——分片上传失败由传输队列语义处置,
+  /// 全局跳转会打断批量任务观测(实现钉子 5)。
+  final void Function(DioException)? onNetworkError;
+
   /// 与 web 端 Uppy getChunkSize 一致:16MB 分片(后端无强约束,保持同参最稳)
   static const int partSize = 16 * 1024 * 1024;
 
@@ -145,9 +161,21 @@ class MsApi {
   /// 直连 presigned URL 的裸 Dio(分片 PUT / 下载,无 cookie)。
   Dio get presignedHttp => _put;
 
-  Exception err(Response<dynamic> r, String fallback) => ApiException(
-      r.statusCode, extractDetail(r.data, fallback),
-      raw: r.data);
+  Exception err(Response<dynamic> r, String fallback) {
+    final e = ApiException(r.statusCode, extractDetail(r.data, fallback),
+        raw: r.data,
+        method: r.requestOptions.method,
+        path: r.requestOptions.uri.path);
+    final status = e.status;
+    // 5xx(及极少数状态码缺失)交全局报错页;4xx/401 保持各页面 toast 与
+    // 既有跳登录链路,不在此上报(D1)。后台静默轮询(noErrorReport extra)
+    // 的 5xx 同样跳过硬性上报:失败留给下一拍自愈,不弹全局报错页。
+    if ((status == null || status >= 500) &&
+        r.requestOptions.extra['noErrorReport'] != true) {
+      onApiError?.call(e);
+    }
+    return e;
+  }
 
   /// 5xx 兜底包装(B0 起 baidu 域先行;B9 起 validateStatus 全放行,5xx 恒回
   /// Response 走各域 `_api.err` 中文 fallback 路径,本包装退化为透传保险——
@@ -188,7 +216,10 @@ class MsApi {
   late final audit = AuditApi(this); // B8:审计查询+CSV 导出
   late final adminBaidu = AdminBaiduApi(this); // B8:备份任务 admin 观测+文件三操作
 
-  InterceptorsWrapper _logInterceptor({bool withQuery = true}) =>
+  InterceptorsWrapper _logInterceptor({
+    bool withQuery = true,
+    void Function(DioException)? onNetworkError,
+  }) =>
       InterceptorsWrapper(
         onRequest: (o, h) {
           AppLog.info('api', '→ ${o.method} ${o.uri.host}${o.uri.path}'
@@ -205,6 +236,17 @@ class MsApi {
               '✗ ${e.requestOptions.method} ${e.requestOptions.uri.path}'
               '${e.response?.statusCode != null ? ' (${e.response?.statusCode})' : ''}',
               e.error);
+          // 传输层异常(超时/断网/证书等)交全局报错页;badResponse 在
+          // validateStatus 全放行下不应出现,即使出现也已由 err() 5xx 路径
+          // 上报,此处排除防同一错误双重上报(实现钉子 6)。cancel 是搜索
+          // 防抖换词/传输队列主动取消的正常业务动作,不是错误;轮询请求
+          // 带 noErrorReport 标记时静默自愈,同样不进全局报错页。
+          if (onNetworkError != null &&
+              e.type != DioExceptionType.badResponse &&
+              e.type != DioExceptionType.cancel &&
+              e.requestOptions.extra['noErrorReport'] != true) {
+            onNetworkError(e);
+          }
           h.next(e);
         },
       );

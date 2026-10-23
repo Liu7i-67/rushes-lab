@@ -13,6 +13,8 @@ library;
 
 import 'dart:async';
 
+import 'package:dio/dio.dart' show Options;
+
 import '../api/ms_api.dart';
 import '../polling_controller.dart';
 import '../session.dart';
@@ -80,7 +82,13 @@ class MaintenanceBannerController extends PollingController {
     if (api == null) return;
     final MaintenanceBannerInfo banner;
     try {
-      final r = await api.http.get('/api/v1/maintenance/banner');
+      // 轮询失败(部署重启窗口/弱网)本就有 lastKnownActive 静默自愈设计,
+      // 打 noErrorReport 标记:不触发全局报错页(否则 8s 一拍连环弹,D6
+      // 冷却窗挡不住下一拍)。
+      final r = await api.http.get(
+        '/api/v1/maintenance/banner',
+        options: Options(extra: const {'noErrorReport': true}),
+      );
       // 非 200(反代 5xx 异常页等)不当完成也不当激活,等下一拍
       if (r.statusCode != 200) return;
       banner = MaintenanceBannerInfo.fromJson(r.data as Map<String, dynamic>);

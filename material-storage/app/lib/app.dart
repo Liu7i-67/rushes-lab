@@ -26,6 +26,7 @@ import 'features/baidu/baidu_new_task_page.dart';
 import 'features/baidu/baidu_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/baidu/task_detail_page.dart';
+import 'features/error_report/error_report_page.dart';
 import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
@@ -154,6 +155,10 @@ class _MsAppState extends State<MsApp> {
           case '/admin/baidu-tasks':
             return MaterialPageRoute(
                 builder: (_) => const AdminBaiduTasksPage());
+          case '/error-report':
+            // feat/app-error-page F1-F3:全局报错提醒页;无构造参数,
+            // 页面自行从 errorReporter.currentError 取首条错误详情(D2)。
+            return MaterialPageRoute(builder: (_) => const ErrorReportPage());
         }
         return null;
       },
