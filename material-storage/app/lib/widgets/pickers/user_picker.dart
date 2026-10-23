@@ -11,6 +11,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 
 class UserPicker extends StatefulWidget {
@@ -104,6 +105,7 @@ class _UserPickerState extends State<UserPicker> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final options = _visibleOptions;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -113,20 +115,25 @@ class _UserPickerState extends State<UserPicker> {
           focusNode: _focus,
           decoration: InputDecoration(
             isDense: true,
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 11,
+            ),
             hintText: widget.hint,
-            prefixIcon: const Icon(Icons.search, size: 20),
+            prefixIcon: Icon(Icons.search, size: 20, color: tk.ink3),
             suffixIcon: _controller.text.isEmpty
                 ? (_fetching
-                    ? const Padding(
-                        padding: EdgeInsets.all(10), // 10 参与加载圈尺寸计算,不入档
-                        child: SizedBox(
+                      ? Padding(
+                          padding: const EdgeInsets.all(10), // 参与加载圈尺寸计算
+                          child: SizedBox(
                             width: 16,
                             height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2)),
-                      )
-                    : null)
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                        )
+                      : null)
                 : IconButton(
-                    icon: const Icon(Icons.clear, size: 18),
+                    icon: Icon(Icons.clear, size: 18, color: tk.ink3),
                     onPressed: () {
                       _controller.clear();
                       _search('');
@@ -140,15 +147,17 @@ class _UserPickerState extends State<UserPicker> {
         Container(
           constraints: const BoxConstraints(maxHeight: 180),
           decoration: BoxDecoration(
-            border: Border.all(color: Theme.of(context).dividerColor),
+            border: Border.all(color: tk.line),
             borderRadius: BorderRadius.circular(Tk.rSm),
           ),
           child: options.isEmpty
               ? Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(Tk.spaceMd),
                   child: Center(
-                    child: Text(_fetching ? '搜索中…' : '无匹配',
-                        style: const TextStyle(fontSize: Tk.fzSm)),
+                    child: Text(
+                      _fetching ? '搜索中…' : '无匹配',
+                      style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                    ),
                   ),
                 )
               : ListView.builder(
@@ -159,25 +168,42 @@ class _UserPickerState extends State<UserPicker> {
                     final selected = widget.value.any((x) => x.id == u.id);
                     return ListTile(
                       visualDensity: VisualDensity.compact,
+                      selected: selected,
+                      selectedTileColor: tk.goldSoft,
                       leading: CircleAvatar(
                         radius: 12,
-                        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
+                        backgroundColor: tk.goldSoft,
                         child: Text(
                           u.name.isEmpty ? '?' : u.name.characters.first,
-                          style: const TextStyle(fontSize: Tk.fzXs),
+                          style: TextStyle(
+                            fontSize: Tk.fzXs,
+                            color: tk.goldInk,
+                          ),
                         ),
                       ),
-                      title: Text(u.name,
-                          maxLines: 1, overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: Tk.fzMd)),
+                      title: Text(
+                        u.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: Tk.fzRowTitle,
+                          color: selected ? tk.goldInk : tk.ink,
+                        ),
+                      ),
                       subtitle: (u.username?.isNotEmpty ?? false)
-                          ? Text(u.username!,
-                              maxLines: 1, overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontSize: Tk.fzXs))
+                          ? Text(
+                              u.username!,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: Tk.fzMd,
+                                color: tk.ink3,
+                              ),
+                            )
                           : null,
                       dense: true,
                       trailing: selected
-                          ? const Icon(Icons.check, size: 18)
+                          ? Icon(Icons.check, size: 18, color: tk.gold)
                           : null,
                       onTap: () => _toggle(u),
                     );
@@ -193,13 +219,15 @@ class _UserPickerState extends State<UserPicker> {
     if (widget.value.isEmpty) return const [];
     return [
       Wrap(
-        spacing: Tk.spaceSm, // 6→spaceSm(A2 就近归档)
+        spacing: Tk.spaceSm,
         runSpacing: 2,
         children: [
           for (final u in widget.value)
             InputChip(
-              label: Text(u.name.isEmpty ? u.id : u.name,
-                  style: const TextStyle(fontSize: Tk.fzSm)),
+              label: Text(
+                u.name.isEmpty ? u.id : u.name,
+                style: const TextStyle(fontSize: Tk.fzSm),
+              ),
               visualDensity: VisualDensity.compact,
               onDeleted: () => _toggle(u),
             ),

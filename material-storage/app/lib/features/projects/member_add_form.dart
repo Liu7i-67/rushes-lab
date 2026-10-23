@@ -1,6 +1,7 @@
-/// MemberAddForm — 项目加成员表单(B6;自 project_members_sheet.dart 拆分):
-/// SubjectPicker(用户/组)+ RoleChips(默认「查看」),逐主体 POST members;
-/// 成功失效 projects scope 并回调刷新列表。
+/// MemberAddForm — 项目加成员表单(B6;自 project_members_sheet.dart 拆分;
+/// 2026-10 墨金重做):SubjectPicker(用户/组)+ RoleChips(默认「查看」),
+/// 逐主体 POST members;成功失效 projects scope 并回调刷新列表。
+/// 版式=分组标签 13/ink3 + chips + 吸底「返回(ghost)/添加(金)」。
 library;
 
 import 'package:flutter/material.dart';
@@ -9,7 +10,9 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import '../../widgets/role_chips.dart';
 import '../../widgets/toast.dart';
@@ -44,7 +47,10 @@ class _MemberAddFormState extends State<MemberAddForm> {
       _submitting = true;
       _error = null;
     });
-    final roles = [for (final r in kProjectRoles) if (_roles.contains(r)) r];
+    final roles = [
+      for (final r in kProjectRoles)
+        if (_roles.contains(r)) r,
+    ];
     var ok = 0;
     var fail = 0;
     String? firstError;
@@ -67,9 +73,11 @@ class _MemberAddFormState extends State<MemberAddForm> {
     setState(() => _submitting = false);
     if (ok > 0) {
       RefreshBus.I.invalidate('projects');
-      toast(context,
-          '已为 $ok 个主体授予「${joinedRoleLabels(roles)}」${fail > 0 ? ' · 失败 $fail' : ''}',
-          tone: fail > 0 ? ToastTone.info : ToastTone.success);
+      toast(
+        context,
+        '已为 $ok 个主体授予「${joinedRoleLabels(roles)}」${fail > 0 ? ' · 失败 $fail' : ''}',
+        tone: fail > 0 ? ToastTone.info : ToastTone.success,
+      );
       widget.onDone();
       return;
     }
@@ -78,58 +86,82 @@ class _MemberAddFormState extends State<MemberAddForm> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('添加成员 → ${widget.project.name}',
-                style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 12),
-            const Text('添加主体(用户 / 用户组)',
-                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-            SubjectPicker(
-              value: _subjects,
-              onChanged: (v) => setState(() {
-                _subjects = v;
-                _error = null;
-              }),
-              preset: mePreset(),
+    final tk = context.tk;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          widget.project.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: Tk.fzMd,
+            fontWeight: FontWeight.w600,
+            color: tk.ink3,
+          ),
+        ),
+        const SizedBox(height: Tk.spaceLg),
+        _GroupLabel('添加主体(用户 / 用户组)'),
+        const SizedBox(height: Tk.spaceSm),
+        SubjectPicker(
+          value: _subjects,
+          onChanged: (v) => setState(() {
+            _subjects = v;
+            _error = null;
+          }),
+          preset: mePreset(),
+        ),
+        const SizedBox(height: Tk.spaceLg),
+        _GroupLabel('角色(可多选,一次授予)'),
+        const SizedBox(height: Tk.spaceSm),
+        RoleChips(value: _roles, onChanged: (v) => setState(() => _roles = v)),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.only(top: Tk.spaceSm),
+            child: Text(
+              _error!,
+              style: TextStyle(fontSize: Tk.fzMd, color: tk.danger),
             ),
-            const SizedBox(height: 12),
-            const Text('角色(可多选,一次授予)',
-                style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-            RoleChips(
-                value: _roles,
-                onChanged: (v) => setState(() => _roles = v)),
-            if (_error != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 8),
-                child: Text(_error!,
-                    style: TextStyle(
-                        color: Theme.of(context).colorScheme.error,
-                        fontSize: Tk.fzSm)),
+          ),
+        const SizedBox(height: Tk.spaceXl),
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton(
+                onPressed: _submitting ? null : widget.onDone,
+                child: const Text('返回'),
               ),
-            const SizedBox(height: 16),
-            Row(children: [
-              Expanded(
-                child: OutlinedButton(
-                  onPressed: _submitting ? null : widget.onDone,
-                  child: const Text('返回'),
-                ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: PrimaryXl(
+                onPressed: _submitting ? null : _submit,
+                label: _submitting ? '添加中…' : '添加',
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: FilledButton(
-                  onPressed: _submitting ? null : _submit,
-                  child: Text(_submitting ? '添加中…' : '添加'),
-                ),
-              ),
-            ]),
+            ),
           ],
         ),
+        const SizedBox(height: Tk.spaceSm),
+      ],
+    );
+  }
+}
+
+/// 分组标签(13/600/ink3;与新建项目表单同语言)。
+class _GroupLabel extends StatelessWidget {
+  const _GroupLabel(this.text);
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      style: TextStyle(
+        fontSize: Tk.fzMd,
+        fontWeight: FontWeight.w600,
+        color: context.tk.ink3,
       ),
     );
   }

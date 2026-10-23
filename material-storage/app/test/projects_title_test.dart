@@ -17,7 +17,10 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: ProjectsPage()));
     await tester.pumpAndSettle();
     expect(find.text('项目'), findsOneWidget);
-    expect(find.byIcon(Icons.bug_report_outlined), findsNothing,
-        reason: '项目页日志推送入口已移除(登录页/我的页保留)');
+    expect(
+      find.byIcon(Icons.bug_report_outlined),
+      findsNothing,
+      reason: '项目页日志推送入口已移除(登录页/我的页保留)',
+    );
   });
 }

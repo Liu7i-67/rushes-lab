@@ -1,9 +1,10 @@
 /// ErrorReportPage — 全局报错提醒页(F7-F11,feat/app-error-page):
-/// 展示首条触发跳转的 ErrorInfo(类型/时间/来源/状态码/message/堆栈),
-/// 提供关闭(AppBar X + 底部主按钮,均 pop)、复制(CopyButton 复用)、
+/// 展示首条触发跳转的 ErrorInfo(时间/入口/操作/类型/详情/堆栈),
+/// 提供关闭(返回 + 底部主按钮,均 pop)、复制(CopyButton 复用)、
 /// 推送日志(与「我的→日志推送」同链路:dumpFile → WeComPush → clear,
 /// 结果就地展示,失败保留日志可重试,不弹新路由/dialog)。
 /// 页面存活期间 markOnPage(true),controller 据此忽略新错误(D2 防套娃)。
+/// 视觉:PageHeader(17 + 副标题)+ AppCard 详情 / surface2 堆栈 / 金主按钮。
 library;
 
 import 'package:flutter/material.dart';
@@ -12,24 +13,13 @@ import '../../core/error_report/error_info.dart';
 import '../../core/error_report/error_report_controller.dart';
 import '../../services/app_log.dart';
 import '../../services/wecom_push.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
 import '../../widgets/copy_button.dart';
-
-const _kTitleStyle = TextStyle(fontSize: Tk.fzLg, fontWeight: FontWeight.w600);
-const _kKeyStyle = TextStyle(fontSize: Tk.fzMd, color: Tk.subtle);
-const _kValueStyle = TextStyle(fontSize: Tk.fzMd, color: Tk.fg, height: 1.4);
-const _kBodyStyle = TextStyle(fontSize: Tk.fzBody, color: Tk.fg, height: 1.45);
-const _kSectionStyle = TextStyle(color: Tk.muted, fontSize: Tk.fzXs);
-const _kMonoStyle = TextStyle(fontSize: Tk.fzXs, fontFamily: 'monospace');
-const _kCardDecoration = BoxDecoration(
-  color: Tk.surface,
-  borderRadius: BorderRadius.all(Radius.circular(Tk.rLg)),
-  border: Border.fromBorderSide(BorderSide(color: Tk.border)),
-);
-const _kBarDecoration = BoxDecoration(
-  color: Tk.surface,
-  border: Border(top: BorderSide(color: Tk.border, width: 0.5)),
-);
+import '../../widgets/page_header.dart';
+import '../../widgets/section_label.dart';
+import 'error_report_sections.dart';
 
 class ErrorReportPage extends StatefulWidget {
   const ErrorReportPage({super.key});
@@ -44,8 +34,6 @@ class _ErrorReportPageState extends State<ErrorReportPage> {
   bool _pushing = false;
   bool _pushOk = false;
   String? _result;
-
-  Color get _resultColor => _pushOk ? Tk.green : Tk.red;
 
   @override
   void initState() {
@@ -88,181 +76,108 @@ class _ErrorReportPageState extends State<ErrorReportPage> {
     _result = text;
   });
 
-  /// F8:AppBar X 与底部主按钮共用,均返回上一页(保留原页面栈)。
+  /// F8:返回键与底部主按钮共用,均返回上一页(保留原页面栈)。
   void _close() => Navigator.of(context).pop();
 
   @override
   Widget build(BuildContext context) {
     final info = _info;
     final stack = info?.stackText?.trim();
+    final tk = context.tk;
     return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          tooltip: '关闭',
-          icon: const Icon(Icons.close),
-          onPressed: _close,
-        ),
-        title: const Text('报错提醒'),
-      ),
-      body: ListView(
-        padding: const EdgeInsets.all(Tk.spaceLg),
+      backgroundColor: tk.bg,
+      body: Column(
         children: [
-          _headerCard(info),
-          if (info == null)
-            _emptyPlaceholder()
-          else ...[
-            const SizedBox(height: Tk.spaceLg),
-            _metaCard(info),
-            const SizedBox(height: Tk.spaceLg),
-            _section('错误详情', _messageCard(info)),
-            if (stack != null && stack.isNotEmpty) ...[
-              const SizedBox(height: Tk.spaceLg),
-              _section('堆栈信息', _stackCard(stack)),
-            ],
-          ],
-        ],
-      ),
-      bottomNavigationBar: _bottomBar(info),
-    );
-  }
-
-  /// 顶部告警卡:错误图标(Tk.red)+ 类型标题 + 发生时间。
-  Widget _headerCard(ErrorInfo? info) => Container(
-    padding: const EdgeInsets.all(Tk.spaceLg),
-    decoration: BoxDecoration(
-      color: Tk.red.withValues(alpha: 0.06),
-      borderRadius: BorderRadius.circular(Tk.rLg),
-      border: Border.all(color: Tk.red.withValues(alpha: 0.18)),
-    ),
-    child: Row(
-      children: [
-        const Icon(Icons.error_outline, color: Tk.red, size: 32),
-        const SizedBox(width: Tk.spaceMd),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(info?.kindLabel ?? '未获取到错误信息', style: _kTitleStyle),
-              const SizedBox(height: Tk.spaceXs),
-              Text(
-                info == null ? '错误详情不可用' : _formatTime(info.time),
-                style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
-              ),
-            ],
+          PageHeader(
+            title: '应用错误',
+            subtitle: '已记录，可复制或推送诊断',
+            back: true,
+            onBack: _close,
           ),
-        ),
-      ],
-    ),
-  );
-
-  /// 来源 + HTTP 状态码(仅接口类且有状态码时展示,F7)。
-  Widget _metaCard(ErrorInfo info) {
-    final withStatus = info.kind == ErrorKind.api && info.status != null;
-    return _card(
-      Column(
-        children: [
-          _kv('来源', info.source),
-          if (withStatus) _kv('HTTP 状态码', '${info.status}'),
+          Expanded(
+            child: ListView(
+              padding: const EdgeInsets.only(
+                top: Tk.spaceSm,
+                bottom: Tk.spaceXl,
+              ),
+              children: [
+                const SectionLabel(title: '错误详情'),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: Tk.spacePage),
+                  child: info == null
+                      ? const ErrorReportEmpty()
+                      : ErrorDetailCard(info: info),
+                ),
+                if (stack != null && stack.isNotEmpty) ...[
+                  const SectionLabel(title: '堆栈信息'),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: Tk.spacePage,
+                    ),
+                    child: ErrorStackCard(stack: stack),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          _bottomBar(info),
         ],
       ),
     );
   }
-
-  Widget _kv(String label, String value) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: Tk.spaceXs),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(width: 88, child: Text(label, style: _kKeyStyle)),
-        Expanded(child: SelectableText(value, style: _kValueStyle)),
-      ],
-    ),
-  );
-
-  /// message 卡:可选中文本,随整页滚动。
-  Widget _messageCard(ErrorInfo info) =>
-      _card(SelectableText(info.message, style: _kBodyStyle));
-
-  /// 堆栈摘要:等宽小字,容器限高内独立滚动(整页仍可滚动)。
-  Widget _stackCard(String stack) => Container(
-    width: double.infinity,
-    constraints: const BoxConstraints(maxHeight: 240),
-    clipBehavior: Clip.antiAlias,
-    decoration: _kCardDecoration,
-    child: SingleChildScrollView(
-      padding: const EdgeInsets.all(Tk.spaceMd),
-      child: SelectableText(stack, style: _kMonoStyle),
-    ),
-  );
-
-  /// null 兜底:不展示详情区,仅占位文案(关闭/推送日志仍可用)。
-  Widget _emptyPlaceholder() => const Padding(
-    padding: EdgeInsets.symmetric(vertical: Tk.spaceXl),
-    child: Text(
-      '暂无错误详情,可返回后重试',
-      textAlign: TextAlign.center,
-      style: TextStyle(fontSize: Tk.fzBody, color: Tk.muted),
-    ),
-  );
-
-  Widget _section(String title, Widget child) => Column(
-    crossAxisAlignment: CrossAxisAlignment.stretch,
-    children: [
-      Padding(
-        padding: const EdgeInsets.only(left: Tk.spaceXs, bottom: Tk.spaceSm),
-        child: Text(title, style: _kSectionStyle),
-      ),
-      child,
-    ],
-  );
-
-  Widget _card(Widget child) => Container(
-    width: double.infinity,
-    padding: const EdgeInsets.all(Tk.spaceLg),
-    decoration: _kCardDecoration,
-    child: child,
-  );
 
   /// 底部操作区:结果就地展示(F11)+ 复制/推送 + 主按钮关闭(F8)。
-  Widget _bottomBar(ErrorInfo? info) => Container(
-    decoration: _kBarDecoration,
-    padding: const EdgeInsets.all(Tk.spaceLg),
-    child: SafeArea(
-      top: false,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          if (_result != null) ...[
-            Text(
-              _result!,
-              style: TextStyle(fontSize: Tk.fzSm, color: _resultColor),
+  Widget _bottomBar(ErrorInfo? info) {
+    final tk = context.tk;
+    return Container(
+      decoration: BoxDecoration(
+        color: tk.surface,
+        border: Border(top: BorderSide(color: tk.line)),
+      ),
+      padding: const EdgeInsets.fromLTRB(
+        Tk.spacePage,
+        Tk.spaceMd,
+        Tk.spacePage,
+        Tk.spaceMd,
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (_result != null) ...[
+              Text(
+                _result!,
+                style: TextStyle(
+                  fontSize: Tk.fzMd,
+                  height: 1.4,
+                  color: _pushOk ? tk.ok : tk.danger,
+                ),
+              ),
+              const SizedBox(height: Tk.spaceSm),
+            ],
+            Row(
+              children: [
+                Expanded(child: _copyButton(info)),
+                const SizedBox(width: Tk.spaceMd),
+                Expanded(child: _pushButton()),
+              ],
             ),
             const SizedBox(height: Tk.spaceMd),
+            PrimaryXl(onPressed: _close, label: '关闭'),
           ],
-          Row(
-            children: [
-              Expanded(child: _copyButton(info)),
-              const SizedBox(width: Tk.spaceMd),
-              Expanded(child: _pushButton()),
-            ],
-          ),
-          const SizedBox(height: Tk.spaceMd),
-          FilledButton(
-            onPressed: _close,
-            child: const Text('关闭', style: TextStyle(fontSize: Tk.fzTitle)),
-          ),
-        ],
+        ),
       ),
-    ),
-  );
+    );
+  }
 
   /// F9:label 模式 CopyButton;无 info 时用 IgnorePointer + 降透明禁用
   /// (CopyButton 无 enabled 参数,不为此改公共组件)。
   Widget _copyButton(ErrorInfo? info) {
     final button = CopyButton(
       text: info?.toClipboardText() ?? '',
-      label: '复制错误信息',
+      label: '复制诊断',
       tooltip: '复制错误信息',
       iconSize: 18,
     );
@@ -282,12 +197,4 @@ class _ErrorReportPageState extends State<ErrorReportPage> {
         : const Icon(Icons.send_outlined, size: 18),
     label: Text(_pushing ? '推送中…' : '推送日志'),
   );
-}
-
-/// 发生时间固定格式 yyyy-MM-dd HH:mm:ss(F7 验收口径)。
-String _formatTime(DateTime t) {
-  final l = t.toLocal();
-  String two(int v) => v.toString().padLeft(2, '0');
-  return '${l.year}-${two(l.month)}-${two(l.day)} '
-      '${two(l.hour)}:${two(l.minute)}:${two(l.second)}';
 }

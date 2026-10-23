@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import 'picker_sheet.dart';
 import 'remote_picker_sheet.dart';
@@ -36,8 +37,7 @@ class GroupPickerField extends StatelessWidget {
       context: context,
       initial: [
         for (final g in value)
-          GroupBrief(
-              id: g.id, name: g.name, memberCount: g.memberCount),
+          GroupBrief(id: g.id, name: g.name, memberCount: g.memberCount),
       ],
       multiple: true,
     );
@@ -66,11 +66,12 @@ class GroupPickerField extends StatelessWidget {
 
   /// 新选组(DirectoryGroup.memberCount 非 null,缺省 0;createdAt 未知留空)。
   static DirectoryGroup _fromBrief(GroupBrief b) => DirectoryGroup(
-      id: b.id,
-      name: b.name,
-      description: b.description,
-      memberCount: b.memberCount ?? 0,
-      createdAt: '');
+    id: b.id,
+    name: b.name,
+    description: b.description,
+    memberCount: b.memberCount ?? 0,
+    createdAt: '',
+  );
 
   /// 展示文案:单组显示组名(name 空回退短 id),多组「N 组」。
   String get _display {
@@ -82,9 +83,14 @@ class GroupPickerField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     if (value.isEmpty) {
       return PickerField(
-          label: label, value: null, hint: hint, onTap: () => _pick(context));
+        label: label,
+        value: null,
+        hint: hint,
+        onTap: () => _pick(context),
+      );
     }
     return InkWell(
       onTap: () => _pick(context),
@@ -96,17 +102,21 @@ class GroupPickerField extends StatelessWidget {
           border: const OutlineInputBorder(),
           // 去 isDense(D6 同口径):filled+outline 下浮起 label 上半截会被裁
           contentPadding: const EdgeInsets.symmetric(
-              horizontal: Tk.spaceMd, vertical: Tk.spaceMd),
+            horizontal: Tk.spaceMd,
+            vertical: Tk.spaceMd,
+          ),
           suffixIcon: allowClear
               ? IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
+                  icon: Icon(Icons.clear, size: 18, color: tk.ink3),
                   tooltip: '清除',
                   onPressed: () => onChanged(const []),
                 )
-              : const Icon(Icons.expand_more, size: 20),
+              : Icon(Icons.expand_more, size: 20, color: tk.ink3),
         ),
-        child: Text(_display,
-            style: const TextStyle(fontSize: Tk.fzBody, color: Tk.fg)),
+        child: Text(
+          _display,
+          style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+        ),
       ),
     );
   }

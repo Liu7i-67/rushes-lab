@@ -1,15 +1,20 @@
-/// 改密页(§2 强制改密流 + app-polish E2 精修):me.must_change_password=true
-/// 时全 App 只放行此页(改密/退出可走,无返回);非强制入口(我的页)改完即回。
-/// E2:复杂度规则前置 hint(至少 8 位,含字母与数字=后端 local_auth 策略);
-/// 成功 toast「密码已更新,请重新登录」反馈后再跳转;错误固定高度区不跳动。
-/// 契约:POST /api/v1/auth/change-password {old_password,new_password}(auth.py)。
+/// 改密页(§2 强制改密流 + 墨金双主题视觉统一):me.must_change_password=
+/// true 时全 App 只放行此页(改密/退出可走,无返回);非强制入口(我的页)
+/// 改完即回。校验/提交逻辑与 app-polish E2 保持一致:复杂度 hint、成功
+/// toast「密码已更新,请重新登录」后再跳转、错误固定高度区不跳动。
+/// 本次只做令牌迁移与视觉统一(PageHeader 二级头 / AppCard surface 卡片 /
+/// 金色主按钮 / danger 错误),不改契约:POST /api/v1/auth/change-password
+/// {old_password,new_password}(auth.py)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/password_field.dart';
 import '../../widgets/toast.dart';
 
@@ -85,88 +90,159 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.forced ? '设置新密码' : '修改密码'),
-        automaticallyImplyLeading: !widget.forced,
-        actions: [
-          if (widget.forced)
-            TextButton(onPressed: _busy ? null : _logout, child: const Text('退出登录')),
-        ],
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(Tk.spaceXl),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.forced) ...[
-              Text(
-                '首次登录或密码已被重置,请先设置新密码后继续使用。',
-                style: Theme.of(context)
-                    .textTheme
-                    .bodySmall
-                    ?.copyWith(color: Theme.of(context).colorScheme.primary),
-              ),
-              const SizedBox(height: Tk.spaceLg),
+      backgroundColor: tk.bg,
+      body: Column(
+        children: [
+          PageHeader(
+            back: !widget.forced,
+            title: widget.forced ? '设置新密码' : '修改密码',
+            subtitle: '至少 8 位，包含字母与数字',
+            actions: [
+              if (widget.forced)
+                TextButton(
+                  onPressed: _busy ? null : _logout,
+                  child: const Text('退出登录'),
+                ),
             ],
-            // P9:三个密码框均带眼睛切换明文(内容/焦点保持)
-            PasswordField(
-              controller: _old,
-              labelText: '原密码',
-              prefixIcon: const Icon(Icons.lock_outline),
-            ),
-            const SizedBox(height: Tk.spaceMd),
-            // E2:复杂度规则前置(后端 local_auth 策略:≥8 位且含字母与数字)
-            PasswordField(
-              controller: _new,
-              labelText: '新密码',
-              hintText: '至少 8 位,需包含字母与数字',
-              prefixIcon: const Icon(Icons.lock_reset_outlined),
-            ),
-            const SizedBox(height: Tk.spaceMd),
-            PasswordField(
-              controller: _confirm,
-              labelText: '确认新密码',
-              prefixIcon: const Icon(Icons.lock_person_outlined),
-              onSubmitted: (_) => _busy ? null : _submit(),
-            ),
-            const SizedBox(height: Tk.spaceLg),
-            FilledButton(
-              onPressed: _busy ? null : _submit,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: _busy
-                    ? const SizedBox(
-                        height: 20,
-                        width: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Text('确认修改'),
-              ),
-            ),
-            // E2:错误固定高度区(空态占位,校验/请求失败均落这里不跳动)
-            SizedBox(
-              height: 48,
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Padding(
-                  padding: const EdgeInsets.only(top: Tk.spaceMd),
-                  child: _error == null
-                      ? null
-                      : Text(
-                          _error!,
-                          textAlign: TextAlign.center,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            color: Theme.of(context).colorScheme.error,
+          ),
+          Expanded(
+            child: SafeArea(
+              top: false,
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(Tk.spacePage),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 420),
+                    child: AppCard(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (widget.forced) ...[
+                            const _ForcedHint(),
+                            const SizedBox(height: Tk.spaceLg),
+                          ],
+                          // P9:三个密码框均带眼睛切换明文(内容/焦点保持)
+                          PasswordField(
+                            controller: _old,
+                            labelText: '原密码',
+                            prefixIcon: Icon(
+                              Icons.lock_outline,
+                              size: 20,
+                              color: tk.ink3,
+                            ),
                           ),
-                        ),
+                          const SizedBox(height: Tk.spaceMd),
+                          // E2:复杂度规则前置(后端 local_auth 策略:≥8 位含字母数字)
+                          PasswordField(
+                            controller: _new,
+                            labelText: '新密码',
+                            hintText: '至少 8 位,需包含字母与数字',
+                            prefixIcon: Icon(
+                              Icons.lock_reset_outlined,
+                              size: 20,
+                              color: tk.ink3,
+                            ),
+                          ),
+                          const SizedBox(height: Tk.spaceMd),
+                          PasswordField(
+                            controller: _confirm,
+                            labelText: '确认新密码',
+                            prefixIcon: Icon(
+                              Icons.lock_person_outlined,
+                              size: 20,
+                              color: tk.ink3,
+                            ),
+                            onSubmitted: (_) {
+                              if (!_busy) _submit();
+                            },
+                          ),
+                          const SizedBox(height: Tk.spaceLg),
+                          SizedBox(
+                            height: 48,
+                            child: FilledButton(
+                              onPressed: _busy ? null : _submit,
+                              child: _busy
+                                  ? SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Theme.of(context)
+                                            .colorScheme
+                                            .onPrimary,
+                                      ),
+                                    )
+                                  : const Text('确认修改'),
+                            ),
+                          ),
+                          // E2:错误固定高度区(空态占位,校验/请求失败不跳动)
+                          SizedBox(
+                            height: 48,
+                            child: Align(
+                              alignment: Alignment.topCenter,
+                              child: Padding(
+                                padding: const EdgeInsets.only(top: Tk.spaceMd),
+                                child: _error == null
+                                    ? null
+                                    : Text(
+                                        _error!,
+                                        textAlign: TextAlign.center,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: tk.danger,
+                                          fontSize: Tk.fzMd,
+                                        ),
+                                      ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 强制改密说明条:goldSoft 底 + 金锁图标 + goldInk 文案。
+class _ForcedHint extends StatelessWidget {
+  const _ForcedHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    return Container(
+      padding: const EdgeInsets.all(Tk.spaceMd),
+      decoration: BoxDecoration(
+        color: tk.goldSoft,
+        borderRadius: BorderRadius.circular(Tk.rSm),
+        border: Border.all(color: tk.gold.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.lock_reset_outlined, size: 18, color: tk.goldInk),
+          const SizedBox(width: Tk.spaceSm),
+          Expanded(
+            child: Text(
+              '首次登录或密码已被重置,请先设置新密码后继续使用。',
+              style: TextStyle(
+                fontSize: Tk.fzMd,
+                height: 1.5,
+                color: tk.goldInk,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

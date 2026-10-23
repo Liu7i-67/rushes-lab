@@ -8,7 +8,9 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/form_text_field.dart';
 import 'admin_form_skeleton.dart';
 import 'group_multi_select.dart';
 
@@ -33,10 +35,12 @@ class _EditUserSheet extends StatefulWidget {
 }
 
 class _EditUserSheetState extends State<_EditUserSheet> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.user.name);
-  late final TextEditingController _email =
-      TextEditingController(text: widget.user.email ?? '');
+  late final TextEditingController _name = TextEditingController(
+    text: widget.user.name,
+  );
+  late final TextEditingController _email = TextEditingController(
+    text: widget.user.email ?? '',
+  );
   List<DirectoryGroup> _groups = const [];
   DirectoryUserDetail? _detail;
   String? _error;
@@ -101,6 +105,7 @@ class _EditUserSheetState extends State<_EditUserSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final detail = _detail;
     return FormSkeleton(
       title: '编辑用户 — ${widget.user.name}',
@@ -116,23 +121,18 @@ class _EditUserSheetState extends State<_EditUserSheet> {
             child: Center(child: CircularProgressIndicator()),
           )
         else ...[
-          Text('登录名:${detail.username ?? '—'}(创建后不可改)',
-              style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _name,
-            decoration: const InputDecoration(
-                labelText: '姓名', border: OutlineInputBorder()),
+          Text(
+            '登录名:${detail.username ?? '—'}(创建后不可改)',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
           ),
           const SizedBox(height: 10),
-          TextField(
+          AppTextField(controller: _name, label: '姓名'),
+          const SizedBox(height: 10),
+          AppTextField(
             controller: _email,
+            label: '邮箱',
+            hint: '留空提交 = 清空邮箱',
             keyboardType: TextInputType.emailAddress,
-            decoration: const InputDecoration(
-              labelText: '邮箱',
-              helperText: '留空提交 = 清空邮箱',
-              border: OutlineInputBorder(),
-            ),
           ),
           const SizedBox(height: 10),
           GroupMultiSelect(
@@ -140,8 +140,10 @@ class _EditUserSheetState extends State<_EditUserSheet> {
             onChanged: (v) => setState(() => _groups = v),
           ),
           const SizedBox(height: 6),
-          const Text('保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限',
-              style: TextStyle(fontSize: Tk.fzXs, color: Tk.muted)),
+          Text(
+            '保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+          ),
         ],
       ],
     );

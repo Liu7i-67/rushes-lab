@@ -19,14 +19,13 @@ PreviewBody plan(
   bool hasFail = false,
   bool hasUrl = false,
   bool playingLive = true,
-}) =>
-    previewBodyPlan(
-      kind: kind,
-      videoReady: videoReady,
-      hasFail: hasFail,
-      hasUrl: hasUrl,
-      playingLive: playingLive,
-    );
+}) => previewBodyPlan(
+  kind: kind,
+  videoReady: videoReady,
+  hasFail: hasFail,
+  hasUrl: hasUrl,
+  playingLive: playingLive,
+);
 
 void main() {
   group('previewBodyPlan — P1-1 锁:video 起播期绝不走图片渲染', () {
@@ -43,8 +42,12 @@ void main() {
             reason: 'video 未就绪(hasUrl=$hasUrl, hasFail=$hasFail)不得落 image',
           );
           expect(
-            plan(PreviewKind.video,
-                videoReady: true, hasUrl: hasUrl, hasFail: hasFail),
+            plan(
+              PreviewKind.video,
+              videoReady: true,
+              hasUrl: hasUrl,
+              hasFail: hasFail,
+            ),
             hasFail ? PreviewBody.block : PreviewBody.player,
           );
         }
@@ -53,38 +56,52 @@ void main() {
   });
 
   group('previewBodyPlan — playingLive 维度(B2 遗留:查看照片显缩略图)', () {
-    test('livp 就绪在播 → player;回切(playingLive=false)→ image 静态缩略图',
-        () {
-      expect(plan(PreviewKind.livp, videoReady: true, hasUrl: true),
-          PreviewBody.player);
+    test('livp 就绪在播 → player;回切(playingLive=false)→ image 静态缩略图', () {
       expect(
-          plan(PreviewKind.livp,
-              videoReady: true, hasUrl: true, playingLive: false),
-          PreviewBody.image,
-          reason: '查看照片=静态缩略图,而非暂停帧(控制器保活便于续播)');
+        plan(PreviewKind.livp, videoReady: true, hasUrl: true),
+        PreviewBody.player,
+      );
+      expect(
+        plan(
+          PreviewKind.livp,
+          videoReady: true,
+          hasUrl: true,
+          playingLive: false,
+        ),
+        PreviewBody.image,
+        reason: '查看照片=静态缩略图,而非暂停帧(控制器保活便于续播)',
+      );
     });
 
-    test('livp 未就绪:playingLive 不影响(image 兜底/loading),起播圈由视图层叠',
-        () {
+    test('livp 未就绪:playingLive 不影响(image 兜底/loading),起播圈由视图层叠', () {
       expect(plan(PreviewKind.livp, hasUrl: true), PreviewBody.image);
-      expect(plan(PreviewKind.livp, hasUrl: true, playingLive: false),
-          PreviewBody.image);
+      expect(
+        plan(PreviewKind.livp, hasUrl: true, playingLive: false),
+        PreviewBody.image,
+      );
       expect(plan(PreviewKind.livp), PreviewBody.loading);
     });
 
     test('video 类不受 playingLive 影响(就绪恒 player)', () {
       expect(
-          plan(PreviewKind.video, videoReady: true, hasUrl: true,
-              playingLive: false),
-          PreviewBody.player);
+        plan(
+          PreviewKind.video,
+          videoReady: true,
+          hasUrl: true,
+          playingLive: false,
+        ),
+        PreviewBody.player,
+      );
     });
   });
 
   group('previewBodyPlan — 八类映射', () {
     test('fail 优先:一切类型有失败即色块', () {
       for (final kind in PreviewKind.values) {
-        expect(plan(kind, hasFail: true, videoReady: true, hasUrl: true),
-            PreviewBody.block);
+        expect(
+          plan(kind, hasFail: true, videoReady: true, hasUrl: true),
+          PreviewBody.block,
+        );
       }
     });
 
@@ -99,8 +116,10 @@ void main() {
       expect(plan(PreviewKind.markdown), PreviewBody.markdown);
       expect(plan(PreviewKind.text), PreviewBody.text);
       expect(plan(PreviewKind.pdf), PreviewBody.pdf);
-      expect(plan(PreviewKind.unsupported, videoReady: true, hasUrl: true),
-          PreviewBody.block);
+      expect(
+        plan(PreviewKind.unsupported, videoReady: true, hasUrl: true),
+        PreviewBody.block,
+      );
     });
   });
 
@@ -111,8 +130,10 @@ void main() {
       expect(videoClock(const Duration(seconds: 65)), '1:05');
       expect(videoClock(const Duration(minutes: 9, seconds: 59)), '9:59');
       expect(videoClock(const Duration(hours: 1)), '1:00:00');
-      expect(videoClock(const Duration(hours: 1, minutes: 1, seconds: 1)),
-          '1:01:01');
+      expect(
+        videoClock(const Duration(hours: 1, minutes: 1, seconds: 1)),
+        '1:01:01',
+      );
     });
   });
 

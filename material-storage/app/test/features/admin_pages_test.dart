@@ -9,16 +9,21 @@ import 'package:ms_app/core/api/admin_baidu_api.dart' show AdminBaiduApi;
 import 'package:ms_app/core/api/audit_api.dart' show AuditApi, AuditFilter;
 import 'package:ms_app/core/api/directory_api.dart'
     show DirectoryApi, UnlockResult;
+import 'package:ms_app/features/admin/admin_audit_page.dart';
 import 'package:ms_app/features/admin/admin_groups_page.dart';
 import 'package:ms_app/features/admin/admin_users_page.dart';
 import 'package:ms_app/features/admin/apply_default_sheet.dart';
 import 'package:ms_app/features/admin/baidu_task_detail_sheet.dart';
 import 'package:ms_app/features/admin/baidu_task_file_list.dart'
     show kOwnerOnlyOpsHint;
+import 'package:ms_app/features/admin/baidu_task_file_rows.dart'
+    show BaiduTaskFileRow;
 import 'package:ms_app/features/admin/grant_template_form_sheet.dart'
     show showGrantTemplateFormSheet;
 import 'package:ms_app/features/me/admin_tiles.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/widgets/badge.dart' as w;
+import 'package:ms_app/widgets/app_chip.dart' show AppChip;
 import 'package:ms_app/core/session.dart';
 
 import '../helpers/fake_apis_b6.dart' show FakeAdminTemplatesApi;
@@ -40,8 +45,12 @@ class FakeDirectoryApi extends DirectoryApi {
   Object? unlockOut;
 
   @override
-  Future<DirectoryUsersPage> listUsers(
-      {String q = '', bool? isActive, int limit = 20, int offset = 0}) async {
+  Future<DirectoryUsersPage> listUsers({
+    String q = '',
+    bool? isActive,
+    int limit = 20,
+    int offset = 0,
+  }) async {
     final staged = usersStaged;
     if (staged is Exception) throw staged;
     return staged as DirectoryUsersPage? ??
@@ -49,11 +58,12 @@ class FakeDirectoryApi extends DirectoryApi {
   }
 
   @override
-  Future<DirectoryUserCreated> createUser(
-      {required String username,
-      required String name,
-      String? email,
-      List<String> groupIds = const []}) async {
+  Future<DirectoryUserCreated> createUser({
+    required String username,
+    required String name,
+    String? email,
+    List<String> groupIds = const [],
+  }) async {
     createCalls.add({
       'username': username,
       'name': name,
@@ -61,21 +71,26 @@ class FakeDirectoryApi extends DirectoryApi {
       'group_ids': groupIds,
     });
     return settleStaged(
-        createOut,
-        DirectoryUserCreated(
-            id: 'u9',
-            username: username,
-            name: name,
-            email: email,
-            isActive: true,
-            mustChangePassword: true,
-            createdAt: '2026-10-20T09:00:00Z',
-            temporaryPassword: 'Tmp-Pass-001'));
+      createOut,
+      DirectoryUserCreated(
+        id: 'u9',
+        username: username,
+        name: name,
+        email: email,
+        isActive: true,
+        mustChangePassword: true,
+        createdAt: '2026-10-20T09:00:00Z',
+        temporaryPassword: 'Tmp-Pass-001',
+      ),
+    );
   }
 
   @override
-  Future<List<DirectoryGroup>> listGroups(
-      {String q = '', int limit = 50, int offset = 0}) async {
+  Future<List<DirectoryGroup>> listGroups({
+    String q = '',
+    int limit = 50,
+    int offset = 0,
+  }) async {
     return groupResult;
   }
 
@@ -91,9 +106,13 @@ class FakeDirectoryApi extends DirectoryApi {
   Future<UnlockResult> unlockUser(String userId) async {
     unlockCalls.add(userId);
     return settleStaged(
-        unlockOut,
-        UnlockResult(
-            clearedUserForms: ['zs'], clearedIps: const [], wasLocked: true));
+      unlockOut,
+      UnlockResult(
+        clearedUserForms: ['zs'],
+        clearedIps: const [],
+        wasLocked: true,
+      ),
+    );
   }
 }
 
@@ -104,10 +123,11 @@ class FakeAuditApi extends AuditApi {
   final listCalls = <AuditFilter>[];
 
   @override
-  Future<List<AuditEvent>> list(
-      {AuditFilter filter = const AuditFilter(),
-      int limit = 30,
-      int offset = 0}) async {
+  Future<List<AuditEvent>> list({
+    AuditFilter filter = const AuditFilter(),
+    int limit = 30,
+    int offset = 0,
+  }) async {
     listCalls.add(filter);
     return listResult;
   }
@@ -126,14 +146,25 @@ class FakeAdminBaiduApi extends AdminBaiduApi {
       settleStaged(detailStaged, _detailOf());
 
   @override
-  Future<AdminBaiduTaskFilesPage> taskFiles(String taskId,
-      {String? status, int limit = 20, int offset = 0}) async {
+  Future<AdminBaiduTaskFilesPage> taskFiles(
+    String taskId, {
+    String? status,
+    int limit = 20,
+    int offset = 0,
+  }) async {
     final staged = filesStaged;
     if (staged is Exception) throw staged;
-    return AdminBaiduTaskFilesPage(items: filesResult, total: filesResult.length);
+    return AdminBaiduTaskFilesPage(
+      items: filesResult,
+      total: filesResult.length,
+    );
   }
 
-  Future<BaiduReviveOut> _op(String taskId, String fileId, String action) async {
+  Future<BaiduReviveOut> _op(
+    String taskId,
+    String fileId,
+    String action,
+  ) async {
     fileOpCalls.add((taskId, fileId, action));
     return BaiduReviveOut(finalized: true, status: 'enumerating');
   }
@@ -151,26 +182,26 @@ class FakeAdminBaiduApi extends AdminBaiduApi {
       _op(taskId, fileId, 'random-suffix');
 
   AdminBaiduTaskDetail _detailOf() => AdminBaiduTaskDetail.fromJson({
-        'id': 't1',
-        'user': {'id': 'u1', 'username': 'zs', 'name': '张三'},
-        'status': 'failed',
-        'source_dir': '/灵机备份',
-        'project': {'id': 'p1', 'name': '婚礼项目'},
-        'target_folder': {'id': 'fo1', 'name': '灵机备份'},
-        'total_files': 3,
-        'done_files': 0,
-        'failed_files': 3,
-        'skipped_files': 0,
-        'cancelled_files': 0,
-        'total_bytes': 0,
-        'done_bytes': 0,
-        'created_at': '2026-10-20T09:00:00Z',
-        'updated_at': '2026-10-20T10:00:00Z',
-        'fail_reason': 'file_failed',
-        'cancel_requested': false,
-        'retry_count': 1,
-        'enum_done': true,
-      });
+    'id': 't1',
+    'user': {'id': 'u1', 'username': 'zs', 'name': '张三'},
+    'status': 'failed',
+    'source_dir': '/灵机备份',
+    'project': {'id': 'p1', 'name': '婚礼项目'},
+    'target_folder': {'id': 'fo1', 'name': '灵机备份'},
+    'total_files': 3,
+    'done_files': 0,
+    'failed_files': 3,
+    'skipped_files': 0,
+    'cancelled_files': 0,
+    'total_bytes': 0,
+    'done_bytes': 0,
+    'created_at': '2026-10-20T09:00:00Z',
+    'updated_at': '2026-10-20T10:00:00Z',
+    'fail_reason': 'file_failed',
+    'cancel_requested': false,
+    'retry_count': 1,
+    'enum_done': true,
+  });
 }
 
 /// 应用默认桩(叠加在 harness FakeAdminTemplatesApi 之上,只补 applyDefault)。
@@ -183,8 +214,10 @@ class FakeApplyTemplatesApi extends FakeAdminTemplatesApi {
   @override
   Future<ApplyDefaultResult> applyDefault(List<String> projectIds) async {
     applyCalls.add(projectIds);
-    return settleStaged(applyOut,
-        ApplyDefaultResult(results: const [], totalApplied: 0, totalSkipped: 0));
+    return settleStaged(
+      applyOut,
+      ApplyDefaultResult(results: const [], totalApplied: 0, totalSkipped: 0),
+    );
   }
 }
 
@@ -230,27 +263,30 @@ FakeAdminMsApi _install() {
   return api;
 }
 
-DirectoryUser _user(String id,
-        {bool locked = false, bool active = true, bool mustChange = false}) =>
-    DirectoryUser(
-      id: id,
-      username: 'u$id',
-      name: '用户$id',
-      email: '$id@x.com',
-      isActive: active,
-      mustChangePassword: mustChange,
-      createdAt: '2026-10-20T08:00:00Z',
-      loginLocked: locked,
-    );
+DirectoryUser _user(
+  String id, {
+  bool locked = false,
+  bool active = true,
+  bool mustChange = false,
+}) => DirectoryUser(
+  id: id,
+  username: 'u$id',
+  name: '用户$id',
+  email: '$id@x.com',
+  isActive: active,
+  mustChangePassword: mustChange,
+  createdAt: '2026-10-20T08:00:00Z',
+  loginLocked: locked,
+);
 
 void main() {
-  testWidgets('入口双闸门:非 admin 无任何管理磁贴;仅 flag 者仅见目录模板;admin 全见',
-      (tester) async {
+  testWidgets('入口双闸门:非 admin 无任何管理磁贴;仅 flag 者仅见目录模板;admin 全见', (tester) async {
     Widget host() => MaterialApp(
-          home: Builder(
-              builder: (context) =>
-                  Scaffold(body: Column(children: adminSectionTiles(context)))),
-        );
+      home: Builder(
+        builder: (context) =>
+            Scaffold(body: Column(children: adminSectionTiles(context))),
+      ),
+    );
 
     session.me = Me.fromJson({
       'id': 'u1',
@@ -272,7 +308,11 @@ void main() {
     expect(find.text('管理后台'), findsNothing);
     expect(find.text('目录模板'), findsOneWidget);
 
-    session.me = Me.fromJson({'id': 'u3', 'name': '系统管理员', 'is_system_admin': true});
+    session.me = Me.fromJson({
+      'id': 'u3',
+      'name': '系统管理员',
+      'is_system_admin': true,
+    });
     await tester.pumpWidget(host());
     expect(find.text('管理后台'), findsOneWidget);
     expect(find.text('目录模板'), findsOneWidget);
@@ -281,7 +321,9 @@ void main() {
   testWidgets('用户页:建号带组提交 → 一次性密码仅回显一次(可复制提示)', (tester) async {
     final api = _install();
     api.directory.usersStaged = DirectoryUsersPage(
-        items: [_user('1')], total: 1);
+      items: [_user('1')],
+      total: 1,
+    );
     await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
     await tester.pumpAndSettle();
     expect(find.text('用户1'), findsOneWidget);
@@ -291,7 +333,9 @@ void main() {
     // 表单字段序(sheet 内):登录名 / 姓名 / 邮箱 / 组搜索
     // (页面背后还有列表搜索框,必须 scope 到 BottomSheet)
     final sheetFields = find.descendant(
-        of: find.byType(BottomSheet), matching: find.byType(TextField));
+      of: find.byType(BottomSheet),
+      matching: find.byType(TextField),
+    );
     await tester.enterText(sheetFields.at(0), 'zhangsan');
     await tester.enterText(sheetFields.at(1), '张三');
     // 表单内容超测试视口:滚到提交键再点(ensureVisible 自动定位其滚动源)
@@ -314,7 +358,9 @@ void main() {
   testWidgets('用户页:解锁入口仅登录锁定行渲染;确认后调 unlock', (tester) async {
     final api = _install();
     api.directory.usersStaged = DirectoryUsersPage(
-        items: [_user('1', locked: true), _user('2')], total: 2);
+      items: [_user('1', locked: true), _user('2')],
+      total: 2,
+    );
     await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
     await tester.pumpAndSettle();
     expect(find.text('登录已锁定'), findsOneWidget); // 仅 u1
@@ -335,6 +381,95 @@ void main() {
     expect(find.text('解锁'), findsNothing);
   });
 
+  testWidgets('用户页:正常/停用状态徽标 + 头像邮箱行卡(墨金行卡)', (tester) async {
+    final api = _install();
+    api.directory.usersStaged = DirectoryUsersPage(
+      items: [_user('1'), _user('2', active: false)],
+      total: 2,
+    );
+    await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
+    await tester.pumpAndSettle();
+
+    // 正常=ok / 停用=warn;邮箱 13/ink3 作副标题
+    expect(find.widgetWithText(w.Badge, '正常'), findsOneWidget);
+    expect(find.widgetWithText(w.Badge, '停用'), findsOneWidget);
+    expect(find.text('1@x.com'), findsOneWidget);
+    expect(find.text('2@x.com'), findsOneWidget);
+    // 分页计数进 PageHeader 副标题
+    expect(find.text('共 2 名用户'), findsOneWidget);
+  });
+
+  testWidgets('用户页 320 宽 + 字号 1.3:满徽标行卡不 overflow', (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final api = _install();
+    api.directory.usersStaged = DirectoryUsersPage(
+      items: [
+        _user('1', locked: true, mustChange: true),
+        _user('2', active: false),
+      ],
+      total: 2,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(1.3)),
+          child: child!,
+        ),
+        home: const AdminUsersPage(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull, reason: '320×640 + 1.3 无 overflow');
+    expect(find.text('用户1'), findsOneWidget);
+  });
+
+  testWidgets('审计页:PageHeader + 快捷 chip + 金色竖线时间线;chip 映射 eventType', (
+    tester,
+  ) async {
+    final api = _install();
+    api.audit.listResult = [
+      AuditEvent.fromJson({
+        'id': 'a1',
+        'event_type': 'upload',
+        'event_time': '2026-10-20T09:00:00Z',
+        'actor_name': '张三',
+        'target_project_name': '婚礼项目',
+        'target_asset_filename': '封面.jpg',
+        'resolved_names': <String, dynamic>{},
+        'details': <String, dynamic>{},
+      }),
+      AuditEvent.fromJson({
+        'id': 'a2',
+        'event_type': 'download',
+        'event_time': '2026-10-20T08:00:00Z',
+        'actor_name': '李四',
+        'resolved_names': <String, dynamic>{},
+        'details': <String, dynamic>{},
+      }),
+    ];
+    await tester.pumpWidget(const MaterialApp(home: AdminAuditPage()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('审计日志'), findsOneWidget);
+    expect(find.text('关键操作留痕，保留 180 天'), findsOneWidget);
+    expect(find.byTooltip('导出 CSV'), findsOneWidget);
+    expect(find.text('全部'), findsOneWidget); // 快捷 chip
+    expect(find.text('上传'), findsWidgets); // chip + 事件标题
+    expect(find.textContaining('张三'), findsOneWidget);
+    // 每条事件一行金色 2px 时间线
+    expect(find.byKey(const Key('audit-timeline-line')), findsNWidgets(2));
+
+    // 快捷 chip「下载」→ 精确 eventType 筛选(数据流保留;事件标题同名,
+    // 按 AppChip 定位避免歧义)
+    await tester.tap(find.widgetWithText(AppChip, '下载'));
+    await tester.pumpAndSettle();
+    expect(api.audit.listCalls.last.eventType, 'download');
+  });
+
   testWidgets('组页:成员管理抽屉移出成员(确认 → DELETE)', (tester) async {
     final api = _install();
     api.directory.groupResult = [
@@ -349,11 +484,12 @@ void main() {
     ];
     api.directory.memberResult = [
       GroupMember(
-          userId: 'u1',
-          username: 'zs',
-          name: '张三',
-          email: 'z@x.com',
-          isActive: true),
+        userId: 'u1',
+        username: 'zs',
+        name: '张三',
+        email: 'z@x.com',
+        isActive: true,
+      ),
     ];
     await tester.pumpWidget(const MaterialApp(home: AdminGroupsPage()));
     await tester.pumpAndSettle();
@@ -375,8 +511,7 @@ void main() {
     expect(find.textContaining('成员 — 后期组'), findsOneWidget);
   });
 
-  testWidgets('应用默认:多项目批量勾选 → 确认 → 结果逐项目呈现(部分成功)',
-      (tester) async {
+  testWidgets('应用默认:多项目批量勾选 → 确认 → 结果逐项目呈现(部分成功)', (tester) async {
     final api = _install();
     api.projects.pagedResult = [
       Project(id: 'p1', name: '婚礼项目', code: 'wed'),
@@ -390,13 +525,20 @@ void main() {
       totalApplied: 3,
       totalSkipped: 1,
     );
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: Center(
-                    child: FilledButton(
-                        onPressed: () => showApplyDefaultSheet(context),
-                        child: const Text('open')))))));
+          builder: (context) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => showApplyDefaultSheet(context),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -422,68 +564,82 @@ void main() {
       'skipped 行覆盖导入确认', (tester) async {
     final api = _install();
     // P2-4:操作闸门比对任务归属者,本用例以归属者 u1 登录(操作放行)
-    session.me = Me.fromJson(
-        {'id': 'u1', 'name': '张三', 'is_system_admin': true});
+    session.me = Me.fromJson({
+      'id': 'u1',
+      'name': '张三',
+      'is_system_admin': true,
+    });
     api.adminBaidu.filesResult = [
       AdminBaiduTaskFile(
-          id: 'f1',
-          sourcePath: '/盘/a.jpg',
-          relPath: '结构超限.jpg',
-          status: 'failed',
-          nonRetryable: true,
-          updatedAt: '2026-10-20T10:00:00Z'),
+        id: 'f1',
+        sourcePath: '/盘/a.jpg',
+        relPath: '结构超限.jpg',
+        status: 'failed',
+        nonRetryable: true,
+        updatedAt: '2026-10-20T10:00:00Z',
+      ),
       AdminBaiduTaskFile(
-          id: 'f2',
-          sourcePath: '/盘/b.jpg',
-          relPath: '冲突.jpg',
-          status: 'failed',
-          lastError: 'key_conflict:素材/b.jpg 已被成片.jpg占用',
-          updatedAt: '2026-10-20T10:00:00Z'),
+        id: 'f2',
+        sourcePath: '/盘/b.jpg',
+        relPath: '冲突.jpg',
+        status: 'failed',
+        lastError: 'key_conflict:素材/b.jpg 已被成片.jpg占用',
+        updatedAt: '2026-10-20T10:00:00Z',
+      ),
       AdminBaiduTaskFile(
-          id: 'f3',
-          sourcePath: '/盘/c.jpg',
-          relPath: '重复.jpg',
-          status: 'skipped_exists',
-          updatedAt: '2026-10-20T10:00:00Z'),
+        id: 'f3',
+        sourcePath: '/盘/c.jpg',
+        relPath: '重复.jpg',
+        status: 'skipped_exists',
+        updatedAt: '2026-10-20T10:00:00Z',
+      ),
     ];
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: Center(
-                    child: FilledButton(
-                        onPressed: () => showBaiduTaskDetailSheet(
-                            context,
-                            AdminBaiduTask.fromJson({
-                              'id': 't1',
-                              'user': {
-                                'id': 'u1',
-                                'username': 'zs',
-                                'name': '张三'
-                              },
-                              'status': 'failed',
-                              'source_dir': '/灵机备份',
-                              'project': {'id': 'p1', 'name': '婚礼项目'},
-                              'total_files': 3,
-                              'done_files': 0,
-                              'failed_files': 3,
-                              'skipped_files': 0,
-                              'cancelled_files': 0,
-                              'total_bytes': 0,
-                              'done_bytes': 0,
-                              'created_at': '2026-10-20T09:00:00Z',
-                              'updated_at': '2026-10-20T10:00:00Z',
-                              'cancel_requested': false,
-                            })),
-                        child: const Text('open')))))));
+          builder: (context) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => showBaiduTaskDetailSheet(
+                  context,
+                  AdminBaiduTask.fromJson({
+                    'id': 't1',
+                    'user': {'id': 'u1', 'username': 'zs', 'name': '张三'},
+                    'status': 'failed',
+                    'source_dir': '/灵机备份',
+                    'project': {'id': 'p1', 'name': '婚礼项目'},
+                    'total_files': 3,
+                    'done_files': 0,
+                    'failed_files': 3,
+                    'skipped_files': 0,
+                    'cancelled_files': 0,
+                    'total_bytes': 0,
+                    'done_bytes': 0,
+                    'created_at': '2026-10-20T09:00:00Z',
+                    'updated_at': '2026-10-20T10:00:00Z',
+                    'cancel_requested': false,
+                  }),
+                ),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
     // 详情头部 + 调度观测字段
     expect(find.textContaining('复活 1 次'), findsOneWidget);
+    // 文件明细拆件后逐行渲染(baidu_task_file_rows.dart)
+    expect(find.byType(BaiduTaskFileRow), findsWidgets);
     // ① non_retryable 行:重试置灰(disabled)且文案可读
     final greyed = tester.widget<TextButton>(
-        find.ancestor(
-            of: find.text('不可重试'), matching: find.byType(TextButton)).first);
+      find
+          .ancestor(of: find.text('不可重试'), matching: find.byType(TextButton))
+          .first,
+    );
     expect(greyed.onPressed, isNull);
     // ② key_conflict 行:分流为随机后缀(非普通重试)
     expect(find.text('随机后缀'), findsOneWidget);
@@ -507,34 +663,47 @@ void main() {
     expect(api.adminBaidu.fileOpCalls.single, ('t1', 'f3', 'overwrite'));
   });
 
-  testWidgets('百度任务详情:他人任务文件操作收敛(P2-4:置灰 + 仅任务归属者可操作)',
-      (tester) async {
+  testWidgets('百度任务详情:他人任务文件操作收敛(P2-4:置灰 + 仅任务归属者可操作)', (tester) async {
     final api = _install();
     // 登录者 u2 ≠ 任务归属者 u1(_detailOf)
-    session.me = Me.fromJson({'id': 'u2', 'name': '路人', 'is_system_admin': true});
+    session.me = Me.fromJson({
+      'id': 'u2',
+      'name': '路人',
+      'is_system_admin': true,
+    });
     api.adminBaidu.filesResult = [
       AdminBaiduTaskFile(
-          id: 'f1',
-          sourcePath: '/盘/a.jpg',
-          relPath: '失败.jpg',
-          status: 'failed',
-          updatedAt: '2026-10-20T10:00:00Z'),
+        id: 'f1',
+        sourcePath: '/盘/a.jpg',
+        relPath: '失败.jpg',
+        status: 'failed',
+        updatedAt: '2026-10-20T10:00:00Z',
+      ),
     ];
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: Center(
-                    child: FilledButton(
-                        onPressed: () =>
-                            showBaiduTaskDetailSheet(context, _openTask()),
-                        child: const Text('open')))))));
+          builder: (context) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => showBaiduTaskDetailSheet(context, _openTask()),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
     // 表头 amber 提示 + 操作置灰(disabled)
     expect(find.textContaining(kOwnerOnlyOpsHint), findsWidgets);
-    final greyed = tester.widget<TextButton>(find.ancestor(
-        of: find.text('重试'), matching: find.byType(TextButton)).first);
+    final greyed = tester.widget<TextButton>(
+      find
+          .ancestor(of: find.text('重试'), matching: find.byType(TextButton))
+          .first,
+    );
     expect(greyed.onPressed, isNull);
     // 点击不发操作(_own_task 守门必 404,前端先收敛)
     await tester.tap(find.text('重试'));
@@ -542,19 +711,28 @@ void main() {
     expect(api.adminBaidu.fileOpCalls, isEmpty);
   });
 
-  testWidgets('百度任务详情:文件明细加载失败 → 错误态 + 重试,不冒充「无文件」(P2-2)',
-      (tester) async {
+  testWidgets('百度任务详情:文件明细加载失败 → 错误态 + 重试,不冒充「无文件」(P2-2)', (tester) async {
     final api = _install();
-    session.me = Me.fromJson({'id': 'u1', 'name': '张三', 'is_system_admin': true});
+    session.me = Me.fromJson({
+      'id': 'u1',
+      'name': '张三',
+      'is_system_admin': true,
+    });
     api.adminBaidu.filesStaged = Exception('网络开小差');
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: Center(
-                    child: FilledButton(
-                        onPressed: () =>
-                            showBaiduTaskDetailSheet(context, _openTask()),
-                        child: const Text('open')))))));
+          builder: (context) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () => showBaiduTaskDetailSheet(context, _openTask()),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -566,11 +744,12 @@ void main() {
     api.adminBaidu.filesStaged = null;
     api.adminBaidu.filesResult = [
       AdminBaiduTaskFile(
-          id: 'f1',
-          sourcePath: '/盘/a.jpg',
-          relPath: '失败.jpg',
-          status: 'failed',
-          updatedAt: '2026-10-20T10:00:00Z'),
+        id: 'f1',
+        sourcePath: '/盘/a.jpg',
+        relPath: '失败.jpg',
+        status: 'failed',
+        updatedAt: '2026-10-20T10:00:00Z',
+      ),
     ];
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
@@ -579,7 +758,11 @@ void main() {
 
   testWidgets('权限模板表单:已删主体行 amber「已删除」标记(P2-3)', (tester) async {
     _install();
-    session.me = Me.fromJson({'id': 'u1', 'name': '张三', 'is_system_admin': true});
+    session.me = Me.fromJson({
+      'id': 'u1',
+      'name': '张三',
+      'is_system_admin': true,
+    });
     final template = GrantTemplate(
       id: 'gt1',
       name: '标准项目',
@@ -587,19 +770,36 @@ void main() {
       description: '旧描述',
       items: [
         GrantTemplateItem(
-            kind: 'user', id: 'u1', roles: const ['viewer'], name: '张三', missing: false),
+          kind: 'user',
+          id: 'u1',
+          roles: const ['viewer'],
+          name: '张三',
+          missing: false,
+        ),
         GrantTemplateItem(
-            kind: 'group', id: 'g9', roles: const ['viewer'], name: '', missing: true),
+          kind: 'group',
+          id: 'g9',
+          roles: const ['viewer'],
+          name: '',
+          missing: true,
+        ),
       ],
     );
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: Center(
-                    child: FilledButton(
-                        onPressed: () => showGrantTemplateFormSheet(context,
-                            template: template),
-                        child: const Text('open')))))));
+          builder: (context) => Scaffold(
+            body: Center(
+              child: FilledButton(
+                onPressed: () =>
+                    showGrantTemplateFormSheet(context, template: template),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -612,19 +812,19 @@ void main() {
 }
 
 AdminBaiduTask _openTask() => AdminBaiduTask.fromJson({
-      'id': 't1',
-      'user': {'id': 'u1', 'username': 'zs', 'name': '张三'},
-      'status': 'failed',
-      'source_dir': '/灵机备份',
-      'project': {'id': 'p1', 'name': '婚礼项目'},
-      'total_files': 3,
-      'done_files': 0,
-      'failed_files': 3,
-      'skipped_files': 0,
-      'cancelled_files': 0,
-      'total_bytes': 0,
-      'done_bytes': 0,
-      'created_at': '2026-10-20T09:00:00Z',
-      'updated_at': '2026-10-20T10:00:00Z',
-      'cancel_requested': false,
-    });
+  'id': 't1',
+  'user': {'id': 'u1', 'username': 'zs', 'name': '张三'},
+  'status': 'failed',
+  'source_dir': '/灵机备份',
+  'project': {'id': 'p1', 'name': '婚礼项目'},
+  'total_files': 3,
+  'done_files': 0,
+  'failed_files': 3,
+  'skipped_files': 0,
+  'cancelled_files': 0,
+  'total_bytes': 0,
+  'done_bytes': 0,
+  'created_at': '2026-10-20T09:00:00Z',
+  'updated_at': '2026-10-20T10:00:00Z',
+  'cancel_requested': false,
+});

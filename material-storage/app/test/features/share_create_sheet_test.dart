@@ -11,30 +11,39 @@ import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/api/share_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/share/share_create_sheet.dart';
+import 'package:ms_app/theme/tk_colors.dart';
+import 'package:ms_app/widgets/app_chip.dart';
 
 import '../helpers/api_harness.dart';
 
 Future<void> _pumpOpener(WidgetTester tester) async {
-  await tester.pumpWidget(MaterialApp(
-    home: Scaffold(
-      body: Builder(
-        builder: (ctx) => Center(
-          child: FilledButton(
-            onPressed: () => showShareSheet(ctx,
-                kind: 'asset', targetId: 'a1', targetLabel: 'front.jpg'),
-            child: const Text('open'),
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (ctx) => Center(
+            child: FilledButton(
+              onPressed: () => showShareSheet(
+                ctx,
+                kind: 'asset',
+                targetId: 'a1',
+                targetLabel: 'front.jpg',
+              ),
+              child: const Text('open'),
+            ),
           ),
         ),
       ),
     ),
-  ));
+  );
   await tester.tap(find.text('open'));
   await tester.pumpAndSettle();
 }
 
 void main() {
-  testWidgets('TTL_OPTIONS 四档=web 实况(1 小时/24 小时/7 天/30 天),默认 24 小时',
-      (tester) async {
+  testWidgets('TTL_OPTIONS 四档=web 实况(1 小时/24 小时/7 天/30 天),默认 24 小时', (
+    tester,
+  ) async {
     expect(ShareApi.ttlOptions, [
       ('1 小时', 3600),
       ('24 小时', 86400),
@@ -47,12 +56,31 @@ void main() {
     for (final label in ['1 小时', '24 小时', '7 天', '30 天']) {
       expect(find.text(label), findsOneWidget);
     }
-    // app-polish D3:有效期 RadioListTile×4 改 ChoiceChip 横排单选
-    // (原 RadioListTile 计数断言随交互迁移同步改写,断言条数语义不变)
-    final chips = tester.widgetList<ChoiceChip>(find.byType(ChoiceChip));
+    // app-polish D3 + 墨金重做:有效期改用 AppChip 横排单选(金浅底选中);
+    // 原 RadioListTile 计数断言随交互迁移同步改写,断言条数语义不变
+    final chips = tester.widgetList<AppChip>(find.byType(AppChip));
     expect(chips.length, 4);
-    // 无提取码/下载开关表单项(ShareCreateIn 无此字段)
-    expect(find.textContaining('提取码'), findsNothing);
+    // 默认选中 24 小时 = 金浅底
+    final defaultChip = tester.widget<AppChip>(
+      find.widgetWithText(AppChip, '24 小时'),
+    );
+    expect(defaultChip.selected, isTrue, reason: '默认 24 小时档');
+    final chipBox = tester.widget<Material>(
+      find
+          .ancestor(of: find.text('24 小时'), matching: find.byType(Material))
+          .first,
+    );
+    expect(
+      chipBox.color,
+      TkColors.light.goldSoft,
+      reason: '选中 chip 金浅底(选中态视觉)',
+    );
+    // 无提取码/下载开关表单项(ShareCreateIn 无此字段;说明文案可提及)
+    expect(
+      find.byType(TextField),
+      findsNothing,
+      reason: '无提取码输入项(表单仅有效期 chips)',
+    );
     expect(find.textContaining('允许下载'), findsNothing);
   });
 
@@ -70,27 +98,31 @@ void main() {
     expect(call.expiresInSeconds, 86400);
     expect(find.textContaining('https://ms.test/s/tok'), findsOneWidget);
     expect(find.textContaining('有效期至'), findsOneWidget);
-    expect(find.text('访问需登录:收件人打开链接后用本地账号登录即可访问。'),
-        findsOneWidget);
+    expect(find.text('访问需登录:收件人打开链接后用本地账号登录即可访问。'), findsOneWidget);
   });
 
   testWidgets('切 30 天档 → expires_in_seconds=2592000;复制链接进剪贴板;'
-      '成功反馈=CopyButton 就地 ✓(R1:原 SnackBar 在 modal 态被遮挡,删除)',
-      (tester) async {
+      '成功反馈=CopyButton 就地 ✓(R1:原 SnackBar 在 modal 态被遮挡,删除)', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
 
     String? clipboard;
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform, (call) async {
-      if (call.method == 'Clipboard.setData') {
-        clipboard =
-            (call.arguments as Map<String, dynamic>)['text'] as String?;
-      }
-      return null;
-    });
-    addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, null));
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          clipboard =
+              (call.arguments as Map<String, dynamic>)['text'] as String?;
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
 
     await _pumpOpener(tester);
     await tester.tap(find.text('30 天'));
@@ -114,14 +146,20 @@ void main() {
     installFakeApi();
     addTearDown(() => session.api = null);
     tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform, (call) async {
-      if (call.method == 'Clipboard.setData') {
-        throw PlatformException(code: 'channel-error');
-      }
-      return null;
-    });
-    addTearDown(() => tester.binding.defaultBinaryMessenger
-        .setMockMethodCallHandler(SystemChannels.platform, null));
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          throw PlatformException(code: 'channel-error');
+        }
+        return null;
+      },
+    );
+    addTearDown(
+      () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      ),
+    );
 
     await _pumpOpener(tester);
     await tester.tap(find.text('生成分享链接'));
@@ -129,15 +167,15 @@ void main() {
     await tester.tap(find.text('复制链接'));
     await tester.pump();
     expect(find.text('复制失败,请长按链接手动复制'), findsOneWidget);
-    expect(find.byIcon(Icons.check), findsNothing,
-        reason: '失败保持原图标,立即可重试');
+    expect(find.byIcon(Icons.check), findsNothing, reason: '失败保持原图标,立即可重试');
   });
 
-  testWidgets('403 detail 透传(无 can_download 时分享被后端拒绝),停留表单态',
-      (tester) async {
+  testWidgets('403 detail 透传(无 can_download 时分享被后端拒绝),停留表单态', (tester) async {
     final api = installFakeApi();
-    api.share.staged =
-        ApiException(403, 'no permission to share(需 can_download)');
+    api.share.staged = ApiException(
+      403,
+      'no permission to share(需 can_download)',
+    );
     addTearDown(() => session.api = null);
     await _pumpOpener(tester);
     await tester.tap(find.text('生成分享链接'));
@@ -146,26 +184,31 @@ void main() {
     expect(find.text('生成分享链接'), findsOneWidget, reason: '失败停留表单态(按钮恢复可点)');
   });
 
-  testWidgets('folder 分享走 share_folder 入口(同表单,标题区分文件/文件夹)',
-      (tester) async {
+  testWidgets('folder 分享走 share_folder 入口(同表单,标题区分文件/文件夹)', (tester) async {
     final api = installFakeApi();
     addTearDown(() => session.api = null);
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showShareSheet(ctx,
-                  kind: 'folder', targetId: 'f1', targetLabel: '档案夹'),
-              child: const Text('open'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showShareSheet(
+                  ctx,
+                  kind: 'folder',
+                  targetId: 'f1',
+                  targetLabel: '档案夹',
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
-    expect(find.text('分享文件夹'), findsOneWidget);
+    expect(find.text('创建分享链接'), findsOneWidget);
     await tester.tap(find.text('生成分享链接'));
     await tester.pumpAndSettle();
     expect(api.share.calls.single.kind, 'folder');

@@ -13,7 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../services/app_log.dart';
-import '../theme/tokens.dart';
+import '../theme/context_tk.dart';
 
 /// 成功态图标回切时长(web CopyButton 无此件,取「可感知又不打扰」经验值)。
 const Duration kCopyFeedbackDuration = Duration(milliseconds: 1500);
@@ -83,8 +83,8 @@ class _CopyButtonState extends State<CopyButton> {
     final icon = Icon(
       _copied ? Icons.check : Icons.copy_outlined,
       size: widget.iconSize,
-      // ✓ 显式 Tk 绿(不随禁用态变灰,反馈可感知);默认态交主题配色
-      color: _copied ? Tk.green : null,
+      // ✓ 显式 ok 绿(不随禁用态变灰,反馈可感知);默认态交主题配色
+      color: _copied ? context.tk.ok : null,
     );
     if (widget.label != null) {
       return FilledButton.icon(

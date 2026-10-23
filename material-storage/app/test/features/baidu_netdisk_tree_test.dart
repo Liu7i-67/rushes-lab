@@ -14,9 +14,9 @@ Future<void> pumpPicker(WidgetTester tester, FakeBaiduAdapter adapter) async {
   tester.view.physicalSize = const Size(800, 1400);
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
-  await tester.pumpWidget(MaterialApp(
-    home: NetdiskTreePickerPage(api: baiduApiWith(adapter)),
-  ));
+  await tester.pumpWidget(
+    MaterialApp(home: NetdiskTreePickerPage(api: baiduApiWith(adapter))),
+  );
   await tester.pumpAndSettle();
 }
 
@@ -33,14 +33,14 @@ void main() {
     await pumpPicker(tester, adapter);
 
     expect(find.text('照片'), findsOneWidget);
-    final fileTile = tester.widget<ListTile>(find.ancestor(
-        of: find.text('说明.txt'), matching: find.byType(ListTile)));
+    final fileTile = tester.widget<ListTile>(
+      find.ancestor(of: find.text('说明.txt'), matching: find.byType(ListTile)),
+    );
     expect(fileTile.enabled, isFalse, reason: '文件行灰显不可选(选目录建任务语义)');
     expect(find.text('2.0 KB'), findsOneWidget, reason: '文件行展示大小');
   });
 
-  testWidgets('展开拉子级:展开请求带父路径;收起再展开不重拉(懒加载一次)',
-      (tester) async {
+  testWidgets('展开拉子级:展开请求带父路径;收起再展开不重拉(懒加载一次)', (tester) async {
     var childFetches = 0;
     final adapter = FakeBaiduAdapter((req) async {
       if (req.query['path'] == '/') {
@@ -61,11 +61,16 @@ void main() {
     expect(find.text('2026'), findsOneWidget);
     // 子级文件行同样灰显
     expect(
-        tester
-            .widget<ListTile>(find.ancestor(
-                of: find.text('a.jpg'), matching: find.byType(ListTile)))
-            .enabled,
-        isFalse);
+      tester
+          .widget<ListTile>(
+            find.ancestor(
+              of: find.text('a.jpg'),
+              matching: find.byType(ListTile),
+            ),
+          )
+          .enabled,
+      isFalse,
+    );
 
     // 收起 → 展开:children 已缓存,不重发
     await tester.tap(find.byIcon(Icons.expand_less));
@@ -77,8 +82,7 @@ void main() {
     expect(childFetches, 1, reason: '懒加载一次,已加载节点不重拉');
   });
 
-  testWidgets('子级加载失败:错误态显示可重试(不标记已加载),重试成功出子级',
-      (tester) async {
+  testWidgets('子级加载失败:错误态显示可重试(不标记已加载),重试成功出子级', (tester) async {
     var fail = true;
     final adapter = FakeBaiduAdapter((req) async {
       if (req.query['path'] == '/') {
@@ -94,8 +98,11 @@ void main() {
 
     await tester.tap(find.text('照片'));
     await tester.pumpAndSettle();
-    expect(find.text('请先绑定百度网盘账号'), findsOneWidget,
-        reason: '后端中文 detail 透传(频控/冲突语义同口径)');
+    expect(
+      find.text('请先绑定百度网盘账号'),
+      findsOneWidget,
+      reason: '后端中文 detail 透传(频控/冲突语义同口径)',
+    );
     expect(find.text('2026'), findsNothing);
 
     fail = false;
@@ -120,15 +127,19 @@ void main() {
     await tester.tap(find.text('重试'));
     await tester.pumpAndSettle();
     expect(find.text('照片'), findsOneWidget);
-    expect(find.text('目录过大,仅显示部分内容'), findsOneWidget,
-        reason: 'truncated 提示「分批浏览」口径');
+    expect(
+      find.text('目录过大,仅显示部分内容'),
+      findsOneWidget,
+      reason: 'truncated 提示「分批浏览」口径',
+    );
   });
 
   testWidgets('点选目录高亮,勾选返回路径;未选时勾选禁用', (tester) async {
     // 选择器经 showNetdiskTreePicker 推入,内里读 session.api!.baidu:
     // 注入挂替身适配器的 session 客户端
     final adapter = FakeBaiduAdapter(
-        (req) async => netdiskJson([entry('/照片', '照片')]));
+      (req) async => netdiskJson([entry('/照片', '照片')]),
+    );
     final msApi = MsApi(baseUrl: 'http://mock.local');
     msApi.http.httpClientAdapter = adapter;
     final savedApi = session.api;
@@ -138,36 +149,48 @@ void main() {
     tester.view.physicalSize = const Size(800, 1400);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () async {
-                popped = await showNetdiskTreePicker(ctx);
-              },
-              child: const Text('open'),
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () async {
+                  popped = await showNetdiskTreePicker(ctx);
+                },
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     expect(find.text('选择网盘目录'), findsOneWidget);
 
     // 未选:确定(勾)禁用
     expect(
-        tester.widget<IconButton>(find
-            .ancestor(of: find.byTooltip('确定'),
-                matching: find.byType(IconButton))).onPressed,
-        isNull);
+      tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byTooltip('确定'),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed,
+      isNull,
+    );
 
     await tester.tap(find.text('照片'));
     await tester.pumpAndSettle();
     expect(find.text('已选来源:/照片'), findsOneWidget);
-    final checkBtn = tester.widget<IconButton>(find
-        .ancestor(of: find.byTooltip('确定'), matching: find.byType(IconButton)));
+    final checkBtn = tester.widget<IconButton>(
+      find.ancestor(
+        of: find.byTooltip('确定'),
+        matching: find.byType(IconButton),
+      ),
+    );
     expect(checkBtn.onPressed, isNotNull);
     await tester.tap(find.byTooltip('确定'));
     await tester.pumpAndSettle();

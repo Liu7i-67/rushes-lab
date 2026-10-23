@@ -12,35 +12,41 @@ import 'package:ms_app/models/models.dart';
 import '../helpers/api_harness.dart';
 
 void main() {
-  testWidgets('grants 列表展示;撤销弹层确认后 DELETE(subject+level)',
-      (tester) async {
+  testWidgets('grants 列表展示;撤销弹层确认后 DELETE(subject+level)', (tester) async {
     final api = installFakeApi();
     api.foldersOps.listGrantsStaged = [
       FolderGrantRow(
-          subject: 'group:g1#member',
-          kind: 'group',
-          subjectId: 'g1',
-          name: '后期组',
-          level: 'uploader'),
+        subject: 'group:g1#member',
+        kind: 'group',
+        subjectId: 'g1',
+        name: '后期组',
+        level: 'uploader',
+      ),
     ];
     addTearDown(() => session.api = null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderGrantsSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderGrantsSheet(
                   ctx,
                   folder: Folder(
-                      id: 'f1', name: '档案夹', parentFolderId: null,
-                      projectId: 'p1')),
-              child: const Text('open'),
+                    id: 'f1',
+                    name: '档案夹',
+                    parentFolderId: null,
+                    projectId: 'p1',
+                  ),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -52,8 +58,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '撤销'));
     await tester.pumpAndSettle();
-    expect(api.foldersOps.removeGrantCalls.single,
-        (folderId: 'f1', subject: 'group:g1#member', level: 'uploader'));
+    expect(api.foldersOps.removeGrantCalls.single, (
+      folderId: 'f1',
+      subject: 'group:g1#member',
+      level: 'uploader',
+    ));
   });
 
   testWidgets('添加 grant:默认勾「查看」;多选 上传+查看 一次授多 level;'
@@ -65,22 +74,28 @@ void main() {
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u1', name: '甲');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderGrantsSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderGrantsSheet(
                   ctx,
                   folder: Folder(
-                      id: 'f1', name: '档案夹', parentFolderId: null,
-                      projectId: 'p1')),
-              child: const Text('open'),
+                    id: 'f1',
+                    name: '档案夹',
+                    parentFolderId: null,
+                    projectId: 'p1',
+                  ),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('添加授权'));
@@ -115,8 +130,10 @@ void main() {
 
     final call = api.foldersOps.addGrantCalls.single;
     expect(call.userId, 'u1');
-    expect(call.levels, ['uploader', 'viewer'],
-        reason: 'levels 固定序=kGrantLevels 声明序(web LEVEL_ORDER)');
+    expect(call.levels, [
+      'uploader',
+      'viewer',
+    ], reason: 'levels 固定序=kGrantLevels 声明序(web LEVEL_ORDER)');
     expect(find.text('授权管理 · 档案夹'), findsOneWidget, reason: '成功回列表');
     await tester.pump(const Duration(seconds: 6));
     await tester.pumpAndSettle();

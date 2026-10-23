@@ -20,55 +20,64 @@ void main() {
       ('7 天', 7 * 86400),
       ('30 天', 30 * 86400),
     ]);
-    expect(kInviteLevels.map((l) => l.$1), ['viewer', 'downloader'],
-        reason: '敏感夹邀请等级枚举=viewer/downloader(web 同款)');
+    expect(kInviteLevels.map((l) => l.$1), [
+      'viewer',
+      'downloader',
+    ], reason: '敏感夹邀请等级枚举=viewer/downloader(web 同款)');
   });
 
-  testWidgets('成员列表展示等级与永久;撤销带 subject/level/permanent',
-      (tester) async {
+  testWidgets('成员列表展示等级与永久;撤销带 subject/level/permanent', (tester) async {
     final api = installFakeApi();
     api.foldersOps.listMembersStaged = [
       FolderMemberRow(
-          subject: 'user:u1',
-          kind: 'user',
-          subjectId: 'u1',
-          name: '甲',
-          level: 'viewer',
-          permanent: true),
+        subject: 'user:u1',
+        kind: 'user',
+        subjectId: 'u1',
+        name: '甲',
+        level: 'viewer',
+        permanent: true,
+      ),
       FolderMemberRow(
-          subject: 'group:g1#member',
-          kind: 'group',
-          subjectId: 'g1',
-          name: '后期组',
-          level: 'downloader',
-          permanent: false,
-          expiresAt: '2026-10-25T10:00:00Z'),
+        subject: 'group:g1#member',
+        kind: 'group',
+        subjectId: 'g1',
+        name: '后期组',
+        level: 'downloader',
+        permanent: false,
+        expiresAt: '2026-10-25T10:00:00Z',
+      ),
     ];
     addTearDown(() => session.api = null);
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderInviteSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderInviteSheet(
                   ctx,
                   folder: Folder(
-                      id: 'sf', name: '敏感夹', parentFolderId: null,
-                      isSensitive: true)),
-              child: const Text('open'),
+                    id: 'sf',
+                    name: '敏感夹',
+                    parentFolderId: null,
+                    isSensitive: true,
+                  ),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
     expect(find.text('邀请管理 · 敏感夹'), findsOneWidget);
     expect(find.text('甲'), findsWidgets, reason: '头像首字+标题');
-    expect(find.text('VIEWER'), findsOneWidget);
-    expect(find.text('永久'), findsOneWidget);
+    expect(find.textContaining('VIEWER'), findsOneWidget);
+    expect(find.textContaining('永久'), findsOneWidget);
     expect(find.textContaining('DOWNLOADER'), findsOneWidget);
     expect(find.textContaining('到期'), findsOneWidget);
 
@@ -77,17 +86,15 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(FilledButton, '撤销'));
     await tester.pumpAndSettle();
-    expect(api.foldersOps.revokeInviteCalls.single,
-        (
-          folderId: 'sf',
-          subject: 'group:g1#member',
-          level: 'downloader',
-          permanent: false,
-        ));
+    expect(api.foldersOps.revokeInviteCalls.single, (
+      folderId: 'sf',
+      subject: 'group:g1#member',
+      level: 'downloader',
+      permanent: false,
+    ));
   });
 
-  testWidgets('邀请表单:选人+level+7 天档 → 逐主体 POST(duration 映射)',
-      (tester) async {
+  testWidgets('邀请表单:选人+level+7 天档 → 逐主体 POST(duration 映射)', (tester) async {
     tester.view.physicalSize = const Size(900, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -95,22 +102,28 @@ void main() {
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u1', name: '甲');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderInviteSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderInviteSheet(
                   ctx,
                   folder: Folder(
-                      id: 'sf', name: '敏感夹', parentFolderId: null,
-                      isSensitive: true)),
-              child: const Text('open'),
+                    id: 'sf',
+                    name: '敏感夹',
+                    parentFolderId: null,
+                    isSensitive: true,
+                  ),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
 
@@ -144,8 +157,7 @@ void main() {
     expect(find.text('邀请管理 · 敏感夹'), findsOneWidget);
   });
 
-  testWidgets('永久档提交 durationSeconds=null;未选主体报「请选至少一个主体」',
-      (tester) async {
+  testWidgets('永久档提交 durationSeconds=null;未选主体报「请选至少一个主体」', (tester) async {
     tester.view.physicalSize = const Size(900, 1600);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
@@ -153,22 +165,28 @@ void main() {
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u1', name: '甲');
 
-    await tester.pumpWidget(MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showFolderInviteSheet(
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) => Center(
+              child: FilledButton(
+                onPressed: () => showFolderInviteSheet(
                   ctx,
                   folder: Folder(
-                      id: 'sf', name: '敏感夹', parentFolderId: null,
-                      isSensitive: true)),
-              child: const Text('open'),
+                    id: 'sf',
+                    name: '敏感夹',
+                    parentFolderId: null,
+                    isSensitive: true,
+                  ),
+                ),
+                child: const Text('open'),
+              ),
             ),
           ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('邀请成员'));

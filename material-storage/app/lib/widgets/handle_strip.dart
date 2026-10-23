@@ -7,6 +7,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../theme/context_tk.dart';
 import '../theme/tokens.dart';
 
 /// sheet 顶部把手条;onDismiss 由调用方接关闭守卫(确认/直关自定)。
@@ -35,13 +36,10 @@ class _HandleStripState extends State<HandleStrip> {
       child: Center(
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: Tk.spaceMd),
-          width: 32,
+          width: 38,
           height: 4,
           decoration: BoxDecoration(
-            color: Theme.of(context)
-                .colorScheme
-                .onSurfaceVariant
-                .withValues(alpha: 0.4),
+            color: context.tk.lineStrong,
             borderRadius: BorderRadius.circular(Tk.rPill),
           ),
         ),

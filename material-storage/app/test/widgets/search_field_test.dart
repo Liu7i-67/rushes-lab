@@ -14,20 +14,20 @@ void main() {
     String? hint,
     ValueChanged<String>? onChanged,
     ValueChanged<String>? onSubmitted,
-  }) =>
-      tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: SearchField(
-            controller: controller,
-            hintText: hint,
-            onChanged: onChanged,
-            onSubmitted: onSubmitted,
-          ),
+  }) => tester.pumpWidget(
+    MaterialApp(
+      home: Scaffold(
+        body: SearchField(
+          controller: controller,
+          hintText: hint,
+          onChanged: onChanged,
+          onSubmitted: onSubmitted,
         ),
-      ));
+      ),
+    ),
+  );
 
-  testWidgets('hint 渲染;无文字无清除钮;输入后出现清除钮且 onChanged 透传',
-      (tester) async {
+  testWidgets('hint 渲染;无文字无清除钮;输入后出现清除钮且 onChanged 透传', (tester) async {
     final changed = <String>[];
     await host(tester, hint: '搜索资产', onChanged: changed.add);
     expect(find.text('搜索资产'), findsOneWidget);
@@ -63,8 +63,7 @@ void main() {
     expect(submitted, 'abc');
   });
 
-  testWidgets('外部 controller 带初始值:清除钮直接可见(监听同步)',
-      (tester) async {
+  testWidgets('外部 controller 带初始值:清除钮直接可见(监听同步)', (tester) async {
     final controller = TextEditingController(text: 'pre');
     await host(tester, controller: controller);
     expect(find.byTooltip('清除'), findsOneWidget, reason: '初始文字→清除钮可见');
@@ -75,17 +74,29 @@ void main() {
     expect(find.byTooltip('清除'), findsNothing);
   });
 
-  testWidgets('圆角走主题(12 输入档),组件不覆盖 border', (tester) async {
-    await tester.pumpWidget(MaterialApp(
-      theme: buildAppTheme(),
-      home: const Scaffold(body: SearchField()),
-    ));
-    final deco =
-        tester.widget<TextField>(find.byType(TextField)).decoration!;
+  testWidgets('46 高排布 + 圆角走主题(rSm=10),组件不覆盖 border', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(),
+        home: const Scaffold(body: SearchField()),
+      ),
+    );
+    final deco = tester.widget<TextField>(find.byType(TextField)).decoration!;
     expect(deco.border, isNull, reason: '不覆盖主题边框(圆角由主题输入档决定)');
-    final themeBorder = Theme.of(tester.element(find.byType(TextField)))
-        .inputDecorationTheme.border! as OutlineInputBorder;
-    expect(themeBorder.borderRadius, BorderRadius.circular(12),
-        reason: 'A3 输入档 rMd=12');
+    expect(
+      deco.contentPadding,
+      const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+      reason: 'isDense:true + 垂直 11 → 46 高搜索框',
+    );
+    final themeBorder =
+        Theme.of(tester.element(find.byType(TextField)))
+                .inputDecorationTheme
+                .border!
+            as OutlineInputBorder;
+    expect(
+      themeBorder.borderRadius,
+      BorderRadius.circular(10),
+      reason: '输入档 rSm=10',
+    );
   });
 }

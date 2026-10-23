@@ -1,8 +1,9 @@
 /// AdminBaiduTasksPage — 备份任务(管理)(B8 功能点 7;web AdminBaiduTasksPage
-/// 移动版):全系统百度备份任务只读观测——状态 chips 筛选 + q 搜索
+/// 移动版):全系统百度备份任务只读观测——状态 chip 筛选 + q 搜索
 /// (用户名/姓名/源目录)+ 服务端分页 + 行点开详情(含文件明细与文件级三操作)。
 /// 存在活动任务时 15s 轮询(web 同款;纯 setState 刷新不引依赖)。 admin 看
 /// 原始 status,不做 queued 派生(方案 §3.2)。require_system_admin。
+/// 视觉:PageHeader + 状态 chip 轨 + SectionCard 行卡。
 library;
 
 import 'dart:async';
@@ -13,10 +14,15 @@ import '../../core/api/ms_api.dart';
 import '../../core/fmt.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
+import '../../widgets/app_chip.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/badge.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/search_field.dart';
 import '../../widgets/toast.dart';
 import 'admin_auto_load.dart';
@@ -119,8 +125,7 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingMore = false);
-      toast(context, errorMessage(e, '加载失败,请稍后重试'),
-          tone: ToastTone.error);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'), tone: ToastTone.error);
     }
   }
 
@@ -136,12 +141,20 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('备份任务')),
       body: Column(
         children: [
+          PageHeader(
+            back: true,
+            title: '备份任务',
+            subtitle: _loading ? '全站备份视图' : '全站 $_total 个任务 · 只读观测',
+          ),
           Padding(
             padding: const EdgeInsets.fromLTRB(
-                Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, 0),
+              Tk.spacePage,
+              Tk.spaceSm,
+              Tk.spacePage,
+              0,
+            ),
             child: SearchField(
               controller: _search,
               hintText: '搜用户名 / 姓名 / 源目录…',
@@ -152,10 +165,15 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
             ),
           ),
           SizedBox(
-            height: 48,
+            height: 52,
             child: ListView(
               scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: Tk.spaceMd),
+              padding: const EdgeInsets.fromLTRB(
+                Tk.spacePage,
+                Tk.spaceSm,
+                Tk.spacePage,
+                0,
+              ),
               children: [
                 for (final (key, label) in const [
                   ('', '全部状态'),
@@ -167,25 +185,16 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
                 ])
                   Padding(
                     padding: const EdgeInsets.only(right: Tk.spaceSm),
-                    child: ChoiceChip(
-                      label: Text(label),
+                    child: AppChip(
+                      label: label,
                       selected: _status == key,
-                      onSelected: (_) {
+                      onTap: () {
                         setState(() => _status = key);
                         _reload();
                       },
                     ),
                   ),
               ],
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: Tk.spaceLg),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text('共 $_total 个任务',
-                  style:
-                      const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
             ),
           ),
           Expanded(child: _body()),
@@ -202,18 +211,28 @@ class _AdminBaiduTasksPageState extends State<AdminBaiduTasksPage>
       return ErrorView(message: _error!, onRetry: _reload);
     }
     if (_items.isEmpty) {
-      return const EmptyState(message: '暂无备份任务');
+      return const EmptyState(
+        icon: Icons.cloud_off_outlined,
+        message: '暂无备份任务',
+      );
     }
-    return ListView.builder(
+    return ListView(
       controller: scrollController,
-      itemCount: _items.length + (_items.length < _total ? 1 : 0),
-      itemBuilder: (context, i) {
-        if (i >= _items.length) {
-          // F6:底部自动加载指示器(到底自动触发;失败后可点重试)
-          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
-        }
-        return _TaskRow(task: _items[i], onChanged: _reload);
-      },
+      padding: const EdgeInsets.fromLTRB(
+        Tk.spacePage,
+        Tk.spaceMd,
+        Tk.spacePage,
+        Tk.space2xl,
+      ),
+      children: [
+        SectionCard(
+          children: [
+            for (final t in _items) _TaskRow(task: t, onChanged: _reload),
+          ],
+        ),
+        if (_items.length < _total)
+          AutoLoadFooter(loading: _loadingMore, onTap: _loadMore),
+      ],
     );
   }
 }
@@ -224,54 +243,38 @@ class _TaskRow extends StatelessWidget {
   final AdminBaiduTask task;
   final VoidCallback onChanged;
 
-  BadgeTone get _tone => baiduTaskTone(task.status);
-
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final t = task;
     // enumerating 阶段清单未就绪(聚合列 NULL→0),不渲染进度(web 同款改进)
-    return ListTile(
-      visualDensity: VisualDensity.compact,
-      title: Row(children: [
-        Flexible(
-          child: Text(t.user.name,
-              maxLines: 1, overflow: TextOverflow.ellipsis),
-        ),
-        const SizedBox(width: 6),
-        Badge(label: kTaskStatusLabels[t.status] ?? t.status, tone: _tone),
-        const Spacer(),
-        if (t.failedFiles > 0)
-          Text('失败 ${t.failedFiles}',
-              style:
-                  const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
-      ]),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    final progress = t.status == 'enumerating' ? '清单准备中' : '${t.progressPct}%';
+    final target = t.targetFolder?.name ?? '已删';
+    return AppRow(
+      leading: const Icon(Icons.cloud_outlined),
+      title: t.user.name,
+      subtitle:
+          '${t.sourceDir} · ${t.project.name} / $target · $progress'
+          ' · 创建于 ${fmtIsoShort(t.createdAt)}',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Text(t.sourceDir,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: Tk.fzXs)),
-          Text(
-            '${t.project.name} / ${t.targetFolder?.name ?? '已删'} · '
-            '${t.status == 'enumerating' ? '清单准备中' : '${t.progressPct}%'} · '
-            '创建于 ${fmtIsoShort(t.createdAt)}',
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-                fontSize: Tk.fzXs,
-                color: t.targetFolder == null ? Tk.amber : Tk.muted),
+          if (t.failedFiles > 0)
+            Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Text(
+                '失败 ${t.failedFiles}',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.danger),
+              ),
+            ),
+          Badge(
+            label: kTaskStatusLabels[t.status] ?? t.status,
+            tone: baiduTaskTone(t.status),
           ),
-          if (t.failReason != null)
-            Text(
-                '失败原因:${kFailReasonLabels[t.failReason] ?? t.failReason}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red)),
+          const SizedBox(width: 6),
+          Icon(Icons.chevron_right, size: 18, color: tk.ink3),
         ],
       ),
-      isThreeLine: true,
-      trailing: const Icon(Icons.chevron_right),
       onTap: () async {
         // 详情内文件级操作成功后返回 true → 刷新列表(任务状态/计数可能已变)
         final changed = await showBaiduTaskDetailSheet(context, t);

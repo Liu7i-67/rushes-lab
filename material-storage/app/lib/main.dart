@@ -18,6 +18,7 @@ import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
 import 'services/notifier.dart';
 import 'services/transfer_foreground.dart';
+import 'theme/theme_controller.dart';
 
 /// 源码最后编辑时间(YYYY-MM-DD HH:mm),打包期注入、项目页标题展示,
 /// 用于 TestFlight 肉眼确认装到的是最新构建(取 git HEAD 提交时刻):
@@ -29,8 +30,11 @@ const kAppBuildStamp = String.fromEnvironment(
   defaultValue: '',
 );
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // WP0 双主题:启动读外观偏好(跟随系统/深/浅);读盘失败保持 system
+  // 且不阻塞后续初始化(ThemeStore 内部已静默降级)。
+  await themeController.load();
   // 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
   // 特性侧缓存在此挂载,core 不再反向 import features)
   session.addSessionClearHook(thumbnailCache.clear);

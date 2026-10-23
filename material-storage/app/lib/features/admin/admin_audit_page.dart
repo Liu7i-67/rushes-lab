@@ -1,6 +1,6 @@
 /// AdminAuditPage — 审计(B8 功能点 4;web AdminAuditPage 移动版):
-/// 筛选=事件类型/项目/操作者(UserPicker 单选)/单日时间 + 分页列表 + CSV 导出。
-/// 导出钉子:dio 带会话(AuditApi.exportCsv)→ 落盘矩阵 other 列;禁 url_launcher。
+/// 快捷 chip 轨 + 事件类型/项目/操作者/单日时间筛选卡 + 金色竖线时间线 +
+/// 分页自动加载 + CSV 导出(dio 带会话,禁 url_launcher)。
 library;
 
 import 'package:flutter/material.dart';
@@ -10,8 +10,10 @@ import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_card.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/toast.dart';
 import 'admin_auto_load.dart';
 import 'audit_event_card.dart';
@@ -45,20 +47,28 @@ class _AdminAuditPageState extends State<AdminAuditPage>
   var _exhausted = false;
 
   AuditFilter get _filter => AuditFilter(
-        eventType: _eventType,
-        actorUserId: _actor?.id ?? '',
-        projectId: _projectId,
-        from: _day == null
-            ? null
-            : DateTime(_day!.year, _day!.month, _day!.day)
-                .toUtc()
-                .toIso8601String(),
-        to: _day == null
-            ? null
-            : DateTime(_day!.year, _day!.month, _day!.day, 23, 59, 59, 999)
-                .toUtc()
-                .toIso8601String(),
-      );
+    eventType: _eventType,
+    actorUserId: _actor?.id ?? '',
+    projectId: _projectId,
+    from: _day == null
+        ? null
+        : DateTime(
+            _day!.year,
+            _day!.month,
+            _day!.day,
+          ).toUtc().toIso8601String(),
+    to: _day == null
+        ? null
+        : DateTime(
+            _day!.year,
+            _day!.month,
+            _day!.day,
+            23,
+            59,
+            59,
+            999,
+          ).toUtc().toIso8601String(),
+  );
 
   @override
   void onAutoLoad() => _loadMore();
@@ -74,9 +84,11 @@ class _AdminAuditPageState extends State<AdminAuditPage>
   Future<void> _loadProjects() async {
     final out = <Project>[];
     try {
-      for (var offset = 0;; offset += 100) {
-        final page =
-            await session.api!.projects.listPaged(limit: 100, offset: offset);
+      for (var offset = 0; ; offset += 100) {
+        final page = await session.api!.projects.listPaged(
+          limit: 100,
+          offset: offset,
+        );
         out.addAll(page);
         if (page.length < 100) break;
       }
@@ -94,8 +106,11 @@ class _AdminAuditPageState extends State<AdminAuditPage>
       _exhausted = false;
     });
     try {
-      final items = await session.api!.audit
-          .list(filter: _filter, limit: _kAuditPageSize, offset: 0);
+      final items = await session.api!.audit.list(
+        filter: _filter,
+        limit: _kAuditPageSize,
+        offset: 0,
+      );
       if (tag != _reloadTag || !mounted) return;
       setState(() {
         _items = items;
@@ -116,8 +131,11 @@ class _AdminAuditPageState extends State<AdminAuditPage>
     setState(() => _loadingMore = true);
     final tag = _reloadTag;
     try {
-      final items = await session.api!.audit
-          .list(filter: _filter, limit: _kAuditPageSize, offset: _items.length);
+      final items = await session.api!.audit.list(
+        filter: _filter,
+        limit: _kAuditPageSize,
+        offset: _items.length,
+      );
       if (tag != _reloadTag || !mounted) return;
       setState(() {
         _items = [..._items, ...items];
@@ -127,8 +145,7 @@ class _AdminAuditPageState extends State<AdminAuditPage>
     } catch (e) {
       if (!mounted) return;
       setState(() => _loadingMore = false);
-      toast(context, errorMessage(e, '加载失败,请稍后重试'),
-          tone: ToastTone.error);
+      toast(context, errorMessage(e, '加载失败,请稍后重试'), tone: ToastTone.error);
     }
   }
 
@@ -145,8 +162,9 @@ class _AdminAuditPageState extends State<AdminAuditPage>
     if (_exporting) return;
     setState(() => _exporting = true);
     try {
-      final (bytes, disposition) =
-          await session.api!.audit.exportCsv(filter: _filter);
+      final (bytes, disposition) = await session.api!.audit.exportCsv(
+        filter: _filter,
+      );
       if (!mounted) return;
       if (!looksLikeCsv(bytes)) {
         toast(context, '导出响应异常(非 CSV),请稍后再试', tone: ToastTone.error);
@@ -181,36 +199,43 @@ class _AdminAuditPageState extends State<AdminAuditPage>
     _reload();
   }
 
+  void _setEventType(String v) {
+    if (_eventType == v) return;
+    setState(() => _eventType = v);
+    _reload();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('审计'),
-        actions: [
-          IconButton(
-            icon: _exporting
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2))
-                : const Icon(Icons.download_outlined),
-            tooltip: '导出 CSV',
-            onPressed: _exporting ? null : _exportCsv,
-          ),
-        ],
-      ),
       body: Column(
         children: [
+          PageHeader(
+            back: true,
+            title: '审计日志',
+            subtitle: '关键操作留痕，保留 180 天',
+            actions: [
+              IconButton(
+                tooltip: '导出 CSV',
+                onPressed: _exporting ? null : _exportCsv,
+                icon: _exporting
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.download_outlined),
+              ),
+            ],
+          ),
+          AuditQuickChips(value: _eventType, onChanged: _setEventType),
           AuditFilterBar(
             eventType: _eventType,
             projectId: _projectId,
             actor: _actor,
             day: _day,
             projects: _projects,
-            onEventTypeChanged: (v) {
-              setState(() => _eventType = v);
-              _reload();
-            },
+            onEventTypeChanged: _setEventType,
             onProjectChanged: (v) {
               setState(() => _projectId = v);
               _reload();
@@ -225,7 +250,7 @@ class _AdminAuditPageState extends State<AdminAuditPage>
               _reload();
             },
           ),
-          const SizedBox(height: Tk.spaceXs),
+          const SizedBox(height: Tk.spaceSm),
           Expanded(child: _body()),
         ],
       ),
@@ -240,19 +265,26 @@ class _AdminAuditPageState extends State<AdminAuditPage>
       return ErrorView(message: _error!, onRetry: _reload);
     }
     if (_items.isEmpty) {
-      return const EmptyState(message: '无匹配记录');
+      return const EmptyState(icon: Icons.history, message: '无匹配记录');
     }
-    return ListView.builder(
+    return ListView(
       controller: scrollController,
-      itemCount: _items.length + 1,
-      itemBuilder: (context, i) {
-        if (i >= _items.length) {
-          // 首页未满页 = 已取完:仅留收尾缝;否则 F6 自动加载指示器
-          if (_exhausted) return const SizedBox(height: Tk.spaceXl);
-          return AutoLoadFooter(loading: _loadingMore, onTap: _loadMore);
-        }
-        return AuditEventCard(event: _items[i]);
-      },
+      padding: const EdgeInsets.fromLTRB(
+        Tk.spacePage,
+        0,
+        Tk.spacePage,
+        Tk.space2xl,
+      ),
+      children: [
+        SectionCard(
+          children: [for (final e in _items) AuditEventCard(event: e)],
+        ),
+        // 首页未满页 = 已取完:仅留收尾缝;否则 F6 自动加载指示器
+        if (_exhausted)
+          const SizedBox(height: Tk.spaceXl)
+        else
+          AutoLoadFooter(loading: _loadingMore, onTap: _loadMore),
+      ],
     );
   }
 }

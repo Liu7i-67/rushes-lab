@@ -1,18 +1,30 @@
-/// Buttons — 按钮变体工具(app-polish A10):DangerButton=FilledButton 红色
-/// 变体(危险确认,收敛 3+ 处 `FilledButton.styleFrom(foregroundColor: Tk.red)`
-/// 复制;红底白字对比达标,前景取 Tk.surface 与主题 onPrimary 同源),
-/// PrimaryXl=吸底大按钮(SheetScaffold bottomActions 主操作,通栏加高)。
+/// Buttons — 按钮变体工具(墨色 + 金色语言):
+/// DangerButton=FilledButton 危险变体(红底 `dangerFill` + `onDanger` 前景);
+/// PrimaryXl=吸底大按钮(金底深墨字,SheetScaffold bottomActions 主操作)。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../theme/context_tk.dart';
 import '../theme/tokens.dart';
 
+/// 金色主按钮上的深墨字(与 app_theme FilledButton 同值)。
+const Color _kOnGold = Color(0xFF1A1509);
+
 /// 危险按钮统一样式(AlertDialog 内联按钮也可直接取用,免再 styleFrom)。
-ButtonStyle dangerButtonStyle() => FilledButton.styleFrom(
-      backgroundColor: Tk.red,
-      foregroundColor: Tk.surface, // on-red 白,与主题 onPrimary 同源
-    );
+ButtonStyle dangerButtonStyle(BuildContext context) {
+  final tk = context.tk;
+  return FilledButton.styleFrom(
+    backgroundColor: tk.dangerFill,
+    foregroundColor: tk.onDanger,
+    minimumSize: const Size(44, 48),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(Tk.rSm)),
+    textStyle: const TextStyle(
+      fontSize: Tk.fzRowTitle,
+      fontWeight: FontWeight.w600,
+    ),
+  );
+}
 
 class DangerButton extends StatelessWidget {
   const DangerButton({
@@ -32,28 +44,23 @@ class DangerButton extends StatelessWidget {
   Widget build(BuildContext context) {
     if (icon != null) {
       return FilledButton.icon(
-        style: dangerButtonStyle(),
+        style: dangerButtonStyle(context),
         onPressed: onPressed,
         icon: Icon(icon),
         label: Text(label),
       );
     }
     return FilledButton(
-      style: dangerButtonStyle(),
+      style: dangerButtonStyle(context),
       onPressed: onPressed,
       child: Text(label),
     );
   }
 }
 
-/// 吸底主操作大按钮(通栏加高;SheetScaffold bottomActions/表单提交位用)。
+/// 吸底主操作大按钮(通栏 48 高;SheetScaffold bottomActions/表单提交位用)。
 class PrimaryXl extends StatelessWidget {
-  const PrimaryXl({
-    super.key,
-    this.onPressed,
-    required this.label,
-    this.icon,
-  });
+  const PrimaryXl({super.key, this.onPressed, required this.label, this.icon});
 
   final VoidCallback? onPressed;
   final String label;
@@ -62,11 +69,18 @@ class PrimaryXl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // 通栏:外层多在 Row>Expanded 里,SizedBox 保证单独使用时也占满;
-    // 加高至 48 触控达标,主文案加粗
+    // 金底深墨字与主题 FilledButton 同源,显式写出便于独立主题环境测试。
     final style = FilledButton.styleFrom(
+      backgroundColor: context.tk.gold,
+      foregroundColor: _kOnGold,
       minimumSize: const Size.fromHeight(48),
-      textStyle:
-          const TextStyle(fontSize: Tk.fzBody, fontWeight: FontWeight.w600),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Tk.rSm),
+      ),
+      textStyle: const TextStyle(
+        fontSize: Tk.fzRowTitle,
+        fontWeight: FontWeight.w600,
+      ),
     );
     if (icon != null) {
       return SizedBox(
@@ -81,7 +95,11 @@ class PrimaryXl extends StatelessWidget {
     }
     return SizedBox(
       width: double.infinity,
-      child: FilledButton(style: style, onPressed: onPressed, child: Text(label)),
+      child: FilledButton(
+        style: style,
+        onPressed: onPressed,
+        child: Text(label),
+      ),
     );
   }
 }

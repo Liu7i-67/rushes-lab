@@ -1,6 +1,7 @@
 /// 创建失败文案归因(自 new_project_sheet.dart 拆出的顶层纯函数,行为零变化;
 /// 仅为本体行数收口 ≤300,归因口径注释随函数走)。调用方 new_project_sheet
-/// 的 ApiException 分支与对应单测共用。
+/// 的 ApiException 分支与对应单测共用;失败态由 SheetScaffold errorText 固定
+/// 展示,吸底「创建项目」按钮即重试入口(无需额外失败卡片)。
 library;
 
 import '../../core/api/ms_api.dart';
@@ -22,12 +23,12 @@ String projectCreateFailCopy(ApiException e) {
       final detail = raw is Map ? (raw['detail'] ?? raw) : null;
       final hasProjectId =
           (detail is Map && detail['project_id'] != null) ||
-              e.message.contains('project_id');
+          e.message.contains('project_id');
       return hasProjectId
           ? '项目已创建,但艺人账号未能建立(登录名刚被占用);可联系管理员在后台'
-              '开通账号后在项目成员中添加;或由管理员删除该项目后用新登录名重建'
+                '开通账号后在项目成员中添加;或由管理员删除该项目后用新登录名重建'
           : '登录名已被占用;若该艺人此前已开通请勿重复开通(可联系管理员将其加入'
-              '本项目成员),否则请更换登录名重试';
+                '本项目成员),否则请更换登录名重试';
     }
     if (e.message.contains('项目 code')) {
       return e.message; // code 冲突:detail 字符串原样即精确文案

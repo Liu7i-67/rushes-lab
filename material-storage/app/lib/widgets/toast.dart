@@ -1,14 +1,16 @@
-/// toast — 全局轻提示统一封装(app-polish A6;J1 重构为顶部 Overlay 悬浮条):
-/// 顶部 SafeArea 下悬浮条(tone 图标配色沿用:成功绿/失败红/信息橙,surface
-/// 底 + rLg 圆角 + 轻阴影 + 左右 margin),**点击条身即销毁**;[actionLabel]
-/// 非空时右侧文字 action(执行 onAction 后销毁);[duration] 到时自动销毁;
-/// 进出场各 150ms(淡入下滑 / 淡出上滑)。
+/// toast — 全局轻提示统一封装(墨色 + 金色:底部 86 暖炭条):
+/// 悬浮在底部 86(键盘弹出时再顶起 viewInsets),固定暖炭底
+/// (`#383228`,两种主题一致)+ 1px 细描边 + rSm 圆角 + shadow2 深色版;
+/// 左侧 8 圆点(info/success 金 / error 红),正文 13.5;
+/// **点击条身即销毁**;[actionLabel] 非空时右侧文字 action(执行 onAction
+/// 后销毁);[duration] 默认 2.4s 到时自动销毁;进出场各 150ms(淡入上滑 /
+/// 淡出下滑)。
 ///
-/// 弃用 ScaffoldMessenger/SnackBar(用户反馈 #9:原从底部弹出且无法点击
-/// 关闭):挂 root navigator(session.navigatorKey,app.dart 注入 MaterialApp)
-/// 的 Overlay,条目在全部路由(含 sheet/dialog)之上,免疫遮挡;无 root
-/// navigator 时(裸 MaterialApp 的单测环境)回退 [context] 所在最近
-/// Overlay —— [context] 参数仅为该兼容保留,签名不变(存量调用零改动)。
+/// 弃用 ScaffoldMessenger/SnackBar(用户反馈 #9):挂 root navigator
+/// (session.navigatorKey,app.dart 注入 MaterialApp)的 Overlay,条目在全部
+/// 路由(含 sheet/dialog)之上,免疫遮挡;无 root navigator 时(裸
+/// MaterialApp 的单测环境)回退 [context] 所在最近 Overlay —— [context]
+/// 参数仅为该兼容保留,签名不变(存量调用零改动)。
 /// 「latest wins」保留:新 toast 先无动画移除旧 entry,不排队。
 ///
 /// P1-2(J1 探针实证缺陷修复):toast 生命周期绑定路由变化——路由
@@ -23,12 +25,23 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../core/session.dart';
+import '../theme/tk_colors.dart';
 import '../theme/tokens.dart';
+
+// ToastRouteObserver 拆到独立文件(§5.6);此处转出,app.dart 的
+// `import 'widgets/toast.dart' show ToastRouteObserver` 无需改动。
+export 'toast_route_observer.dart';
 
 enum ToastTone { success, error, info }
 
 /// 进出场动画时长(J1 定稿 150ms)。
 const _kToastAnim = Duration(milliseconds: 150);
+
+/// 浮层距底距离(设计 §2:Toast 底部 86;键盘弹出再顶起)。
+const double kToastBottomOffset = 86;
+
+/// 默认展示时长(设计 §2:2.4s 自动消失)。
+const Duration kToastDuration = Duration(milliseconds: 2400);
 
 /// 当前活跃 toast(latest-wins:新条先顶掉旧条;全库同刻至多一条)。
 _ToastHandle? _current;
@@ -40,12 +53,11 @@ void toast(
   String? actionLabel,
   VoidCallback? onAction,
   ToastTone tone = ToastTone.info,
-  Duration duration = const Duration(seconds: 3),
+  Duration duration = kToastDuration,
 }) {
-  final (icon, color) = switch (tone) {
-    ToastTone.success => (Icons.check_circle_outline, Tk.green),
-    ToastTone.error => (Icons.error_outline, Tk.red),
-    ToastTone.info => (Icons.info_outline, Tk.accent),
+  final dot = switch (tone) {
+    ToastTone.success || ToastTone.info => Tk.previewGold,
+    ToastTone.error => Tk.dangerOnDark,
   };
   final overlay =
       session.navigatorKey.currentState?.overlay ??
@@ -55,8 +67,7 @@ void toast(
   _current?._removeNow(); // latest-wins:先移除旧 entry,再挂新条
   final handle = _ToastHandle(
     overlay: overlay,
-    icon: icon,
-    iconColor: color,
+    dotColor: dot,
     message: message,
     actionLabel: actionLabel,
     onAction: onAction,
@@ -73,32 +84,12 @@ void dismissCurrentToast() {
   _current = null;
 }
 
-/// P1-2:路由观察者——push/pop/replace 即销毁当前 toast。语义:页面切走,
-/// 旧页提示对新页无意义;兼修 Overlay 条目跨路由存活、隐形盖住新页顶部
-/// (AppBar 返回键区)吞首击的缺陷。app.dart 挂 MaterialApp
-/// .navigatorObservers;裸 MaterialApp 的单测环境未挂 observer 时不生效
-/// (同页 toast 行为零改动)。didPop 覆盖「toast 弹出后用户按返回」场景。
-class ToastRouteObserver extends NavigatorObserver {
-  @override
-  void didPush(Route<dynamic> route, Route<dynamic>? previousRoute) =>
-      dismissCurrentToast();
-
-  @override
-  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) =>
-      dismissCurrentToast();
-
-  @override
-  void didReplace({Route<dynamic>? newRoute, Route<dynamic>? oldRoute}) =>
-      dismissCurrentToast();
-}
-
 /// 一条 toast 的宿主句柄:持有 OverlayEntry,负责插入与移除(立即顶替 /
 /// 动画退场后摘除)。
 class _ToastHandle {
   _ToastHandle({
     required this.overlay,
-    required this.icon,
-    required this.iconColor,
+    required this.dotColor,
     required this.message,
     required this.duration,
     this.actionLabel,
@@ -106,8 +97,7 @@ class _ToastHandle {
   });
 
   final OverlayState overlay;
-  final IconData icon;
-  final Color iconColor;
+  final Color dotColor;
   final String message;
   final String? actionLabel;
   final VoidCallback? onAction;
@@ -151,18 +141,28 @@ class _ToastBarState extends State<_ToastBar>
     curve: Curves.easeOut,
   );
   late final Animation<Offset> _slide = Tween(
-    begin: const Offset(0, -0.4),
+    begin: const Offset(0, 0.4), // 底部弹出:自下而上
     end: Offset.zero,
   ).animate(_curve);
 
   Timer? _auto;
   var _exiting = false;
+  var _started = false;
+  var _reduced = false;
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true; // MediaQuery 首帧才可读,show/timer 延到这里启动
+    // P2-7:reduced-motion 下不走 150ms 进出场(直接显隐)。
+    _reduced = MediaQuery.disableAnimationsOf(context);
     _anim.addStatusListener(_onStatus);
-    _anim.forward();
+    if (_reduced) {
+      _anim.value = 1;
+    } else {
+      _anim.forward();
+    }
     _auto = Timer(widget.handle.duration, _beginExit);
   }
 
@@ -173,11 +173,16 @@ class _ToastBarState extends State<_ToastBar>
     }
   }
 
-  /// 点击条身 / action / 自动到期统一的退场入口:停掉自动销毁,反向播放。
+  /// 点击条身 / action / 自动到期统一的退场入口:停掉自动销毁,反向播放;
+  /// reduced-motion 直接摘除(无动画 ticker)。
   void _beginExit() {
     if (_exiting || !mounted) return;
     _exiting = true;
     _auto?.cancel();
+    if (_reduced) {
+      widget.handle._removeNow();
+      return;
+    }
     _anim.reverse();
   }
 
@@ -192,51 +197,68 @@ class _ToastBarState extends State<_ToastBar>
   @override
   Widget build(BuildContext context) {
     final h = widget.handle;
+    final insets = MediaQuery.viewInsetsOf(context).bottom;
+    // 固定暖炭底:浅色主题下也保持深色表面(设计 §3.1),故取 TkColors.dark。
+    const barColor = Color(0xFF383228); // = TkColors.dark.surface4
+    const barBorder = Color(0x12FFFFFF); // rgba(255,255,255,.07)
+    const barText = Color(0xFFF3EDDF); // = TkColors.dark.ink
     return Positioned(
-      top: 0,
-      left: 0,
-      right: 0,
-      child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            Tk.spaceMd,
-            Tk.spaceSm,
-            Tk.spaceMd,
-            0,
-          ),
-          child: FadeTransition(
-            opacity: _curve,
-            child: SlideTransition(
-              position: _slide,
-              child: Material(
-                color: Tk.surface,
-                elevation: 3, // 轻阴影
-                borderRadius: const BorderRadius.all(Radius.circular(Tk.rLg)),
-                child: InkWell(
-                  borderRadius: const BorderRadius.all(Radius.circular(Tk.rLg)),
-                  onTap: _beginExit, // 点击条身即销毁
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(
-                      Tk.spaceLg,
-                      Tk.spaceMd,
-                      Tk.spaceSm,
-                      Tk.spaceMd,
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(h.icon, size: 20, color: h.iconColor),
-                        const SizedBox(width: Tk.spaceSm),
-                        Expanded(child: Text(h.message)),
-                        if (h.actionLabel != null)
-                          TextButton(
-                            onPressed: () {
-                              h.onAction?.call();
-                              _beginExit();
-                            },
-                            child: Text(h.actionLabel!),
+      left: Tk.spacePage,
+      right: Tk.spacePage,
+      bottom: kToastBottomOffset + insets,
+      child: FadeTransition(
+        opacity: _curve,
+        child: SlideTransition(
+          position: _slide,
+          child: Container(
+            decoration: BoxDecoration(
+              color: barColor,
+              borderRadius: BorderRadius.circular(Tk.rSm),
+              border: Border.all(color: barBorder),
+              boxShadow: TkColors.dark.shadow2,
+            ),
+            child: Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(Tk.rSm),
+                onTap: _beginExit, // 点击条身即销毁
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 11,
+                  ),
+                  child: Row(
+                    children: [
+                      _ToastDot(color: h.dotColor),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          h.message,
+                          style: const TextStyle(
+                            color: barText,
+                            fontSize: 13.5,
+                            height: 1.45,
                           ),
-                      ],
-                    ),
+                        ),
+                      ),
+                      if (h.actionLabel != null)
+                        TextButton(
+                          onPressed: () {
+                            h.onAction?.call();
+                            _beginExit();
+                          },
+                          style: TextButton.styleFrom(
+                            foregroundColor: Tk.previewGold,
+                            minimumSize: const Size(44, 44),
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            textStyle: const TextStyle(
+                              fontSize: 13.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          child: Text(h.actionLabel!),
+                        ),
+                    ],
                   ),
                 ),
               ),
@@ -244,6 +266,23 @@ class _ToastBarState extends State<_ToastBar>
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 左侧 8 圆点(tone 色;error 红)。
+class _ToastDot extends StatelessWidget {
+  const _ToastDot({required this.color});
+
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      key: const ValueKey<String>('toast-dot'),
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
     );
   }
 }

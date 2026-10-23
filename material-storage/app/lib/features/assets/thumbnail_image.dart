@@ -1,7 +1,7 @@
 /// ThumbnailImage — 宫格缩略图(B2 §8.1;app-polish-3 包 B 改造:磁盘优先 + 淡入):
 /// tags.thumbnail_key 存在才请求 thumbnail-url(否则端点必 404,web AssetThumbnail
 /// 同门槛);位图经 ThumbDiskStore 磁盘缓存——presigned URL ~25min 轮换/冷启动/
-/// 二次进入均本地秒出,不再整图重下;加载中纯 Tk.fill 占位(**无 spinner**,
+/// 二次进入均本地秒出,不再整图重下;加载中纯 surface3 占位(**无 spinner**,
 /// 消「白屏→加载动画→显示」三段闪烁),就位 180ms 淡入;签名/下载/解码任一
 /// 失败降级类型色块。
 library;
@@ -16,23 +16,33 @@ import '../../core/session.dart';
 import '../../core/thumb_disk_store.dart';
 import '../../core/thumbnail_cache.dart';
 import '../../models/models.dart';
-import '../../theme/tokens.dart';
+import '../../theme/context_tk.dart';
 import '../../widgets/type_block.dart';
 
 /// 进程级缩略图 URL 缓存(只存 URL 不存位图;位图字节磁盘见 ThumbDiskStore;
 /// 签名走会话 API)。
-final thumbnailCache = ThumbnailCache(signer: (assetId) async {
-  final r = await session.api!.assets.thumbnailUrl(assetId);
-  return SignedThumb(url: r.url, expiresInSeconds: r.expiresIn);
-});
+final thumbnailCache = ThumbnailCache(
+  signer: (assetId) async {
+    final r = await session.api!.assets.thumbnailUrl(assetId);
+    return SignedThumb(url: r.url, expiresInSeconds: r.expiresIn);
+  },
+);
 
 class ThumbnailImage extends StatefulWidget {
-  const ThumbnailImage({super.key, required this.asset, this.fallbackIconSize});
+  const ThumbnailImage({
+    super.key,
+    required this.asset,
+    this.fallbackIconSize,
+    this.fallback,
+  });
 
   final Asset asset;
 
   /// 降级色块图标边长(缺省 32;B7 搜索结果小格 48px 用 20 防 overflow)。
   final double? fallbackIconSize;
+
+  /// 自定义降级件(如宫格传 AssetPlate);null = 保持 [TypeBlock] 默认行为。
+  final Widget? fallback;
 
   @override
   State<ThumbnailImage> createState() => _ThumbnailImageState();
@@ -116,10 +126,13 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     return builder.takeBytes();
   }
 
-  Widget get _fallback => TypeBlock(
+  Widget get _fallback =>
+      widget.fallback ??
+      TypeBlock(
         kind: detectKind(
-            filename: widget.asset.filename,
-            contentType: widget.asset.contentType),
+          filename: widget.asset.filename,
+          contentType: widget.asset.contentType,
+        ),
         filename: widget.asset.filename,
         iconSize: widget.fallbackIconSize,
       );
@@ -129,31 +142,33 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     // web 同门槛 + 失败降级:直接类型色块(worker 对非图不生成/下载解码失败)
     if (!widget.asset.hasThumbnail || _failed) return _fallback;
     final bytes = _bytes;
-    // 占位纯色,无 CircularProgressIndicator(用户抱怨的第二段闪烁)
-    if (bytes == null) return const ColoredBox(color: Tk.fill);
-    return LayoutBuilder(builder: (context, box) {
-      // 解码降采样:格宽 × dpr 取整 clamp 96..600(省内存;放大预览走他路)
-      final dpr = MediaQuery.devicePixelRatioOf(context);
-      final px =
-          box.maxWidth.isFinite ? (box.maxWidth * dpr).round() : 600;
-      return Image.memory(
-        bytes,
-        fit: BoxFit.cover,
-        width: double.infinity,
-        height: double.infinity,
-        cacheWidth: px.clamp(96, 600),
-        gaplessPlayback: true,
-        // 仅首帧淡入(180ms):字节就位不闪,wasSync(内存缓存命中)直出
-        frameBuilder: (context, child, frame, wasSync) => wasSync
-            ? child
-            : AnimatedOpacity(
-                opacity: frame == null ? 0.0 : 1.0,
-                duration: const Duration(milliseconds: 180),
-                curve: Curves.easeOut,
-                child: child,
-              ),
-        errorBuilder: (_, _, _) => _fallback,
-      );
-    });
+    // 占位纯色(主题 surface3),无 CircularProgressIndicator(用户抱怨的
+    // 第二段闪烁)
+    if (bytes == null) return ColoredBox(color: context.tk.surface3);
+    return LayoutBuilder(
+      builder: (context, box) {
+        // 解码降采样:格宽 × dpr 取整 clamp 96..600(省内存;放大预览走他路)
+        final dpr = MediaQuery.devicePixelRatioOf(context);
+        final px = box.maxWidth.isFinite ? (box.maxWidth * dpr).round() : 600;
+        return Image.memory(
+          bytes,
+          fit: BoxFit.cover,
+          width: double.infinity,
+          height: double.infinity,
+          cacheWidth: px.clamp(96, 600),
+          gaplessPlayback: true,
+          // 仅首帧淡入(180ms):字节就位不闪,wasSync(内存缓存命中)直出
+          frameBuilder: (context, child, frame, wasSync) => wasSync
+              ? child
+              : AnimatedOpacity(
+                  opacity: frame == null ? 0.0 : 1.0,
+                  duration: const Duration(milliseconds: 180),
+                  curve: Curves.easeOut,
+                  child: child,
+                ),
+          errorBuilder: (_, _, _) => _fallback,
+        );
+      },
+    );
   }
 }

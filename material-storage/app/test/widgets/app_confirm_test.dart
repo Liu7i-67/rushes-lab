@@ -4,22 +4,25 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ms_app/theme/tokens.dart';
+import 'package:ms_app/theme/tk_colors.dart';
 import 'package:ms_app/widgets/app_confirm.dart';
 
 void main() {
-  Future<void> ask(WidgetTester tester, void Function(BuildContext) run) => tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: Builder(
-            builder: (ctx) => Center(
-              child: FilledButton(
-                onPressed: () => run(ctx),
-                child: const Text('ask'),
+  Future<void> ask(WidgetTester tester, void Function(BuildContext) run) =>
+      tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => Center(
+                child: FilledButton(
+                  onPressed: () => run(ctx),
+                  child: const Text('ask'),
+                ),
               ),
             ),
           ),
         ),
-      ));
+      );
 
   testWidgets('确认=true;取消=false(文案可配)', (tester) async {
     Future<bool?>? r;
@@ -42,7 +45,7 @@ void main() {
     expect(await r, isFalse);
   });
 
-  testWidgets('危险态:确认钮红底白字;点确认返回 true', (tester) async {
+  testWidgets('危险态:确认钮红底浅字;点确认返回 true', (tester) async {
     Future<bool?>? r;
     await ask(tester, (ctx) {
       r = showAppConfirm(ctx, title: '确认删除?', confirmLabel: '删除', danger: true);
@@ -50,10 +53,19 @@ void main() {
     await tester.tap(find.text('ask'));
     await tester.pumpAndSettle();
 
-    final btn = tester.widget<FilledButton>(find.ancestor(
-        of: find.text('删除'), matching: find.byType(FilledButton)));
-    expect(btn.style?.backgroundColor?.resolve({}), Tk.red, reason: '危险态红底');
-    expect(btn.style?.foregroundColor?.resolve({}), Tk.surface, reason: '白字');
+    final btn = tester.widget<FilledButton>(
+      find.ancestor(of: find.text('删除'), matching: find.byType(FilledButton)),
+    );
+    expect(
+      btn.style?.backgroundColor?.resolve({}),
+      TkColors.light.dangerFill,
+      reason: '危险态红底 dangerFill',
+    );
+    expect(
+      btn.style?.foregroundColor?.resolve({}),
+      TkColors.light.onDanger,
+      reason: 'onDanger 浅字',
+    );
 
     await tester.tap(find.text('删除'));
     await tester.pumpAndSettle();
@@ -68,9 +80,13 @@ void main() {
     await tester.tap(find.text('ask'));
     await tester.pumpAndSettle();
 
-    final btn = tester.widget<FilledButton>(find.ancestor(
-        of: find.text('确认'), matching: find.byType(FilledButton)));
-    expect(btn.style?.backgroundColor?.resolve({}), isNot(Tk.red));
+    final btn = tester.widget<FilledButton>(
+      find.ancestor(of: find.text('确认'), matching: find.byType(FilledButton)),
+    );
+    expect(
+      btn.style?.backgroundColor?.resolve({}),
+      isNot(TkColors.light.dangerFill),
+    );
 
     await tester.tapAt(const Offset(20, 20)); // 遮罩
     await tester.pumpAndSettle();

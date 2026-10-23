@@ -8,6 +8,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import 'picker_sheet.dart';
 import 'remote_picker_sheet.dart';
@@ -59,11 +60,16 @@ class UserPickerField extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     // 无值 → PickerField(hint 语义);有值 → InputDecorator(PickerField 不支持
     // suffix 清除钮,故直接渲染只读装饰;装饰口径与 C5 后的 PickerField 一致)
     if (value.isEmpty) {
       return PickerField(
-          label: label, value: null, hint: hint, onTap: () => _pick(context));
+        label: label,
+        value: null,
+        hint: hint,
+        onTap: () => _pick(context),
+      );
     }
     return InkWell(
       onTap: () => _pick(context),
@@ -75,17 +81,21 @@ class UserPickerField extends StatelessWidget {
           border: const OutlineInputBorder(),
           // 去 isDense(D6 同口径):filled+outline 下浮起 label 上半截会被裁
           contentPadding: const EdgeInsets.symmetric(
-              horizontal: Tk.spaceMd, vertical: Tk.spaceMd),
+            horizontal: Tk.spaceMd,
+            vertical: Tk.spaceMd,
+          ),
           suffixIcon: allowClear
               ? IconButton(
-                  icon: const Icon(Icons.clear, size: 18),
+                  icon: Icon(Icons.clear, size: 18, color: tk.ink3),
                   tooltip: '清除',
                   onPressed: () => onChanged(const []),
                 )
-              : const Icon(Icons.expand_more, size: 20),
+              : Icon(Icons.expand_more, size: 20, color: tk.ink3),
         ),
-        child: Text(_display,
-            style: const TextStyle(fontSize: Tk.fzBody, color: Tk.fg)),
+        child: Text(
+          _display,
+          style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+        ),
       ),
     );
   }

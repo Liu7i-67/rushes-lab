@@ -9,12 +9,16 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/form_text_field.dart';
 import 'admin_form_skeleton.dart';
 
 /// 打开建/编目录模板表单;返回是否成功提交。
-Future<bool> showFolderTemplateFormSheet(BuildContext context,
-        {FolderTemplate? template}) async {
+Future<bool> showFolderTemplateFormSheet(
+  BuildContext context, {
+  FolderTemplate? template,
+}) async {
   final ok = await showModalBottomSheet<bool>(
     context: context,
     showDragHandle: true,
@@ -70,10 +74,12 @@ class _FolderTemplateFormSheet extends StatefulWidget {
 }
 
 class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.template?.name ?? '');
-  late final TextEditingController _desc =
-      TextEditingController(text: widget.template?.description ?? '');
+  late final TextEditingController _name = TextEditingController(
+    text: widget.template?.name ?? '',
+  );
+  late final TextEditingController _desc = TextEditingController(
+    text: widget.template?.description ?? '',
+  );
   late var _paths = <String>[
     for (final e in widget.template?.entries ?? const <FolderTemplateEntry>[])
       e.path,
@@ -89,23 +95,20 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('添加目录'),
-        content: TextField(
+        content: AppTextField(
           controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: '相对路径(以 / 分隔层级)',
-            hintText: '素材/视频/原始',
-            border: OutlineInputBorder(),
-          ),
-          onSubmitted: (v) => Navigator.of(ctx).pop(v),
+          label: '相对路径(以 / 分隔层级)',
+          hint: '素材/视频/原始',
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.of(ctx).pop(null),
-              child: const Text('取消')),
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('取消'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.of(ctx).pop(controller.text),
-              child: const Text('添加')),
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('添加'),
+          ),
         ],
       ),
     );
@@ -188,6 +191,7 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final t = widget.template;
     final treeRows = pathsToTreeRows(_paths);
     // F5:内联骨架(限高 0.85 + 滚动 + 键盘避让 + 错误行 + 提交键)收口
@@ -200,38 +204,47 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
       error: _error,
       maxHeightFactor: 0.85,
       children: [
-        TextField(
-          controller: _name,
-          autofocus: !_isEdit,
-          decoration: const InputDecoration(
-              labelText: '模板名', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _name, label: '模板名'),
         const SizedBox(height: 10),
-        TextField(
-          controller: _desc,
-          maxLength: 1024,
-          decoration: const InputDecoration(
-              labelText: '描述(可选)', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _desc, label: '描述(可选)', maxLength: 1024),
         Text(
           '目录条目(${_paths.length}/200,每条为项目根下相对路径,'
           '保存时全量替换)',
-          style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
+          style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
         ),
         for (final (i, path) in _paths.indexed)
-          ListTile(
-            visualDensity: VisualDensity.compact,
-            dense: true,
-            leading: const Icon(Icons.folder_outlined, size: 18),
-            title: Text(path, style: const TextStyle(fontSize: Tk.fzMd)),
-            trailing: IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.delete_outline, size: 18),
-              onPressed: () => setState(() {
-                _paths = [..._paths]..removeAt(i);
-              }),
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.only(left: 10),
+            constraints: const BoxConstraints(minHeight: 44),
+            decoration: BoxDecoration(
+              color: tk.surface2,
+              borderRadius: BorderRadius.circular(Tk.rSm),
+              border: Border.all(color: tk.line),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.folder_outlined, size: 16, color: tk.ink3),
+                const SizedBox(width: Tk.spaceSm),
+                Expanded(
+                  child: Text(
+                    path,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: Tk.fzMd, color: tk.ink),
+                  ),
+                ),
+                IconButton(
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  onPressed: () => setState(() {
+                    _paths = [..._paths]..removeAt(i);
+                  }),
+                ),
+              ],
             ),
           ),
+        const SizedBox(height: Tk.spaceSm),
         OutlinedButton.icon(
           onPressed: _addRow,
           icon: const Icon(Icons.add, size: 18),
@@ -244,23 +257,25 @@ class _FolderTemplateFormSheetState extends State<_FolderTemplateFormSheet> {
             width: double.infinity,
             padding: const EdgeInsets.all(10),
             decoration: BoxDecoration(
-              color: Tk.fill,
+              color: tk.surface2,
               borderRadius: BorderRadius.circular(Tk.rSm),
+              border: Border.all(color: tk.line),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                    '目录树预览 · ${_paths.length} 条路径 · '
-                    '去重后 ${treeRows.length} 个目录',
-                    style:
-                        const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
+                  '目录树预览 · ${_paths.length} 条路径 · '
+                  '去重后 ${treeRows.length} 个目录',
+                  style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                ),
                 for (final (depth, seg) in treeRows)
                   Padding(
                     padding: EdgeInsets.only(left: depth * 14.0, top: 2),
-                    child: Text('└ $seg',
-                        style: const TextStyle(
-                            fontSize: Tk.fzSm, color: Tk.muted)),
+                    child: Text(
+                      '└ $seg',
+                      style: TextStyle(fontSize: Tk.fzMd, color: tk.ink2),
+                    ),
                   ),
               ],
             ),

@@ -13,8 +13,11 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/session.dart';
+import 'package:ms_app/features/projects/project_card.dart';
 import 'package:ms_app/features/projects/projects_page.dart';
 import 'package:ms_app/models/models.dart';
+import 'package:ms_app/theme/app_theme.dart';
+import 'package:ms_app/widgets/app_card.dart';
 import 'package:ms_app/widgets/search_field.dart';
 
 import '../helpers/api_harness.dart';
@@ -33,22 +36,24 @@ Future<void> _pumpPage(WidgetTester tester, List<Project> projects) async {
 }
 
 List<Project> get _threeProjects => [
-      Project(id: 'p1', name: '婚礼A', code: 'wed-a'),
-      Project(id: 'p2', name: '写字楼B', code: 'off-b'),
-      Project(id: 'p3', name: '婚礼C', code: 'wed-c'),
-    ];
+  Project(id: 'p1', name: '婚礼A', code: 'wed-a'),
+  Project(id: 'p2', name: '写字楼B', code: 'off-b'),
+  Project(id: 'p3', name: '婚礼C', code: 'wed-c'),
+];
 
 void main() {
-  testWidgets('J2:输入过滤词列表仅剩匹配项(名称包含;code 不区分大小写)',
-      (tester) async {
+  testWidgets('J2:输入过滤词列表仅剩匹配项(名称包含;code 不区分大小写)', (tester) async {
     await _pumpPage(tester, _threeProjects);
     expect(find.text('婚礼A'), findsOneWidget, reason: '前置:全量 3 项');
     expect(find.text('写字楼B'), findsOneWidget);
     expect(find.text('婚礼C'), findsOneWidget);
 
     // 已交付转绿(J2):AppBar 下常驻紧凑搜索框(A7 SearchField)
-    expect(find.byType(SearchField), findsOneWidget,
-        reason: 'J2:AppBar 下常驻紧凑搜索框');
+    expect(
+      find.byType(SearchField),
+      findsOneWidget,
+      reason: 'J2:AppBar 下常驻紧凑搜索框',
+    );
     await tester.enterText(find.byType(SearchField), '婚礼');
     await tester.pump();
     await tester.pump();
@@ -89,7 +94,42 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(find.text('婚礼A'), findsNothing);
-    expect(find.textContaining('无匹配'), findsOneWidget,
-        reason: 'J2:空结果显示「无匹配项目」提示');
+    expect(
+      find.textContaining('无匹配'),
+      findsOneWidget,
+      reason: 'J2:空结果显示「无匹配项目」提示',
+    );
+  });
+
+  testWidgets('P2-10:ProjectCard 复用 AppCard,点击/长按行为不变', (tester) async {
+    var taps = 0;
+    var longs = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: buildAppTheme(),
+        home: Scaffold(
+          body: ProjectCard(
+            project: Project(
+              id: 'p1',
+              name: '项目A',
+              code: 'PA',
+              myRoles: const ['admin'],
+            ),
+            onTap: () => taps++,
+            onLongPress: () => longs++,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byType(AppCard), findsOneWidget, reason: 'P2-10:不再重复卡片容器');
+    expect(find.text('项目A'), findsOneWidget);
+    expect(find.text('PA'), findsOneWidget);
+    expect(find.byIcon(Icons.chevron_right), findsOneWidget);
+
+    await tester.tap(find.text('项目A'));
+    expect(taps, 1, reason: '整卡点击透传');
+    await tester.longPress(find.text('项目A'));
+    expect(longs, 1, reason: '长按透传(页面层挂管理菜单)');
   });
 }

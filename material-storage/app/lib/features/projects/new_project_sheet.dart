@@ -1,12 +1,9 @@
-/// NewProjectSheet — 新建项目(B6 §8.5;web NewProjectModal 移动版):字段对齐
-/// ProjectCreateIn(名称/code/描述/管理员/minio_bucket 下拉(见 minio_buckets.dart)/
-/// 权限行/目录模板/艺人可选开通),总闸门 is_project_creator。D2:Form+GlobalKey
-/// 校验(name/code 内联 errorText,跨字段走 SheetScaffold errorText);关闭有未保存
-/// 输入→确认层(框架拖拽直关绕过 PopScope 故禁用,自制把手条见 handle_strip.dart)。
-/// 文本字段统一 AppTextField(去 isDense,修「高级」展开后浮起 label 被裁),管理员用
-/// PickerField;maxHeightFactor 0.85(I3 #5:弹层太高难发现可取消)。拆件:表单体→
-/// new_project_form.dart,无权限兜底→new_project_no_permit.dart;历史见
-/// docs/qdev/2026-10-21-app-polish.md 与 -2/-3 文档。
+/// NewProjectSheet — 新建项目(B6 §8.5;web NewProjectModal 移动版;2026-10
+/// 墨金重做):字段/提交编排/关闭守卫留本文件,表单视图→new_project_form.dart,
+/// 无权兜底→new_project_no_permit.dart。总闸门 is_project_creator。
+/// D2:Form+GlobalKey 校验,跨字段错误走 SheetScaffold errorText;关闭有未保存
+/// 输入→确认层(框架拖拽直关绕过 PopScope 故禁用,自制把手条见 handle_strip)。
+/// 吸底=取消 ghost + 创建项目金;提交中双按钮禁用防重。
 library;
 
 import 'package:flutter/material.dart';
@@ -67,8 +64,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   /// 创建成功响应(带 artist_account 时一次性密码面板展示中,收口整个表单)。
   ProjectCreated? _created;
 
-  /// 跨字段错误(表单字段级错误走内联 errorText,D2):admin/权限行/艺人
-  /// 与提交失败,渲染在 SheetScaffold errorText 位。
+  /// 跨字段错误(admin/权限行/艺人与提交失败,渲染在 SheetScaffold errorText)。
   String? _error;
 
   /// 提交防重(P2-1):create await 期间禁用按钮并拦下重复提交。
@@ -77,8 +73,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
   @override
   void initState() {
     super.initState();
-    // 默认项目管理员=创建者(web adminUserId=me.id 同款)
-    _admin = mePreset();
+    _admin = mePreset(); // 默认项目管理员=创建者(web adminUserId=me.id)
   }
 
   @override
@@ -100,7 +95,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     for (final r in _rows) {
       if (r.roles.isEmpty) return '「${r.name}」行请至少勾选一个角色';
     }
-    if (_artistGate && (_artist.username.isNotEmpty || _artist.name.isNotEmpty)) {
+    if (_artistGate &&
+        (_artist.username.isNotEmpty || _artist.name.isNotEmpty)) {
       if (_artist.username.isEmpty) return '已填写艺人姓名,登录名为必填';
       if (_artist.name.isEmpty) return '已填写登录名,艺人姓名为必填(不能全为空白)';
       final au = _artist.username;
@@ -144,8 +140,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     if (ok == true && mounted) Navigator.of(context).pop(false);
   }
 
-  /// bucket 下拉(与 web 单选一致):选项来自 kMinioBuckets,单选项无需搜索。
-  Future<void> _pickBucket(BuildContext context) async {
+  /// bucket 选择(与 web 单选一致):选项来自 kMinioBuckets,单选项无需搜索。
+  Future<void> _pickBucket() async {
     final v = await showPickerSheet<String>(
       context: context,
       title: '选择 MinIO bucket',
@@ -219,7 +215,8 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     if (!(me?.isProjectCreator ?? false)) {
       // 无权限(直达兜底):web NewProjectModal 无权分支同文案口径
       return NewProjectNoPermit(
-          onClose: () => Navigator.of(context).pop(false));
+        onClose: () => Navigator.of(context).pop(false),
+      );
     }
     final created = _created;
     return PopScope(
@@ -241,9 +238,13 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
             bottomActions: created != null
                 ? const <Widget>[]
                 : <Widget>[
+                    OutlinedButton(
+                      onPressed: _submitting ? null : _attemptClose,
+                      child: const Text('取消'),
+                    ),
                     PrimaryXl(
                       onPressed: _submitting ? null : _submit,
-                      label: _submitting ? '创建中…' : '创建',
+                      label: _submitting ? '创建中…' : '创建项目',
                     ),
                   ],
             child: created != null
@@ -260,8 +261,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
     );
   }
 
-  /// 表单体入参组装:状态全部在此持有,子组件不读 session(props 下发,
-  /// 回调上行 setState 也在此;codeValidator/艺人跟随判断均留在父级)。
+  /// 表单体入参组装:状态在此持有,子组件不读 session(props 下发,回调上行)。
   NewProjectFormProps _formProps(Me? me) {
     return NewProjectFormProps(
       formKey: _formKey,
@@ -269,7 +269,7 @@ class _NewProjectSheetState extends State<_NewProjectSheet> {
       code: _code,
       desc: _desc,
       bucket: _bucket,
-      onBucketTap: () => _pickBucket(context),
+      onBucketTap: _pickBucket,
       admin: _admin,
       onAdminChanged: (v) => setState(() => _admin = v),
       rows: _rows,

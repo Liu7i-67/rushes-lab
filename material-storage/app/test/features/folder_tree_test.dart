@@ -7,13 +7,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/features/folders/folder_tree.dart';
 import 'package:ms_app/models/models.dart';
 
-Folder f(String id, {String? parent, int count = 0}) =>
-    Folder(
-      id: id,
-      name: '夹$id',
-      parentFolderId: parent,
-      subtreeFileCount: count,
-    );
+Folder f(String id, {String? parent, int count = 0}) => Folder(
+  id: id,
+  name: '夹$id',
+  parentFolderId: parent,
+  subtreeFileCount: count,
+);
 
 void main() {
   test('多级嵌套:一级→二级→三级 逐层挂 children', () {
@@ -43,10 +42,7 @@ void main() {
   });
 
   test('孤儿不渲染不殃及正常根:同一列表里的一级夹照常出现', () {
-    final roots = buildFolderTree([
-      f('ok'),
-      f('orphan', parent: 'ghost'),
-    ]);
+    final roots = buildFolderTree([f('ok'), f('orphan', parent: 'ghost')]);
     expect(roots.map((n) => n.folder.id).toList(), ['ok']);
   });
 
@@ -70,27 +66,30 @@ void main() {
     expect(roots, isEmpty);
   });
 
-  test('Folder.from 契约:subtree_file_count / direct_file_count / is_sensitive 解析', () {
-    final j = {
-      'id': 'f1',
-      'project_id': 'p1',
-      'parent_folder_id': null,
-      'name': '根夹',
-      'minio_prefix': '根夹/',
-      'is_sensitive': true,
-      'created_at': '2026-10-20T00:00:00Z',
-      'subtree_file_count': 7,
-      'direct_file_count': 3,
-      // 列表响应里 my_can_* 恒 False — 模型照收,但只有详情值可信(字段级注释)
-      'my_can_download': false,
-    };
-    final folder = Folder.fromJson(j);
-    expect(folder.subtreeFileCount, 7);
-    expect(folder.directFileCount, 3);
-    expect(folder.isSensitive, isTrue);
-    expect(folder.parentFolderId, isNull);
-    expect(folder.myCanDownload, isFalse);
-  });
+  test(
+    'Folder.from 契约:subtree_file_count / direct_file_count / is_sensitive 解析',
+    () {
+      final j = {
+        'id': 'f1',
+        'project_id': 'p1',
+        'parent_folder_id': null,
+        'name': '根夹',
+        'minio_prefix': '根夹/',
+        'is_sensitive': true,
+        'created_at': '2026-10-20T00:00:00Z',
+        'subtree_file_count': 7,
+        'direct_file_count': 3,
+        // 列表响应里 my_can_* 恒 False — 模型照收,但只有详情值可信(字段级注释)
+        'my_can_download': false,
+      };
+      final folder = Folder.fromJson(j);
+      expect(folder.subtreeFileCount, 7);
+      expect(folder.directFileCount, 3);
+      expect(folder.isSensitive, isTrue);
+      expect(folder.parentFolderId, isNull);
+      expect(folder.myCanDownload, isFalse);
+    },
+  );
 
   test('Folder.from 旧后端兼容:direct_file_count 缺键默认 0(K1)', () {
     final j = {

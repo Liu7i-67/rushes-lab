@@ -1,21 +1,19 @@
-/// MePage 协作区入口(B7 §8.6/§8.7):审批中心(admin 挂待审数 badge,
-/// RefreshBus 'approvals' 失效同步)+ 通知(全局未读红点,unreadPoller
-/// 驱动)+ 我的权限。入口人人可见,badge 从严收敛(方案 §8.6)。
+/// MePage 协作区入口(B7 §8.6/§8.7;墨金 WP2 视觉):审批中心(admin 挂
+/// 待审数徽标,RefreshBus 'approvals' 失效同步)+ 通知(全局未读金点,
+/// unreadPoller 驱动)+ 我的权限。入口人人可见,badge 从严收敛。
 library;
-
-import 'dart:async';
 
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/polling_controller.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
-import '../../theme/tokens.dart';
+import '../../theme/context_tk.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/badge.dart';
 
 /// 审批中心入口:badge=待我审批数(scope=all&status=pending 同源;
-/// **仅 is_system_admin 挂 badge**——scope=all 对任意认证用户放行,
-/// 非 admin 挂 badge 只见全组织噪声,§8.6 钉子)。
+/// **仅 is_system_admin 挂 badge**——非 admin 挂 badge 只见全组织噪声)。
 class ApprovalsTile extends StatefulWidget {
   const ApprovalsTile({super.key, this.badgeEnabled = true});
 
@@ -28,7 +26,8 @@ class ApprovalsTile extends StatefulWidget {
 
 class _ApprovalsTileState extends State<ApprovalsTile> {
   int? _pendingCount;
-  bool get _badgeOn => widget.badgeEnabled && (session.me?.isSystemAdmin ?? false);
+  bool get _badgeOn =>
+      widget.badgeEnabled && (session.me?.isSystemAdmin ?? false);
 
   @override
   void initState() {
@@ -46,30 +45,40 @@ class _ApprovalsTileState extends State<ApprovalsTile> {
   Future<void> _loadBadge() async {
     if (!_badgeOn) return;
     try {
-      final r = await session.api!
-          .approvalsOps.list(scope: 'all', status: 'pending');
+      final r = await session.api!.approvalsOps.list(
+        scope: 'all',
+        status: 'pending',
+      );
       if (mounted) setState(() => _pendingCount = r.length);
     } catch (_) {} // badge 静默失败:入口仍可点,列表页内重试
   }
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final n = _pendingCount ?? 0;
-    return ListTile(
+    return AppRow(
       leading: const Icon(Icons.how_to_vote_outlined),
-      title: const Text('审批中心'),
-      trailing: _badgeOn && n > 0
-          ? Badge(label: n >= 50 ? '50+' : '$n', tone: BadgeTone.amber)
-          : const Icon(Icons.chevron_right),
+      title: '审批中心',
       onTap: () async {
         await Navigator.of(context).pushNamed('/approvals');
-        _loadBadge(); // 返回即对账(决策在页内已失效,此处兜底)
+        _loadBadge(); // 返回即对账
       },
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (_badgeOn && n > 0) ...[
+            Badge(label: n >= 50 ? '50+' : '$n', tone: BadgeTone.gold),
+            const SizedBox(width: 6),
+          ],
+          Icon(Icons.chevron_right, size: 18, color: tk.ink3),
+        ],
+      ),
     );
   }
 }
 
-/// 通知入口:红点=全局未读(unreadPoller 驱动,mark-read 即时同步)。
+/// 通知入口:金点=全局未读(unreadPoller 驱动,mark-read 即时同步)。
 class NotificationsTile extends StatelessWidget {
   const NotificationsTile({super.key, this.poller});
 
@@ -78,27 +87,33 @@ class NotificationsTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     final p = poller ?? unreadPoller;
     return AnimatedBuilder(
       animation: p,
       builder: (context, _) {
         final unread = p.unreadCount;
-        return ListTile(
+        return AppRow(
           leading: const Icon(Icons.notifications_outlined),
-          title: const Text('通知'),
-          trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-            if (unread > 0) ...[
-              Container(
-                width: 8,
-                height: 8,
-                decoration: const BoxDecoration(
-                    shape: BoxShape.circle, color: Tk.accent),
-              ),
-              const SizedBox(width: 6),
-            ],
-            const Icon(Icons.chevron_right),
-          ]),
+          title: '通知',
           onTap: () => Navigator.of(context).pushNamed('/notifications'),
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (unread > 0) ...[
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: tk.gold,
+                  ),
+                ),
+                const SizedBox(width: 6),
+              ],
+              Icon(Icons.chevron_right, size: 18, color: tk.ink3),
+            ],
+          ),
         );
       },
     );
@@ -111,11 +126,10 @@ class MyPermissionsTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
+    return AppRow(
       leading: const Icon(Icons.shield_outlined),
-      title: const Text('我的权限'),
-      subtitle: const Text('项目角色与临时授权'),
-      trailing: const Icon(Icons.chevron_right),
+      title: '我的权限',
+      subtitle: '项目角色与临时授权',
       onTap: () => Navigator.of(context).pushNamed('/my-permissions'),
     );
   }

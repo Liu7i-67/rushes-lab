@@ -14,20 +14,19 @@ import 'package:ms_app/models/models.dart';
 import '../helpers/api_harness.dart';
 
 Widget _host() => MaterialApp(
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) => Center(
-            child: FilledButton(
-              onPressed: () => showNewProjectSheet(ctx),
-              child: const Text('open'),
-            ),
-          ),
+  home: Scaffold(
+    body: Builder(
+      builder: (ctx) => Center(
+        child: FilledButton(
+          onPressed: () => showNewProjectSheet(ctx),
+          child: const Text('open'),
         ),
       ),
-    );
+    ),
+  ),
+);
 
-Finder get _bucketField =>
-    find.widgetWithText(TextField, 'MinIO bucket(必填)');
+Finder get _bucketField => find.widgetWithText(TextField, 'MinIO bucket(必填)');
 
 /// 装配假 API + 创建者账号,打开弹层并展开「高级」(bucket 收在折叠内)。
 Future<FakeMsApi> _openAdvanced(WidgetTester tester) async {
@@ -46,13 +45,14 @@ Future<FakeMsApi> _openAdvanced(WidgetTester tester) async {
 }
 
 void main() {
-  testWidgets('展开「高级」后 bucket 字段可见,只读且回显默认桶 label',
-      (tester) async {
+  testWidgets('展开「高级」后 bucket 字段可见,只读且回显默认桶 label', (tester) async {
     await _openAdvanced(tester);
     expect(_bucketField, findsOneWidget);
     expect(tester.widget<TextField>(_bucketField).readOnly, isTrue);
-    expect(tester.widget<TextField>(_bucketField).controller!.text,
-        'ms-dev(开发环境)');
+    expect(
+      tester.widget<TextField>(_bucketField).controller!.text,
+      'ms-dev(开发环境)',
+    );
   });
 
   testWidgets('点按字段弹出选择器:出现 ms-dev(开发环境) 与关闭钮', (tester) async {
@@ -64,10 +64,12 @@ void main() {
     // 字段本身也在同一 BottomSheet 内(只读 TextField 的 EditableText 同文案),
     // 故行断言限定 ListTile,与既有 _sheetRow 用法一致。
     expect(
-        find.descendant(
-            of: find.byType(BottomSheet),
-            matching: find.widgetWithText(ListTile, 'ms-dev(开发环境)')),
-        findsOneWidget);
+      find.descendant(
+        of: find.byType(BottomSheet),
+        matching: find.widgetWithText(ListTile, 'ms-dev(开发环境)'),
+      ),
+      findsOneWidget,
+    );
     expect(find.byTooltip('关闭'), findsWidgets, reason: '弹层可取消');
   });
 
@@ -75,28 +77,37 @@ void main() {
     await _openAdvanced(tester);
     await tester.tap(_bucketField);
     await tester.pumpAndSettle();
-    await tester.tap(find.descendant(
+    await tester.tap(
+      find.descendant(
         of: find.byType(BottomSheet),
-        matching: find.widgetWithText(ListTile, 'ms-dev(开发环境)')));
+        matching: find.widgetWithText(ListTile, 'ms-dev(开发环境)'),
+      ),
+    );
     await tester.pumpAndSettle();
 
     expect(find.text('选择 MinIO bucket'), findsNothing, reason: '选即关');
-    expect(tester.widget<TextField>(_bucketField).controller!.text,
-        'ms-dev(开发环境)');
+    expect(
+      tester.widget<TextField>(_bucketField).controller!.text,
+      'ms-dev(开发环境)',
+    );
   });
 
-  testWidgets('不打开选择器直接提交 → 请求体 minio_bucket=ms-dev(默认值链路)',
-      (tester) async {
+  testWidgets('不打开选择器直接提交 → 请求体 minio_bucket=ms-dev(默认值链路)', (tester) async {
     final api = await _openAdvanced(tester);
     await tester.enterText(find.widgetWithText(TextField, '项目名称'), '演示');
     await tester.enterText(
-        find.widgetWithText(TextField, '项目编码(小写字母/数字/-)'), 'demo');
+      find.widgetWithText(TextField, '项目编码(小写字母/数字/-)'),
+      'demo',
+    );
     await tester.pump();
-    await tester.tap(find.text('创建'));
+    await tester.tap(find.text('创建项目'));
     await tester.pumpAndSettle();
 
-    expect(api.projectsOps.createCalls.single['minio_bucket'], 'ms-dev',
-        reason: '默认 _bucket = kMinioBuckets.first.value');
+    expect(
+      api.projectsOps.createCalls.single['minio_bucket'],
+      'ms-dev',
+      reason: '默认 _bucket = kMinioBuckets.first.value',
+    );
   });
 
   group('minioBucketLabel(纯函数)', () {

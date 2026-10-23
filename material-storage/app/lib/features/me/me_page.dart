@@ -1,9 +1,7 @@
-/// 我的页(B1 骨架,§2/§6;app-polish E5 精修):iOS 设置式分组卡片——
-/// 组标题(fzXs muted 加字距)+ 组卡(surface 底 rLg 圆角,组内 ListTile
-/// 无缝 + 细分隔线)。结构:头部摘要(大头像+姓名+角色 Badge)→ 账号与安全
-/// (改密)→ 管理(闸门)→ 协作(审批/通知/权限/回收站)→ 网盘与传输 →
-/// 诊断(日志推送+当前服务,置底)→ 关于(版本号/检查更新,仅 Android 显示
-/// 检查入口,feat/app-qiniu-update F2-1)→ 退出登录(红字行 + danger 确认)。
+/// 我的页(§6 F12;WP2 拆分后只保留编排/状态):PageHeader 大标题 +
+/// 设置入口;身份卡(me_header_card);分组顺序:协作 → 网盘与传输 → 偏好 →
+/// 管理 → 账号与安全 → 诊断 → 关于(me_sections 提供分组容器/外观行/
+/// 退出登录行/实时状态行)。所有闸门与实时查询逻辑保持原行为。
 library;
 
 import 'package:flutter/material.dart' hide Badge;
@@ -11,21 +9,27 @@ import 'package:flutter/material.dart' hide Badge;
 import '../../core/haptics.dart';
 import '../../core/session.dart';
 import '../../main.dart' show kAppBuildStamp;
-import '../../models/models.dart';
-import '../../services/notifier.dart' show Notifier, openNotificationSettings;
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/badge.dart';
+import '../../widgets/page_header.dart';
 import 'admin_tiles.dart';
 import 'collab_tiles.dart';
 import 'log_push.dart';
+import 'me_header_card.dart';
+import 'me_sections.dart';
+import 'settings_sheet.dart';
 import 'update_tile.dart';
+
+export 'me_sections.dart' show BaiduBackupTile, TransferNotifyTile;
 
 class MePage extends StatelessWidget {
   const MePage({super.key});
 
   Future<void> _logout(BuildContext context) async {
-    // E5:退出登录前弹确认(danger);取消/遮罩不登出
+    // 退出登录前弹确认(danger);取消/遮罩不登出
     final ok = await showAppConfirm(
       context,
       title: '退出登录?',
@@ -34,7 +38,7 @@ class MePage extends StatelessWidget {
       danger: true,
     );
     if (ok != true || !context.mounted) return;
-    Haptics.impact(); // G2:危险确认瞬间
+    Haptics.impact(); // 危险确认瞬间
     await session.logout();
     if (!context.mounted) return;
     Navigator.of(context).pushNamedAndRemoveUntil('/', (r) => false);
@@ -45,197 +49,101 @@ class MePage extends StatelessWidget {
     return AnimatedBuilder(
       animation: session,
       builder: (context, _) {
+        final tk = context.tk;
         final me = session.me;
         final adminTiles = adminSectionTiles(context);
+        final stamp = buildStampLabel(kAppBuildStamp);
         return Scaffold(
-          appBar: AppBar(title: const Text('我的')),
           body: ListView(
             padding: const EdgeInsets.only(bottom: Tk.spaceXl),
             children: [
-              _headerCard(me),
-              // P6:构建 stamp(打包注入,新包核验锚点自项目页标题迁此);
-              // 本地 run/test 未注入为空 → 整行不渲染
-              if (buildStampLabel(kAppBuildStamp) != null)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(24, 0, 24, Tk.spaceXs),
-                  child: Text(
-                    buildStampLabel(kAppBuildStamp)!,
-                    style: const TextStyle(
-                        color: Tk.subtle, fontSize: Tk.fzSm),
+              PageHeader(
+                title: '我的',
+                actions: [
+                  IconButton(
+                    tooltip: '设置',
+                    icon: const Icon(Icons.settings_outlined),
+                    onPressed: () => showAppearanceSheet(context),
                   ),
-                ),
-              _group('账号与安全', [
-                ListTile(
-                  leading: const Icon(Icons.password_outlined),
-                  title: const Text('修改密码'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () =>
-                      Navigator.of(context)
-                          .pushNamed('/change-password', arguments: false),
-                ),
-              ]),
-              // B8:管理区(§8.9)——管理后台仅 is_system_admin;目录模板独立
-              // 闸门 is_folder_template_manager(持 flag 非 admin 仅见此入口)。
-              if (adminTiles.isNotEmpty) _group('管理', adminTiles),
-              // B7:协作区(审批中心 badge 仅 admin;通知红点=全局未读);
-              // B6:回收站(项目)仅 is_project_deleter 可见
-              _group('协作', [
-                // badge 从严:仅 is_system_admin 挂待审数(§8.6 钉子;
-                // 入口人人可见——scope=self「我发起的」对普通用户有效)
-                ApprovalsTile(badgeEnabled: me?.isSystemAdmin ?? false),
-                const NotificationsTile(),
-                const MyPermissionsTile(),
-                if (me?.isProjectDeleter ?? false)
-                  ListTile(
-                    leading: const Icon(Icons.delete_sweep_outlined),
-                    title: const Text('回收站(项目)'),
-                    subtitle: const Text('已删除项目的恢复入口'),
-                    trailing: const Icon(Icons.chevron_right),
-                    onTap: () =>
-                        Navigator.of(context).pushNamed('/deleted-projects'),
-                  ),
-              ]),
-              _group('网盘与传输', [
-                const _BaiduBackupTile(),
-                // R4a(mobile-ux-polish-2):传输通知授权状态行(实时查询,
-                // 未开启点击直达系统设置,跳前不再弹引导框)
-                const TransferNotifyTile(),
-              ]),
-              // E5:「当前服务/日志推送」收进「诊断」分组并置底
-              _group('诊断', [
-                ListTile(
-                  leading: const Icon(Icons.bug_report_outlined),
-                  title: const Text('日志推送到企业微信'),
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => showLogPushDialog(context),
-                ),
-                ListTile(
-                  leading: const Icon(Icons.dns_outlined),
-                  title: Text(
-                    session.entryLabel.isEmpty ? '(探测中)' : session.entryLabel,
-                  ),
-                  subtitle: Text(
-                    session.baseUrl ?? '',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  trailing: const Badge(label: '只读'),
-                ),
-              ]),
-              // 关于:版本号全平台展示;「检查更新」仅 Android(D6)——
-              // feat/app-qiniu-update F2-1,手动检查反馈与下载安装流程见
-              // core/update/;E5 合并时收编为分组卡片形态。
-              _group('关于', [const UpdateCheckTile()]),
-              // E5:退出登录=红字行内钮 + danger 确认(替代整宽按钮)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                    Tk.spaceLg, Tk.spaceLg, Tk.spaceLg, 0),
-                child: SizedBox(
-                  height: 48,
-                  child: TextButton(
-                    style: TextButton.styleFrom(foregroundColor: Tk.red),
-                    onPressed: () => _logout(context),
-                    child: const Text('退出登录', style: TextStyle(fontSize: Tk.fzBody)),
-                  ),
-                ),
+                ],
               ),
+              MeHeaderCard(me: me),
+              // P6:构建 stamp(打包注入;本地 run/test 未注入为空 → 不渲染)
+              if (stamp != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(
+                    Tk.spacePage,
+                    0,
+                    Tk.spacePage,
+                    Tk.spaceSm,
+                  ),
+                  child: Text(
+                    stamp,
+                    style: TextStyle(fontSize: Tk.fzSm, color: tk.ink3),
+                  ),
+                ),
+              MeGroup(
+                title: '协作',
+                children: [
+                  // badge 从严:仅 is_system_admin 挂待审数(入口人人可见)
+                  ApprovalsTile(badgeEnabled: me?.isSystemAdmin ?? false),
+                  const NotificationsTile(),
+                  const MyPermissionsTile(),
+                  if (me?.isProjectDeleter ?? false)
+                    AppRow(
+                      leading: const Icon(Icons.delete_sweep_outlined),
+                      title: '回收站(项目)',
+                      subtitle: '已删除项目的恢复入口',
+                      onTap: () =>
+                          Navigator.of(context).pushNamed('/deleted-projects'),
+                    ),
+                ],
+              ),
+              const MeGroup(
+                title: '网盘与传输',
+                children: [BaiduBackupTile(), TransferNotifyTile()],
+              ),
+              const MeGroup(title: '偏好', children: [AppearanceRow()]),
+              // B8:管理区——管理后台仅 is_system_admin;目录模板独立闸门
+              if (adminTiles.isNotEmpty)
+                MeGroup(title: '管理', children: adminTiles),
+              MeGroup(
+                title: '账号与安全',
+                children: [
+                  AppRow(
+                    leading: const Icon(Icons.password_outlined),
+                    title: '修改密码',
+                    onTap: () =>
+                        Navigator.of(context)
+                            .pushNamed('/change-password', arguments: false),
+                  ),
+                  MeLogoutRow(onTap: () => _logout(context)),
+                ],
+              ),
+              MeGroup(
+                title: '诊断',
+                children: [
+                  AppRow(
+                    leading: const Icon(Icons.bug_report_outlined),
+                    title: '日志推送到企业微信',
+                    onTap: () => showLogPushDialog(context),
+                  ),
+                  AppRow(
+                    leading: const Icon(Icons.dns_outlined),
+                    title: session.entryLabel.isEmpty
+                        ? '(探测中)'
+                        : session.entryLabel,
+                    subtitle: session.baseUrl ?? '',
+                    trailing: const Badge(label: '只读'),
+                  ),
+                ],
+              ),
+              // 关于:版本号全平台展示;「检查更新」仅 Android(D6)
+              const MeGroup(title: '关于', children: [UpdateCheckTile()]),
             ],
           ),
         );
       },
-    );
-  }
-
-  /// 头部摘要卡:放大头像 + 姓名 + 角色 Badge(E5;Me 无邮箱字段,
-  /// 邮箱行待后端契约扩展后补)。
-  Widget _headerCard(Me? me) {
-    final name = me?.name ?? '(未登录)';
-    final role = me?.roleLabel ?? '';
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          Tk.spaceLg, Tk.spaceLg, Tk.spaceLg, Tk.spaceSm),
-      child: Row(
-        children: [
-          CircleAvatar(
-            radius: 28,
-            backgroundColor: Tk.accentFaint,
-            foregroundColor: Tk.accentStrong,
-            child: Text(
-              name.isEmpty || name == '(未登录)' ? '?' : name.characters.first,
-              style: const TextStyle(fontSize: Tk.fzLg),
-            ),
-          ),
-          const SizedBox(width: Tk.spaceMd),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: Tk.fzLg, fontWeight: FontWeight.w600)),
-                if (role.isNotEmpty) ...[
-                  const SizedBox(height: Tk.spaceXs),
-                  Badge(
-                    label: role,
-                    tone: me?.isSystemAdmin ?? false
-                        ? BadgeTone.accent
-                        : BadgeTone.neutral,
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// iOS 设置式分组:组标题 + 圆角组卡(组内无缝,项间细分隔线)。
-  Widget _group(String title, List<Widget> children) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(
-          Tk.spaceLg, Tk.spaceMd, Tk.spaceLg, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(Tk.spaceSm, 0, Tk.spaceSm,
-                Tk.spaceSm),
-            child: Text(
-              title,
-              style: const TextStyle(
-                color: Tk.muted,
-                fontSize: Tk.fzXs,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ),
-          Container(
-            clipBehavior: Clip.antiAlias,
-            decoration: BoxDecoration(
-              borderRadius: const BorderRadius.all(Radius.circular(Tk.rLg)),
-              border: Border.all(color: Tk.border),
-            ),
-            // 底色放 Material(ListTile 墨水效果需要 Material 祖先,
-            // DecoratedBox 带底色会触发 framework 断言)
-            child: Material(
-              color: Tk.surface,
-              child: Column(
-                children: [
-                  for (var i = 0; i < children.length; i++) ...[
-                    if (i > 0)
-                      const Divider(height: 1, thickness: 0.5, indent: 56),
-                    children[i],
-                  ],
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }
@@ -244,161 +152,3 @@ class MePage extends StatelessWidget {
 /// 独立纯函数便于单测(test 环境恒空 stamp,无法经环境变量注入)。
 @visibleForTesting
 String? buildStampLabel(String stamp) => stamp.isEmpty ? null : '构建 $stamp';
-
-/// 网盘备份入口行(占位,B9 做完整页):开关关闭时置灰不可点按、显示「未启用」
-/// (功能点 8 字面口径;后端 /baidu/* 对关闭部署统一 404);开启时查询绑定状态
-/// (GET /baidu/backup/binding,404→未启用;查询异常→「状态未知」≠未启用),
-/// 绑定后显示账号。
-class _BaiduBackupTile extends StatefulWidget {
-  const _BaiduBackupTile();
-
-  @override
-  State<_BaiduBackupTile> createState() => _BaiduBackupTileState();
-}
-
-class _BaiduBackupTileState extends State<_BaiduBackupTile> {
-  BaiduBindingInfo? _status;
-  bool _loaded = false;
-  bool _failed = false;
-
-  bool get _enabled => session.me?.baiduBackupEnabled ?? false;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<void> _load() async {
-    if (!_enabled) return;
-    try {
-      final s = await session.api!.baidu.bindingStatus();
-      if (mounted) {
-        setState(() {
-          _status = s;
-          _loaded = true;
-          _failed = false;
-        });
-      }
-    } catch (_) {
-      // 查询失败 ≠ 未启用:显示「状态未知」与开关关闭区分;入口仍可点按
-      if (mounted) {
-        setState(() {
-          _loaded = true;
-          _failed = true;
-        });
-      }
-    }
-  }
-
-  String get _subtitle {
-    if (!_enabled) return '未启用';
-    if (_failed) return '状态未知,点按进入后重试';
-    if (_loaded && _status == null) return '未启用';
-    if (_status == null) return '…';
-    if (_status!.bound) return '已绑定:${_status!.displayName}';
-    return _status!.status == 'expired' ? '绑定已失效,点按重新绑定' : '未绑定';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = _enabled;
-    return ListTile(
-      leading: const Icon(Icons.cloud_outlined),
-      title: const Text('网盘备份'),
-      subtitle: Text(_subtitle),
-      // 开关关闭:入口置灰(disabled,不可点按),chevron 一并隐藏
-      trailing: enabled ? const Icon(Icons.chevron_right) : null,
-      enabled: enabled,
-      onTap: enabled
-          ? () async {
-              // B9:完整用户侧页(绑定状态+任务列表+新建任务;绑定页页内进入)
-              await Navigator.of(context).pushNamed('/baidu');
-              _load(); // 返回即刷新(绑定/解绑后入口行显示最新状态)
-            }
-          : null,
-    );
-  }
-}
-
-/// R4a(mobile-ux-polish-2):传输通知授权状态行(「我的」页)。
-/// 实时查询系统通知授权(Android 13+ 真实反映;低版本/查询失败恒视为已开启,
-/// 降级不误报);未开启 → 点击跳应用详情设置页(跳前不再弹引导框,口径见需求
-/// 文档 R4a),已开启纯展示不可点。从设置授权回来(回前台)自动重查。
-/// [query]/[openSettings] 注入供单测(生产用 Notifier / 系统设置跳转默认实现)。
-class TransferNotifyTile extends StatefulWidget {
-  const TransferNotifyTile({super.key, this.query, this.openSettings});
-
-  /// 授权态查询(null=Notifier.queryPermission 真实查询)。
-  final Future<bool> Function()? query;
-
-  /// 跳设置动作(null=openNotificationSettings 真实跳转)。
-  final Future<void> Function()? openSettings;
-
-  @override
-  State<TransferNotifyTile> createState() => _TransferNotifyTileState();
-}
-
-class _TransferNotifyTileState extends State<TransferNotifyTile>
-    with WidgetsBindingObserver {
-  /// null=查询中;true=已开启(纯展示);false=未开启(点击跳设置)。
-  bool? _enabled;
-
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _refresh();
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 「去设置」授权回来 → 回前台实时重查(页内无路由返回事件可挂)
-    if (state == AppLifecycleState.resumed) _refresh();
-  }
-
-  Future<void> _refresh() async {
-    final enabled =
-        await (widget.query?.call() ?? Notifier.I.queryPermission());
-    if (mounted) setState(() => _enabled = enabled);
-  }
-
-  Future<void> _goSettings() async {
-    await (widget.openSettings?.call() ?? openNotificationSettings());
-    _refresh();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final enabled = _enabled;
-    return ListTile(
-      leading: const Icon(Icons.notifications_outlined),
-      title: const Text('传输通知'),
-      subtitle: Text(switch (enabled) {
-        null => '查询中…',
-        true => '已开启,后台上传/下载完成可提醒',
-        false => '未开启,收不到后台传输完成提醒',
-      }),
-      trailing: enabled == true
-          ? const Text(
-              '✓已开启',
-              style: TextStyle(color: Tk.green, fontSize: Tk.fzMd),
-            )
-          : enabled == false
-              ? const Row(mainAxisSize: MainAxisSize.min, children: [
-                  Text('未开启',
-                      style: TextStyle(color: Tk.subtle, fontSize: Tk.fzMd)),
-                  Icon(Icons.chevron_right, color: Tk.subtle),
-                ])
-              : null,
-      // 仅未开启可点(跳设置,跳前不再弹引导框);已开启/查询中纯展示
-      onTap: enabled == false ? _goSettings : null,
-    );
-  }
-}

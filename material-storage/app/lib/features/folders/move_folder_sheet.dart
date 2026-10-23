@@ -1,10 +1,7 @@
-/// MoveFolderSheet — 文件夹移动选择器(B6 §8.4;web MoveFolderModal 移动版):
+/// MoveFolderSheet — 文件夹移动选择器(B6 §8.4;F7 统一墨色 + 金色):
 /// 目标=项目根(移为一级)+ 项目内夹树;sensitive 及其子树级联禁选(目标侧
-/// 后端 400);源自身及其子树整支禁选(防环,需求「目标不含自身子树」)。
-/// 提交 PATCH parent_folder_id(null=项目一级);409(一级夹带 explicit grant
-/// 禁 reparent 等)/400 detail 透传。
-/// app-polish D1:骨架迁移 SheetScaffold(errorText 位/PrimaryXl 吸底);
-/// 错误 errorMessage 兜底(E14)。
+/// 后端 400);源自身及其子树整支禁选(防环)。提交 PATCH
+/// parent_folder_id(null=项目一级);409/400 detail 透传。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,7 +10,9 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_row.dart';
 import '../../widgets/buttons.dart';
 import '../../widgets/sheet_scaffold.dart';
 import '../assets/batch_move_sheet.dart' show sensitiveCascadeIds;
@@ -31,9 +30,10 @@ Future<bool> showMoveFolderSheet(
     showDragHandle: true,
     isScrollControlled: true,
     builder: (_) => _MoveFolderSheet(
-        folder: folder,
-        projectId: projectId,
-        projectLabel: projectLabel ?? ''),
+      folder: folder,
+      projectId: projectId,
+      projectLabel: projectLabel ?? '',
+    ),
   );
   return ok ?? false;
 }
@@ -42,7 +42,6 @@ Future<bool> showMoveFolderSheet(
 /// sensitive 源一律禁移动 → 调用方闸门拦;此处兜底含源)。纯函数可单测。
 Set<String> moveTargetBlockIds(List<Folder> folders, String sourceId) {
   final byId = {for (final f in folders) f.id: f};
-  // 源子树:自源向下收集后代(parentFolderId 可空,统一按 String? 键分桶)
   final children = <String?, List<String>>{};
   for (final f in folders) {
     children.putIfAbsent(f.parentFolderId, () => []).add(f.id);
@@ -68,6 +67,7 @@ class _MoveFolderSheet extends StatefulWidget {
   final Folder folder;
   final String projectId;
   final String projectLabel;
+
   @override
   State<_MoveFolderSheet> createState() => _MoveFolderSheetState();
 }
@@ -88,8 +88,10 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
       _error = null;
     });
     try {
-      await session.api!.foldersOps
-          .move(widget.folder.id, parentFolderId: _targetId);
+      await session.api!.foldersOps.move(
+        widget.folder.id,
+        parentFolderId: _targetId,
+      );
       RefreshBus.I.invalidate('folders');
       if (!mounted) return;
       Navigator.of(context).pop(true);
@@ -110,6 +112,7 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return SheetScaffold(
       title: '移动「${widget.folder.name}」',
       errorText: _error,
@@ -124,27 +127,31 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('目标项目:${widget.projectLabel}(移动限同项目内)',
-              style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            '目标项目:${widget.projectLabel}(移动限同项目内)',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+          ),
           if (widget.folder.isSensitive)
             Padding(
               padding: const EdgeInsets.only(top: Tk.spaceXs),
-              child: Text('敏感文件夹只能直挂项目一级,不支持移动',
-                  style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                      fontSize: Tk.fzSm)),
+              child: Text(
+                '敏感文件夹只能直挂项目一级,不支持移动',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.danger),
+              ),
             ),
           const SizedBox(height: Tk.spaceSm),
-          Text('移动到哪个目录(自身及其子夹、敏感目录不可选)',
-              style: Theme.of(context).textTheme.bodySmall),
-          // 夹树定高内滚(外层 SheetScaffold 已管总高与吸底钮)
+          Text(
+            '移动到哪个目录(自身及其子夹、敏感目录不可选)',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+          ),
           SizedBox(
             height: MediaQuery.of(context).size.height * 0.42,
             child: _folderList(),
           ),
           Text(
-              '已选目标:${_targetId == null ? (_targetName == null ? '未选择' : '项目根(一级)') : '目录「$_targetName」'}',
-              style: Theme.of(context).textTheme.bodySmall),
+            '已选目标:${_targetId == null ? (_targetName == null ? '未选择' : '项目根(一级)') : '目录「$_targetName」'}',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+          ),
         ],
       ),
     );
@@ -159,14 +166,19 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
         }
         if (snap.hasError) {
           return Center(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Text('目录加载失败:${errorMessage(snap.error!, '请下拉重试')}',
-                  style: Theme.of(context).textTheme.bodySmall),
-              TextButton(
-                onPressed: () => setState(() => _foldersFuture = _load()),
-                child: const Text('重试'),
-              ),
-            ]),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '目录加载失败:${errorMessage(snap.error!, '请下拉重试')}',
+                  style: TextStyle(fontSize: Tk.fzMd, color: context.tk.ink3),
+                ),
+                TextButton(
+                  onPressed: () => setState(() => _foldersFuture = _load()),
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
           );
         }
         final folders = snap.data ?? const <Folder>[];
@@ -180,20 +192,20 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
         }
 
         walk(buildFolderTree(folders), 0);
-        return ListView.builder(
+        return ListView.separated(
           itemCount: rows.length + 1,
+          separatorBuilder: (_, _) =>
+              Divider(height: 1, thickness: 1, color: context.tk.line),
           itemBuilder: (context, i) {
             if (i == 0) {
-              // 项目根选项(null parent = 移为一级)
               final selected = _targetId == null && _targetName != null;
-              return ListTile(
-                visualDensity: VisualDensity.compact,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                leading: const Icon(Icons.home_outlined, size: 20),
-                title: const Text('项目根(移为一级)',
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-                selected: selected,
-                trailing: selected ? const Icon(Icons.check) : null,
+              return AppRow(
+                leading: const Icon(Icons.home_outlined),
+                title: '项目根(移为一级)',
+                showChevron: false,
+                trailing: selected
+                    ? Icon(Icons.check, size: 20, color: context.tk.gold)
+                    : null,
                 onTap: () => setState(() {
                   _targetId = null;
                   _targetName = '__root__';
@@ -204,28 +216,30 @@ class _MoveFolderSheetState extends State<_MoveFolderSheet> {
             final f = node.folder;
             final disabled = blocked.contains(f.id);
             final selected = f.id == _targetId;
-            return ListTile(
-              visualDensity: VisualDensity.compact,
-              contentPadding:
-                  EdgeInsets.only(left: 8.0 + depth * 16, right: 8),
-              leading: Icon(
-                f.isSensitive
-                    ? Icons.folder_special_outlined
-                    : Icons.folder_outlined,
-                size: 20,
-                color: disabled ? Theme.of(context).disabledColor : null,
-              ),
-              title: Text(f.name,
-                  maxLines: 1, overflow: TextOverflow.ellipsis),
-              enabled: !disabled,
-              selected: selected,
-              trailing: selected ? const Icon(Icons.check) : null,
-              onTap: disabled
-                  ? null
-                  : () => setState(() {
+            return Padding(
+              padding: EdgeInsets.only(left: depth * Tk.spaceLg.toDouble()),
+              child: AppRow(
+                leading: Icon(
+                  f.isSensitive ? Icons.lock_outline : Icons.folder_outlined,
+                  color: disabled
+                      ? context.tk.ink3
+                      : f.isSensitive
+                      ? context.tk.goldInk
+                      : context.tk.ink2,
+                ),
+                title: f.name,
+                subtitle: disabled ? '不可选(自身/子夹/敏感目录)' : null,
+                showChevron: false,
+                trailing: selected
+                    ? Icon(Icons.check, size: 20, color: context.tk.gold)
+                    : null,
+                onTap: disabled
+                    ? null
+                    : () => setState(() {
                         _targetId = f.id;
                         _targetName = f.name;
                       }),
+              ),
             );
           },
         );

@@ -18,8 +18,7 @@ import 'package:ms_app/features/auth/login_page.dart';
 import 'package:ms_app/models/models.dart';
 
 void main() {
-  testWidgets('H1:探活中「正在连接服务…」横幅出现,输入框可用,登录钮禁用',
-      (tester) async {
+  testWidgets('H1:探活中「正在连接服务…」横幅出现,输入框可用,登录钮禁用', (tester) async {
     session.phase = SessionPhase.probing;
     session.me = null;
     addTearDown(() => session.me = null);
@@ -28,8 +27,7 @@ void main() {
     await tester.pump();
 
     // 已交付转绿(H1):探活态文案「正在连接服务…」(原仅细进度条无文字)
-    expect(find.text('正在连接服务…'), findsOneWidget,
-        reason: 'H1:探活文案改「正在连接服务…」');
+    expect(find.text('正在连接服务…'), findsOneWidget, reason: 'H1:探活文案改「正在连接服务…」');
 
     // 探活期间输入框保持可用:用户名可输入落字(无禁用/遮挡)
     await tester.enterText(find.byType(TextField).first, 'alice');
@@ -37,8 +35,9 @@ void main() {
     expect(find.text('alice'), findsOneWidget, reason: 'H1:探活中输入框可用');
 
     // 登录钮探活中禁用
-    final btn = tester
-        .widget<FilledButton>(find.widgetWithText(FilledButton, '登录'));
+    final btn = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '登录'),
+    );
     expect(btn.onPressed, isNull, reason: 'H1:探活未完成登录钮禁用');
   });
 
@@ -53,11 +52,12 @@ void main() {
     await tester.pumpWidget(const MaterialApp(home: LoginPage()));
     await tester.pump();
     expect(
-        tester
-            .widget<FilledButton>(find.widgetWithText(FilledButton, '登录'))
-            .onPressed,
-        isNull,
-        reason: '前置:探活中禁用');
+      tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, '登录'))
+          .onPressed,
+      isNull,
+      reason: '前置:探活中禁用',
+    );
 
     // 探活完成(phase→ready):重新挂页触发 build 重读公开字段
     // (me 非 null 令 initState 的 cookie 恢复短路,不发网络;非 const 新
@@ -67,14 +67,14 @@ void main() {
     await tester.pumpWidget(MaterialApp(home: LoginPage()));
     await tester.pump();
 
-    final btn = tester
-        .widget<FilledButton>(find.widgetWithText(FilledButton, '登录'));
+    final btn = tester.widget<FilledButton>(
+      find.widgetWithText(FilledButton, '登录'),
+    );
     expect(btn.onPressed, isNotNull, reason: 'H1:探活完成登录钮恢复可点');
     expect(find.text('正在连接服务…'), findsNothing, reason: 'H1:探活横幅消失');
   });
 
-  testWidgets('H3:渲染《服务条款》《隐私政策》可点链接;点击注入外开短路径',
-      (tester) async {
+  testWidgets('H3:渲染《服务条款》《隐私政策》可点链接;点击注入外开短路径', (tester) async {
     session.baseUrl = 'https://ms.test';
     session.me = null;
     addTearDown(() {
@@ -82,14 +82,16 @@ void main() {
       session.me = null;
     });
     final opened = <String>[];
-    await tester.pumpWidget(MaterialApp(
-      home: LoginPage(
-        openUrl: (url) async {
-          opened.add(url);
-          return true;
-        },
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LoginPage(
+          openUrl: (url) async {
+            opened.add(url);
+            return true;
+          },
+        ),
       ),
-    ));
+    );
     await tester.pump();
 
     expect(find.text('《服务条款》'), findsOneWidget, reason: 'H3:条款链接渲染');
@@ -104,12 +106,10 @@ void main() {
       'https://ms.test/terms',
       'https://ms.test/privacy',
     ], reason: 'H3:优先公网 nginx 短路径外开(url_launcher externalApplication 同参)');
-    expect(find.text('打开失败,请稍后重试'), findsNothing,
-        reason: '打开成功不落错误区');
+    expect(find.text('打开失败,请稍后重试'), findsNothing, reason: '打开成功不落错误区');
   });
 
-  testWidgets('H3:外开失败回退静态页路径;两连失败落固定错误区(不弹 toast)',
-      (tester) async {
+  testWidgets('H3:外开失败回退静态页路径;两连失败落固定错误区(不弹 toast)', (tester) async {
     session.baseUrl = 'https://ms.test';
     session.me = null;
     addTearDown(() {
@@ -117,14 +117,16 @@ void main() {
       session.me = null;
     });
     final opened = <String>[];
-    await tester.pumpWidget(MaterialApp(
-      home: LoginPage(
-        openUrl: (url) async {
-          opened.add(url);
-          return false; // 模拟外开失败(无法打开浏览器等)
-        },
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LoginPage(
+          openUrl: (url) async {
+            opened.add(url);
+            return false; // 模拟外开失败(无法打开浏览器等)
+          },
+        ),
       ),
-    ));
+    );
     await tester.pump();
 
     await tester.tap(find.text('《服务条款》'));
@@ -136,8 +138,7 @@ void main() {
     ], reason: 'H3:短路径失败回退 api 静态页');
 
     // 已交付转绿(H3):两连失败落固定错误区文案
-    expect(find.text('打开失败,请稍后重试'), findsOneWidget,
-        reason: 'H3:两连失败落固定错误提示');
+    expect(find.text('打开失败,请稍后重试'), findsOneWidget, reason: 'H3:两连失败落固定错误提示');
     expect(find.byType(SnackBar), findsNothing, reason: 'H3:不弹 toast 打扰');
   });
 }

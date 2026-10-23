@@ -9,7 +9,7 @@
 ///   host+path 已由 MsApi 保证,本页不新增含 url/code 的日志)。
 library;
 
-import 'package:flutter/material.dart';
+import 'package:flutter/material.dart' hide Badge;
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -17,7 +17,10 @@ import '../../core/api/baidu_api.dart';
 import '../../core/api/ms_api.dart' show ApiException, errorMessage;
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/badge.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/toast.dart';
 import 'bind_step_views.dart';
 
@@ -36,7 +39,8 @@ class BindCodePage extends StatefulWidget {
 
 class _BindCodePageState extends State<BindCodePage> {
   BaiduApi get _api => widget.api ?? session.api!.baidu;
-  bool get _enabled => widget.enabled ?? session.me?.baiduBackupEnabled ?? false;
+  bool get _enabled =>
+      widget.enabled ?? session.me?.baiduBackupEnabled ?? false;
 
   final _codeCtrl = TextEditingController();
   BaiduBindingInfo? _status;
@@ -69,9 +73,9 @@ class _BindCodePageState extends State<BindCodePage> {
   }
 
   void _say(String msg, {required bool ok}) => setState(() {
-        _msg = msg;
-        _msgOk = ok;
-      });
+    _msg = msg;
+    _msgOk = ok;
+  });
 
   Future<void> _genUrl() async {
     setState(() {
@@ -123,8 +127,8 @@ class _BindCodePageState extends State<BindCodePage> {
         e.status == 404
             ? '网盘备份未启用'
             : e.status == 400
-                ? '${e.message}(请回到上一步重新生成链接)'
-                : e.message,
+            ? '${e.message}(请回到上一步重新生成链接)'
+            : e.message,
         ok: false,
       );
     } catch (e) {
@@ -150,78 +154,145 @@ class _BindCodePageState extends State<BindCodePage> {
       await launchUrl(Uri.parse(_url!), mode: LaunchMode.externalApplication);
     } catch (_) {
       if (mounted) {
-        toast(context, '无法打开系统浏览器,请复制链接到浏览器打开',
-            tone: ToastTone.error);
+        toast(context, '无法打开系统浏览器,请复制链接到浏览器打开', tone: ToastTone.error);
       }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return Scaffold(
-      appBar: AppBar(title: const Text('绑定百度网盘账号')),
-      body: !_enabled
-          ? const BindDisabledView()
-          : ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                if (_status != null)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: Text(
-                      _status!.bound
-                          ? '当前已绑定:${_status!.displayName}'
-                          : '当前未绑定${_status!.status == 'expired' ? '(绑定已失效,请重新授权)' : ''}',
-                      style: TextStyle(
-                          fontSize: Tk.fzMd,
-                          color: _status!.bound ? Tk.green : Tk.muted),
+      body: Column(
+        children: [
+          const PageHeader(
+            back: true,
+            title: '绑定百度网盘账号',
+            subtitle: '通过授权码完成一次绑定',
+          ),
+          Expanded(
+            child: !_enabled
+                ? const BindDisabledView()
+                : ListView(
+                    padding: const EdgeInsets.fromLTRB(
+                      Tk.spacePage,
+                      Tk.spaceLg,
+                      Tk.spacePage,
+                      Tk.spaceXl,
                     ),
-                  ),
-                BindStepCard(
-                  title: '第 1 步 · 获取授权链接',
-                  done: _step >= 1,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        '生成百度 OAuth 授权链接,用于确认本人百度账号身份。'
-                        '网盘授权仅用于将所选目录只读备份至应用侧,不做修改、删除、分享。',
-                        style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted),
+                      if (_status != null) _statusLine(context),
+                      BindStepCard(
+                        step: 1,
+                        total: 2,
+                        title: '获取授权链接',
+                        done: _step >= 1,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '生成百度 OAuth 授权链接,用于确认本人百度账号身份。'
+                              '网盘授权仅用于将所选目录只读备份至应用侧,不做修改、'
+                              '删除、分享。',
+                              style: TextStyle(
+                                fontSize: Tk.fzMd,
+                                height: 1.6,
+                                color: tk.ink3,
+                              ),
+                            ),
+                            const SizedBox(height: Tk.spaceMd),
+                            SizedBox(
+                              width: double.infinity,
+                              child: FilledButton.tonal(
+                                onPressed: _busy ? null : _genUrl,
+                                child: Text(_step >= 1 ? '重新生成链接' : '生成授权链接'),
+                              ),
+                            ),
+                            if (_step >= 1 && _url != null)
+                              BindUrlPanel(
+                                url: _url!,
+                                onCopy: _copyUrl,
+                                onOpen: _openBrowser,
+                              ),
+                          ],
+                        ),
                       ),
-                      const SizedBox(height: 8),
-                      OutlinedButton(
-                        onPressed: _busy ? null : _genUrl,
-                        child: Text(_step >= 1 ? '重新生成链接' : '生成授权链接'),
-                      ),
-                      if (_step >= 1 && _url != null)
-                        BindUrlPanel(
-                            url: _url!,
-                            onCopy: _copyUrl,
-                            onOpen: _openBrowser),
+                      if (_step >= 1)
+                        BindStepCard(
+                          step: 2,
+                          total: 2,
+                          title: '粘贴授权码',
+                          done: false,
+                          child: BindCodePanel(
+                            controller: _codeCtrl,
+                            busy: _busy,
+                            onSubmit: _submit,
+                          ),
+                        ),
+                      if (_msg != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: Tk.spaceMd),
+                          child: Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Icon(
+                                _msgOk
+                                    ? Icons.check_circle_outline
+                                    : Icons.error_outline,
+                                size: 18,
+                                color: _msgOk ? tk.ok : tk.danger,
+                              ),
+                              const SizedBox(width: Tk.spaceSm),
+                              Expanded(
+                                child: Text(
+                                  _msg!,
+                                  style: TextStyle(
+                                    fontSize: Tk.fzMd,
+                                    height: 1.5,
+                                    fontWeight: FontWeight.w500,
+                                    color: _msgOk ? tk.ok : tk.danger,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                     ],
                   ),
-                ),
-                if (_step >= 1) ...[
-                  BindStepCard(
-                    title: '第 2 步 · 粘贴授权码',
-                    done: false,
-                    child: BindCodePanel(
-                        controller: _codeCtrl,
-                        busy: _busy,
-                        onSubmit: _submit),
-                  ),
-                ],
-                if (_msg != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(_msg!,
-                        style: TextStyle(
-                            fontSize: Tk.fzMd,
-                            color: _msgOk ? Tk.green : Tk.red,
-                            fontWeight: FontWeight.w500)),
-                  ),
-              ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statusLine(BuildContext context) {
+    final tk = context.tk;
+    final s = _status!;
+    final expired = s.status == 'expired';
+    final text = s.bound
+        ? '当前已绑定:${s.displayName}'
+        : '当前未绑定${expired ? '(绑定已失效,请重新授权)' : ''}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Tk.spaceMd),
+      child: Row(
+        children: [
+          Badge(
+            label: s.bound ? '已绑定' : (expired ? '绑定已过期' : '未绑定'),
+            tone: s.bound
+                ? BadgeTone.ok
+                : (expired ? BadgeTone.warn : BadgeTone.neutral),
+          ),
+          const SizedBox(width: Tk.spaceSm),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
             ),
+          ),
+        ],
+      ),
     );
   }
 }

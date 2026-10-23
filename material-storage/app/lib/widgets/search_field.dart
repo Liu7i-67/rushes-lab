@@ -1,10 +1,13 @@
 /// SearchField — 统一搜索框(app-polish A7,方案 §A7):替代 7 处复制的
-/// 搜索输入。圆角走主题输入档(A3 后 rMd=12,不覆盖主题);prefixIcon 搜索
-/// 图标 + 有文字时显示清除钮;onSubmitted(键盘搜索/完成)+ onChanged 双
-/// 通道透传;isDense 密排。controller 可注入(搜索页自持)或缺省自建。
+/// 搜索输入。46 高(isDense + 垂直 11 + 主题描边),填充/描边/聚焦金边全部
+/// 走主题 inputDecorationTheme(`bg` 填充、`controlBorder` 描边、`gold` 聚焦);
+/// prefixIcon 搜索图标 + 有文字时显示清除钮;onSubmitted + onChanged 双
+/// 通道透传;controller 可注入(搜索页自持)或缺省自建。
 library;
 
 import 'package:flutter/material.dart';
+
+import '../theme/context_tk.dart';
 
 class SearchField extends StatefulWidget {
   const SearchField({
@@ -33,7 +36,8 @@ class SearchField extends StatefulWidget {
 class _SearchFieldState extends State<SearchField> {
   TextEditingController? _own;
 
-  TextEditingController get _c => widget.controller ?? (_own ??= TextEditingController());
+  TextEditingController get _c =>
+      widget.controller ?? (_own ??= TextEditingController());
 
   bool get _hasText => _c.text.isNotEmpty;
 
@@ -71,25 +75,31 @@ class _SearchFieldState extends State<SearchField> {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return TextField(
       controller: _c,
       autofocus: widget.autofocus,
       textInputAction: widget.textInputAction,
-      // 填充/圆角走主题 inputDecorationTheme(A3 输入档 rMd=12),不在此覆盖
+      // 填充/描边/圆角/聚焦金边走主题;此处只补 46 高的密集排布
+      // (isDense:true 不会裁切——搜索框无浮起 label)。
       decoration: InputDecoration(
         isDense: true,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 11,
+        ),
         hintText: widget.hintText,
-        prefixIcon: const Icon(Icons.search, size: 20),
+        prefixIcon: Icon(Icons.search, size: 20, color: tk.ink3),
         suffixIcon: _hasText
             ? IconButton(
                 visualDensity: VisualDensity.compact,
-                icon: const Icon(Icons.clear, size: 18),
+                icon: Icon(Icons.clear, size: 18, color: tk.ink3),
                 tooltip: '清除',
                 onPressed: _clear,
               )
             : null,
-        // border 不设:圆角/填充全部由主题输入档(A3 后 rMd=12)提供,
-        // 组件内覆盖会以默认 4px 半径压掉主题圆角
+        // border 不设:圆角/填充/描边全部由主题输入档提供,
+        // 组件内覆盖会以默认 4px 半径压掉主题圆角。
       ),
       onChanged: (v) {
         _sync(); // 自建 controller 无外部监听者,重建刷新清除钮可见性

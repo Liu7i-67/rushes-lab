@@ -7,10 +7,13 @@
 /// 实现注记:builder 位置在 Navigator 之上,弹层走全局 navigatorKey 压路由
 /// (Android 返回键被 PopScope 拦死,不能只做 Stack 遮罩);内容经
 /// ListenableBuilder 跟随 controller 原地刷新(维持中 message/issues 变化可见)。
+/// 视觉:墨色 + 金色双主题 — 弹层底/圆角/标题 20 全部交 DialogTheme,
+/// 状态点 warn、完成图标 ok、issues 编号 goldInk、遮罩 scrim。
 library;
 
 import 'package:flutter/material.dart';
 
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../session.dart';
 import 'banner_controller.dart';
@@ -46,10 +49,10 @@ class _MaintenanceOverlayState extends State<MaintenanceOverlay> {
   }
 
   _DialogKind get _target => switch (_c.phase) {
-        MaintenancePhase.maintaining => _DialogKind.maintaining,
-        MaintenancePhase.justFinished => _DialogKind.finished,
-        _ => _DialogKind.none,
-      };
+    MaintenancePhase.maintaining => _DialogKind.maintaining,
+    MaintenancePhase.justFinished => _DialogKind.finished,
+    _ => _DialogKind.none,
+  };
 
   void _sync() {
     if (!mounted) return;
@@ -78,7 +81,7 @@ class _MaintenanceOverlayState extends State<MaintenanceOverlay> {
     final f = showDialog<void>(
       context: nav.context,
       barrierDismissible: false,
-      barrierColor: Colors.black54,
+      barrierColor: nav.context.tk.scrim,
       builder: (_) => PopScope(
         canPop: false,
         child: kind == _DialogKind.maintaining
@@ -112,46 +115,84 @@ class _MaintainingCard extends StatelessWidget {
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
+        final tk = context.tk;
         final info = controller.info;
         final custom = info?.message?.trim();
         final issues = info?.issues ?? const <(int, String)>[];
         return AlertDialog(
-          title: const Row(children: [
-            Icon(Icons.circle, size: 10, color: Tk.amber),
-            SizedBox(width: Tk.spaceSm),
-            Expanded(child: Text('系统升级中', style: TextStyle(fontSize: Tk.fzTitle))),
-          ]),
+          title: Row(
+            children: [
+              Container(
+                width: 10,
+                height: 10,
+                decoration: BoxDecoration(
+                  color: tk.warn,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: Tk.spaceSm),
+              // 字号/字重交 DialogTheme(title 20);此处只带语义文案。
+              const Expanded(child: Text('系统升级中')),
+            ],
+          ),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(custom == null || custom.isEmpty
-                    ? '我们正在部署一次更新,通常 1 分钟内恢复。'
-                    : custom),
+                Text(
+                  custom == null || custom.isEmpty
+                      ? '我们正在部署一次更新,通常 1 分钟内恢复。'
+                      : custom,
+                  style: TextStyle(fontSize: 14, height: 1.5, color: tk.ink2),
+                ),
                 if (issues.isNotEmpty) ...[
                   const SizedBox(height: Tk.spaceMd),
-                  const Text('本次解决',
-                      style: TextStyle(fontSize: Tk.fzSm, color: Tk.subtle)),
+                  Text(
+                    '本次解决',
+                    style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                  ),
                   const SizedBox(height: Tk.spaceXs),
                   for (final (no, summary) in issues)
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: Row(crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('#$no',
-                                style: const TextStyle(fontSize: Tk.fzSm,
-                                    color: Tk.amber)),
-                            const SizedBox(width: Tk.spaceSm),
-                            Expanded(child: Text(summary,
-                                style: const TextStyle(fontSize: Tk.fzMd))),
-                          ]),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '#$no',
+                            style: TextStyle(
+                              fontSize: Tk.fzMd,
+                              fontWeight: FontWeight.w600,
+                              fontFeatures: const [
+                                FontFeature.tabularFigures(),
+                              ],
+                              color: tk.goldInk,
+                            ),
+                          ),
+                          const SizedBox(width: Tk.spaceSm),
+                          Expanded(
+                            child: Text(
+                              summary,
+                              style: TextStyle(
+                                fontSize: Tk.fzMd,
+                                height: 1.5,
+                                color: tk.ink2,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                 ],
                 const SizedBox(height: Tk.spaceMd),
-                const Text(
+                Text(
                   '如果你正在上传或下载,可能会被打断 — 升级完成后请重试。',
-                  style: TextStyle(fontSize: Tk.fzSm, color: Tk.muted),
+                  style: TextStyle(
+                    fontSize: Tk.fzMd,
+                    height: 1.5,
+                    color: tk.ink3,
+                  ),
                 ),
               ],
             ),
@@ -168,15 +209,18 @@ class _FinishedCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
     return AlertDialog(
-      title: const Row(children: [
-        Icon(Icons.check_circle, size: 20, color: Tk.green),
-        SizedBox(width: Tk.spaceSm),
-        Expanded(child: Text('升级完成', style: TextStyle(fontSize: Tk.fzTitle))),
-      ]),
-      content: const Text(
+      title: Row(
+        children: [
+          Icon(Icons.check_circle, size: 20, color: tk.ok),
+          const SizedBox(width: Tk.spaceSm),
+          const Expanded(child: Text('升级完成')),
+        ],
+      ),
+      content: Text(
         '已恢复正常使用,如果之前的操作中断,请重新尝试一次。',
-        style: TextStyle(fontSize: Tk.fzMd),
+        style: TextStyle(fontSize: 14, height: 1.5, color: tk.ink2),
       ),
     );
   }

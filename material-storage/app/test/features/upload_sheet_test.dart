@@ -13,7 +13,11 @@ import 'package:ms_app/core/api/content_types.dart';
 import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/core/transfers/transfer_queue.dart';
 import 'package:ms_app/core/transfers/transfer_task.dart';
+import 'package:ms_app/features/assets/upload_pick.dart' show showUploadSheet;
 import 'package:ms_app/features/assets/upload_sheet.dart';
+import 'package:ms_app/theme/app_theme.dart';
+import 'package:ms_app/theme/tk_colors.dart';
+import 'package:ms_app/widgets/app_row.dart';
 
 void main() {
   group('sanitizeUploadName(filename 净化钉子)', () {
@@ -47,14 +51,16 @@ void main() {
       expect(contentTypeForFilename('f.livp'), 'application/zip');
       expect(contentTypeForFilename('g.livp'.toUpperCase()), 'application/zip');
       expect(contentTypeForFilename('noext'), 'application/octet-stream');
-      expect(contentTypeForFilename('.hidden'), 'application/octet-stream',
-          reason: '点文件无主名');
+      expect(
+        contentTypeForFilename('.hidden'),
+        'application/octet-stream',
+        reason: '点文件无主名',
+      );
     });
   });
 
   group('notifyUploadSuccess(§8.1 数据新鲜度)', () {
-    test('上传成功 → assets:<folderId> 与 folders 双失效,无关 scope 不动',
-        () {
+    test('上传成功 → assets:<folderId> 与 folders 双失效,无关 scope 不动', () {
       final hits = <String>[];
       void lAssets() => hits.add('assets:f9');
       void lFolders() => hits.add('folders');
@@ -79,11 +85,14 @@ void main() {
       final done = <int>[];
       final errors = <Object>[];
       final r = await enqueueBatch(
-        List.generate(3, (i) => () async {
-          // 模拟 iCloud 未下载:第 2 项 entityToLivp 抛 StateError
-          if (i == 1) throw StateError('iCloud 未下载(asset 2)');
-          done.add(i);
-        }),
+        List.generate(
+          3,
+          (i) => () async {
+            // 模拟 iCloud 未下载:第 2 项 entityToLivp 抛 StateError
+            if (i == 1) throw StateError('iCloud 未下载(asset 2)');
+            done.add(i);
+          },
+        ),
         onError: errors.add,
       );
       expect(r.$1, 2, reason: '入队数=2');
@@ -96,7 +105,12 @@ void main() {
     test('空批次 → (0,0);全部失败 → (0,n),异常不外泄', () async {
       expect(await enqueueBatch(<Future<void> Function()>[]), (0, 0));
       final r = await enqueueBatch(
-          List.generate(2, (i) => () async => throw StateError('x$i')));
+        List.generate(
+          2,
+          (i) =>
+              () async => throw StateError('x$i'),
+        ),
+      );
       expect(r, (0, 2));
     });
 
@@ -107,9 +121,53 @@ void main() {
     });
   });
 
+  group('showUploadSheet(P2-10 上传来源 AppCard+AppRow)', () {
+    testWidgets('两项来源行:金图标/普通图标 + 标题副标题,回调保留', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: buildAppTheme(Brightness.light),
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) => TextButton(
+                onPressed: () =>
+                    showUploadSheet(ctx, folderId: 'f1', where: '医美项目/当天素材'),
+                child: const Text('open'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('上传到 当天素材'), findsOneWidget);
+      expect(find.byType(AppRow), findsNWidgets(2));
+      expect(find.text('从相册选择'), findsOneWidget);
+      expect(find.text('选择文件'), findsOneWidget);
+      expect(find.byIcon(Icons.photo_library_outlined), findsOneWidget);
+      expect(find.byIcon(Icons.folder_open_outlined), findsOneWidget);
+      // 相册来源金浅底,文件来源普通 surface3
+      final iconBgs = tester
+          .widgetList<Container>(find.byType(Container))
+          .map((c) => (c.decoration as BoxDecoration?)?.color)
+          .whereType<Color>()
+          .toList();
+      expect(iconBgs, contains(TkColors.light.goldSoft));
+      expect(iconBgs, contains(TkColors.light.surface3));
+      expect(
+        find.byIcon(Icons.chevron_right),
+        findsNWidgets(2),
+        reason: '行尾 chevron',
+      );
+
+      await tester.tap(find.byTooltip('关闭'));
+      await tester.pumpAndSettle();
+      expect(find.byType(AppRow), findsNothing);
+    });
+  });
+
   group('UploadMiniBar(§5 队列指示)', () {
-    testWidgets('有活动上传才显示;n/m=已完成/总上传数;条=聚合字节进度',
-        (tester) async {
+    testWidgets('有活动上传才显示;n/m=已完成/总上传数;条=聚合字节进度', (tester) async {
       final q = TransferQueue();
       final gateA = Completer<void>();
       final gateB = Completer<void>();
@@ -126,27 +184,38 @@ void main() {
           );
       q.enqueue(req('a', 200, gateA));
       q.enqueue(req('b', 100, gateB));
-      await tester.pumpWidget(MaterialApp(
-          home: Scaffold(body: UploadMiniBar(queue: q))));
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: UploadMiniBar(queue: q)),
+        ),
+      );
       await tester.pump();
-      expect(find.text('0/2'), findsOneWidget, reason: 'n/m=已完成/总上传数');
+      expect(find.text('正在上传 2 项'), findsOneWidget, reason: '胶囊显示活动上传数');
       expect(
         tester.widget<LinearProgressIndicator>(
-            find.byType(LinearProgressIndicator)),
-        isA<LinearProgressIndicator>()
-            .having((w) => w.value, 'value', closeTo(50 / 300, 1e-9)),
+          find.byType(LinearProgressIndicator),
+        ),
+        isA<LinearProgressIndicator>().having(
+          (w) => w.value,
+          'value',
+          closeTo(50 / 300, 1e-9),
+        ),
       );
 
       // a 完成 → n 进位,b 仍活动 → 条在
       q.tasks.firstWhere((t) => t.filename == 'a').doneBytes = 200;
       gateA.complete();
       await tester.pumpAndSettle();
-      expect(find.text('1/2'), findsOneWidget);
+      expect(find.text('正在上传 1 项'), findsOneWidget);
       expect(
         tester.widget<LinearProgressIndicator>(
-            find.byType(LinearProgressIndicator)),
-        isA<LinearProgressIndicator>()
-            .having((w) => w.value, 'value', closeTo(200 / 300, 1e-9)),
+          find.byType(LinearProgressIndicator),
+        ),
+        isA<LinearProgressIndicator>().having(
+          (w) => w.value,
+          'value',
+          closeTo(200 / 300, 1e-9),
+        ),
       );
 
       // 全部终态 → 无活动上传 → 条消失(等 worker 收尾落地)
@@ -155,17 +224,49 @@ void main() {
       expect(find.byType(LinearProgressIndicator), findsNothing);
     });
 
+    testWidgets('胶囊可点:点击触发 onTap(宫格接 openTransfersView)', (tester) async {
+      final q = TransferQueue();
+      final gate = Completer<void>();
+      q.enqueue(
+        TransferRequest(
+          kind: TransferKind.upload,
+          filename: 'a',
+          where: 'w',
+          totalBytes: 10,
+          worker: (p, token) async => gate.future,
+        ),
+      );
+      var tapped = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: UploadProgressPill(queue: q, onTap: () => tapped++),
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.tap(find.text('正在上传 1 项'));
+      expect(tapped, 1, reason: '整条胶囊可点切换传输页');
+      gate.complete();
+      await tester.pumpAndSettle();
+    });
+
     testWidgets('下载任务不计入 n/m(上传口径)', (tester) async {
       final q = TransferQueue();
-      q.enqueue(TransferRequest(
-        kind: TransferKind.download,
-        filename: 'd.livp',
-        where: '项目/夹',
-        totalBytes: 100,
-        worker: (p, token) async {},
-      ));
-      await tester.pumpWidget(MaterialApp(
-          home: Scaffold(body: UploadMiniBar(queue: q))));
+      q.enqueue(
+        TransferRequest(
+          kind: TransferKind.download,
+          filename: 'd.livp',
+          where: '项目/夹',
+          totalBytes: 100,
+          worker: (p, token) async {},
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: UploadMiniBar(queue: q)),
+        ),
+      );
       await tester.pump();
       expect(find.text('0/1'), findsNothing, reason: '下载不算上传 m');
       expect(find.byType(LinearProgressIndicator), findsNothing);

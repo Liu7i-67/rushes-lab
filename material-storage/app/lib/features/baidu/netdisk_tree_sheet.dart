@@ -1,9 +1,6 @@
-/// NetdiskTreePickerPage — 百度网盘目录树选择器(B9 §8.10,web
-/// BaiduNewTaskModal 左栏移动版):懒加载=展开拉子级
-/// (GET /baidu/backup/netdisk/folders?path=),loading/空/错误态齐全(错误可
-/// 重试,不置 loaded 死态);文件行灰显不可选(「选目录创建任务」语义);
-/// truncated 追加「目录过大」提示行;点选目录高亮,AppBar 勾选返回路径
-/// (根目录不可作源——web 同口径)。刷新=重挂树。
+/// NetdiskTreePickerPage — 百度网盘目录树选择器(B9 §8.10):懒加载=展开拉
+/// 子级,loading/空/错误态齐全;文件行灰显不可选;truncated 提示「目录过大」;
+/// 点选目录金色浅底高亮,页首勾选返回路径(根目录不可作源)。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,17 +10,17 @@ import '../../core/api/ms_api.dart';
 import '../../core/fmt.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
 
-/// 打开选择器;返回选定网盘目录绝对路径(取消/未选返回 null)。
-Future<String?> showNetdiskTreePicker(BuildContext context) {
-  return Navigator.of(context).push<String>(
-    MaterialPageRoute(builder: (_) => const NetdiskTreePickerPage()),
-  );
-}
+Future<String?> showNetdiskTreePicker(BuildContext context) =>
+    Navigator.of(context).push<String>(
+      MaterialPageRoute(builder: (_) => const NetdiskTreePickerPage()),
+    );
 
-/// 树节点状态(懒加载:children=null=未拉取;error!=null=拉取失败可重试)。
 class NetdiskNode {
   NetdiskNode(this.entry);
 
@@ -35,13 +32,9 @@ class NetdiskNode {
   var truncated = false;
 }
 
-/// 展开后的可见行(node, depth)。
-typedef NetdiskRow = (NetdiskNode, int);
-
 class NetdiskTreePickerPage extends StatefulWidget {
   const NetdiskTreePickerPage({super.key, this.api});
 
-  /// 测试注入;缺省取现役 session 客户端。
   final BaiduApi? api;
 
   @override
@@ -82,7 +75,6 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
     }
   }
 
-  /// 展开/收起;首次展开拉子级(文件行不进树;错误态留重试不标记已加载)。
   Future<void> _toggle(NetdiskNode node) async {
     if (node.loading) return;
     if (node.expanded) {
@@ -105,7 +97,6 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
         });
       } catch (e) {
         if (!mounted) return;
-        // 不置 children:节点保持未加载,重试点开再拉
         setState(() {
           node.loading = false;
           node.error = errorMessage(e, '读取网盘子目录失败');
@@ -116,141 +107,178 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
     }
   }
 
-  /// 深度优先铺平可见行(折叠子树跳过;文件行灰显不可选,web 同「选目录
-  /// 创建任务」语义)。
-  List<Widget> _rows(List<NetdiskNode> nodes, int depth) => [
-        for (final n in nodes)
-          if (n.entry.isDir) ...[
-            _dirRow(n, depth),
-            if (n.expanded && n.children != null)
-              ..._rows(n.children!, depth + 1),
-          ] else
-            _fileRow(n.entry, depth),
-      ];
+  List<Widget> _rows(
+    BuildContext context,
+    List<NetdiskNode> nodes,
+    int depth,
+  ) => [
+    for (final n in nodes)
+      if (n.entry.isDir) ...[
+        _dirRow(context, n, depth),
+        if (n.expanded && n.children != null)
+          ..._rows(context, n.children!, depth + 1),
+      ] else
+        _fileRow(context, n.entry, depth),
+  ];
 
-  /// 文件行:仅展示不可选(灰显+大小;web FileTypeIcon 语义收敛为通用图标)。
-  Widget _fileRow(BaiduNetdiskEntry e, int depth) => ListTile(
-        visualDensity: VisualDensity.compact,
-        contentPadding: EdgeInsets.only(left: 12.0 + depth * 16, right: 8),
-        enabled: false,
-        leading: const Icon(Icons.insert_drive_file_outlined,
-            size: 18, color: Tk.subtle),
-        title: Text(e.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(fontSize: Tk.fzMd, color: Tk.subtle)),
-        trailing: Text(fmtBytes(e.sizeBytes ?? 0),
-            style: const TextStyle(fontSize: Tk.fzXs, color: Tk.subtle)),
-      );
+  Widget _fileRow(BuildContext context, BaiduNetdiskEntry e, int depth) {
+    final tk = context.tk;
+    final style = TextStyle(fontSize: Tk.fzMd, color: tk.ink3);
+    return ListTile(
+      contentPadding: EdgeInsets.only(left: 12.0 + depth * 16, right: 12),
+      enabled: false,
+      leading: Icon(Icons.insert_drive_file_outlined, size: 18, color: tk.ink3),
+      title: Text(
+        e.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: style,
+      ),
+      trailing: Text(
+        fmtBytes(e.sizeBytes ?? 0),
+        style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+      ),
+    );
+  }
 
-  Widget _dirRow(NetdiskNode n, int depth) {
+  Widget _dirRow(BuildContext context, NetdiskNode n, int depth) {
+    final tk = context.tk;
     final e = n.entry;
     final selected = _selected == e.path;
+    final icon = n.error != null
+        ? Icons.error_outline
+        : n.expanded
+        ? Icons.folder_open_outlined
+        : Icons.folder_outlined;
+    final iconColor = n.error != null
+        ? tk.danger
+        : selected
+        ? tk.goldInk
+        : tk.ink2;
+    final subtitle = n.loading
+        ? Text(
+            '加载中…',
+            style: TextStyle(fontSize: Tk.fzXs, color: tk.ink3),
+          )
+        : n.error == null
+        ? null
+        : Text(
+            n.error!,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(fontSize: Tk.fzXs, color: tk.danger),
+          );
     return Column(
       children: [
         ListTile(
-          visualDensity: VisualDensity.compact,
-          contentPadding: EdgeInsets.only(left: 12.0 + depth * 16, right: 8),
-          leading: Icon(
-            n.error != null
-                ? Icons.error_outline
-                : n.expanded
-                    ? Icons.folder_open_outlined
-                    : Icons.folder_outlined,
-            size: 20,
-            color: n.error != null ? Tk.red : Tk.muted,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(Tk.rSm),
           ),
-          title: Text(e.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                  fontSize: Tk.fzMd,
-                  color: selected ? Tk.accentStrong : Tk.fg,
-                  fontWeight: selected ? FontWeight.w600 : FontWeight.w400)),
-          subtitle: n.loading
-              ? const Text('加载中…', style: TextStyle(fontSize: Tk.fzXs))
-              : n.error != null
-                  ? Text(n.error!,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: Tk.fzXs, color: Tk.red))
-                  : null,
+          contentPadding: EdgeInsets.only(left: 12.0 + depth * 16, right: 4),
+          leading: Icon(icon, size: 20, color: iconColor),
+          title: Text(
+            e.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: Tk.fzRowTitle,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              color: selected ? tk.goldInk : tk.ink,
+            ),
+          ),
+          subtitle: subtitle,
           trailing: IconButton(
+            tooltip: n.expanded ? '收起' : '展开',
             visualDensity: VisualDensity.compact,
             icon: Icon(
-                n.expanded
-                    ? Icons.expand_less
-                    : Icons.expand_more,
-                size: 20),
+              n.expanded ? Icons.expand_less : Icons.expand_more,
+              size: 20,
+            ),
             onPressed: () => _toggle(n),
           ),
-          tileColor: selected ? Tk.accentFaint : null,
+          tileColor: selected ? tk.goldSoft : null,
           onTap: () {
-            // 点行=选定来源;子目录未加载时顺带展开(web 树点选/展开同位)
             setState(() => _selected = e.path);
             if (!n.expanded) _toggle(n);
           },
         ),
         if (n.truncated && n.expanded)
-          Padding(
-            padding: EdgeInsets.only(left: 28.0 + depth * 16, bottom: 4),
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: Text('目录过大,仅显示部分内容',
-                  style: TextStyle(fontSize: Tk.fzXs, color: Tk.amber,
-                      fontStyle: FontStyle.italic)),
-            ),
-          ),
+          _truncatedHint(context, 28.0 + depth * 16),
       ],
+    );
+  }
+
+  Widget _truncatedHint(BuildContext context, double left) {
+    final tk = context.tk;
+    return Padding(
+      padding: EdgeInsets.fromLTRB(left, 0, 16, 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          '目录过大,仅显示部分内容',
+          style: TextStyle(
+            fontSize: Tk.fzXs,
+            color: tk.warn,
+            fontStyle: FontStyle.italic,
+          ),
+        ),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
+    final tk = context.tk;
+    final canConfirm = _selected != null && _selected != '/';
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('选择网盘目录'),
-        actions: [
-          IconButton(
-            tooltip: '刷新',
-            icon: const Icon(Icons.refresh),
-            onPressed: _loadRoot,
-          ),
-          IconButton(
-            tooltip: '确定',
-            icon: const Icon(Icons.check),
-            onPressed: _selected == null || _selected == '/'
-                ? null
-                : () => Navigator.of(context).pop(_selected),
-          ),
-        ],
-      ),
       body: Column(
         children: [
+          PageHeader(
+            back: true,
+            title: '选择网盘目录',
+            actions: [
+              IconButton(
+                tooltip: '刷新',
+                icon: const Icon(Icons.refresh),
+                onPressed: _loadRoot,
+              ),
+              IconButton(
+                tooltip: '确定',
+                icon: const Icon(Icons.check),
+                onPressed: canConfirm
+                    ? () => Navigator.of(context).pop(_selected)
+                    : null,
+              ),
+            ],
+          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            padding: const EdgeInsets.fromLTRB(
+              Tk.spacePage,
+              Tk.spaceSm,
+              Tk.spacePage,
+              0,
+            ),
             child: Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                _selected == null
-                    ? '未选择(点选目录;不支持整盘根目录)'
-                    : '已选来源:$_selected',
+                _selected == null ? '未选择(点选目录;不支持整盘根目录)' : '已选来源:$_selected',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                    fontSize: Tk.fzSm,
-                    color: _selected == null ? Tk.subtle : Tk.accentStrong),
+                  fontSize: Tk.fzMd,
+                  color: _selected == null ? tk.ink3 : tk.goldInk,
+                ),
               ),
             ),
           ),
-          const Divider(height: 16),
-          Expanded(child: _body()),
+          Divider(height: Tk.spaceLg, color: tk.line),
+          Expanded(child: _body(context)),
         ],
       ),
     );
   }
 
-  Widget _body() {
+  Widget _body(BuildContext context) {
     if (_rootError != null) {
       return ErrorView(message: _rootError!, onRetry: _loadRoot);
     }
@@ -259,29 +287,14 @@ class _NetdiskTreePickerPageState extends State<NetdiskTreePickerPage> {
       return const Center(child: CircularProgressIndicator());
     }
     if (roots.isEmpty) {
-      return Center(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('网盘为空或读取失败,可点右上刷新',
-              style: TextStyle(fontSize: Tk.fzMd, color: Tk.muted)),
-          const SizedBox(height: 8),
-          TextButton(onPressed: _loadRoot, child: const Text('重试')),
-        ]),
-      );
+      return const EmptyState(message: '网盘为空或读取失败');
     }
-    return ListView(children: [
-      ..._rows(roots, 0),
-      if (_rootTruncated)
-        const Padding(
-          padding: EdgeInsets.fromLTRB(28, 0, 16, 8),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: Text('目录过大,仅显示部分内容',
-                style: TextStyle(
-                    fontSize: Tk.fzXs,
-                    color: Tk.amber,
-                    fontStyle: FontStyle.italic)),
-          ),
-        ),
-    ]);
+    return ListView(
+      padding: const EdgeInsets.all(Tk.spaceSm),
+      children: [
+        ..._rows(context, roots, 0),
+        if (_rootTruncated) _truncatedHint(context, 28),
+      ],
+    );
   }
 }

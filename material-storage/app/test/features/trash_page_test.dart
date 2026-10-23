@@ -16,6 +16,7 @@ import 'package:ms_app/features/assets/trash_page.dart';
 import 'package:ms_app/features/folders/folder_row.dart';
 import 'package:ms_app/models/asset.dart' as asset_models show TrashPage;
 import 'package:ms_app/models/models.dart' hide TrashPage;
+import 'package:ms_app/widgets/app_row.dart';
 
 import '../helpers/api_harness.dart';
 
@@ -28,12 +29,17 @@ class _PagedOpsApi extends FakeOpsApi {
   int total = 0;
 
   @override
-  Future<asset_models.TrashPage> listTrash(String folderId,
-      {int limit = 500, int offset = 0}) async {
+  Future<asset_models.TrashPage> listTrash(
+    String folderId, {
+    int limit = 500,
+    int offset = 0,
+  }) async {
     trashCalls.add((folderId: folderId, limit: limit, offset: offset));
     // 页面组件(features TrashPage)与数据类同名:此处构造数据类,用别名
     return asset_models.TrashPage(
-        items: offset > 0 ? page2 : page1, total: total);
+      items: offset > 0 ? page2 : page1,
+      total: total,
+    );
   }
 }
 
@@ -45,56 +51,95 @@ class _PagedMsApi extends FakeMsApi {
 }
 
 Asset _trashed(String id) => Asset(
-    id: id,
-    filename: '$id.jpg',
-    sizeBytes: 1,
-    contentType: 'image/jpeg',
-    createdAt: '2026-10-20T10:00:00Z',
-    folderId: 'f1',
-    deletedAt: '2026-10-21T09:30:00Z');
+  id: id,
+  filename: '$id.jpg',
+  sizeBytes: 1,
+  contentType: 'image/jpeg',
+  createdAt: '2026-10-20T10:00:00Z',
+  folderId: 'f1',
+  deletedAt: '2026-10-21T09:30:00Z',
+);
 
 void main() {
   test('canSeeTrash 三态:普通夹 admin∨删除授权;sensitive 仅系统 admin', () {
     // 普通夹:my_can_admin → 可见
     expect(
-        canSeeTrash(myCanAdmin: true, myDeleteGrant: null,
-            isSensitive: false, isSystemAdmin: false),
-        isTrue);
+      canSeeTrash(
+        myCanAdmin: true,
+        myDeleteGrant: null,
+        isSensitive: false,
+        isSystemAdmin: false,
+      ),
+      isTrue,
+    );
     // 普通夹:仅 my_delete_grant(组级删除授权)→ 可见(F5 口径)
     expect(
-        canSeeTrash(myCanAdmin: false, myDeleteGrant: true,
-            isSensitive: false, isSystemAdmin: false),
-        isTrue);
+      canSeeTrash(
+        myCanAdmin: false,
+        myDeleteGrant: true,
+        isSensitive: false,
+        isSystemAdmin: false,
+      ),
+      isTrue,
+    );
     // 普通夹:两皆无 → 不可见
     expect(
-        canSeeTrash(myCanAdmin: false, myDeleteGrant: false,
-            isSensitive: false, isSystemAdmin: false),
-        isFalse);
+      canSeeTrash(
+        myCanAdmin: false,
+        myDeleteGrant: false,
+        isSensitive: false,
+        isSystemAdmin: false,
+      ),
+      isFalse,
+    );
     // 敏感夹:项目 admin(my_can_admin)也不可见(侧信道收口)
     expect(
-        canSeeTrash(myCanAdmin: true, myDeleteGrant: false,
-            isSensitive: true, isSystemAdmin: false),
-        isFalse);
+      canSeeTrash(
+        myCanAdmin: true,
+        myDeleteGrant: false,
+        isSensitive: true,
+        isSystemAdmin: false,
+      ),
+      isFalse,
+    );
     // 敏感夹:系统 admin → 可见
     expect(
-        canSeeTrash(myCanAdmin: true, myDeleteGrant: false,
-            isSensitive: true, isSystemAdmin: true),
-        isTrue);
+      canSeeTrash(
+        myCanAdmin: true,
+        myDeleteGrant: false,
+        isSensitive: true,
+        isSystemAdmin: true,
+      ),
+      isTrue,
+    );
     // 详情未到(null)→ 视为不可见
     expect(
-        canSeeTrash(myCanAdmin: null, myDeleteGrant: null,
-            isSensitive: false, isSystemAdmin: false),
-        isFalse);
+      canSeeTrash(
+        myCanAdmin: null,
+        myDeleteGrant: null,
+        isSensitive: false,
+        isSystemAdmin: false,
+      ),
+      isFalse,
+    );
   });
 
   testWidgets('列表渲染+恢复:调 restore、行移除、失效 assets/folders', (tester) async {
     final api = installFakeApi();
-    api.ops.trashStaged = asset_models.TrashPage(items: [
-      Asset(
-          id: 'a1', filename: '旧图.jpg', sizeBytes: 2048,
-          contentType: 'image/jpeg', createdAt: '2026-10-20T10:00:00Z',
-          folderId: 'f1', deletedAt: '2026-10-21T09:30:00Z'),
-    ], total: 1);
+    api.ops.trashStaged = asset_models.TrashPage(
+      items: [
+        Asset(
+          id: 'a1',
+          filename: '旧图.jpg',
+          sizeBytes: 2048,
+          contentType: 'image/jpeg',
+          createdAt: '2026-10-20T10:00:00Z',
+          folderId: 'f1',
+          deletedAt: '2026-10-21T09:30:00Z',
+        ),
+      ],
+      total: 1,
+    );
     addTearDown(() => session.api = null);
     var assets = 0;
     var folders = 0;
@@ -107,8 +152,11 @@ void main() {
       RefreshBus.I.removeListener('folders', onFolders);
     });
 
-    await tester
-        .pumpWidget(MaterialApp(home: TrashPage(folderId: 'f1', folderName: '档案夹')));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TrashPage(folderId: 'f1', folderName: '档案夹'),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(api.ops.trashCalls.single.folderId, 'f1');
     expect(find.text('旧图.jpg'), findsOneWidget);
@@ -124,8 +172,7 @@ void main() {
     expect(folders, greaterThan(0));
   });
 
-  testWidgets('文件夹 ⋯ 菜单入口:普通夹 admin 可进回收站页;400/403 无权禁用',
-      (tester) async {
+  testWidgets('文件夹 ⋯ 菜单入口:普通夹 admin 可进回收站页;400/403 无权禁用', (tester) async {
     // 菜单 6 项在默认 600px 测试面落入滚动区,加大面免 scrollUntilVisible
     tester.view.physicalSize = const Size(800, 1200);
     tester.view.devicePixelRatio = 1.0;
@@ -133,39 +180,50 @@ void main() {
     final api = installFakeApi();
     // 普通夹详情:my_can_admin=true → 闸门放行
     api.folders.getResult = Folder(
-        id: 'f1', name: '档案夹', parentFolderId: null, projectId: 'p1',
-        isSensitive: false, myCanAdmin: true, myDeleteGrant: false);
+      id: 'f1',
+      name: '档案夹',
+      parentFolderId: null,
+      projectId: 'p1',
+      isSensitive: false,
+      myCanAdmin: true,
+      myDeleteGrant: false,
+    );
     addTearDown(() => session.api = null);
     session.me = Me(id: 'u1', name: '甲', isSystemAdmin: false);
 
     late BuildContext captured;
-    await tester.pumpWidget(MaterialApp(
-      routes: {
-        '/trash': (_) => TrashPage(folderId: 'f1', folderName: '档案夹'),
-      },
-      home: Scaffold(
-        body: Builder(
-          builder: (ctx) {
-            captured = ctx;
-            return Center(
-              child: FilledButton(
-                onPressed: () => showFolderMenu(captured,
-                    folder: Folder(id: 'f1', name: '档案夹', parentFolderId: null)),
-                child: const Text('open'),
-              ),
-            );
-          },
+    await tester.pumpWidget(
+      MaterialApp(
+        routes: {'/trash': (_) => TrashPage(folderId: 'f1', folderName: '档案夹')},
+        home: Scaffold(
+          body: Builder(
+            builder: (ctx) {
+              captured = ctx;
+              return Center(
+                child: FilledButton(
+                  onPressed: () => showFolderMenu(
+                    captured,
+                    folder: Folder(id: 'f1', name: '档案夹', parentFolderId: null),
+                  ),
+                  child: const Text('open'),
+                ),
+              );
+            },
+          ),
         ),
       ),
-    ));
+    );
     await tester.tap(find.text('open'));
     await tester.pumpAndSettle();
     expect(
-        tester
-            .widget<ListTile>(find.ancestor(
-                of: find.text('回收站'), matching: find.byType(ListTile)))
-            .enabled,
-        isTrue, reason: '普通夹 my_can_admin → 回收站可点');
+      tester
+          .widget<AppRow>(
+            find.ancestor(of: find.text('回收站'), matching: find.byType(AppRow)),
+          )
+          .onTap,
+      isNotNull,
+      reason: '普通夹 my_can_admin → 回收站可点',
+    );
     await tester.tap(find.text('回收站'));
     await tester.pumpAndSettle();
     expect(find.text('回收站 · 档案夹'), findsOneWidget, reason: '已导航进回收站页');
@@ -178,35 +236,48 @@ void main() {
     final api = installFakeApi();
     // 敏感夹详情:项目 admin 有 my_can_admin=true,闸门仍不放行(侧信道收口)
     api.folders.getResult = Folder(
-        id: 'f2', name: '敏感夹', parentFolderId: null, projectId: 'p1',
-        isSensitive: true, myCanAdmin: true, myDeleteGrant: false);
+      id: 'f2',
+      name: '敏感夹',
+      parentFolderId: null,
+      projectId: 'p1',
+      isSensitive: true,
+      myCanAdmin: true,
+      myDeleteGrant: false,
+    );
     addTearDown(() => session.api = null);
 
     Future<void> pumpMenu() async {
       late BuildContext captured;
       // UniqueKey 强制重建(否则同型 MaterialApp 复用元素树,上一个菜单路由残留)
-      await tester.pumpWidget(MaterialApp(
-        key: UniqueKey(),
-        routes: {
-          '/trash': (_) => TrashPage(folderId: 'f2', folderName: '敏感夹'),
-        },
-        home: Scaffold(
-          body: Builder(
-            builder: (ctx) {
-              captured = ctx;
-              return Center(
-                child: FilledButton(
-                  onPressed: () => showFolderMenu(captured,
+      await tester.pumpWidget(
+        MaterialApp(
+          key: UniqueKey(),
+          routes: {
+            '/trash': (_) => TrashPage(folderId: 'f2', folderName: '敏感夹'),
+          },
+          home: Scaffold(
+            body: Builder(
+              builder: (ctx) {
+                captured = ctx;
+                return Center(
+                  child: FilledButton(
+                    onPressed: () => showFolderMenu(
+                      captured,
                       folder: Folder(
-                          id: 'f2', name: '敏感夹', parentFolderId: null,
-                          isSensitive: true)),
-                  child: const Text('open'),
-                ),
-              );
-            },
+                        id: 'f2',
+                        name: '敏感夹',
+                        parentFolderId: null,
+                        isSensitive: true,
+                      ),
+                    ),
+                    child: const Text('open'),
+                  ),
+                );
+              },
+            ),
           ),
         ),
-      ));
+      );
       await tester.tap(find.text('open'));
       await tester.pumpAndSettle();
     }
@@ -215,22 +286,27 @@ void main() {
     session.me = Me(id: 'u1', name: '甲', isSystemAdmin: false);
     await pumpMenu();
     expect(
-        tester
-            .widget<ListTile>(find.ancestor(
-                of: find.text('回收站'), matching: find.byType(ListTile)))
-            .enabled,
-        isFalse, reason: 'sensitive 夹仅系统 admin');
+      tester
+          .widget<AppRow>(
+            find.ancestor(of: find.text('回收站'), matching: find.byType(AppRow)),
+          )
+          .onTap,
+      isNull,
+      reason: 'sensitive 夹仅系统 admin',
+    );
     expect(find.text('仅系统管理员可查看'), findsOneWidget);
 
     // 系统 admin → 可进
     session.me = Me(id: 'u0', name: '管', isSystemAdmin: true);
     await pumpMenu();
     expect(
-        tester
-            .widget<ListTile>(find.ancestor(
-                of: find.text('回收站'), matching: find.byType(ListTile)))
-            .enabled,
-        isTrue);
+      tester
+          .widget<AppRow>(
+            find.ancestor(of: find.text('回收站'), matching: find.byType(AppRow)),
+          )
+          .onTap,
+      isNotNull,
+    );
     await tester.tap(find.text('回收站'));
     await tester.pumpAndSettle();
     expect(find.text('回收站 · 敏感夹'), findsOneWidget);
@@ -238,24 +314,51 @@ void main() {
 
   // ── E10(app-polish 交付批)────────────────────────────────────────────────
   test('E10:回收站行首图标按 kind 分型(原一律 description_outlined)', () {
-    expect(trashKindIcon(filename: 'a.jpg', contentType: 'image/jpeg'),
-        Icons.image_outlined, reason: 'image → image');
-    expect(trashKindIcon(filename: 'a.heic', contentType: 'image/heic'),
-        Icons.image_outlined, reason: 'heic 归 image 分型');
-    expect(trashKindIcon(filename: 'b.mov', contentType: 'video/quicktime'),
-        Icons.videocam_outlined, reason: 'video → videocam');
-    expect(trashKindIcon(filename: 'c.livp', contentType: 'application/zip'),
-        Icons.photo_camera_outlined, reason: 'livp → 实况(相机)意象');
-    expect(trashKindIcon(filename: 'd.mp3'),
-        Icons.graphic_eq, reason: '音频 → graphic_eq(扩展名补判)');
-    expect(trashKindIcon(filename: 'e.m4a', contentType: 'audio/x-m4a'),
-        Icons.graphic_eq, reason: '音频 → graphic_eq(content_type 补判)');
-    expect(trashKindIcon(filename: 'f.pdf', contentType: 'application/pdf'),
-        Icons.description_outlined, reason: 'pdf → doc 分型');
-    expect(trashKindIcon(filename: 'g.md', contentType: 'text/markdown'),
-        Icons.description_outlined, reason: 'markdown → doc 分型');
-    expect(trashKindIcon(filename: 'h.bin'),
-        Icons.insert_drive_file_outlined, reason: '未识别 → 通用文件');
+    expect(
+      trashKindIcon(filename: 'a.jpg', contentType: 'image/jpeg'),
+      Icons.image_outlined,
+      reason: 'image → image',
+    );
+    expect(
+      trashKindIcon(filename: 'a.heic', contentType: 'image/heic'),
+      Icons.image_outlined,
+      reason: 'heic 归 image 分型',
+    );
+    expect(
+      trashKindIcon(filename: 'b.mov', contentType: 'video/quicktime'),
+      Icons.videocam_outlined,
+      reason: 'video → videocam',
+    );
+    expect(
+      trashKindIcon(filename: 'c.livp', contentType: 'application/zip'),
+      Icons.photo_camera_outlined,
+      reason: 'livp → 实况(相机)意象',
+    );
+    expect(
+      trashKindIcon(filename: 'd.mp3'),
+      Icons.graphic_eq,
+      reason: '音频 → graphic_eq(扩展名补判)',
+    );
+    expect(
+      trashKindIcon(filename: 'e.m4a', contentType: 'audio/x-m4a'),
+      Icons.graphic_eq,
+      reason: '音频 → graphic_eq(content_type 补判)',
+    );
+    expect(
+      trashKindIcon(filename: 'f.pdf', contentType: 'application/pdf'),
+      Icons.description_outlined,
+      reason: 'pdf → doc 分型',
+    );
+    expect(
+      trashKindIcon(filename: 'g.md', contentType: 'text/markdown'),
+      Icons.description_outlined,
+      reason: 'markdown → doc 分型',
+    );
+    expect(
+      trashKindIcon(filename: 'h.bin'),
+      Icons.insert_drive_file_outlined,
+      reason: '未识别 → 通用文件',
+    );
   });
 
   testWidgets('E10:滚动到底自动加载第二页(offset=首页条数),无需点按', (tester) async {
@@ -265,8 +368,11 @@ void main() {
     api.ops.page2 = [_trashed('a31'), _trashed('a32'), _trashed('a33')];
     addTearDown(() => session.api = null);
 
-    await tester
-        .pumpWidget(MaterialApp(home: TrashPage(folderId: 'f1', folderName: '档案夹')));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TrashPage(folderId: 'f1', folderName: '档案夹'),
+      ),
+    );
     await tester.pumpAndSettle();
     expect(api.ops.trashCalls.single.offset, 0, reason: '首轮只拉第一页');
 
@@ -276,12 +382,13 @@ void main() {
       await tester.drag(find.byType(ListView), const Offset(0, -800));
       await tester.pumpAndSettle();
     }
-    expect(api.ops.trashCalls.length, 2,
-        reason: 'E10:滚动到底自动发起第二页请求');
+    expect(api.ops.trashCalls.length, 2, reason: 'E10:滚动到底自动发起第二页请求');
     expect(api.ops.trashCalls.last.offset, 30, reason: 'E10:offset=首页条数');
-    expect(find.text('a31.jpg'), findsOneWidget,
-        reason: 'E10:第二页内容拼接渲染');
-    expect(find.textContaining('加载更多'), findsNothing,
-        reason: 'E10:「加载更多」格子移除,改底部线性加载指示');
+    expect(find.text('a31.jpg'), findsOneWidget, reason: 'E10:第二页内容拼接渲染');
+    expect(
+      find.textContaining('加载更多'),
+      findsNothing,
+      reason: 'E10:「加载更多」格子移除,改底部线性加载指示',
+    );
   });
 }

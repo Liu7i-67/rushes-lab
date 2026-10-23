@@ -1,7 +1,7 @@
-/// ApprovalsPage — 审批中心(B7 §8.6):分段 待我审批(scope=all&status=
-/// pending)/ 我发起的(scope=self,全状态,web ApprovalsPage 实况无再筛);
-/// 卡片决策(带确认)成功即刷新列表 + 失效 approvals(MePage badge 同步);
-/// 403/422 detail 透传(决策权由后端 enforce_admin_for_target 守门)。
+/// ApprovalsPage — 审批中心(§6 F13):PageHeader(待审数副标题) +
+/// AppSegmented 待我审批(scope=all&status=pending)/我发起的(scope=self,
+/// 全状态);卡片决策(带确认+备注)成功即局部更新 + 失效 approvals;
+/// 403/409/422 detail 透传(决策权由后端 enforce_admin_for_target 守门)。
 library;
 
 import 'package:flutter/material.dart';
@@ -11,8 +11,10 @@ import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/app_segmented.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/page_header.dart';
 import '../../widgets/toast.dart';
 import 'approval_card.dart';
 
@@ -28,12 +30,17 @@ class ApprovalsPage extends StatefulWidget {
 class _ApprovalsPageState extends State<ApprovalsPage> {
   /// 初始段按身份分流(P2-2,web 默认 self 同款):系统 admin 落「待我审批」,
   /// 非 admin 落「我发起的」—— 防 scope=all 对非 admin 引入全组织噪声。
-  _Scope _scope =
-      (session.me?.isSystemAdmin ?? false) ? _Scope.pending : _Scope.mine;
+  _Scope _scope = (session.me?.isSystemAdmin ?? false)
+      ? _Scope.pending
+      : _Scope.mine;
 
   List<Approval>? _items;
   String? _error;
   bool _loading = false;
+
+  /// 已加载段的条数(分段计数/页头副标题;未加载段为 null 不显计数)。
+  int? _pendingCount;
+  int? _mineCount;
 
   /// 加载代际(P2-3):切段/决策刷新后,慢旧段响应落地时对不上最新代际
   /// 即整包丢弃(数据与 error/loading 均不回落),防旧段覆盖新段。
@@ -50,17 +57,25 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
 
   Future<void> _reload() async {
     final gen = ++_gen;
+    final scope = _scope;
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
       final r = await session.api!.approvalsOps.list(
-        scope: _scope == _Scope.pending ? 'all' : 'self',
-        status: _scope == _Scope.pending ? 'pending' : null,
+        scope: scope == _Scope.pending ? 'all' : 'self',
+        status: scope == _Scope.pending ? 'pending' : null,
       );
       if (gen != _gen || !mounted) return; // 过期响应丢弃(旧不覆新)
-      setState(() => _items = r);
+      setState(() {
+        _items = r;
+        if (scope == _Scope.pending) {
+          _pendingCount = r.length;
+        } else {
+          _mineCount = r.length;
+        }
+      });
     } catch (e) {
       if (gen != _gen || !mounted) return; // 旧段失败也不污染新段
       setState(() => _error = errorMessage(e, '审批列表加载失败'));
@@ -80,7 +95,7 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
           ? await ops.approve(a.id, decisionNote: note.isEmpty ? null : note)
           : await ops.reject(a.id, decisionNote: note.isEmpty ? null : note);
       if (!mounted) return;
-      // E8:决策成功局部更新(按 id 原地改状态/移除),不整列表重拉——
+      // 决策成功局部更新(按 id 原地改状态/移除),不整列表重拉——
       // 滚动位置天然保持;「待我审批」段移除已决策项,「我发起的」段就地换新
       setState(() {
         final items = _items;
@@ -94,6 +109,7 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
                 x,
           ].whereType<Approval>().toList();
         }
+        if (_scope == _Scope.pending) _pendingCount = _items?.length ?? 0;
       });
       toast(context, approve ? '已批准' : '已拒绝', tone: ToastTone.success);
       RefreshBus.I.invalidate('approvals'); // MePage 待审 badge 即时同步
@@ -124,10 +140,13 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, controller.text),
-              child: Text(approve ? '批准' : '拒绝')),
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: Text(approve ? '批准' : '拒绝'),
+          ),
         ],
       ),
     );
@@ -137,29 +156,33 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
   Widget build(BuildContext context) {
     final items = _items;
     return Scaffold(
-      appBar: AppBar(title: const Text('审批中心')),
       body: Column(
         children: [
+          PageHeader(
+            back: true,
+            title: '审批中心',
+            subtitle: '${_pendingCount ?? 0} 条待我审批',
+          ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-            child: SegmentedButton<_Scope>(
-              // E8:两段计数(当前段已拉条数;标签 Text 保持裸词,计数独立小字,
-              // 兼顾可读与既有锚点)
+            padding: const EdgeInsets.fromLTRB(
+              Tk.spacePage,
+              Tk.spaceMd,
+              Tk.spacePage,
+              Tk.spaceXs,
+            ),
+            child: AppSegmented<_Scope>(
+              // 两段计数(已加载段显示;未加载段不显,避免编造 0)
               segments: [
-                ButtonSegment(
+                Segment(
                   value: _Scope.pending,
-                  label: _segLabel('待我审批',
-                      _scope == _Scope.pending ? items?.length : null),
+                  label: '待我审批',
+                  count: _pendingCount,
                 ),
-                ButtonSegment(
-                  value: _Scope.mine,
-                  label: _segLabel('我发起的',
-                      _scope == _Scope.mine ? items?.length : null),
-                ),
+                Segment(value: _Scope.mine, label: '我发起的', count: _mineCount),
               ],
-              selected: {_scope},
-              onSelectionChanged: (s) {
-                setState(() => _scope = s.first);
+              value: _scope,
+              onChanged: (s) {
+                setState(() => _scope = s);
                 _reload();
               },
             ),
@@ -175,19 +198,6 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
     );
   }
 
-  /// 分段标签:裸词 + 弱色计数(计数未加载/不属于当前段时不显示)。
-  Widget _segLabel(String text, int? count) => Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(text),
-          if (count != null) ...[
-            const SizedBox(width: Tk.spaceXs),
-            Text('$count',
-                style: const TextStyle(color: Tk.subtle, fontSize: Tk.fzSm)),
-          ],
-        ],
-      );
-
   Widget _buildList(List<Approval>? items) {
     if (_loading && items == null) {
       return const Center(child: CircularProgressIndicator());
@@ -196,19 +206,30 @@ class _ApprovalsPageState extends State<ApprovalsPage> {
       return ErrorView(message: _error!, onRetry: _reload);
     }
     if (items == null || items.isEmpty) {
-      return ListView(children: [
-        const SizedBox(height: 80),
-        EmptyState(
-          icon: Icons.how_to_vote_outlined,
-          message: _scope == _Scope.pending ? '暂无待你审批的申请' : '你的申请都会出现在这里',
-        ),
-      ]);
+      return ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          const SizedBox(height: 80),
+          EmptyState(
+            icon: Icons.how_to_vote_outlined,
+            title: _scope == _Scope.pending ? '暂无待你审批的申请' : '暂无我发起的申请',
+            message: _scope == _Scope.pending
+                ? '新的权限申请会出现在这里，通过后会通知申请人。'
+                : '在素材预览页申请访问后，审批记录会出现在这里。',
+          ),
+        ],
+      );
     }
     return ListView.separated(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(
-          Tk.spaceLg, Tk.spaceSm, Tk.spaceLg, Tk.spaceXl),
+        Tk.spacePage,
+        Tk.spaceMd,
+        Tk.spacePage,
+        Tk.space2xl,
+      ),
       itemCount: items.length,
-      separatorBuilder: (_, _) => const SizedBox(height: Tk.spaceSm),
+      separatorBuilder: (_, _) => const SizedBox(height: Tk.spaceMd),
       itemBuilder: (context, i) {
         final a = items[i];
         return ApprovalCard(

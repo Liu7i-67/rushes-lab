@@ -5,7 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
-import '../../theme/tokens.dart';
+import '../../theme/context_tk.dart';
 
 /// event_type 过滤全集(web AdminAuditPage 同款,含首位 '' = 全部)。
 const kAuditEventTypes = <String>[
@@ -142,21 +142,22 @@ const kAuditDetailKeyLabels = <String, String>{
   'via': '来源',
 };
 
-/// event_type → 粗分类色(web eventColor 同规则)。
-Color auditEventColor(String eventType) {
-  if (eventType.startsWith('access_denied')) return Tk.red;
-  if (eventType.startsWith('baidu_')) return Tk.green;
-  if (eventType.contains('approval')) return Tk.amber;
+/// event_type → 粗分类色(web eventColor 同规则;颜色随主题令牌)。
+Color auditEventColor(BuildContext context, String eventType) {
+  final tk = context.tk;
+  if (eventType.startsWith('access_denied')) return tk.danger;
+  if (eventType.startsWith('baidu_')) return tk.ok;
+  if (eventType.contains('approval')) return tk.warn;
   if (eventType.startsWith('share') || eventType.startsWith('signed_url')) {
-    return Tk.green;
+    return tk.ok;
   }
   if (eventType.startsWith('upload') || eventType.startsWith('download')) {
-    return Tk.accent;
+    return tk.gold;
   }
   if (eventType.contains('project') ||
       eventType.contains('folder') ||
       eventType.contains('invite')) {
-    return Tk.fg;
+    return tk.ink;
   }
-  return Tk.muted;
+  return tk.ink2;
 }

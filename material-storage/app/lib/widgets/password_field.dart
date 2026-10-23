@@ -1,10 +1,12 @@
 /// PasswordField — 密码输入框复用组件(P9):默认遮挡,suffixIcon 眼睛按钮
 /// 切换明文/遮挡;切换只动本组件内聚 state,controller 内容与焦点均不丢。
-/// 外观对齐项目现有输入框 InputDecoration(labelText + prefixIcon),
-/// validator/onSubmitted 透传,调用方表单校验逻辑不变。
+/// 外观对齐项目现有输入框 InputDecoration(labelText + prefixIcon),颜色走
+/// 主题令牌(眼睛图标 ink3);validator/onSubmitted 透传,校验逻辑不变。
 library;
 
 import 'package:flutter/material.dart';
+
+import '../theme/context_tk.dart';
 
 class PasswordField extends StatefulWidget {
   const PasswordField({
@@ -75,6 +77,7 @@ class _PasswordFieldState extends State<PasswordField> {
             _obscure
                 ? Icons.visibility_outlined
                 : Icons.visibility_off_outlined,
+            color: context.tk.ink3,
           ),
           tooltip: _obscure ? '显示密码' : '隐藏密码',
           onPressed: () => setState(() => _obscure = !_obscure),

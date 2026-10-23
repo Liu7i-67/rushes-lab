@@ -1,7 +1,6 @@
-/// P3 预览页横滑切张单测(target-behavior 锁:实现落地前部分断言会红——
-/// 实现于 preview_page.dart:AppBar 去左右切换钮、预览主体外层加
+/// P3 预览页横滑切张单测(target-behavior 锁):预览主体外层
 /// GestureDetector(onHorizontalDragEnd),未放大时 InteractiveViewer
-/// panEnabled:false 让单指横滑穿透)。
+/// panEnabled:false 让单指横滑穿透;F9 顶栏改为 PreviewTopBar。
 ///
 /// 手势力学已实测(外层 HDrag vs 内层 InteractiveViewer panEnabled:false):
 /// tester.fling(速度 1200)能穿透到外层 onHorizontalDragEnd(速度≈位移方向),
@@ -12,6 +11,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/session.dart';
+import 'package:ms_app/features/preview/preview_chrome.dart';
 import 'package:ms_app/features/preview/preview_media.dart';
 import 'package:ms_app/features/preview/preview_page.dart';
 import 'package:ms_app/models/models.dart';
@@ -26,7 +26,10 @@ class SwipeFakeAssetsApi extends FakeAssetsApi {
   final downloadLinkCalls = <String>[];
 
   @override
-  Future<String> downloadLink(String assetId, {bool asAttachment = true}) async {
+  Future<String> downloadLink(
+    String assetId, {
+    bool asAttachment = true,
+  }) async {
     downloadLinkCalls.add(assetId);
     return 'http://preview.test/$assetId';
   }
@@ -42,33 +45,35 @@ class SwipeFakeMsApi extends FakeMsApi {
 }
 
 Asset assetOf(String id) => Asset(
-      id: id,
-      filename: '$id.jpg',
-      sizeBytes: 1,
-      contentType: 'image/jpeg',
-      createdAt: '2026-10-20T10:00:00Z',
-      folderId: 'f1',
-    );
+  id: id,
+  filename: '$id.jpg',
+  sizeBytes: 1,
+  contentType: 'image/jpeg',
+  createdAt: '2026-10-20T10:00:00Z',
+  folderId: 'f1',
+);
 
 Future<void> pumpPreview(WidgetTester tester) async {
   installFakeApi(SwipeFakeMsApi());
   addTearDown(() => session.api = null);
-  await tester.pumpWidget(MaterialApp(
-    home: MediaQuery(
-      // 测试字体(Ahem)行高偏大:胶片条 TypeBlock 在 48px 格内会假性溢出,
-      // 缩小文本度量只影响测试渲染,与被测的横滑/计数断言无关
-      data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
-      child: PreviewPage(
-        args: PreviewArgs(
-          items: [assetOf('a0'), assetOf('a1'), assetOf('a2')],
-          index: 0,
-          folderId: 'f1',
-          canDownload: true,
-          where: '项目/夹',
+  await tester.pumpWidget(
+    MaterialApp(
+      home: MediaQuery(
+        // 测试字体(Ahem)行高偏大:胶片条 TypeBlock 在 48px 格内会假性溢出,
+        // 缩小文本度量只影响测试渲染,与被测的横滑/计数断言无关
+        data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
+        child: PreviewPage(
+          args: PreviewArgs(
+            items: [assetOf('a0'), assetOf('a1'), assetOf('a2')],
+            index: 0,
+            folderId: 'f1',
+            canDownload: true,
+            where: '项目/夹',
+          ),
         ),
       ),
     ),
-  ));
+  );
   // 预览 URL 编排为微任务级,逐 pump 推进(加载圈为不定长动画,勿 pumpAndSettle)
   await tester.pump();
   await tester.pump();
@@ -85,22 +90,26 @@ Future<void> swipe(WidgetTester tester, {required bool forward}) async {
 }
 
 void main() {
-  testWidgets('P3:AppBar 无左右切换钮,计数保留;左滑下一张/右滑上一张/边界即停',
-      (tester) async {
+  testWidgets('P3:顶栏无左右切换钮,计数保留;左滑下一张/右滑上一张/边界即停', (tester) async {
     await pumpPreview(tester);
 
-    // 顶部去切换钮(作用域限定 AppBar;页内其他 chevron 不受影响)
+    // 顶部去切换钮(作用域限定 PreviewTopBar;页内其他 chevron 不受影响)
+    expect(find.byType(PreviewTopBar), findsOneWidget);
     expect(
       find.descendant(
-          of: find.byType(AppBar), matching: find.byIcon(Icons.chevron_left)),
+        of: find.byType(PreviewTopBar),
+        matching: find.byIcon(Icons.chevron_left),
+      ),
       findsNothing,
-      reason: 'P3:移除 AppBar 左切换钮',
+      reason: 'P3:移除顶部左切换钮',
     );
     expect(
       find.descendant(
-          of: find.byType(AppBar), matching: find.byIcon(Icons.chevron_right)),
+        of: find.byType(PreviewTopBar),
+        matching: find.byIcon(Icons.chevron_right),
+      ),
       findsNothing,
-      reason: 'P3:移除 AppBar 右切换钮',
+      reason: 'P3:移除顶部右切换钮',
     );
 
     // 计数与文件名照常渲染
@@ -116,8 +125,7 @@ void main() {
     await swipe(tester, forward: true);
     expect(find.textContaining('3 / 3'), findsOneWidget);
     await swipe(tester, forward: true);
-    expect(find.textContaining('3 / 3'), findsOneWidget,
-        reason: '末张再左滑边界即停');
+    expect(find.textContaining('3 / 3'), findsOneWidget, reason: '末张再左滑边界即停');
 
     // 右滑回退,首张再滑边界即停
     await swipe(tester, forward: false);
@@ -125,8 +133,7 @@ void main() {
     await swipe(tester, forward: false);
     expect(find.textContaining('1 / 3'), findsOneWidget);
     await swipe(tester, forward: false);
-    expect(find.textContaining('1 / 3'), findsOneWidget,
-        reason: '首张再右滑边界即停');
+    expect(find.textContaining('1 / 3'), findsOneWidget, reason: '首张再右滑边界即停');
     expect(find.text('a0.jpg'), findsWidgets);
   });
 }

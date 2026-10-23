@@ -8,7 +8,9 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
+import '../../widgets/form_text_field.dart';
 import '../../widgets/pickers/subject_picker.dart';
 import 'admin_form_skeleton.dart';
 import 'grant_template_row.dart';
@@ -17,8 +19,10 @@ import 'grant_template_row.dart';
 const kGrantTemplateItemsMax = 50;
 
 /// 打开建/编模板表单;返回是否成功提交。
-Future<bool> showGrantTemplateFormSheet(BuildContext context,
-        {GrantTemplate? template}) async {
+Future<bool> showGrantTemplateFormSheet(
+  BuildContext context, {
+  GrantTemplate? template,
+}) async {
   final ok = await showModalBottomSheet<bool>(
     context: context,
     showDragHandle: true,
@@ -39,10 +43,12 @@ class _GrantTemplateFormSheet extends StatefulWidget {
 }
 
 class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
-  late final TextEditingController _name =
-      TextEditingController(text: widget.template?.name ?? '');
-  late final TextEditingController _desc =
-      TextEditingController(text: widget.template?.description ?? '');
+  late final TextEditingController _name = TextEditingController(
+    text: widget.template?.name ?? '',
+  );
+  late final TextEditingController _desc = TextEditingController(
+    text: widget.template?.description ?? '',
+  );
   late var _isDefault = widget.template?.isDefault ?? false;
   late var _rows = <GrantRow>[
     for (final it in widget.template?.items ?? const <GrantTemplateItem>[])
@@ -73,13 +79,13 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
   }
 
   List<Subject> get _subjects => [
-        for (final r in _rows)
-          Subject(
-            kind: r.kind == 'group' ? SubjectKind.group : SubjectKind.user,
-            id: r.id,
-            name: r.name ?? r.id,
-          ),
-      ];
+    for (final r in _rows)
+      Subject(
+        kind: r.kind == 'group' ? SubjectKind.group : SubjectKind.user,
+        id: r.id,
+        name: r.name ?? r.id,
+      ),
+  ];
 
   Future<void> _submit() async {
     final name = _name.text.trim();
@@ -93,7 +99,9 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
     }
     if (_rows.length > kGrantTemplateItemsMax) {
       setState(
-          () => _error = '条目超上限:最多 $kGrantTemplateItemsMax 条,当前 ${_rows.length} 条');
+        () =>
+            _error = '条目超上限:最多 $kGrantTemplateItemsMax 条,当前 ${_rows.length} 条',
+      );
       return;
     }
     if (_rows.any((r) => r.roles.isEmpty)) {
@@ -148,6 +156,7 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
   @override
   Widget build(BuildContext context) {
     final t = widget.template;
+    final tk = context.tk;
     // F5:内联骨架(限高 0.85 + 滚动 + 键盘避让 + 错误行 + 提交键)收口
     // FormSkeleton,与建号/编辑等表单共用一处实现
     return FormSkeleton(
@@ -158,39 +167,31 @@ class _GrantTemplateFormSheetState extends State<_GrantTemplateFormSheet> {
       error: _error,
       maxHeightFactor: 0.85,
       children: [
-        TextField(
-          controller: _name,
-          autofocus: !_isEdit,
-          decoration: const InputDecoration(
-              labelText: '模板名', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _name, label: '模板名'),
         const SizedBox(height: 10),
-        TextField(
-          controller: _desc,
-          maxLength: 1024,
-          decoration: const InputDecoration(
-              labelText: '描述(可选)', border: OutlineInputBorder()),
-        ),
+        AppTextField(controller: _desc, label: '描述(可选)', maxLength: 1024),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           dense: true,
-          title: const Text('设为默认模板',
-              style: TextStyle(fontSize: Tk.fzBody)),
-          subtitle: const Text(
-              '默认模板的授权会在项目创建时自动合并;每 org 至多一个默认,'
-              '设为默认会自动取消原默认',
-              style: TextStyle(fontSize: Tk.fzXs)),
+          title: Text(
+            '设为默认模板',
+            style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+          ),
+          subtitle: Text(
+            '默认模板的授权会在项目创建时自动合并;每 org 至多一个默认,'
+            '设为默认会自动取消原默认',
+            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3, height: 1.5),
+          ),
           value: _isDefault,
           onChanged: (v) => setState(() => _isDefault = v),
         ),
-        Text('授权条目(${_rows.length}/$kGrantTemplateItemsMax,'
-            '每行主体各自勾选角色)',
-            style: const TextStyle(fontSize: Tk.fzSm, color: Tk.muted)),
-        const SizedBox(height: 6),
-        SubjectPicker(
-          value: _subjects,
-          onChanged: _applySubjects,
+        Text(
+          '授权条目(${_rows.length}/$kGrantTemplateItemsMax,'
+          '每行主体各自勾选角色)',
+          style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
         ),
+        const SizedBox(height: 6),
+        SubjectPicker(value: _subjects, onChanged: _applySubjects),
         for (final r in _rows)
           GrantTemplateRow(
             row: r,
