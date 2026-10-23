@@ -19,6 +19,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/models.dart';
 import '../services/app_log.dart';
 import 'api/ms_api.dart';
+import 'error_report/error_report_controller.dart';
 
 /// dart-define 注入的开发口(不在 UI 呈现;47.108.196.211 预设已删除)。
 const kDartDefineApiBase =
@@ -144,6 +145,10 @@ class Session extends ChangeNotifier {
       baseUrl: base,
       jar: _persistentJar ?? CookieJar(),
       onSessionExpired: handleSessionExpired,
+      // 5xx/网络异常交全局报错页(门槛判定在 controller 内;core 内互引,
+      // 不违反 core→features 解耦约定)
+      onApiError: errorReporter.onApiError,
+      onNetworkError: errorReporter.onNetworkError,
     );
     _setPhase(SessionPhase.ready);
   }

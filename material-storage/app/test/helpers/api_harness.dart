@@ -334,7 +334,8 @@ class FakeNotificationsApi extends NotificationsApi {
       onListOverride;
 
   @override
-  Future<NotificationsList> list({int limit = 50, int offset = 0}) async {
+  Future<NotificationsList> list(
+      {int limit = 50, int offset = 0, bool silent = false}) async {
     listCalls.add((limit: limit, offset: offset));
     final ovr = onListOverride;
     if (ovr != null) return ovr(limit: limit, offset: offset);
