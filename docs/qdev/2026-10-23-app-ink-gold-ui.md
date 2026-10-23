@@ -794,7 +794,7 @@ WP12 收尾（删别名/grep/全量 analyze+test/双主题冒烟）
 
 ## 15. 交付状态（2026-10-23）
 
-- 分支：`feat/app-ink-gold-ui`（worktree `E:/qbb/github_not_me/rushes-lab-feat-app-ink-gold-ui`，自 `liuqi`，**未合并、未 commit**，提交/合并由用户拍板）。
+- 已合并 `liuqi`：merge `de1a107`（代码提交 `b0a5299`，changelog `bab47a1`）；feature worktree 已清理。
 - 验证：`dart analyze lib test` **0 issue**；`flutter test --concurrency=4` **1033 全绿**；`pubspec.yaml`/`pubspec.lock` 无改动；无新增依赖、无后端/数据库/API 变更。
 - 生产文件 >300：仅 `preview_media.dart(674)`（文档唯一例外，diff 仅 2 行颜色）；`notifier.dart(463)`/`transfer_queue.dart(386)` 为未改动的既有文件；`preview_page.dart` 恰好 300 行。
 - 独立测试两轮：首轮 4 个 P1 已闭环；第二轮发现并修复「搜索预览跨文件夹复用首个 folderId」新 P1；终轮无 P0/P1。
