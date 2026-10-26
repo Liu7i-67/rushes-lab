@@ -7,8 +7,11 @@
 /// app-polish-2 增补(G 包,对应 2026-10-22-app-polish-2.md):
 /// - G1 胶片条恒居中:点选视口贴边项/横滑切张(含相邻已可见张)后当前张
 ///   一律 animateTo 居中(去「已完整可见则不滚」守卫);
-/// - G2 缩略图优先:进入只签 thumbnail-url;放大(双击/捏合)>1.5x 签发一次
-///   download-link 原图并 fade 替换(复位不回退);403 保持缩略图+P7 式提示。
+/// - G2(W4/W6 改写,app-thumbnail-storm-fix 2026-10-26):缩略图优先改为
+///   W6 数据源——进入磁盘 miss 经 fetchThumb 签一次 thumbnail-url 取字节,
+///   Image.memory 直出;放大(双击)恒显缩略图、零新增 dio 调用(W4:原图
+///   升级链路整体删除),复位正常;403 桩在场恒零调用,图片场景永不出现
+///   「原图不可用」提示(只剩视频 inline 失败回退分支)。
 ///
 /// 套路:同 preview_page_swipe_test.dart——内存假 API,网络图在测试区恒
 /// errorBuilder,不影响手势与结构断言;全程逐 pump(缩略图 spinner 不定长,
@@ -17,6 +20,9 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart' show kDoubleTapMinTime;
 import 'package:flutter/material.dart';
@@ -67,8 +73,9 @@ class _PreviewFakeMsApi extends FakeMsApi {
   _PreviewAssetsApi get assets => _assets2;
 }
 
-/// G2:记录式假 API——thumbnail-url 即回假签名(缩略图优先直显),
-/// download-link 记录入参(asAttachment 口径)且可编排抛错(403 用例)。
+/// W4/W6(G2 改写):记录式假 API——thumbnail-url 即回假签名(fetchThumb
+/// 链签名桩),download-link 记录入参(asAttachment 口径)且可编排抛错
+/// (403 桩在场恒零调用用例)。
 class _G2AssetsApi extends FakeAssetsApi {
   _G2AssetsApi(super.api);
 
@@ -100,6 +107,54 @@ class _G2FakeMsApi extends FakeMsApi {
   @override
   _G2AssetsApi get assets => _assets2;
 }
+
+/// W4/W6 假 HttpClient:任何请求都回 200 + 1x1 PNG 字节(fetchThumb 字节下载
+/// 桩;桩风格对齐 preview_fallback_thumb_test——noSuchMethod 返回 null)。
+/// T12 配方:HttpOverrides.runZoned 包住整个测试体(pumpMedia+轮询都在 zone
+/// 内),静态 _thumbHttp 首建(本文件首个 fetch,即首个 W6 用例)即被拦;桩
+/// 无状态,后续用例复用同实例不受 zone 影响。
+class _PngHttpClient implements HttpClient {
+  @override
+  Future<HttpClientRequest> getUrl(Uri url) async => _PngRequest();
+  @override
+  set connectionTimeout(Duration? _) {}
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _PngRequest implements HttpClientRequest {
+  @override
+  Future<HttpClientResponse> close() async => _PngResponse();
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) {}
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+class _PngResponse implements HttpClientResponse {
+  @override
+  int get statusCode => 200;
+  @override
+  StreamSubscription<List<int>> listen(
+    void Function(List<int> event)? onData, {
+    Function? onError,
+    void Function()? onDone,
+    bool? cancelOnError,
+  }) => Stream<List<int>>.fromIterable([kPng1x1]).listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
+  @override
+  dynamic noSuchMethod(Invocation invocation) => null;
+}
+
+/// 1×1 透明 PNG(经典字节,测试内可真实解码出帧)。
+final Uint8List kPng1x1 = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+  'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+);
 
 Asset _img(
   String id, {
@@ -137,7 +192,9 @@ Future<void> _pumpPreview(
   await tester.pump();
 }
 
-/// 挂裸 PreviewMedia(G2 媒体状态机用,无胶片条无溢出噪音)并落定首轮。
+/// 挂裸 PreviewMedia(W4/W6 媒体状态机用,无胶片条无溢出噪音)并等首图落地:
+/// fetchThumb(签名→假 HttpClient 字节→解码)链跨多拍微任务,逐 pump 轮询
+/// 等 InteractiveViewer 出现(加载圈为不定长动画,pumpAndSettle 不可用)。
 Future<_G2AssetsApi> _pumpMedia(
   WidgetTester tester,
   Asset asset, {
@@ -153,8 +210,10 @@ Future<_G2AssetsApi> _pumpMedia(
       ),
     ),
   );
-  await tester.pump(); // _load 微任务:thumbnail-url 落地
-  await tester.pump(); // Image 挂载帧
+  for (var i = 0; i < 40; i++) {
+    if (find.byType(InteractiveViewer).evaluate().isNotEmpty) break;
+    await tester.pump(const Duration(milliseconds: 50));
+  }
   return fake.assets;
 }
 
@@ -182,14 +241,6 @@ double _mediaScale(WidgetTester tester) => tester
     .transformationController!
     .value
     .getMaxScaleOnAxis();
-
-/// 树上全部网络图 URL(G2 换源断言:缩略图/原图各一个特征地址)。
-List<String> _imageUrls(WidgetTester tester) => tester
-    .widgetList<Image>(
-      find.byWidgetPredicate((w) => w is Image && w.image is NetworkImage),
-    )
-    .map((w) => (w.image as NetworkImage).url)
-    .toList();
 
 void main() {
   setUp(() => thumbnailCache.clear());
@@ -393,96 +444,99 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
-  // ── G2 缩略图优先 + 放大换原图 ────────────────────────────────────────────
-  testWidgets('G2:进入预览默认只签 thumbnail-url 直显缩略图,不签原图', (tester) async {
-    final fake = await _pumpMedia(tester, _img('g2a-1'));
+  // ── G2→W4/W6:缩略图数据源与放大行为(app-thumbnail-storm-fix 改写)──────
+  testWidgets(
+    'W6:进入预览磁盘 miss → fetchThumb 签一次 thumbnail-url 取字节,Image.memory 直出不签原图',
+    (tester) async {
+      await HttpOverrides.runZoned(() async {
+        // 本文件无磁盘挂载(setUp 不 attach 目录):ThumbDiskStore._dir 为 null,
+        // read 恒 miss → fetchThumb(签名→假 HttpClient 字节)→ Image.memory。
+        final fake = await _pumpMedia(tester, _img('g2a-1'));
 
-    expect(fake.thumbCalls, ['g2a-1'], reason: 'G2:入口走既有 thumbnail 通道');
-    expect(fake.linkCalls, isEmpty, reason: 'G2:入口不再直接签 download-link 原图');
-    expect(
-      find.byType(InteractiveViewer),
-      findsOneWidget,
-      reason: '缩略图直显仍为图片分支(可放大)',
-    );
-    expect(_imageUrls(tester), [
-      'http://thumb.test/g2a-1',
-    ], reason: '渲染的是缩略图 URL');
-    expect(
-      find.textContaining('原图不可用'),
-      findsNothing,
-      reason: '缩略图正常直显,无 P7 提示',
-    );
-    expect(find.text('预览加载失败'), findsNothing);
-  });
+        expect(fake.thumbCalls, [
+          'g2a-1',
+        ], reason: 'W6:磁盘 miss 经 fetchThumb 签一次 thumbnail-url');
+        expect(fake.linkCalls, isEmpty, reason: 'W6:入口不签 download-link 原图');
+        expect(
+          find.byType(InteractiveViewer),
+          findsOneWidget,
+          reason: '缩略图直显仍为图片分支(可放大)',
+        );
+        expect(
+          find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+          findsOneWidget,
+          reason: 'W6:直出来源为 Image.memory(fetchThumb 字节),缩略图路径 NetworkImage 退场',
+        );
+        expect(
+          find.textContaining('原图不可用'),
+          findsNothing,
+          reason: '缩略图正常直显,无回退提示',
+        );
+        expect(find.text('预览加载失败'), findsNothing);
+      }, createHttpClient: (_) => _PngHttpClient());
+    },
+  );
 
-  testWidgets('G2:放大(双击)>1.5x 签发一次原图;解码失败回退缩略图+提示,复位不重签(P2-1 改定)', (
+  testWidgets('W4:双击放大恒显缩略图,零新增 dio 调用;复位正常(原 G2 放大/P2-1 回退用例改写)', (
     tester,
   ) async {
-    final fake = await _pumpMedia(tester, _img('g2b-1'));
-    final center = tester.getCenter(find.byType(PreviewMedia));
-    expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: '前置:初始 1x');
+    await HttpOverrides.runZoned(() async {
+      final fake = await _pumpMedia(tester, _img('g2b-1'));
+      final center = tester.getCenter(find.byType(PreviewMedia));
+      expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: '前置:初始 1x');
 
-    await _doubleTap(tester, center); // 2.5x > 1.5x 阈值
-    await tester.pump(); // 签发微任务 + 换源 setState
-    await tester.pump(const Duration(milliseconds: 400)); // 缩放动画+fade 完成
-    expect(fake.linkCalls, const [
-      (id: 'g2b-1', asAttachment: false),
-    ], reason: 'G2:放大越过 1.5x 签发一次 inline 原图(as_attachment:false)');
-    expect(_mediaScale(tester), greaterThan(1.05), reason: 'G2:原图加载中缩放态不打断');
+      await _doubleTap(tester, center); // 2.5x,缩放动画 220ms
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(
+        _mediaScale(tester),
+        greaterThan(1.05),
+        reason: 'W4:双击放大仍生效(只动变换矩阵,防「图未渲染假绿」)',
+      );
+      expect(fake.linkCalls, isEmpty, reason: 'W4:放大零新增 dio 调用(原图升级链路整体删除)');
+      expect(fake.thumbCalls, ['g2b-1'], reason: 'W4:缩略图签名仍只有入口那一次');
+      expect(
+        find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+        findsOneWidget,
+        reason: 'W4:放大后画面恒为 Image.memory 缩略图',
+      );
 
-    // P2-1(测试实证缺陷修复):widget 测试区网络图恒 errorBuilder,即原图
-    // 下载/解码失败路径——缩略图可用态回退保持缩略图 + P7 式提示(修复前
-    // 直落「图片解码失败」失败卡)。pump 过 errorBuilder 后置帧回调与回退
-    // fade(200ms)后断言稳定态。
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(_imageUrls(tester), [
-      'http://thumb.test/g2b-1',
-    ], reason: 'P2-1:原图解码失败回退缩略图渲染(非失败卡)');
-    expect(
-      find.textContaining('原图不可用'),
-      findsOneWidget,
-      reason: 'P2-1:与 403 路径同观感,叠不打断的 P7 式小字提示',
-    );
-    expect(
-      find.byType(InteractiveViewer),
-      findsOneWidget,
-      reason: 'P2-1:保持图片分支可放大(不落失败卡)',
-    );
-    expect(_mediaScale(tester), greaterThan(1.05), reason: 'P2-1:回退不打断缩放态');
-
-    await _doubleTap(tester, center); // 复位 1x
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: '前置:已复位');
-    expect(fake.linkCalls.length, 1, reason: 'G2:签发去重——复位不重签(P2-1 回退态同样不重签)');
-    expect(_imageUrls(tester), [
-      'http://thumb.test/g2b-1',
-    ], reason: 'P2-1:回退态稳定,复位不再尝试原图');
+      await _doubleTap(tester, center); // 复位 1x
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: 'W4:再双击复位 1x');
+      expect(fake.linkCalls, isEmpty, reason: 'W4:复位同样零原图签发');
+      expect(fake.thumbCalls, ['g2b-1'], reason: 'W4:复位不触发重签');
+    }, createHttpClient: (_) => _PngHttpClient());
   });
 
-  testWidgets('G2:放大签原图 403 → 保持缩略图 + P7 式小字提示,缩放不打断', (tester) async {
-    final fake = await _pumpMedia(
-      tester,
-      _img('g2c-1'),
-      linkStaged: ApiException(403, '无下载权限'),
-    );
-    final center = tester.getCenter(find.byType(PreviewMedia));
+  testWidgets('W4:放大不触发原图签发(403 桩在场零调用),恒显缩略图(原 G2 403 回退用例改写)', (
+    tester,
+  ) async {
+    await HttpOverrides.runZoned(() async {
+      // linkStaged 403 保留注入以证明零调用:若放大仍会签原图,此处即抛 403 异常。
+      final fake = await _pumpMedia(
+        tester,
+        _img('g2c-1'),
+        linkStaged: ApiException(403, '无下载权限'),
+      );
+      final center = tester.getCenter(find.byType(PreviewMedia));
 
-    await _doubleTap(tester, center);
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 400));
-    expect(fake.linkCalls.length, 1, reason: '前置:放大确有签发尝试');
-    expect(_mediaScale(tester), greaterThan(1.05), reason: 'G2:签发失败缩放态不被打断');
-    expect(_imageUrls(tester), [
-      'http://thumb.test/g2c-1',
-    ], reason: 'G2:403 保持缩略图渲染');
-    expect(
-      find.textContaining('原图不可用'),
-      findsOneWidget,
-      reason: 'G2:叠不打断的 P7 式小字提示(沿用既有文案)',
-    );
-    expect(find.text('预览加载失败'), findsNothing, reason: 'G2:失败不落失败卡(本来就是缩略图)');
+      await _doubleTap(tester, center);
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(fake.linkCalls, isEmpty, reason: 'W4:403 桩在场仍零调用——放大不再签原图');
+      expect(_mediaScale(tester), greaterThan(1.05), reason: 'W4:双击放大缩放生效');
+      expect(fake.thumbCalls, ['g2c-1'], reason: 'W4:缩略图仅入口一次签名');
+      expect(
+        find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+        findsOneWidget,
+        reason: 'W4:恒显 Image.memory 缩略图',
+      );
+      expect(
+        find.textContaining('原图不可用'),
+        findsNothing,
+        reason: 'W4:图片放大场景永不出现回退提示(只剩视频 inline 失败回退分支)',
+      );
+      expect(find.text('预览加载失败'), findsNothing, reason: 'W4:零调用即无失败卡');
+    }, createHttpClient: (_) => _PngHttpClient());
   });
 
   // ── P2-8 入队计时器按资产独立 ────────────────────────────────────────────

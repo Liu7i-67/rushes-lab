@@ -1,38 +1,44 @@
 /// PreviewMedia — 预览主体加载编排与状态机(B2 §8.2 八类;D10 拆分后装配层):
 /// 决策在 preview_plan.dart(纯函数),md/text 拉取在 preview_text_load.dart,
 /// 视频/实况播放器在 preview_player.dart(自持控制器),媒体区渲染与手势在
-/// preview_image_view.dart(本层经组合装配)。本层只做加载编排与状态机:
-/// 切张由父级以 ValueKey(asset.id) 重建清态;起播/解码失败一律降级
-/// 「下载后打开」色块。livp「查看照片」回切显示静态缩略图而非暂停帧
+/// preview_image_view.dart(W4+W6 改造落在本层组合的 view)。本层只做加载
+/// 编排与状态机:切张由父级以 ValueKey(asset.id) 重建清态;起播/解码失败
+/// 一律降级「下载后打开」色块。livp「查看照片」回切显示静态缩略图而非暂停帧
 /// (plan playingLive 维度,控制器 Offstage 保活便于续播)。
 /// C2/C3(app-polish):媒体区单击上抛在 view 层经双击窗口消歧后回调至此
 /// (onSingleTap → 页面切沉浸)。
-/// G2(app-polish-2):图片分支两段式渐进加载——进入默认签 thumbnail-url
-/// 直显缩略图(不再直接签原图);view 层放大 >1.5x 经 onOriginalRequest
-/// 触发签发 download-link 原图,就绪后平滑替换(缩放态不打断,复位不回退);
-/// 失败保持缩略图叠 P7 式小字提示。无缩略图资产维持原图 inline,
-/// heic/svg 等恒缩略图,livp/视频/PDF 分支零改动。
-/// P2-1(app-polish-2 探针实证缺陷修复):放大签发的原图下载/解码失败
-/// (Image errorBuilder)时不再落「图片解码失败」失败卡——缩略图可用态
-/// 回退保持缩略图+_thumbFallback 提示(与 403 路径同观感),仅无缩略图
-/// 可用时保留失败卡。
+/// W4 #19-#21(app-thumbnail-storm-fix,用户拍板 D4):放大永不自动换原图——
+/// G2 升级链路(_maybeRequestOriginal/_requestOriginal/AnimatedSwitcher 等)
+/// 整体删除;livePreviewUrl 与 _loadThumb 并行发起(冷缓存 live URL 不被
+/// 缩略图字节最坏 20s 阻塞),_loading 在 _loadThumb 落定即 false,晚到
+/// live URL 经 setState 刷新出「播放实况」按钮;视频/PDF/text/markdown 零改动。
+/// W6 #23-#26(app-thumbnail-storm-fix):缩略图统一数据源——先读磁盘
+/// ThumbDiskStore(命中零网络 Image.memory 直出),未命中经共享取字节入口
+/// fetchThumb(与宫格/胶片条共享任务去重,受并发 6 闸 + 20s 硬超时治理)并
+/// 按磁盘代数写盘;失败/取消/超时统一 P2-6 两态文案落失败卡,不弹报错页。
 library;
 
+import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/preview_kind.dart';
 import '../../core/session.dart';
+import '../../core/thumb_disk_store.dart';
+import '../../core/thumb_fetch.dart';
+import '../../core/thumb_pipeline.dart' show ThumbHandle;
 import '../../models/models.dart';
-import '../assets/thumbnail_image.dart' show thumbnailCache;
 import 'preview_image_view.dart';
 import 'preview_plan.dart';
 import 'preview_text_load.dart';
 
 export 'preview_image_view.dart'
-    show kSwipeDistanceThreshold, kSwipeVelocityThreshold; // preview_page 既有 import 兼容
+    show
+        kSwipeDistanceThreshold,
+        kSwipeVelocityThreshold; // preview_page 既有 import 兼容
 
 class PreviewMedia extends StatefulWidget {
   const PreviewMedia({
@@ -62,8 +68,13 @@ class PreviewMedia extends StatefulWidget {
 }
 
 class _PreviewMediaState extends State<PreviewMedia> {
+  /// W6:预览缩略图 UI 总等待上限(自进入预览起算、含管线排队——与管线
+  /// deadline「执行起算」不同口径;有意为之的双重上限)。
+  static const _thumbWaitLimit = Duration(seconds: 20);
+
   var _loading = true;
-  String? _url; // 可直接呈现的图 URL(原图 inline / 缩略图)
+  Uint8List? _thumbBytes; // W6:缩略图字节(磁盘直读/共享取字节;非空恒 Image.memory)
+  String? _url; // 可直接呈现的图 URL(W6 语义:仅无缩略图原图 inline;video 播放 inline)
   String? _text; // md/text 内容
   String? _fail; // 降级提示(色块 + 下载后打开)
   var _videoReady = false;
@@ -71,31 +82,29 @@ class _PreviewMediaState extends State<PreviewMedia> {
   String? _liveUrl; // livp 实况短片(非空才有回切按钮,web 同口径)
   var _playingLive = false; // livp 在播实况短片;video 类就绪即 true
 
-  // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字提示)。
-  // G2 起图片分支反向复用:放大签原图失败(403/网络)时保持缩略图+同一提示。
-  // P2-1:原图签发成功但下载/解码失败(Image errorBuilder)同口径——缩略图
-  // 可用则回退保持缩略图+提示,仅无缩略图可用时保留失败卡。
+  // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字
+  // 提示,视频 inline 失败同口径降级为静态帧渲染)。
   var _thumbFallback = false;
 
-  // P2-1:本张缩略图 URL(_loadThumb 就绪时记录,不重签)——原图下载/解码
-  // 失败时经 errorBuilder 回退复用。
-  String? _thumbUrl;
+  // W6 #23:共享取字节任务句柄。每 State 生命周期只允许发起一次——切张由
+  // 父级 ValueKey(asset.id) 重建 State 保证;重入会泄漏旧句柄无人 cancel。
+  ThumbHandle? _thumbHandle;
 
-  // G2(app-polish-2)缩略图优先状态机:
-  var _showingThumb = false; // 当前 _url 为缩略图(进入默认;换原图后 false)
-  var _originalRequested = false; // 本张原图签发去重(缩放反复越线只签一次)
+  // W6 #23/#25:本次加载捕获的磁盘代数(read 前捕获,贯穿 write/remove,
+  // 防跨代误写/误删)。
+  int _thumbGen = 0;
 
   Asset get _a => widget.asset;
 
   PreviewKind get _kind =>
       detectKind(filename: _a.filename, contentType: _a.contentType);
 
-  /// 播放器挂载 URL:video=原图 inline;livp=实况短片。
+  /// 播放器挂载 URL:video=原图 inline;livp=实况短片(W6:语义不变)。
   String? get _playUrl => switch (_kind) {
-        PreviewKind.video => _url,
-        PreviewKind.livp => _liveUrl,
-        _ => null,
-      };
+    PreviewKind.video => _url,
+    PreviewKind.livp => _liveUrl,
+    _ => null,
+  };
 
   @override
   void initState() {
@@ -103,33 +112,41 @@ class _PreviewMediaState extends State<PreviewMedia> {
     _load();
   }
 
+  @override
+  void dispose() {
+    // W6 #23:横切/退出即取消共享任务(最后订阅者离开 → 管线终止/释放名额),
+    // 防任务残留占名额与 watchdog 至 20s。
+    _thumbHandle?.cancel();
+    _thumbHandle = null;
+    super.dispose();
+  }
+
   Future<void> _load() async {
     switch (_kind) {
       case PreviewKind.livp:
+        // W4 #21:livePreviewUrl 与 _loadThumb 并行发起(冷缓存下 live URL
+        // 不被缩略图字节最坏 20s 阻塞,断网 35s 落降级破验收 2)。
+        final live = _loadLiveUrl();
         await _loadThumb();
-        try {
-          final r = await session.api!.assets.livePreviewUrl(_a.id);
-          if (mounted) _liveUrl = r.url;
-        } catch (_) {/* 403/404 → 只显示静态图(web 同口径) */}
         if (mounted) setState(() => _loading = false);
+        await live;
       case PreviewKind.heic:
         await _loadThumb();
         if (mounted) setState(() => _loading = false);
       case PreviewKind.image:
         // svg/avif/ico 超出 Flutter 解码:走缩略图(JPEG 转码),无则色块
-        if (kUnDecodableImageExts
-            .any((e) => _a.filename.toLowerCase().endsWith(e))) {
+        if (kUnDecodableImageExts.any(
+          (e) => _a.filename.toLowerCase().endsWith(e),
+        )) {
           await _loadThumb();
           if (mounted) setState(() => _loading = false);
           return;
         }
-        // G2:有缩略图先缩略图直显(原图待放大 >1.5x 再签,见
-        // _maybeRequestOriginal);无缩略图维持原图 inline(现状,web 同口径)
+        // W4/W6:有缩略图缩略图直显(磁盘直读/共享取字节,放大恒缩略图);
+        // 无缩略图维持原图 inline(现状,web 同口径)
         if (_a.hasThumbnail) {
           await _loadThumb();
-          if (!mounted) return;
-          if (_fail == null) _showingThumb = true;
-          setState(() => _loading = false);
+          if (mounted) setState(() => _loading = false);
         } else {
           await _loadInlineUrl();
         }
@@ -145,14 +162,28 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
+  /// livp 实况短片 URL(W4 #21 并行发起;失败静默回退静态图,web 同口径)。
+  /// 晚到的 live URL 必须 setState——并行后 _loading=false 的刷新先于本回调,
+  /// 不 setState 则「播放实况」按钮/播放器永不出现。
+  Future<void> _loadLiveUrl() async {
+    try {
+      final r = await session.api!.assets.livePreviewUrl(_a.id);
+      if (mounted) setState(() => _liveUrl = r.url);
+    } catch (_) {
+      /* 403/404 → 只显示静态图(web 同口径) */
+    }
+  }
+
   /// download-link(inline)原图/媒体 URL;失败置 _fail。
   /// P7(mobile-ux-polish):失败(403 无下载权/网络错)时若有缩略图则回退
   /// 缩略图预览(叠不打断的小字提示,不阻断查看);无缩略图维持原失败卡。
   /// 视频 inline 失败同口径降级(渲染侧按静态图处理,不再挂播放器)。
   Future<void> _loadInlineUrl() async {
     try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
+      final url = await session.api!.assets.downloadLink(
+        _a.id,
+        asAttachment: false,
+      );
       if (mounted) _url = url;
     } catch (_) {
       if (!mounted) return;
@@ -170,28 +201,79 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
-  /// 缩略图大图(heic/livp 静态/不可解码 image/G2 默认首显);缺失/失败按
-  /// P2-6 两态置 _fail。P2-1:URL 就绪时记入 _thumbUrl(原图失败回退复用)。
+  /// W6 #23:缩略图数据源(顺序写死)——
+  /// ① 无 thumbnail_key 直接两态失败卡(不读盘,走现状 inline/失败分支);
+  /// ② 捕获磁盘代数 → ThumbDiskStore.read(读返回后先查 mounted——read 期间
+  ///    dispose 直接返回不发 fetch,防无人取消的任务占名额至 20s;再校验代数,
+  ///    跨代丢弃视同 miss:重新捕获当前代数续走,不得直接 return——三空会
+  ///    永久转圈)→ 命中记 _thumbBytes 零网络;
+  /// ③ miss 经共享取字节入口 fetchThumb(与宫格/胶片条共享任务不重复下载),
+  ///    句柄存 _thumbHandle(dispose 必 cancel);外层 .timeout(20s) 为 UI
+  ///    总等待上限,onTimeout 先 cancel 再落失败;成功记 _thumbBytes 并按
+  ///    捕获代数写盘(fire-and-forget);收到 null(cancel/clear)仍 mounted
+  ///    也置 _fail(防 _thumbBytes/_url/_fail 三空永久 loading)。
+  /// 签名/下载失败(404/5xx/网络)统一 P2-6 两态文案置 _fail。
   Future<void> _loadThumb() async {
+    if (!_a.hasThumbnail) {
+      _fail = thumbFailText(_a.tags);
+      return;
+    }
+    final id = _a.id;
     try {
-      if (!_a.hasThumbnail) {
-        _fail = thumbFailText(_a.tags);
+      // 磁盘代数必须在 read 之前捕获(write 紧前才捕获形同虚设)
+      var gen = ThumbDiskStore.I.generation;
+      _thumbGen = gen;
+      final cached = await ThumbDiskStore.I.read(id);
+      if (!mounted) return; // read 期间 dispose:不发 fetch
+      final nowGen = ThumbDiskStore.I.generation;
+      if (nowGen != gen) {
+        // read 期间 clear(跨代):丢弃视同 miss,重新捕获当前代数继续
+        gen = nowGen;
+        _thumbGen = nowGen;
+      }
+      if (cached != null) {
+        setState(() => _thumbBytes = cached); // 磁盘命中:零网络直出
         return;
       }
-      _url = _thumbUrl = await thumbnailCache.urlOf(_a.id);
+      final handle = fetchThumb(id);
+      _thumbHandle = handle; // 每 State 只发起一次(见字段注释)
+      final bytes = await handle.future.timeout(
+        _thumbWaitLimit,
+        onTimeout: () {
+          // UI 总等待上限(含排队):先取消任务再落失败
+          handle.cancel();
+          throw TimeoutException('预览缩略图等待超时', _thumbWaitLimit);
+        },
+      );
+      if (!mounted) return;
+      if (bytes == null || bytes.isEmpty) {
+        // cancel(null)/clear:仍 mounted 也落失败,防三空永久 loading
+        setState(() => _fail = thumbFailText(_a.tags));
+        return;
+      }
+      setState(() => _thumbBytes = bytes);
+      // 写盘 fire-and-forget(带捕获代数;全局写互斥在 store 内部)
+      ThumbDiskStore.I.write(id, bytes, expectedGeneration: gen).ignore();
     } catch (_) {
-      _fail = thumbFailText(_a.tags);
+      // 签名失败(404/5xx)/下载失败/超时:统一两态文案(p7-both 500 语义同)
+      if (mounted) setState(() => _fail = thumbFailText(_a.tags));
     }
   }
 
   /// md/text 正文(拆 preview_text_load.dart;P2-8 超限断流降级)。
   Future<void> _loadText() async {
     try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
-      final text = await fetchInlineText((token) =>
-          openPresignedStream(session.api!.presignedHttp, url,
-              cancelToken: token));
+      final url = await session.api!.assets.downloadLink(
+        _a.id,
+        asAttachment: false,
+      );
+      final text = await fetchInlineText(
+        (token) => openPresignedStream(
+          session.api!.presignedHttp,
+          url,
+          cancelToken: token,
+        ),
+      );
       if (mounted) _text = text;
     } on TextTooLargeException catch (e) {
       if (mounted) {
@@ -217,46 +299,6 @@ class _PreviewMediaState extends State<PreviewMedia> {
     }
   }
 
-  // ── G2 缩略图优先 + 放大换原图 ────────────────────────────────────────────
-
-  /// 当前张是否允许「放大换原图」:仅普通可解码图片且缩略图在显
-  /// (svg/avif/ico/heic 恒缩略图;无缩略图进入时已是原图;其余分支零改动)。
-  bool get _canUpgradeToOriginal =>
-      _kind == PreviewKind.image &&
-      _a.hasThumbnail &&
-      !kUnDecodableImageExts
-          .any((e) => _a.filename.toLowerCase().endsWith(e)) &&
-      _showingThumb &&
-      _fail == null;
-
-  /// 缩放(捏合或双击)>1.5x 触发一次原图签发;签发去重:同一张预览会话内
-  /// 只签一次(反复缩放/复位不重签;切张重建 State 后视为新会话)。
-  /// view 层手势回调连发安全(本层同步置位去重)。
-  void _maybeRequestOriginal() {
-    if (!_canUpgradeToOriginal || _originalRequested) return;
-    _originalRequested = true; // 同步置位,手势连发不双签
-    _requestOriginal();
-  }
-
-  /// 签发 download-link 原图并平滑替换:就绪后仅换 _url(fade 由渲染层
-  /// AnimatedSwitcher 承担,InteractiveViewer/变换矩阵不动,缩放态不打断;
-  /// 复位 1x 不回退);失败(403 无下载权/网络)保持缩略图,叠 P7 式小字提示。
-  /// 切张防串:State 随 asset.id 重建,旧请求落地经 mounted 守卫丢弃。
-  Future<void> _requestOriginal() async {
-    try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
-      if (!mounted) return;
-      setState(() {
-        _url = url;
-        _showingThumb = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _thumbFallback = true);
-    }
-  }
-
   /// livp 实况/静态回切(P2-2,web 同款按钮语义):静态→实况:控制器已就绪
   /// 直接续播,否则起播(首播/失败重试);实况→静态:暂停保活,显示静态缩略图。
   void _toggleLive() {
@@ -270,20 +312,21 @@ class _PreviewMediaState extends State<PreviewMedia> {
     });
   }
 
-  /// P2-1:Image 下载/解码失败(view 层 errorBuilder 上抛)——缩略图可用态
-  /// 回退保持缩略图 + 提示;errorBuilder 处于 build 期,回退经 post-frame
-  /// setState 落地:本帧先现失败卡,下帧起 fade 回缩略图。
-  void _onImageDecodeFailed(String url) {
-    if (_thumbUrl != null && url != _thumbUrl) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
-        setState(() {
-          _url = _thumbUrl;
-          _showingThumb = true;
-          _thumbFallback = true; // 复位不重签(_originalRequested 保持)
-        });
+  /// W6 #25:Image.memory 解码失败(view 层 errorBuilder 上抛)——删盘上
+  /// 坏字节(带捕获代数,防跨代误删新会话写入)+ post-frame 置失败卡
+  /// (文案与「预览图还在生成」语义区分;同时清 _thumbFallback 防视频回退
+  /// 分支残留矛盾提示)。
+  void _onThumbDecodeFailed() {
+    final id = _a.id;
+    final gen = _thumbGen;
+    ThumbDiskStore.I.remove(id, expectedGeneration: gen).ignore();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _fail = '图片解码失败,建议下载后打开';
+        _thumbFallback = false;
       });
-    }
+    });
   }
 
   /// P3:播放器就绪/失败(状态机侧;view 层挂载)。
@@ -310,6 +353,7 @@ class _PreviewMediaState extends State<PreviewMedia> {
       asset: _a,
       kind: _kind,
       loading: _loading,
+      thumbBytes: _thumbBytes,
       url: _url,
       text: _text,
       fail: _fail,
@@ -322,8 +366,7 @@ class _PreviewMediaState extends State<PreviewMedia> {
       onSingleTap: widget.onSingleTap,
       onSwipe: widget.onSwipe,
       onZoomChanged: widget.onZoomChanged,
-      onOriginalRequest: _maybeRequestOriginal,
-      onImageDecodeFailed: _onImageDecodeFailed,
+      onThumbDecodeFailed: _onThumbDecodeFailed,
       onToggleLive: _toggleLive,
       onPlayerReady: _onPlayerReady,
       onPlayerError: _onPlayerError,

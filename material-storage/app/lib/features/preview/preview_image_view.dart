@@ -1,22 +1,21 @@
-/// PreviewImageView — 预览媒体区渲染/手势层(D10 从 preview_media 拆出,
-/// 纯迁移零行为变化):
-/// - 渲染分支装配:Image 装配([_previewImage])、InteractiveViewer 装配
-///   ([_image])、播放器挂载([_player])、实况回切([_liveToggle])、
-///   正文/失败卡/PDF 面板分支([_render]);
-/// - 手势:C2/C3 单击/双击「双击窗口」手动消歧([_onTapUp])、双击
-///   1x↔2.5x 缩放动画([_handleDoubleTap])、捏合与横滑判定
-///   ([_onInteraction*])。
-/// 状态(加载/URL/失败/播放态)由 PreviewMedia(加载编排与状态机)持有,
-/// 经 props 注入;状态变更经 on* 回调上抛(切沉浸/切页/放大让位/实况切换/
-/// 播放器就绪与失败)。G2(app-polish-2):捏合/双击放大 >1.5x 经
-/// [PreviewImageView.onOriginalRequest] 触发原图签发(本层不关心签发编排)。
+/// PreviewImageView — 预览媒体区渲染/手势层(D10 从 preview_media 拆出;
+/// W4+W6 改造落在本层):渲染分支装配(Image/InteractiveViewer/播放器/
+/// 实况回切/正文与失败卡)+ 手势(单击/双击「双击窗口」手动消歧、双击
+/// 1x↔2.5x 缩放动画、捏合与横滑判定)。
+/// W4(放大不换原图,用户拍板 D4):有缩略图恒显缩略图,放大永不自动换
+/// 原图(G2 升级链路整体删除);无缩略图资产维持原图 inline。
+/// W6(数据源统一):缩略图以字节([PreviewImageView.thumbBytes])呈现
+/// ([Image.memory]);[Image.network] 仅剩无缩略图原图 inline 一条路。
+/// 状态(加载/URL/字节/失败/播放态)由 PreviewMedia(加载编排与状态机)
+/// 持有,经 props 注入;状态变更经 on* 回调上抛(切沉浸/切页/放大让位/
+/// 实况切换/播放器就绪与失败/缩略图解码失败)。
 library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:flutter/gestures.dart'
-    show kDoubleTapSlop, kDoubleTapTimeout;
+import 'package:flutter/gestures.dart' show kDoubleTapSlop, kDoubleTapTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -36,9 +35,6 @@ const kSwipeVelocityThreshold = 500.0;
 /// C3:双击放大目标倍率(规格 2.5x;捏合上限 maxScale 4 不变)。
 const double kDoubleTapScale = 2.5;
 
-/// G2:放大触发原图签发的缩放阈值(捏合/双击超过即签,规格 1.5x)。
-const double kOriginalZoomThreshold = 1.5;
-
 class PreviewImageView extends StatefulWidget {
   const PreviewImageView({
     super.key,
@@ -49,6 +45,8 @@ class PreviewImageView extends StatefulWidget {
     required this.onPlayerReady,
     required this.onPlayerError,
     required this.onSharePdf,
+    required this.onThumbDecodeFailed,
+    this.thumbBytes,
     this.url,
     this.text,
     this.fail,
@@ -61,8 +59,6 @@ class PreviewImageView extends StatefulWidget {
     this.onSingleTap,
     this.onSwipe,
     this.onZoomChanged,
-    this.onOriginalRequest,
-    this.onImageDecodeFailed,
   });
 
   final Asset asset;
@@ -71,7 +67,11 @@ class PreviewImageView extends StatefulWidget {
   /// 首轮加载中(true=加载圈;PreviewMedia 状态机持有)。
   final bool loading;
 
-  /// 可直接呈现的图 URL(原图 inline / 缩略图)。
+  /// 缩略图字节(W6:磁盘直读/共享取字节入口产出;非空恒走 Image.memory)。
+  final Uint8List? thumbBytes;
+
+  /// 可直接呈现的图 URL(W6 语义:仅无缩略图原图 inline 非空;video 为
+  /// 播放 inline URL)。
   final String? url;
 
   /// md/text 正文。
@@ -80,7 +80,7 @@ class PreviewImageView extends StatefulWidget {
   /// 降级提示(色块 + 下载后打开)。
   final String? fail;
 
-  /// P7/G2:缩略图兜底提示条(原图 inline 失败回退/放大签原图失败保持)。
+  /// P7:缩略图兜底提示条(原图 inline 失败回退)。
   final bool thumbFallback;
 
   /// 播放器就绪/死亡/在播态(PreviewMedia 状态机持有)。
@@ -103,20 +103,16 @@ class PreviewImageView extends StatefulWidget {
   /// P3:图片放大态(scale>1)回报(外层横滑切页据此让位)。
   final ValueChanged<bool>? onZoomChanged;
 
-  /// G2:捏合/双击放大越过 [kOriginalZoomThreshold](签发编排归
-  /// PreviewMedia;去重与失败回退均在状态机侧)。
-  final VoidCallback? onOriginalRequest;
-
-  /// P2-1:Image 下载/解码失败(errorBuilder)上抛(失败 URL;回退编排——
-  /// 缩略图可用则 post-frame 回退缩略图——归 PreviewMedia 状态机)。
-  final ValueChanged<String>? onImageDecodeFailed;
-
-  /// livp 实况/静态回切(状态机切换 _playingLive)。
-  final VoidCallback onToggleLive;
+  /// W4 #20:Image.memory 解码失败(errorBuilder)上抛(删盘上坏字节 +
+  /// post-frame 置失败卡,编排归 PreviewMedia 状态机)。
+  final VoidCallback onThumbDecodeFailed;
 
   /// 播放器起播就绪/失败(状态机置 _videoReady/_playerDead/_fail 等)。
   final VoidCallback onPlayerReady;
   final VoidCallback onPlayerError;
+
+  /// livp 实况/静态回切(状态机切换 _playingLive)。
+  final VoidCallback onToggleLive;
 
   /// pdf iOS 面板「分享/打开」(dio 下载临时文件 → share_plus)。
   final VoidCallback onSharePdf;
@@ -156,6 +152,10 @@ class _PreviewImageViewState extends State<PreviewImageView>
 
   PreviewKind get _kind => widget.kind;
 
+  /// 当前渲染来源是否有可呈现的图(W6 #24):缩略图字节(磁盘/共享取字节)
+  /// 或无缩略图原图 inline URL 任一在场即可渲染。
+  bool get _hasRenderable => widget.thumbBytes != null || widget.url != null;
+
   @override
   void dispose() {
     _tapWindow?.cancel();
@@ -165,14 +165,11 @@ class _PreviewImageViewState extends State<PreviewImageView>
   }
 
   /// P3:交互中按当前缩放分流——未放大(scale≈1)累计横滑位移(供切页判定),
-  /// 放大后位移归 InteractiveViewer 平移,不再累计。
-  /// G2:捏合放大越过 1.5x 阈值即触发原图签发(去重内闸在状态机侧,连发安全)。
+  /// 放大后位移归 InteractiveViewer 平移,不再累计(W4:放大不再触发任何
+  /// 原图签发,画面恒为缩略图)。
   void _onInteractionUpdate(ScaleUpdateDetails d) {
     if (_transform.value.getMaxScaleOnAxis() <= 1.01) {
       _swipeDx += d.focalPointDelta.dx;
-    }
-    if (_transform.value.getMaxScaleOnAxis() > kOriginalZoomThreshold) {
-      widget.onOriginalRequest?.call();
     }
   }
 
@@ -187,8 +184,7 @@ class _PreviewImageViewState extends State<PreviewImageView>
       final v = d.velocity.pixelsPerSecond.dx;
       if (dx < -kSwipeDistanceThreshold || v < -kSwipeVelocityThreshold) {
         widget.onSwipe?.call(true);
-      } else if (dx > kSwipeDistanceThreshold ||
-          v > kSwipeVelocityThreshold) {
+      } else if (dx > kSwipeDistanceThreshold || v > kSwipeVelocityThreshold) {
         widget.onSwipe?.call(false);
       }
     }
@@ -244,6 +240,7 @@ class _PreviewImageViewState extends State<PreviewImageView>
 
   /// 双击 1x↔2.5x(Matrix4Tween 动画;放大锚点=双击点,平移钳制在半幅内
   /// 防出界;复位恒回 identity)。缩放态即时同步(外层横滑让位/交还随动)。
+  /// W4:放大只动变换矩阵,不触发换源(画面恒为缩略图)。
   void _handleDoubleTap() {
     final zoomTo = !_zoomed;
     final box = context.findRenderObject();
@@ -261,8 +258,9 @@ class _PreviewImageViewState extends State<PreviewImageView>
       ..translateByDouble(tx, ty, 0, 1)
       ..scaleByDouble(s, s, 1, 1);
     if (_zoomTick != null) _zoomCtrl.removeListener(_zoomTick!);
-    final anim =
-        _zoomCtrl.drive(Matrix4Tween(begin: _transform.value.clone(), end: target));
+    final anim = _zoomCtrl.drive(
+      Matrix4Tween(begin: _transform.value.clone(), end: target),
+    );
     void tick() => _transform.value = anim.value;
     _zoomTick = tick;
     _zoomCtrl.addListener(tick);
@@ -271,20 +269,16 @@ class _PreviewImageViewState extends State<PreviewImageView>
       setState(() => _zoomed = zoomTo);
       widget.onZoomChanged?.call(zoomTo);
     }
-    // G2:双击放大目标 2.5x > 1.5x 阈值 → 触发原图签发(去重内闸在状态机侧)
-    if (zoomTo) widget.onOriginalRequest?.call();
   }
 
   /// 当前渲染分支是否图片(复用 plan 纯函数;决定双击缩放手势是否注册)。
   bool get _zoomable {
-    if (widget.loading || widget.fail != null || widget.url == null) {
-      return false;
-    }
+    if (widget.loading || widget.fail != null || !_hasRenderable) return false;
     return previewBodyPlan(
           kind: _planKind,
           videoReady: widget.videoReady,
           hasFail: widget.fail != null,
-          hasUrl: widget.url != null,
+          hasUrl: _hasRenderable,
           playingLive: widget.playingLive,
         ) ==
         PreviewBody.image;
@@ -293,15 +287,15 @@ class _PreviewImageViewState extends State<PreviewImageView>
   /// 渲染分支判定用的 kind(P7:视频 inline 失败回退缩略图 → 按静态图渲染)。
   PreviewKind get _planKind =>
       widget.thumbFallback && _kind == PreviewKind.video
-          ? PreviewKind.image
-          : _kind;
+      ? PreviewKind.image
+      : _kind;
 
   /// C2/C3:媒体区点按统一包一层(tapUp 手动消歧,见 _onTapUp 注释)。
   Widget _tapRegion(Widget child) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapUp: _onTapUp,
-        child: child,
-      );
+    behavior: HitTestBehavior.opaque,
+    onTapUp: _onTapUp,
+    child: child,
+  );
 
   @override
   Widget build(BuildContext context) {
@@ -318,8 +312,8 @@ class _PreviewImageViewState extends State<PreviewImageView>
           : _render(),
     );
     Widget content = core;
-    // P7/G2:缩略图兜底(原图 inline 失败回退/放大签原图失败保持)时叠加
-    // 不打断的小字提示(纯展示,手势穿透不阻断查看)
+    // P7:缩略图兜底(原图 inline 失败回退)时叠加不打断的小字提示
+    // (纯展示,手势穿透不阻断查看)
     if (widget.thumbFallback) {
       content = Stack(
         fit: StackFit.expand,
@@ -332,9 +326,10 @@ class _PreviewImageViewState extends State<PreviewImageView>
             child: Center(
               child: Container(
                 padding: const EdgeInsets.symmetric(
-                    // 横 10 就近归 spaceSm;竖 5 属同容器比例微缝保留
-                    horizontal: 10,
-                    vertical: 5),
+                  // 横 10 就近归 spaceSm;竖 5 属同容器比例微缝保留
+                  horizontal: 10,
+                  vertical: 5,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.black54,
                   borderRadius: BorderRadius.circular(Tk.rSm),
@@ -358,7 +353,7 @@ class _PreviewImageViewState extends State<PreviewImageView>
       kind: _planKind,
       videoReady: widget.videoReady,
       hasFail: widget.fail != null,
-      hasUrl: widget.url != null,
+      hasUrl: _hasRenderable,
       playingLive: widget.playingLive,
     );
     switch (body) {
@@ -380,50 +375,55 @@ class _PreviewImageViewState extends State<PreviewImageView>
         // loading 且可播 URL 已在:挂播放器(自显转圈;livp 静起播同款)
         if (widget.playUrl != null && !widget.playerDead) return _player();
         return const Center(
-            child: CircularProgressIndicator(color: Colors.white70));
+          child: CircularProgressIndicator(color: Colors.white70),
+        );
       case PreviewBody.image:
         return _image();
     }
   }
 
   Widget _player() => MediaVideoPlayer(
-        key: ValueKey(widget.playUrl!),
-        url: widget.playUrl!,
-        playing: _kind == PreviewKind.video || widget.playingLive,
-        isLive: _kind == PreviewKind.livp,
-        onReady: widget.onPlayerReady,
-        onError: widget.onPlayerError,
-      );
+    key: ValueKey(widget.playUrl!),
+    url: widget.playUrl!,
+    playing: _kind == PreviewKind.video || widget.playingLive,
+    isLive: _kind == PreviewKind.livp,
+    onReady: widget.onPlayerReady,
+    onError: widget.onPlayerError,
+  );
 
-  /// G2:缩略图→原图平滑替换——AnimatedSwitcher 同尺寸 fade 交叠(布局恒满幅,
-  /// StackFit.expand),InteractiveViewer/变换矩阵不动,缩放态不打断。
-  Widget _previewImage(String url) => AnimatedSwitcher(
-        duration: const Duration(milliseconds: 200),
-        // 默认 layoutBuilder 居中 Stack 会让 Image 收缩到内在尺寸,这里恒撑满
-        layoutBuilder: (currentChild, previousChildren) => Stack(
-          fit: StackFit.expand,
-          alignment: Alignment.center,
-          children: [
-            ...previousChildren,
-            ?currentChild,
-          ],
-        ),
-        child: Image.network(
-          url,
-          key: ValueKey(url), // URL 变化即触发 fade(thumb→原图)
-          fit: BoxFit.contain,
-          errorBuilder: (_, _, _) {
-            // P2-1(测试实证缺陷修复):原图签发成功但下载/解码失败——缩略图
-            // 可用态回退保持缩略图(_thumbFallback 叠 P7 式小字提示,与 403
-            // 路径同观感),仅无缩略图可用(或失败的正是缩略图)时保留失败卡。
-            // errorBuilder 处于 build 期,回退经 post-frame setState 落地
-            // (编排归 PreviewMedia):本帧先现失败卡,下帧起 fade 回缩略图
-            // (同 thumb↔原图交叠款)。
-            widget.onImageDecodeFailed?.call(url);
-            return _block('图片解码失败,建议下载后打开');
-          },
-        ),
+  /// W4 #20/W6 #24:Image 装配显式二选一——缩略图字节在场走 [Image.memory]
+  /// (key=assetId+'mem';解码失败上抛 onThumbDecodeFailed:删坏字节+落失败
+  /// 卡,编排归状态机);仅无缩略图原图 inline 走 [Image.network](失败就地
+  /// 渲染失败块、不改状态,现状行为保留)。外层恒撑满(旧 AnimatedSwitcher
+  /// layoutBuilder 教训:默认居中 Stack 会让 Image 收缩到内在尺寸)。
+  Widget _previewImage() {
+    final bytes = widget.thumbBytes;
+    final url = widget.url;
+    assert(bytes != null || url != null);
+    final Widget image;
+    if (bytes != null) {
+      image = Image.memory(
+        bytes,
+        key: ValueKey('${widget.asset.id}mem'),
+        fit: BoxFit.contain,
+        errorBuilder: (_, _, _) {
+          widget.onThumbDecodeFailed();
+          return _block('图片解码失败,建议下载后打开');
+        },
       );
+    } else {
+      image = Image.network(
+        url!,
+        key: ValueKey(url),
+        fit: BoxFit.contain,
+        // 无缩略图原图 inline 失败:维持现状——失败块就地渲染、不改状态
+        // (preview_page_swipe/probe_p2/preview_polish C3/preview_fallback_thumb
+        // 四处既有用例依赖)
+        errorBuilder: (_, _, _) => _block('图片解码失败,建议下载后打开'),
+      );
+    }
+    return SizedBox.expand(child: Center(child: image));
+  }
 
   Widget _image() {
     final stack = <Widget>[
@@ -437,15 +437,18 @@ class _PreviewImageViewState extends State<PreviewImageView>
         onInteractionStart: _onInteractionStart, // C3:捏合打断双击动画
         onInteractionUpdate: _onInteractionUpdate,
         onInteractionEnd: _onInteractionEnd,
-        child: _previewImage(widget.url!),
+        child: _previewImage(),
       ),
     ];
     // livp 起播中:静态图上叠加加载圈(播放器 Offstage 预热)
     if (_kind == PreviewKind.livp && widget.playingLive && !widget.videoReady) {
-      stack.add(const Positioned.fill(
-        child: Center(
-            child: CircularProgressIndicator(color: Colors.white70)),
-      ));
+      stack.add(
+        const Positioned.fill(
+          child: Center(
+            child: CircularProgressIndicator(color: Colors.white70),
+          ),
+        ),
+      );
     }
     // livp 回切按钮(P2-2):静态态显「播放实况」(web liveUrl 非空才出按钮)
     if (_kind == PreviewKind.livp &&
@@ -454,13 +457,8 @@ class _PreviewImageViewState extends State<PreviewImageView>
       stack.add(_liveToggle());
     }
     // 播放器后台挂载保活(livp 静态态/起播中):暂停续播免重新起播
-    if (widget.playUrl != null &&
-        !widget.playerDead &&
-        bodyBehindImage) {
-      stack.add(Offstage(
-        offstage: true,
-        child: _player(),
-      ));
+    if (widget.playUrl != null && !widget.playerDead && bodyBehindImage) {
+      stack.add(Offstage(offstage: true, child: _player()));
     }
     return Stack(fit: StackFit.expand, children: stack);
   }
@@ -471,30 +469,29 @@ class _PreviewImageViewState extends State<PreviewImageView>
       _kind == PreviewKind.livp && (widget.videoReady || widget.playingLive);
 
   Widget _liveToggle() => Positioned(
-        left: 0,
-        right: 0,
-        bottom: Tk.spaceLg,
-        child: Center(
-          child: TextButton.icon(
-            onPressed: widget.onToggleLive,
-            style: TextButton.styleFrom(
-              backgroundColor: Colors.black54,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: Tk.spaceLg, vertical: Tk.spaceSm),
-            ),
-            icon: Icon(
-              widget.playingLive ? Icons.image_outlined : Icons.play_arrow,
-              size: 16,
-            ),
-            label: Text(widget.playingLive ? '查看照片' : '播放实况'),
+    left: 0,
+    right: 0,
+    bottom: Tk.spaceLg,
+    child: Center(
+      child: TextButton.icon(
+        onPressed: widget.onToggleLive,
+        style: TextButton.styleFrom(
+          backgroundColor: Colors.black54,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(
+            horizontal: Tk.spaceLg,
+            vertical: Tk.spaceSm,
           ),
         ),
-      );
+        icon: Icon(
+          widget.playingLive ? Icons.image_outlined : Icons.play_arrow,
+          size: 16,
+        ),
+        label: Text(widget.playingLive ? '查看照片' : '播放实况'),
+      ),
+    ),
+  );
 
-  Widget _block(String msg) => PreviewBlock(
-        kind: _kind,
-        filename: widget.asset.filename,
-        message: msg,
-      );
+  Widget _block(String msg) =>
+      PreviewBlock(kind: _kind, filename: widget.asset.filename, message: msg);
 }
