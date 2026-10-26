@@ -59,7 +59,7 @@ void main() {
 
   test('T11②:thumbnailUrl 5xx 静默;对照不带标记的 5xx 照常上报', () async {
     await expectLater(
-      api.assets.thumbnailUrl('a1'),
+      api.assets.thumbnailUrl('a1', size: 'large'),
       throwsA(isA<ApiException>()),
       reason: '异常仍上抛给调用方(格内降级色块)',
     );
@@ -100,7 +100,7 @@ void main() {
       onNetworkError: netErrors.add,
     );
     await expectLater(
-      deadApi.assets.thumbnailUrl('a1'),
+      deadApi.assets.thumbnailUrl('a1', size: 'large'),
       throwsA(isA<DioException>()),
     );
     await expectLater(

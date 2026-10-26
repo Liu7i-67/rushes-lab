@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/preview_kind.dart';
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
@@ -110,7 +111,12 @@ class ResultRow extends StatelessWidget {
                 height: 44,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(9),
-                  child: ThumbnailImage(asset: a, fallbackIconSize: 18),
+                  child: ThumbnailImage(
+                    // thumb-variant 批 D1:44px 行内小图 → small(240px)
+                    asset: a,
+                    fallbackIconSize: 18,
+                    variant: ThumbVariant.small,
+                  ),
                 ),
               ),
               const SizedBox(width: Tk.spaceMd),

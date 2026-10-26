@@ -114,6 +114,7 @@ from app.services.folder_chain import (
 from app.services.org import get_default_organization
 from app.services.permissions import PermissionsService
 from app.services.presign import PresignService
+from app.services.thumb_exts import is_image_asset, is_video_asset
 from app.services.token_crypto import TokenCryptoService
 from app.settings import Settings, get_settings
 
@@ -2001,9 +2002,9 @@ async def _enqueue_thumbnail(
         job = "generate_livp_thumbnail"
         from app.services.arq_pool import enqueue_livp_download
         await enqueue_livp_download(ctx_pool, str(asset_id))
-    elif content_type.startswith("image/"):
+    elif is_image_asset(filename, content_type):
         job = "generate_thumbnail"
-    elif content_type.startswith("video/"):
+    elif is_video_asset(filename, content_type):
         job = "generate_video_thumbnail"
     if job is None:
         return

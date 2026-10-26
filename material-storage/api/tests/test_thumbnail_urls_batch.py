@@ -1,19 +1,23 @@
 """缩略图批量签发端点(POST /api/v1/assets/thumbnail-urls)— 契约测试(T7-T10)。
 
 唯一需求依据:docs/qdev/2026-10-26-app-thumbnail-storm-fix.md「功能点明细」W3
-(#13/#14)与「测试功能点」T7-T10。设施沿用仓库单元测试惯例
-(test_batch_download_link.py 直调 endpoint + stub 依赖;test_asset_batch_move.py
-create_app + ASGITransport + lifespan;不连真 DB / OpenFGA / MinIO;路由级用例
-的 lifespan 需 redis/arq/openfga —— 常规在 hh2 dev 容器跑,本地不跑 docker)。
+(#13/#14)与「测试功能点」T7-T10;thumb-variant 适配见下方注。设施沿用仓库单元
+测试惯例(test_batch_download_link.py 直调 endpoint + stub 依赖;test_asset_batch_move.py
+create_app + ASGITransport + lifespan;不连真 DB / OpenFGA / MinIO;路由级用例的
+lifespan 以 fake arq pool 桩隔离 redis,本地无容器可跑,见 fixture 注)。
 
 契约要点(文档「契约」节钉死):
   - 入参 ThumbUrlsIn{asset_ids: [uuid] 1..100 必填}(超限 pydantic 入参约束回
     422,风格对齐 BatchDownloadLinkIn);认证同单发端点 get_current_user,
     不做 per-asset FGA
-  - 响应 ThumbUrlsOut{urls: [{asset_id, url, expires_in}], missing: [uuid]}:
+  - 响应 ThumbUrlsOut{urls: [{asset_id, url, expires_in, variant}], missing: [uuid]}:
     urls 只含有 thumbnail_key 的行;missing = 不存在或无 thumbnail_key;
     重复 id 以唯一 id 出;软删行照常返回;request_base 跟随入口;
     响应顺序不保证,App 按 asset_id 匹配
+  - thumb-variant 适配(2026-10-27,docs/qdev/2026-10-27-thumb-variant-video-cover.md
+    §3.2):实现已把响应 variant 设为必填、签名调用新增 cache_control —— 本文件
+    仅「加」断言/替身参数适配新契约,不改既有断言语义(新增断言见各测试内
+    「thumb-variant 适配」注释)
   - 物理:单条 SELECT … WHERE id IN(禁止 N+1);逐行 sign_thumbnail_url
     (本地 HMAC,ttl=1800 与单发同值)
 
@@ -92,12 +96,14 @@ class ThumbPresign:
         self.calls: list[dict[str, Any]] = []
 
     def sign_thumbnail_url(
-        self, key: str, expires_seconds: int, request_base: str | None = None
+        self, key: str, expires_seconds: int, request_base: str | None = None,
+        cache_control: str | None = None,   # thumb-variant 适配:端点新增传参
     ) -> str:
         self.calls.append({
             "key": key,
             "expires_seconds": expires_seconds,
             "request_base": request_base,
+            "cache_control": cache_control,
         })
         return f"{THUMB_PREFIX}{key}?X-Amz-Signature=fake&X-Amz-Expires={expires_seconds}"
 
@@ -118,7 +124,7 @@ def _stmt_in_ids(stmt: Any) -> set[Any]:
     id 集内的预置行不返回,防替身送错行掩盖实现缺陷;编译失败视作空集)。"""
     try:
         params = stmt.compile().params
-    except Exception:  # noqa: BLE001  替身宽容:编译不可用 → 空集(全部视为不存在)
+    except Exception:  # 替身宽容:编译不可用 → 空集(全部视为不存在)
         return set()
     wanted: set[Any] = set()
     for v in params.values():
@@ -227,11 +233,15 @@ async def test_batch_all_signed_url_shape_and_ttl() -> None:
         assert url.startswith(THUMB_PREFIX), f"URL 前缀(入口 host + /ms-thumbs/): {url!r}"
         assert key_of[aid] in url and "X-Amz-Signature" in url, f"URL 形状(key+签名): {url!r}"
         assert fld(entry, "expires_in") == TTL, "expires_in 与单发同值(30 min)"
+        # thumb-variant 适配:响应新增必填 variant(缺省 large 请求 → 恒 "large")
+        assert fld(entry, "variant") == "large", "缺省(=large)请求 variant 恒为 large"
     assert fld(out.out, "missing") == [], "全部命中时 missing 为空"
     # 逐条 sign_thumbnail_url:ttl=1800、request_base 跟随入口(Host 头)
     assert len(out.presign.calls) == 2
     assert all(c["expires_seconds"] == TTL for c in out.presign.calls)
     assert all(c["request_base"] == REQUEST_BASE for c in out.presign.calls)
+    # thumb-variant 适配:签发时统一带 cache_control(§3.2 B4 卫生项)
+    assert all(c["cache_control"] == "public, max-age=604800" for c in out.presign.calls)
 
 
 # ─── T8 部分 missing + 重复 id 归一 ───────────────────────────────────────────
@@ -250,6 +260,8 @@ async def test_batch_partial_missing_and_duplicate_ids() -> None:
 
     url_ids = [str(fld(u, "asset_id")) for u in fld(out.out, "urls")]
     assert url_ids == [str(ok.id)], "重复 id 归一:urls 恰一条唯一 id"
+    # thumb-variant 适配:每条 url 均带 variant 字段(缺省 large 请求 → "large")
+    assert all(fld(u, "variant") == "large" for u in fld(out.out, "urls"))
     missing = {str(m) for m in fld(out.out, "missing")}
     assert missing == {str(no_key.id), str(ghost.id)}, "无 key 与不存在都进 missing"
     assert len(out.presign.calls) == 1, "重复 id 只签一次"
@@ -272,10 +284,30 @@ def test_model_rejects_empty_and_over_100() -> None:
 
 @pytest.fixture(scope="session")
 async def app_with_lifespan():
-    """先例 test_asset_batch_move.py:app.state 仅 lifespan 设置,裸 client 会 500。"""
-    app = create_app()
-    async with app.router.lifespan_context(app):  # type: ignore[attr-defined]
-        yield app
+    """先例 test_asset_batch_move.py:app.state 仅 lifespan 设置,裸 client 会 500。
+
+    thumb-variant 适配(2026-10-27):本命令要求本地无容器可跑 —— lifespan 里唯一
+    硬连外部服务的是 create_arq_pool(redis ping);此处打桩它(fake pool 仅需
+    aclose,路由级用例只消费 app.state,不触 arq)。OpenFGA init check 失败仅
+    warning 非致命、redis client from_url 惰性不建连,均无需桩。既有断言语义不变。
+    """
+    import app.services.arq_pool as arq_pool_mod
+
+    class _FakePool:
+        async def aclose(self) -> None:
+            return None
+
+    async def _fake_create_arq_pool(settings: Any) -> Any:
+        return _FakePool()
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(arq_pool_mod, "create_arq_pool", _fake_create_arq_pool)
+    try:
+        app = create_app()
+        async with app.router.lifespan_context(app):  # type: ignore[attr-defined]
+            yield app
+    finally:
+        mp.undo()
 
 
 async def test_route_422_and_401(app_with_lifespan: Any) -> None:
@@ -322,6 +354,8 @@ async def test_soft_deleted_returned_and_single_in_query() -> None:
     url_ids = {str(fld(u, "asset_id")) for u in fld(out.out, "urls")}
     assert url_ids == {str(alive.id), str(trashed.id)}, "软删行照常返回"
     assert fld(out.out, "missing") == []
+    # thumb-variant 适配:软删行同样带 variant(缺省 large 请求 → "large")
+    assert all(fld(u, "variant") == "large" for u in fld(out.out, "urls"))
     assert len(out.presign.calls) == 2
     assert len(out.db.executed) == 1, (
         f"必须单条 IN 查询(非 N+1): execute 次数 = {len(out.db.executed)}"

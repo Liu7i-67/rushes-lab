@@ -33,7 +33,7 @@ class _PrewarmAssetsApi extends FakeAssetsApi {
   Future<
     ({Map<String, ({String url, int expiresIn})> byId, Set<String> missing})
   >
-  thumbnailUrls(List<String> assetIds) async {
+  thumbnailUrls(List<String> assetIds, {String? size}) async {
     batchCalls.add(List.of(assetIds));
     final staged = batchStaged;
     if (staged is Exception) throw staged;

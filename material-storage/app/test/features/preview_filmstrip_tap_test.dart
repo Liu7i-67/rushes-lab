@@ -30,8 +30,10 @@ class _FilmAssetsApi extends FakeAssetsApi {
 
   /// 永挂起:胶片条 FutureBuilder 停在 spinner 占位。
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) =>
-      Completer<({String url, int expiresIn})>().future;
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) => Completer<({String url, int expiresIn})>().future;
 }
 
 class _FilmFakeMsApi extends FakeMsApi {

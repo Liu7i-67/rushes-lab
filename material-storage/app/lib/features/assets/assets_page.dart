@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
+import '../../core/thumb_variant.dart';
 import '../../core/transfers/transfer_queue.dart';
 import '../../models/models.dart';
 import '../../services/app_log.dart';
@@ -98,7 +99,9 @@ class _AssetsPageState extends State<AssetsPage> {
     _canDownload = detail?.myCanDownload;
     _canUpload = detail?.myCanUpload;
     _detail = detail;
-    unawaited(prewarmThumbUrls(page.items)); // W3 #17 挂点①(首载/刷新/重试/静默刷新共用落点)
+    // thumb-variant 批 D1:宫格 cell 取 small → 预热同规格(small)避免白签 large
+    unawaited(prewarmThumbUrls(page.items, variant: ThumbVariant.small));
+    // W3 #17 挂点①(首载/刷新/重试/静默刷新共用落点)
   }
 
   /// 全屏刷新(首拉/下拉/重试):整页骨架,失败走整页错误。
@@ -168,7 +171,9 @@ class _AssetsPageState extends State<AssetsPage> {
           ..addAll(sortAssetsByCreatedAt(merged, desc: _sortDesc));
         _loadingMore = false;
       });
-      unawaited(prewarmThumbUrls(page.items)); // W3 #17 挂点②(merge 后;_loadMore 不经 _applyPage)
+      // thumb-variant 批 D1:同挂点①,增量页也预热 small(与宫格 cell 同规格)
+      unawaited(prewarmThumbUrls(page.items, variant: ThumbVariant.small));
+      // W3 #17 挂点②(merge 后;_loadMore 不经 _applyPage)
     } catch (e) {
       AppLog.error('assets', '加载更多失败', e);
       if (!mounted) return;

@@ -57,7 +57,10 @@ class _ProbeAssetsApi extends FakeAssetsApi {
   }
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     return (url: 'http://thumb.test/$assetId', expiresIn: 1800);
   }
@@ -332,11 +335,7 @@ void main() {
     // 无缩略图资产走原图 inline(Image.network),InteractiveViewer 可挂载;
     // 进入时已签一次 inline 的 download-link
     await tester.pump(const Duration(milliseconds: 300));
-    expect(
-      assets.downloadLinkCalls,
-      ['a1'],
-      reason: '前置:进入 inline 签发一次',
-    );
+    expect(assets.downloadLinkCalls, ['a1'], reason: '前置:进入 inline 签发一次');
     expect(assets.thumbCalls, isEmpty, reason: '无缩略图不签 thumbnail-url');
 
     final center = tester.getCenter(find.byType(PreviewMedia));
@@ -347,11 +346,9 @@ void main() {
       greaterThan(2.0),
       reason: 'W4:双击放大仍生效(恒显缩略图/原图,不再切换来源)',
     );
-    expect(
-      assets.downloadLinkCalls,
-      ['a1'],
-      reason: 'W4:放大不新增任何 dio 调用(原图升级链路已删)',
-    );
+    expect(assets.downloadLinkCalls, [
+      'a1',
+    ], reason: 'W4:放大不新增任何 dio 调用(原图升级链路已删)');
 
     // 切张:整页换成资产 b2(ValueKey 重建,旧 State dispose → 句柄 cancel)
     await tester.pumpWidget(

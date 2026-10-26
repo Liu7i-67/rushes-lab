@@ -20,25 +20,43 @@ import 'dart:typed_data';
 
 import 'thumbnail_cache.dart';
 import 'thumb_pipeline.dart';
+import 'thumb_variant.dart';
 
 /// presigned 直连裸 HttpClient(无 cookie;不设池限,见 D5)。
 final HttpClient _thumbHttp = HttpClient()
   ..connectionTimeout = const Duration(seconds: 15);
 
-/// 进程级共享任务:签名→下载字节(宫格/胶片条/预览统一入口)。
-ThumbHandle fetchThumb(String assetId) {
-  return thumbPipeline.submit(assetId, (ctx) => _fetchJob(assetId, ctx));
+/// 进程级共享任务:签名→下载字节(宫格/胶片条/预览统一入口;同
+/// assetId+variant 去重——large/small 各自独立任务,防 240 小图顶掉 1024 预览
+/// 或反之互串)。[variant] 透传管线去重键/URL 缓存键/签名闸放弃链。
+ThumbHandle fetchThumb(
+  String assetId, {
+  ThumbVariant variant = ThumbVariant.large,
+}) {
+  return thumbPipeline.submit(
+    assetId,
+    (ctx) => _fetchJob(assetId, variant, ctx),
+    variant: variant,
+  );
 }
 
-Future<Uint8List?> _fetchJob(String assetId, ThumbTaskContext ctx) async {
+Future<Uint8List?> _fetchJob(
+  String assetId,
+  ThumbVariant variant,
+  ThumbTaskContext ctx,
+) async {
   // ① 放弃链先注册:任务终态(最后订阅者 cancel/deadline/clear)→
-  //    abandonAwait 同步放弃闸内等待(带代数,clear 后旧代 no-op)
+  //    abandonAwait 同步放弃闸内等待(带 variant+代数,clear 后旧代 no-op)
   final signGen = thumbnailCache.generation;
   ctx.registerAbort(
-    () => thumbnailCache.abandonAwait(assetId, generation: signGen),
+    () => thumbnailCache.abandonAwait(
+      assetId,
+      variant: variant,
+      generation: signGen,
+    ),
   );
   if (ctx.isCancelled) throw ThumbCancelled('取消于签名前($assetId)');
-  final url = await thumbnailCache.urlOf(assetId);
+  final url = await thumbnailCache.urlOf(assetId, variant: variant);
   if (ctx.isCancelled) throw ThumbCancelled('取消于签名后($assetId)');
   // ② 连接已建(getUrl 返回):晚注册立即触发规则覆盖此点
   final req = await _thumbHttp.getUrl(Uri.parse(url));

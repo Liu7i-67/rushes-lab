@@ -1,9 +1,11 @@
-/// ThumbPipeline — 缩略图字节任务全局并发闸(app-thumbnail-storm-fix W1):
-/// 进程级单实例 [thumbPipeline],上限 6、FIFO;同 assetId 订阅去重(排队态与
-/// 运行态均共享同一次执行,任务任一终态立即出表);订阅句柄式取消(最后订阅者
-/// 离开即终止任务:排队撤销/运行按 D7 分阶段 abort+短路);任务硬超时 20s
-/// (自开始执行起算,排队不计时);管线级 swallow(终态后 job 迟到异常一律吞掉,
-/// 防未处理异步异常弹报错页架空 D2);代际 clear(先终止运行任务再清表)。
+/// ThumbPipeline — 缩略图字节任务全局并发闸(app-thumbnail-storm-fix W1;
+/// thumb-variant 批 A1 去重键加 variant 维度):
+/// 进程级单实例 [thumbPipeline],上限 6、FIFO;同 assetId+variant 订阅去重
+/// (键 `'$assetId:${variant.diskTag}'`;排队态与运行态均共享同一次执行,任务
+/// 任一终态立即出表);订阅句柄式取消(最后订阅者离开即终止任务:排队撤销/
+/// 运行按 D7 分阶段 abort+短路);任务硬超时 20s(自开始执行起算,排队不计时);
+/// 管线级 swallow(终态后 job 迟到异常一律吞掉,防未处理异步异常弹报错页架空
+/// D2);代际 clear(先终止运行任务再清表)。
 ///
 /// Timer 纪律:唯一 Timer 是 deadline watchdog,任务任一终态在调用栈内同步
 /// 取消(禁事件队列延迟);调度/短路全走 Future/microtask。
@@ -14,6 +16,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../services/app_log.dart';
+import 'thumb_variant.dart';
 
 /// 任务被取消/超时后 job 短路用的标记异常(管线保证吞掉,不向 UI 传播)。
 class ThumbCancelled implements Exception {
@@ -81,10 +84,17 @@ class _Sub {
 }
 
 class _Task {
-  _Task(this.pipeline, this.assetId, this.job, this.generation);
+  _Task(this.pipeline, this.assetId, this.variant, this.job, this.generation);
 
   final ThumbPipeline pipeline;
   final String assetId;
+
+  /// 规格变体(去重维度之一:同 assetId 的 large/small 是两个独立任务)。
+  final ThumbVariant variant;
+
+  /// 去重表键:`'$assetId:${variant.diskTag}'`(日志仍用纯 [assetId] 便于定位)。
+  String get key => '$assetId:${variant.diskTag}';
+
   final Future<Uint8List?> Function(ThumbTaskContext ctx) job;
   final int generation;
 
@@ -127,15 +137,17 @@ class ThumbPipeline {
   @visibleForTesting
   int get generation => _generation;
 
-  /// 提交任务:同 assetId 未终态任务自动共享(每订阅者独立句柄)。
+  /// 提交任务:同 assetId+variant 未终态任务自动共享(每订阅者独立句柄)。
   ThumbHandle submit(
     String assetId,
-    Future<Uint8List?> Function(ThumbTaskContext ctx) job,
-  ) {
-    final existing = _dedup[assetId];
+    Future<Uint8List?> Function(ThumbTaskContext ctx) job, {
+    ThumbVariant variant = ThumbVariant.large,
+  }) {
+    final key = '$assetId:${variant.diskTag}';
+    final existing = _dedup[key];
     if (existing != null) return _subscribe(existing);
-    final task = _Task(this, assetId, job, _generation);
-    _dedup[assetId] = task;
+    final task = _Task(this, assetId, variant, job, _generation);
+    _dedup[key] = task;
     _queue.add(task);
     _pump();
     return _subscribe(task);
@@ -245,7 +257,7 @@ class ThumbPipeline {
     }
     t.subs.clear();
     _release(t);
-    if (identical(_dedup[t.assetId], t)) _dedup.remove(t.assetId);
+    if (identical(_dedup[t.key], t)) _dedup.remove(t.key);
     _running.remove(t);
   }
 
@@ -259,7 +271,7 @@ class ThumbPipeline {
     }
     t.subs.clear();
     _release(t);
-    if (identical(_dedup[t.assetId], t)) _dedup.remove(t.assetId);
+    if (identical(_dedup[t.key], t)) _dedup.remove(t.key);
     _running.remove(t);
   }
 
@@ -280,7 +292,7 @@ class ThumbPipeline {
     }
     t.subs.clear();
     _release(t);
-    if (identical(_dedup[t.assetId], t)) _dedup.remove(t.assetId);
+    if (identical(_dedup[t.key], t)) _dedup.remove(t.key);
     _running.remove(t);
   }
 

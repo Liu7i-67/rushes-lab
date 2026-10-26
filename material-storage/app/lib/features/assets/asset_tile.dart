@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/fmt.dart';
 import '../../core/haptics.dart';
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
@@ -28,6 +29,7 @@ class AssetGridTile extends StatelessWidget {
     required this.onTap,
     required this.onLongPress,
     this.index = 0,
+    this.variant = ThumbVariant.large,
   });
 
   final Asset asset;
@@ -38,6 +40,10 @@ class AssetGridTile extends StatelessWidget {
 
   /// 打样卡种子(宫格下标;无缩略图/失败时编号与配色来源)。
   final int index;
+
+  /// 缩略图规格(thumb-variant 批 D1):宫格 cell 由 assets_body 传
+  /// [ThumbVariant.small](240px 源);默认 large 兼容既有构造面。
+  final ThumbVariant variant;
 
   static const _radius = BorderRadius.all(Radius.circular(assetMediaRadius));
 
@@ -98,6 +104,7 @@ class AssetGridTile extends StatelessWidget {
                         children: [
                           ThumbnailImage(
                             asset: asset,
+                            variant: variant,
                             fallback: AssetPlate(
                               seed: index,
                               borderRadius: _radius,

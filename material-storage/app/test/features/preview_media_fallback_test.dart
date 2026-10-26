@@ -58,7 +58,10 @@ class _FallbackAssetsApi extends FakeAssetsApi {
   }
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     if (thumbStaged is Exception) throw thumbStaged!;
     return (url: 'http://presigned/thumb/$assetId', expiresIn: 600);
