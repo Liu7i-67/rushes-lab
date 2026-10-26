@@ -40,6 +40,10 @@ List<int> _stubBytes = const [];
 /// 桩请求已命中的 URL(断言下载目标用)。
 final _stubUrls = <Uri>[];
 
+/// 桩请求 abort 调用计数(storm-fix:abort 链可观测;现状 noSuchMethod
+/// 静默 no-op——tear-off 非空不抛 TypeError,但取消行为不可见,补齐计数)。
+int _abortCalls = 0;
+
 class _StubHttpClient implements HttpClient {
   @override
   Future<HttpClientRequest> getUrl(Uri url) async {
@@ -57,6 +61,11 @@ class _StubHttpClient implements HttpClient {
 class _StubRequest implements HttpClientRequest {
   @override
   Future<HttpClientResponse> close() async => _StubResponse();
+
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) {
+    _abortCalls++;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
@@ -155,6 +164,7 @@ void main() {
     _stubStatus = 200;
     _stubBytes = const [];
     _stubUrls.clear();
+    _abortCalls = 0;
     dir = Directory.systemTemp.createTempSync('thumb_img_test');
     ThumbDiskStore.I.debugAttachDirectory(dir);
   });
@@ -164,6 +174,23 @@ void main() {
       dir.deleteSync(recursive: true);
     } catch (_) {}
   });
+
+  /// 写盘 fire-and-forget 的微任务链在 fakeAsync 下不被 tester.pump flush
+  /// (嵌套 zone 内注册,收尾才跑):pump 出帧 + 真实 await 提供事件循环拍
+  /// 催化其推进,轮询探测落盘。
+  Future<void> waitForWritten(WidgetTester tester, String assetId) async {
+    for (var i = 0; i < 100; i++) {
+      if (ThumbDiskStore.I.debugHas(assetId)) return;
+      await tester.pump(const Duration(milliseconds: 50));
+      // 真实 async 让出 isolate 一拍:催化 fire-and-forget 微任务链推进
+      await ThumbDiskStore.I.read(assetId);
+    }
+    expect(
+      ThumbDiskStore.I.debugHas(assetId),
+      isTrue,
+      reason: '写盘 fire-and-forget 应在 pump 轮询窗口内落地',
+    );
+  }
 
   testWidgets('P2-2:TypeBlock 浅/深主题均内置 AssetPlate,扩展名可见不抛', (tester) async {
     for (final brightness in [Brightness.light, Brightness.dark]) {
@@ -197,7 +224,10 @@ void main() {
     inStubZone((tester) async {
       final api = installFakeApi(_ThumbMsApi()) as _ThumbMsApi;
       addTearDown(() => session.api = null);
-      await ThumbDiskStore.I.write('cached-a', kPng1x1);
+      // 预写为真实文件 IO:fakeAsync 下裸 await 挂死,经 runAsync 落盘
+      await tester.runAsync(() async {
+        await ThumbDiskStore.I.write('cached-a', kPng1x1);
+      });
 
       await tester.pumpWidget(_host(_asset('cached-a')));
       await tester.pumpAndSettle();
@@ -213,7 +243,7 @@ void main() {
         reason: '磁盘位图直接上屏(消三段闪烁的第一段白屏)',
       );
       expect(find.byType(TypeBlock), findsNothing, reason: '非降级路径');
-    });
+    })(tester);
   });
 
   testWidgets('功能点 2:磁盘未命中 → 签 1 次并落盘;二次进入 0 次新签名', (tester) async {
@@ -224,7 +254,12 @@ void main() {
       _stubBytes = kPng1x1;
 
       await tester.pumpWidget(_host(_asset('fresh-a'), key: const Key('v1')));
-      await tester.pumpAndSettle();
+      // 管线/签名闸/下载链跨多拍事件队列调度,pumpAndSettle 一轮不可达:
+      // 轮询推进假时钟直到字节上屏(与 preview_fallback_thumb 同配方)。
+      for (var i = 0; i < 40; i++) {
+        if (find.byType(Image).evaluate().isNotEmpty) break;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
 
       expect(api.assets.thumbCalls, ['fresh-a'], reason: '未命中磁盘签 1 次 URL');
       expect(
@@ -232,22 +267,30 @@ void main() {
         contains('http://thumb.test/fresh-a'),
         reason: '用签名 URL 下载位图字节',
       );
+      await waitForWritten(tester, 'fresh-a');
+      // runAsync 轮询期间 fakeAsync 时钟未走:回来补一拍出帧再断言
+      await tester.pump();
       expect(
         await ThumbDiskStore.I.read('fresh-a'),
         kPng1x1,
-        reason: '下载成功即落盘(下次进入/URL 轮换不再整图重下)',
+        reason:
+            '下载成功即落盘(写盘 fire-and-forget,轮询等待落地;'
+            '下次进入/URL 轮换不再整图重下)',
       );
       expect(find.byType(Image), findsOneWidget);
 
       // 二次进入:重建同 asset 的 ThumbnailImage(URL 内存缓存仍在)
       await tester.pumpWidget(_host(_asset('fresh-a'), key: const Key('v2')));
-      await tester.pumpAndSettle();
+      for (var i = 0; i < 40; i++) {
+        if (find.byType(Image).evaluate().isNotEmpty) break;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
 
       expect(api.assets.thumbCalls, [
         'fresh-a',
       ], reason: '第二格位走磁盘缓存,0 次新签名(功能点 2 的「第二次进入 0 次」)');
       expect(find.byType(Image), findsOneWidget);
-    });
+    })(tester);
   });
 
   testWidgets('功能点 3:加载中占位为纯 ColoredBox(surface3),'
@@ -273,7 +316,7 @@ void main() {
         reason: '占位态不含加载动画(用户原话「不要转圈」)',
       );
       expect(find.byType(Image), findsNothing);
-    });
+    })(tester);
   });
 
   testWidgets('功能点 3:无 thumbnail_key 资产走 TypeBlock 色块,不发任何请求', (tester) async {
@@ -296,7 +339,7 @@ void main() {
       );
       expect(find.text('JPG'), findsOneWidget, reason: '扩展名小字可读可见');
       expect(api.assets.thumbCalls, isEmpty, reason: '零签名请求');
-    });
+    })(tester);
   });
 
   testWidgets('功能点 2:下载失败(非 200)降级 TypeBlock 色块,不白屏不转圈', (tester) async {
@@ -309,6 +352,7 @@ void main() {
       await tester.pumpWidget(_host(_asset('broken-a')));
       await tester.pumpAndSettle();
 
+      expect(_abortCalls, 0, reason: '非 200 走 drain→失败路径,abort 链未触发(可观测性冒烟)');
       expect(
         find.byType(TypeBlock),
         findsOneWidget,
@@ -316,6 +360,6 @@ void main() {
       );
       expect(find.byType(Image), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
-    });
+    })(tester);
   });
 }

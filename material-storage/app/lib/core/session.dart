@@ -22,8 +22,10 @@ import 'api/ms_api.dart';
 import 'error_report/error_report_controller.dart';
 
 /// dart-define 注入的开发口(不在 UI 呈现;47.108.196.211 预设已删除)。
-const kDartDefineApiBase =
-    String.fromEnvironment('MS_API_BASE', defaultValue: '');
+const kDartDefineApiBase = String.fromEnvironment(
+  'MS_API_BASE',
+  defaultValue: '',
+);
 const kIntranetEntry = 'http://192.168.110.221';
 const kPublicEntry = 'https://bucket.taoxiplan.com';
 
@@ -35,10 +37,10 @@ const kProbePath = '/api/v1/maintenance/banner';
 
 /// §4 定稿候选序;dart-define 优先,未注入则内网→公网。
 List<String> defaultProbeCandidates() => [
-      if (kDartDefineApiBase.isNotEmpty) kDartDefineApiBase,
-      kIntranetEntry,
-      kPublicEntry,
-    ];
+  if (kDartDefineApiBase.isNotEmpty) kDartDefineApiBase,
+  kIntranetEntry,
+  kPublicEntry,
+];
 
 enum SessionPhase { probing, unreachable, ready }
 
@@ -95,11 +97,17 @@ class Session extends ChangeNotifier {
 
   void addSessionClearHook(void Function() hook) => _clearHooks.add(hook);
 
+  /// 钩子观测(T14 断言 registerSessionClearHooks 幂等用;勿在生产代码消费)。
+  @visibleForTesting
+  List<void Function()> get debugClearHooks => List.unmodifiable(_clearHooks);
+
   void _runClearHooks() {
     for (final h in _clearHooks) {
       try {
         h();
-      } catch (_) {/* 钩子失败不阻断登出 */}
+      } catch (_) {
+        /* 钩子失败不阻断登出 */
+      }
     }
   }
 
@@ -115,10 +123,12 @@ class Session extends ChangeNotifier {
       await initPersistence();
       for (final base in candidates ?? defaultProbeCandidates()) {
         try {
-          final r = await Dio(BaseOptions(
-            connectTimeout: const Duration(seconds: 3),
-            receiveTimeout: const Duration(seconds: 3),
-          )).get<dynamic>('$base$kProbePath');
+          final r = await Dio(
+            BaseOptions(
+              connectTimeout: const Duration(seconds: 3),
+              receiveTimeout: const Duration(seconds: 3),
+            ),
+          ).get<dynamic>('$base$kProbePath');
           // 4xx(如反代 403)/5xx:默认 validateStatus(2xx)会抛 DioException →
           // 走 catch 换下一个;statusCode==200 再显式兜底(即便 validateStatus
           // 被放宽,4xx 也不算命中)。banner 恒 200,判定语义即「HTTP 200」。
@@ -126,7 +136,9 @@ class Session extends ChangeNotifier {
             _activate(base);
             return;
           }
-        } catch (_) {/* 换下一个候选 */}
+        } catch (_) {
+          /* 换下一个候选 */
+        }
       }
       _setPhase(SessionPhase.unreachable);
     } finally {
@@ -139,8 +151,8 @@ class Session extends ChangeNotifier {
     entryLabel = base == kIntranetEntry
         ? '内网'
         : base == kPublicEntry
-            ? '公网'
-            : '指定';
+        ? '公网'
+        : '指定';
     api = MsApi(
       baseUrl: base,
       jar: _persistentJar ?? CookieJar(),
@@ -170,7 +182,9 @@ class Session extends ChangeNotifier {
       if (dirPath != null) {
         try {
           cookieDirExists = Directory(dirPath).existsSync();
-        } catch (_) {/* 目录状态查不出也照记日志 */}
+        } catch (_) {
+          /* 目录状态查不出也照记日志 */
+        }
       }
       final status = e is ApiException ? e.status : null;
       AppLog.error(
@@ -198,7 +212,9 @@ class Session extends ChangeNotifier {
   /// 重拉兜底;改密本身已生效,此处失败不向调用方报错(页面语义=改密成功)。
   Future<void> changePassword(String oldPassword, String newPassword) async {
     await api!.auth.changePassword(
-        oldPassword: oldPassword, newPassword: newPassword);
+      oldPassword: oldPassword,
+      newPassword: newPassword,
+    );
     try {
       me = await api!.auth.me();
       _meStale = false;
@@ -244,8 +260,7 @@ class Session extends ChangeNotifier {
     try {
       final dir = await getApplicationSupportDirectory();
       _cookieDirPath = '${dir.path}/.cookies';
-      _persistentJar =
-          PersistCookieJar(storage: FileStorage(_cookieDirPath!));
+      _persistentJar = PersistCookieJar(storage: FileStorage(_cookieDirPath!));
     } catch (e) {
       // R4b:失败不再静默——插件通道失败是「重启要求重登」的候选根因之一,
       // 留日志(降级语义不变:走内存 jar)。

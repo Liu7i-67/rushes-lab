@@ -1,32 +1,26 @@
-/// ThumbnailImage — 宫格缩略图(B2 §8.1;app-polish-3 包 B 改造:磁盘优先 + 淡入):
+/// ThumbnailImage — 宫格缩略图(B2 §8.1;storm-fix W1 管线接入):
 /// tags.thumbnail_key 存在才请求 thumbnail-url(否则端点必 404,web AssetThumbnail
 /// 同门槛);位图经 ThumbDiskStore 磁盘缓存——presigned URL ~25min 轮换/冷启动/
-/// 二次进入均本地秒出,不再整图重下;加载中纯 surface3 占位(**无 spinner**,
-/// 消「白屏→加载动画→显示」三段闪烁),就位 180ms 淡入;签名/下载/解码任一
-/// 失败降级类型色块。
+/// 二次进入均本地秒出;网络段改经共享取字节入口 fetchThumb(并发 6 闸 + 订阅
+/// 句柄取消 + 20s 硬超时,dispose/换 asset 即 cancel);磁盘代数在 read 前捕获、
+/// 贯穿 write/remove;加载中纯 surface3 占位(无 spinner),字节就位先 setState
+/// 显示、写盘 fire-and-forget;签名/下载/解码失败降级类型色块。
 library;
 
-import 'dart:io' show BytesBuilder, HttpClient;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
 import '../../core/preview_kind.dart';
-import '../../core/session.dart';
 import '../../core/thumb_disk_store.dart';
-import '../../core/thumbnail_cache.dart';
+import '../../core/thumb_fetch.dart';
+import '../../core/thumb_pipeline.dart' show ThumbHandle;
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../widgets/type_block.dart';
 
-/// 进程级缩略图 URL 缓存(只存 URL 不存位图;位图字节磁盘见 ThumbDiskStore;
-/// 签名走会话 API)。
-final thumbnailCache = ThumbnailCache(
-  signer: (assetId) async {
-    final r = await session.api!.assets.thumbnailUrl(assetId);
-    return SignedThumb(url: r.url, expiresInSeconds: r.expiresIn);
-  },
-);
+export '../../core/thumbnail_cache.dart'
+    show thumbnailCache; // 兼容旧 import(main/preview_media;彻底清理记遗留)
 
 class ThumbnailImage extends StatefulWidget {
   const ThumbnailImage({
@@ -49,16 +43,11 @@ class ThumbnailImage extends StatefulWidget {
 }
 
 class _ThumbnailImageState extends State<ThumbnailImage> {
-  /// presigned 直连裸 HttpClient(无 cookie,预签 host 可能非入口;连接池复用)。
-  /// 不走 session.api!.presignedHttp(dio):dio 每请求内置 Timer.run 零时器,
-  /// fake-async 单测(Filmstrip 惰性建格)尾部仍在途即报 pending timer;
-  /// 裸 HttpClient 与旧 Image.network 同语义,测试下经 HttpOverrides 可注假响应。
-  static final HttpClient _http = HttpClient()
-    ..connectionTimeout = const Duration(seconds: 15);
-
   Uint8List? _bytes;
   bool _failed = false;
-  int _tag = 0; // 切 asset / dispose 后在途请求落地即弃(无需 cancel)
+  int _tag = 0; // 切 asset / dispose 后在途任务落地即弃
+  ThumbHandle? _handle;
+  int _gen = 0; // 本次加载捕获的磁盘代数(写盘/坏字节 remove 贯穿用)
 
   @override
   void initState() {
@@ -74,56 +63,59 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
       _bytes = null;
       _failed = false;
     });
+    _tag++;
+    _handle?.cancel();
+    _handle = null;
     // web 同门槛:无 thumbnail_key 不发签名请求;换到无 key 资产只丢弃在途
-    if (widget.asset.hasThumbnail) {
-      _load();
-    } else {
-      _tag++;
-    }
+    if (widget.asset.hasThumbnail) _load();
   }
 
   @override
   void dispose() {
     _tag++;
+    _handle?.cancel();
+    _handle = null;
     super.dispose();
   }
 
-  /// 磁盘 → 签 URL → HTTP 字节下载 → 落盘 → setState;任一步异常置 _failed。
+  /// 磁盘 → fetchThumb(签名+下载,受管线闸治理)→ setState → 写盘
+  /// fire-and-forget;任一步异常/取消置 _failed,下次重建自然重试。
   Future<void> _load() async {
     final tag = ++_tag;
     final id = widget.asset.id;
+    _handle?.cancel();
+    _handle = null;
     try {
+      // 磁盘代数必须在 read 之前捕获(write 紧前才捕获形同虚设)
+      var gen = ThumbDiskStore.I.generation;
+      _gen = gen;
       final cached = await ThumbDiskStore.I.read(id);
       if (tag != _tag || !mounted) return;
       if (cached != null) {
         setState(() => _bytes = cached);
         return;
       }
-      final url = await thumbnailCache.urlOf(id); // 进程级 URL 缓存/单飞重签
+      // read 期间发生 clear(跨代):丢弃视同 miss,重新捕获当前代数继续
+      // (不得直接 return——会停占位态)
+      final nowGen = ThumbDiskStore.I.generation;
+      if (nowGen != gen) {
+        gen = nowGen;
+        _gen = nowGen;
+      }
+      final handle = fetchThumb(id);
+      _handle = handle;
+      final bytes = await handle.future;
       if (tag != _tag || !mounted) return;
-      final bytes = await _download(url);
-      if (bytes.isEmpty) throw StateError('缩略图响应为空');
-      await ThumbDiskStore.I.write(id, bytes);
-      if (tag != _tag || !mounted) return;
+      if (bytes == null || bytes.isEmpty) {
+        // cancel(null)/超时/异常:不落盘,置降级色块
+        throw StateError('缩略图任务未产出字节($id)');
+      }
+      // 字节就位先 setState 显示;写盘 fire-and-forget(带代数防跨代误写)
       setState(() => _bytes = bytes);
+      ThumbDiskStore.I.write(id, bytes, expectedGeneration: gen).ignore();
     } catch (_) {
       if (tag == _tag && mounted) setState(() => _failed = true);
     }
-  }
-
-  /// presigned URL 整包拉取为字节(缩略图量级小,不落临时文件)。
-  static Future<Uint8List> _download(String url) async {
-    final req = await _http.getUrl(Uri.parse(url));
-    final resp = await req.close();
-    if (resp.statusCode != 200) {
-      await resp.drain<void>();
-      throw StateError('缩略图下载失败(${resp.statusCode})');
-    }
-    final builder = BytesBuilder(copy: false);
-    await for (final chunk in resp) {
-      builder.add(chunk);
-    }
-    return builder.takeBytes();
   }
 
   Widget get _fallback =>
@@ -145,6 +137,9 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     // 占位纯色(主题 surface3),无 CircularProgressIndicator(用户抱怨的
     // 第二段闪烁)
     if (bytes == null) return ColoredBox(color: context.tk.surface3);
+    final tag = _tag;
+    final id = widget.asset.id;
+    final gen = _gen;
     return LayoutBuilder(
       builder: (context, box) {
         // 解码降采样:格宽 × dpr 取整 clamp 96..600(省内存;放大预览走他路)
@@ -166,7 +161,19 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
                   curve: Curves.easeOut,
                   child: child,
                 ),
-          errorBuilder: (_, _, _) => _fallback,
+          errorBuilder: (_, _, _) {
+            // 坏字节兜底:删盘上坏文件(带代数防跨代误删)+ post-frame 置降级
+            ThumbDiskStore.I.remove(id, expectedGeneration: gen).ignore();
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              // 先比对捕获 tag/assetId 再 setState(防切张后旧资产回调误伤新格)
+              if (!mounted || _tag != tag || widget.asset.id != id) return;
+              setState(() {
+                _failed = true;
+                _bytes = null;
+              });
+            });
+            return _fallback;
+          },
         );
       },
     );

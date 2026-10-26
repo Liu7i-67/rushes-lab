@@ -49,7 +49,11 @@ void noContent(HttpRequest req) {
 }
 
 /// 已捕获请求:(method:, path:, body:) 具名字段,解构 `(:method, :path, :body)`。
-typedef CapturedRequest = ({String method, String path, Map<String, dynamic> body});
+typedef CapturedRequest = ({
+  String method,
+  String path,
+  Map<String, dynamic> body,
+});
 
 class ApiHarness {
   ApiHarness(this._handler, {this.capture = false});
@@ -93,14 +97,15 @@ class ApiHarness {
 
 Asset fakeAsset(String id, {List<String> labels = const [], String? notes}) =>
     Asset(
-        id: id,
-        filename: '$id.jpg',
-        sizeBytes: 1,
-        contentType: 'image/jpeg',
-        createdAt: '2026-10-20T10:00:00Z',
-        folderId: 'f1',
-        userLabels: labels,
-        notes: notes);
+      id: id,
+      filename: '$id.jpg',
+      sizeBytes: 1,
+      contentType: 'image/jpeg',
+      createdAt: '2026-10-20T10:00:00Z',
+      folderId: 'f1',
+      userLabels: labels,
+      notes: notes,
+    );
 
 /// 结果编排(公开,B6 假 API 族共用):值为 Exception 则抛,否则原样返回(缺省回退)。
 T settleStaged<T>(Object? staged, T fallback) {
@@ -126,32 +131,52 @@ class FakeOpsApi extends AssetOpsApi {
   Object? restoreStaged;
 
   @override
-  Future<Asset> updateMeta(String assetId,
-      {List<String>? userLabels, String? notes, String? labelsMode}) async {
-    metaCalls
-        .add((id: assetId, labels: userLabels, notes: notes, mode: labelsMode));
+  Future<Asset> updateMeta(
+    String assetId, {
+    List<String>? userLabels,
+    String? notes,
+    String? labelsMode,
+  }) async {
+    metaCalls.add((
+      id: assetId,
+      labels: userLabels,
+      notes: notes,
+      mode: labelsMode,
+    ));
     return settleStaged(metaStaged, fakeAsset(assetId));
   }
 
   @override
-  Future<AssetBatchPrefixResult> batchPrefix(List<String> assetIds,
-      {required String action, required String prefix}) async {
+  Future<AssetBatchPrefixResult> batchPrefix(
+    List<String> assetIds, {
+    required String action,
+    required String prefix,
+  }) async {
     prefixCalls.add((ids: assetIds, action: action, prefix: prefix));
-    return settleStaged(prefixStaged,
-        AssetBatchPrefixResult(renamed: assetIds.length, skipped: 0));
+    return settleStaged(
+      prefixStaged,
+      AssetBatchPrefixResult(renamed: assetIds.length, skipped: 0),
+    );
   }
 
   @override
-  Future<AssetBatchMoveResult> batchMove(List<String> assetIds,
-      {required String targetFolderId}) async {
+  Future<AssetBatchMoveResult> batchMove(
+    List<String> assetIds, {
+    required String targetFolderId,
+  }) async {
     moveCalls.add((ids: assetIds, targetFolderId: targetFolderId));
     return settleStaged(
-        moveStaged, AssetBatchMoveResult(movedCount: assetIds.length));
+      moveStaged,
+      AssetBatchMoveResult(movedCount: assetIds.length),
+    );
   }
 
   @override
-  Future<TrashPage> listTrash(String folderId,
-      {int limit = 500, int offset = 0}) async {
+  Future<TrashPage> listTrash(
+    String folderId, {
+    int limit = 500,
+    int offset = 0,
+  }) async {
     trashCalls.add((folderId: folderId, limit: limit, offset: offset));
     return settleStaged(trashStaged, TrashPage(items: [], total: 0));
   }
@@ -175,8 +200,11 @@ class FakeAssetsApi extends AssetsApi {
   final searchStaged = <Object?>[];
 
   @override
-  Future<List<SearchResult>> search(String q,
-      {int limit = 50, CancelToken? cancelToken}) async {
+  Future<List<SearchResult>> search(
+    String q, {
+    int limit = 50,
+    CancelToken? cancelToken,
+  }) async {
     searchCalls.add((q: q, limit: limit));
     final staged = searchStaged.isNotEmpty ? searchStaged.removeAt(0) : null;
     return settleStaged(staged, const <SearchResult>[]);
@@ -191,6 +219,59 @@ class FakeAssetsApi extends AssetsApi {
     final staged = deleteStagedById[assetId] ?? deleteStaged;
     if (staged is Exception) throw staged;
   }
+
+  // storm-fix(T11①/T12/T13):缩略图三端点桩。记录调用、可编排:
+  // staged 为 Exception(如 ApiException(404))则抛,否则按缺省/定制返回。
+  // (字段命名避开既有用例子类的 thumbCalls/thumbStaged,防字段遮蔽。)
+  /// 单发签名(thumbnailUrl):staged 异常时抛(404 隔离宫格单发兜底),
+  /// null=缺省即回假地址。命中计数见 [thumbUrlCalls]。
+  final thumbUrlCalls = <String>[];
+  Object? thumbUrlStaged;
+
+  @override
+  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+    thumbUrlCalls.add(assetId);
+    final staged = thumbUrlStaged;
+    if (staged is Exception) throw staged;
+    return (url: 'http://thumb.test/$assetId', expiresIn: 1800);
+  }
+
+  /// 批量签名(宫格预热):记录分批入参(≤100/批);staged 为 Exception 则
+  /// 抛(失败静默用例),`Map<String,String>`(id→url) 定制返回,缺省全量回
+  /// 假地址、missing 空。
+  final thumbnailUrlsCalls = <List<String>>[];
+  Object? thumbnailUrlsStaged;
+
+  @override
+  Future<
+    ({Map<String, ({String url, int expiresIn})> byId, Set<String> missing})
+  >
+  thumbnailUrls(List<String> assetIds) async {
+    thumbnailUrlsCalls.add(List.of(assetIds));
+    final staged = thumbnailUrlsStaged;
+    if (staged is Exception) throw staged;
+    final custom = staged is Map<String, String> ? staged : null;
+    return (
+      byId: {
+        for (final id in assetIds)
+          id: (url: custom?[id] ?? 'http://thumb.test/$id', expiresIn: 1800),
+      },
+      missing: const <String>{},
+    );
+  }
+
+  /// livp 实况短片:记录调用;staged 为 Exception 则抛(403/404 静默回退
+  /// 静态图),null=缺省回假地址。
+  final livePreviewCalls = <String>[];
+  Object? livePreviewStaged;
+
+  @override
+  Future<({String url, int expiresIn})> livePreviewUrl(String assetId) async {
+    livePreviewCalls.add(assetId);
+    final staged = livePreviewStaged;
+    if (staged is Exception) throw staged;
+    return (url: 'http://live.test/$assetId', expiresIn: 1800);
+  }
 }
 
 class FakeShareApi extends ShareApi {
@@ -199,22 +280,30 @@ class FakeShareApi extends ShareApi {
   final calls = <({String kind, String id, int expiresInSeconds})>[];
   Object? staged;
   ShareLink _fallback() => ShareLink(
-      token: 'tok',
-      landingUrl: 'https://ms.test/s/tok',
-      expiresAt: '2026-10-30T10:00:00');
+    token: 'tok',
+    landingUrl: 'https://ms.test/s/tok',
+    expiresAt: '2026-10-30T10:00:00',
+  );
 
   @override
-  Future<ShareLink> shareAsset(String assetId,
-      {required int expiresInSeconds}) async {
-    calls.add(
-        (kind: 'asset', id: assetId, expiresInSeconds: expiresInSeconds));
+  Future<ShareLink> shareAsset(
+    String assetId, {
+    required int expiresInSeconds,
+  }) async {
+    calls.add((kind: 'asset', id: assetId, expiresInSeconds: expiresInSeconds));
     return settleStaged(staged, _fallback());
   }
 
   @override
-  Future<ShareLink> shareFolder(String folderId,
-      {required int expiresInSeconds}) async {
-    calls.add((kind: 'folder', id: folderId, expiresInSeconds: expiresInSeconds));
+  Future<ShareLink> shareFolder(
+    String folderId, {
+    required int expiresInSeconds,
+  }) async {
+    calls.add((
+      kind: 'folder',
+      id: folderId,
+      expiresInSeconds: expiresInSeconds,
+    ));
     return settleStaged(staged, _fallback());
   }
 }
@@ -223,7 +312,15 @@ class FakeApprovalsApi extends ApprovalsApi {
   FakeApprovalsApi(super.api);
 
   final calls =
-      <({String targetType, String targetId, String action, int? durationSeconds, String reason})>[];
+      <
+        ({
+          String targetType,
+          String targetId,
+          String action,
+          int? durationSeconds,
+          String reason,
+        })
+      >[];
   Object? staged;
 
   @override
@@ -282,8 +379,12 @@ class FakeApprovalOpsApi extends ApprovalOpsApi {
   List<Object?> listStaged = <Object?>[];
 
   @override
-  Future<List<Approval>> list(
-      {String scope = 'self', String? status, int limit = 50, int offset = 0}) async {
+  Future<List<Approval>> list({
+    String scope = 'self',
+    String? status,
+    int limit = 50,
+    int offset = 0,
+  }) async {
     listCalls.add((scope: scope, status: status));
     final staged = listStaged.isNotEmpty ? listStaged.removeAt(0) : null;
     if (staged is Completer<List<Approval>>) return staged.future;
@@ -298,8 +399,11 @@ class FakeApprovalOpsApi extends ApprovalOpsApi {
   Future<Approval> reject(String id, {String? decisionNote}) =>
       _decide(id, approve: false, decisionNote: decisionNote);
 
-  Future<Approval> _decide(String id,
-      {required bool approve, String? decisionNote}) async {
+  Future<Approval> _decide(
+    String id, {
+    required bool approve,
+    String? decisionNote,
+  }) async {
     decideCalls.add((id: id, approve: approve, note: decisionNote));
     if (decideStaged is Exception) throw decideStaged!;
     return _approvalOf(id, approve);
@@ -307,17 +411,17 @@ class FakeApprovalOpsApi extends ApprovalOpsApi {
 }
 
 Approval _approvalOf(String id, bool approved) => Approval(
-      id: id,
-      applicantUserId: 'u9',
-      targetType: 'asset',
-      targetId: 'a1',
-      action: 'download',
-      durationSeconds: 3600,
-      reason: '关单需要',
-      status: approved ? 'approved' : 'rejected',
-      createdAt: '2026-10-20T09:00:00Z',
-      requesterName: '申请人',
-    );
+  id: id,
+  applicantUserId: 'u9',
+  targetType: 'asset',
+  targetId: 'a1',
+  action: 'download',
+  durationSeconds: 3600,
+  reason: '关单需要',
+  status: approved ? 'approved' : 'rejected',
+  createdAt: '2026-10-20T09:00:00Z',
+  requesterName: '申请人',
+);
 
 /// B7:通知假 API(对应 MsApi.notifications)。
 class FakeNotificationsApi extends NotificationsApi {
@@ -325,17 +429,23 @@ class FakeNotificationsApi extends NotificationsApi {
 
   final listCalls = <({int limit, int offset})>[];
   final markReadCalls = <({List<String>? ids, bool all})>[];
-  NotificationsList listStaged =
-      NotificationsList(items: const [], total: 0, unreadCount: 0);
+  NotificationsList listStaged = NotificationsList(
+    items: const [],
+    total: 0,
+    unreadCount: 0,
+  );
   Object? markReadStaged;
 
   /// B9 分页编排钩子:非 null 时按 (limit, offset) 返回,优先于 [listStaged]。
   NotificationsList Function({required int limit, required int offset})?
-      onListOverride;
+  onListOverride;
 
   @override
-  Future<NotificationsList> list(
-      {int limit = 50, int offset = 0, bool silent = false}) async {
+  Future<NotificationsList> list({
+    int limit = 50,
+    int offset = 0,
+    bool silent = false,
+  }) async {
     listCalls.add((limit: limit, offset: offset));
     final ovr = onListOverride;
     if (ovr != null) return ovr(limit: limit, offset: offset);
@@ -349,32 +459,45 @@ class FakeNotificationsApi extends NotificationsApi {
     // 模拟已读语义:listStaged 原地置已读 + unread_count 同步(badge 对账断言用)
     final readAt = '2026-10-20T10:00:00Z';
     final items = listStaged.items
-        .map((n) => (all || (ids ?? const []).contains(n.id))
-            ? NotificationItem(
-                id: n.id, kind: n.kind, title: n.title, body: n.body,
-                link: n.link, readAt: n.readAt ?? readAt, createdAt: n.createdAt)
-            : n)
+        .map(
+          (n) => (all || (ids ?? const []).contains(n.id))
+              ? NotificationItem(
+                  id: n.id,
+                  kind: n.kind,
+                  title: n.title,
+                  body: n.body,
+                  link: n.link,
+                  readAt: n.readAt ?? readAt,
+                  createdAt: n.createdAt,
+                )
+              : n,
+        )
         .toList();
     final unread = items.where((n) => n.readAt == null).length;
     listStaged = NotificationsList(
-        items: items, total: listStaged.total, unreadCount: unread);
-    return ids?.length ?? listStaged.items.where((n) => n.readAt != null).length;
+      items: items,
+      total: listStaged.total,
+      unreadCount: unread,
+    );
+    return ids?.length ??
+        listStaged.items.where((n) => n.readAt != null).length;
   }
 }
 
-NotificationItem notificationOf(String id,
-        {String kind = 'approval_pending',
-        bool unread = true,
-        String? link}) =>
-    NotificationItem(
-      id: id,
-      kind: kind,
-      title: '标题$id',
-      body: '正文$id',
-      link: link,
-      readAt: unread ? null : '2026-10-20T09:00:00Z',
-      createdAt: '2026-10-20T09:00:00Z',
-    );
+NotificationItem notificationOf(
+  String id, {
+  String kind = 'approval_pending',
+  bool unread = true,
+  String? link,
+}) => NotificationItem(
+  id: id,
+  kind: kind,
+  title: '标题$id',
+  body: '正文$id',
+  link: link,
+  readAt: unread ? null : '2026-10-20T09:00:00Z',
+  createdAt: '2026-10-20T09:00:00Z',
+);
 
 /// B7:项目列表假 API(对应 MsApi.projects;通知 folder_invite 跳转反查
 /// 项目名/my_roles 用)。

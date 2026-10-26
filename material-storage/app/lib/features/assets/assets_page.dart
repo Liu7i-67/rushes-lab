@@ -3,6 +3,8 @@
 /// 保留 RefreshBus 订阅、静默刷新代际、分页自动加载、my_can_* 与上传闸门。
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
@@ -17,6 +19,7 @@ import 'asset_selection_bar.dart';
 import 'assets_body.dart';
 import 'assets_header.dart';
 import 'selection_actions.dart';
+import 'thumb_prewarm.dart' show prewarmThumbUrls;
 import 'upload_pick.dart' show showUploadSheet;
 import 'upload_progress_pill.dart';
 import 'upload_sheet.dart' show openTransfersView;
@@ -95,6 +98,7 @@ class _AssetsPageState extends State<AssetsPage> {
     _canDownload = detail?.myCanDownload;
     _canUpload = detail?.myCanUpload;
     _detail = detail;
+    unawaited(prewarmThumbUrls(page.items)); // W3 #17 挂点①(首载/刷新/重试/静默刷新共用落点)
   }
 
   /// 全屏刷新(首拉/下拉/重试):整页骨架,失败走整页错误。
@@ -164,6 +168,7 @@ class _AssetsPageState extends State<AssetsPage> {
           ..addAll(sortAssetsByCreatedAt(merged, desc: _sortDesc));
         _loadingMore = false;
       });
+      unawaited(prewarmThumbUrls(page.items)); // W3 #17 挂点②(merge 后;_loadMore 不经 _applyPage)
     } catch (e) {
       AppLog.error('assets', '加载更多失败', e);
       if (!mounted) return;

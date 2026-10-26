@@ -3,8 +3,8 @@
 ///       忽略不报错,决策#4 达成;原探针实证的「落登录失败错误区」已反转);
 /// - H3:baseUrl 未就绪点法务链接 → 不外开、落固定错误区;
 /// - G1:items<2 不渲染且首帧无异常;重选同张不触发滚动异常;
-/// - G2:无缩略图资产维持原图 inline;放大签原图期间切张(取消竞态);
-///       原图到达时正处放大态(替换/失败回退均不打断缩放,P2-1 改定);
+/// - G2:无缩略图资产维持原图 inline;放大不再签原图+切张重建无异常
+///       (W4 改写,原「放大签原图/缩放态替换」语义随 G2 删除);
 /// - J1:弹层遮罩在场时 toast 悬浮其上且可点(action/body 竞态;P1-2 修复后
 ///       push 路由即销毁 toast、Back 首击生效,原「push 不销毁吞首击」已反转);
 /// - J2:过滤态下拉刷新/进详情返回均保持过滤;
@@ -315,32 +315,52 @@ void main() {
     expect(_currentImageUrl(tester), 'http://presigned/raw1');
   });
 
-  testWidgets('G2 探针:放大签原图期间切张,旧请求落地被丢弃(mounted 守卫)', (tester) async {
+  // W4 改写(原 G2 探针「放大签原图期间切张/缩放态替换」2026-10-26 方案):
+  // 放大不再签原图,替换/回退语义随 G2 删除而消失;取消竞态由 W6 fetchThumb
+  // 句柄 cancel 承担(thumb_pipeline_test T3 覆盖)。此处保留行为回归:
+  // 放大零新增 dio 调用 + 缩放生效 + 切张重建无异常。
+  testWidgets('W4 回归:双击放大不签原图;切张重建无异常(原 G2 探针改写)', (tester) async {
     final (:api, :assets) = await _pumpPreview(
       tester,
       PreviewArgs(
-        items: [_img('a1'), _img('b2')],
+        items: [_img('a1', withThumb: false)],
         index: 0,
         folderId: 'f1',
         canDownload: true,
       ),
     );
-    final hang = Completer<String>();
-    assets.linkHang = hang;
+    // 无缩略图资产走原图 inline(Image.network),InteractiveViewer 可挂载;
+    // 进入时已签一次 inline 的 download-link
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      assets.downloadLinkCalls,
+      ['a1'],
+      reason: '前置:进入 inline 签发一次',
+    );
+    expect(assets.thumbCalls, isEmpty, reason: '无缩略图不签 thumbnail-url');
 
     final center = tester.getCenter(find.byType(PreviewMedia));
     await _doubleTap(tester, center);
     await tester.pump(const Duration(milliseconds: 300));
-    expect(assets.downloadLinkCalls, ['a1'], reason: '前置:放大签原图(挂起中)');
+    expect(
+      _mediaScale(tester),
+      greaterThan(2.0),
+      reason: 'W4:双击放大仍生效(恒显缩略图/原图,不再切换来源)',
+    );
+    expect(
+      assets.downloadLinkCalls,
+      ['a1'],
+      reason: 'W4:放大不新增任何 dio 调用(原图升级链路已删)',
+    );
 
-    // 切张:整页换成资产 b2(ValueKey 重建,旧 State dispose)
+    // 切张:整页换成资产 b2(ValueKey 重建,旧 State dispose → 句柄 cancel)
     await tester.pumpWidget(
       MaterialApp(
         home: MediaQuery(
           data: const MediaQueryData(textScaler: TextScaler.linear(0.5)),
           child: PreviewPage(
             args: PreviewArgs(
-              items: [_img('b2')],
+              items: [_img('b2', withThumb: false)],
               index: 0,
               folderId: 'f1',
               canDownload: true,
@@ -350,73 +370,13 @@ void main() {
       ),
     );
     await tester.pump();
-    await tester.pump();
-
-    // 旧请求此刻落地 → 若无 mounted 守卫将 setState after dispose 抛错
-    hang.complete('http://presigned/a1-original');
-    await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
 
-    expect(find.byType(PreviewMedia), findsOneWidget);
+    expect(find.byType(PreviewMedia), findsOneWidget, reason: '切张无异常');
     expect(
       _currentImageUrl(tester),
-      'http://thumb.test/b2',
-      reason: 'G2:新张仍在缩略图,旧张原图 URL 未串入',
-    );
-  });
-
-  testWidgets('G2 探针:原图到达时正处放大态——替换/失败回退均不打断缩放(P2-1 改定)', (tester) async {
-    final (:api, :assets) = await _pumpPreview(
-      tester,
-      PreviewArgs(
-        items: [_img('z1')],
-        index: 0,
-        folderId: 'f1',
-        canDownload: true,
-      ),
-    );
-    final hang = Completer<String>();
-    assets.linkHang = hang;
-
-    final center = tester.getCenter(find.byType(PreviewMedia));
-    await _doubleTap(tester, center);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(_mediaScale(tester), greaterThan(2.0), reason: '前置:双击放大 2.5x');
-    expect(assets.downloadLinkCalls, ['z1']);
-
-    hang.complete('http://presigned/z1-original');
-    await tester.pump();
-    // AnimatedSwitcher 200ms 交叠:多 pump 几拍让退场 child 摘除(首帧 setState
-    // 落在 pump1 之后,过渡实际从 pump2 起步)
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.pump(const Duration(milliseconds: 200));
-    await tester.pump(const Duration(milliseconds: 200));
-
-    // P2-1(修复后改定):测试区网络图恒 errorBuilder=原图下载/解码失败路径
-    // ——缩略图可用态回退保持缩略图 + P7 式提示(修复前停留失败卡)。再 pump
-    // 过回退后置帧回调与 200ms 回退 fade,断言稳定态。
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-
-    final urls = tester
-        .widgetList<Image>(
-          find.descendant(
-            of: find.byType(InteractiveViewer),
-            matching: find.byType(Image),
-          ),
-        )
-        .map((w) => (w.image as NetworkImage).url)
-        .toList();
-    expect(urls, ['http://thumb.test/z1'], reason: 'P2-1:原图解码失败回退缩略图渲染(回退态稳定)');
-    expect(
-      find.textContaining('原图不可用'),
-      findsOneWidget,
-      reason: 'P2-1:与 403 路径同观感,叠 P7 式小字提示',
-    );
-    expect(
-      _mediaScale(tester),
-      greaterThan(2.0),
-      reason: 'G2+P2-1:原图到达→替换→失败回退全程不打断缩放态(仍放大,未复位 1x)',
+      'http://presigned/b2',
+      reason: '切张后新张原图 inline,旧张数据未串入',
     );
   });
 

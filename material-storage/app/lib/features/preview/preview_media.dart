@@ -1,55 +1,44 @@
-/// PreviewMedia — 预览主体渲染(B2 §8.2 八类;B2 遗留拆分后装配层):
+/// PreviewMedia — 预览主体加载编排与状态机(B2 §8.2 八类;D10 拆分后装配层):
 /// 决策在 preview_plan.dart(纯函数),md/text 拉取在 preview_text_load.dart,
-/// 视频/实况播放器在 preview_player.dart(自持控制器)。本层只做加载编排与
-/// 组装:切张由父级以 ValueKey(asset.id) 重建清态;起播/解码失败一律降级
-/// 「下载后打开」色块。livp「查看照片」回切显示静态缩略图而非暂停帧
+/// 视频/实况播放器在 preview_player.dart(自持控制器),媒体区渲染与手势在
+/// preview_image_view.dart(W4+W6 改造落在本层组合的 view)。本层只做加载
+/// 编排与状态机:切张由父级以 ValueKey(asset.id) 重建清态;起播/解码失败
+/// 一律降级「下载后打开」色块。livp「查看照片」回切显示静态缩略图而非暂停帧
 /// (plan playingLive 维度,控制器 Offstage 保活便于续播)。
-/// C2/C3(app-polish):媒体区统一包一层点按手势——单击经 [PreviewMedia.onSingleTap]
-/// 上抛(页面切沉浸);单击/双击用自管「双击窗口」手动消歧(不注册框架
-/// onDoubleTap,原因见 _onTapUp 字段注释),双击走图片分支 1x↔2.5x 缩放动画。
-/// C6(app-polish):Android PDF 由「需下载后打开」死胡同改为就地面板
-/// (下载完成就地「打开」,见 preview_doc_views.AndroidPdfPanel)。
-/// G2(app-polish-2):图片分支两段式渐进加载——进入默认签 thumbnail-url
-/// 直显缩略图(不再直接签原图);捏合/双击放大 >1.5x 时签发一次
-/// download-link 原图,就绪后同 Image fade 平滑替换(缩放态不打断,复位
-/// 不回退);失败保持缩略图叠 P7 式小字提示。无缩略图资产维持原图 inline,
-/// heic/svg 等恒缩略图,livp/视频/PDF 分支零改动。
-/// P2-1(app-polish-2 探针实证缺陷修复):放大签发的原图下载/解码失败
-/// (Image errorBuilder)时不再落「图片解码失败」失败卡——缩略图可用态
-/// 回退保持缩略图+_thumbFallback 提示(与 403 路径同观感),仅无缩略图
-/// 可用时保留失败卡。
+/// C2/C3(app-polish):媒体区单击上抛在 view 层经双击窗口消歧后回调至此
+/// (onSingleTap → 页面切沉浸)。
+/// W4 #19-#21(app-thumbnail-storm-fix,用户拍板 D4):放大永不自动换原图——
+/// G2 升级链路(_maybeRequestOriginal/_requestOriginal/AnimatedSwitcher 等)
+/// 整体删除;livePreviewUrl 与 _loadThumb 并行发起(冷缓存 live URL 不被
+/// 缩略图字节最坏 20s 阻塞),_loading 在 _loadThumb 落定即 false,晚到
+/// live URL 经 setState 刷新出「播放实况」按钮;视频/PDF/text/markdown 零改动。
+/// W6 #23-#26(app-thumbnail-storm-fix):缩略图统一数据源——先读磁盘
+/// ThumbDiskStore(命中零网络 Image.memory 直出),未命中经共享取字节入口
+/// fetchThumb(与宫格/胶片条共享任务去重,受并发 6 闸 + 20s 硬超时治理)并
+/// 按磁盘代数写盘;失败/取消/超时统一 P2-6 两态文案落失败卡,不弹报错页。
 library;
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
-import 'package:flutter/gestures.dart'
-    show kDoubleTapSlop, kDoubleTapTimeout;
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:share_plus/share_plus.dart';
 
 import '../../core/preview_kind.dart';
 import '../../core/session.dart';
+import '../../core/thumb_disk_store.dart';
+import '../../core/thumb_fetch.dart';
+import '../../core/thumb_pipeline.dart' show ThumbHandle;
 import '../../models/models.dart';
-import '../../theme/tokens.dart';
-import '../assets/thumbnail_image.dart' show thumbnailCache;
-import 'preview_doc_views.dart';
-import 'preview_player.dart';
+import 'preview_image_view.dart';
 import 'preview_plan.dart';
 import 'preview_text_load.dart';
 
-/// P3(mobile-ux-polish)横滑切页阈值(位移 px / 速度 px·s⁻¹):
-/// 内层(InteractiveViewer 交互回调)与外层(preview_page GestureDetector)
-/// 两路判定共用同一口径;一次滑动手势只会被 arena 判给其中一路,不双触发。
-const kSwipeDistanceThreshold = 60.0;
-const kSwipeVelocityThreshold = 500.0;
-
-/// C3:双击放大目标倍率(规格 2.5x;捏合上限 maxScale 4 不变)。
-const double kDoubleTapScale = 2.5;
-
-/// G2:放大触发原图签发的缩放阈值(捏合/双击超过即签,规格 1.5x)。
-const double kOriginalZoomThreshold = 1.5;
+export 'preview_image_view.dart'
+    show
+        kSwipeDistanceThreshold,
+        kSwipeVelocityThreshold; // preview_page 既有 import 兼容
 
 class PreviewMedia extends StatefulWidget {
   const PreviewMedia({
@@ -78,10 +67,14 @@ class PreviewMedia extends StatefulWidget {
   State<PreviewMedia> createState() => _PreviewMediaState();
 }
 
-class _PreviewMediaState extends State<PreviewMedia>
-    with TickerProviderStateMixin {
+class _PreviewMediaState extends State<PreviewMedia> {
+  /// W6:预览缩略图 UI 总等待上限(自进入预览起算、含管线排队——与管线
+  /// deadline「执行起算」不同口径;有意为之的双重上限)。
+  static const _thumbWaitLimit = Duration(seconds: 20);
+
   var _loading = true;
-  String? _url; // 可直接呈现的图 URL(原图 inline / 缩略图)
+  Uint8List? _thumbBytes; // W6:缩略图字节(磁盘直读/共享取字节;非空恒 Image.memory)
+  String? _url; // 可直接呈现的图 URL(W6 语义:仅无缩略图原图 inline;video 播放 inline)
   String? _text; // md/text 内容
   String? _fail; // 降级提示(色块 + 下载后打开)
   var _videoReady = false;
@@ -89,58 +82,29 @@ class _PreviewMediaState extends State<PreviewMedia>
   String? _liveUrl; // livp 实况短片(非空才有回切按钮,web 同口径)
   var _playingLive = false; // livp 在播实况短片;video 类就绪即 true
 
-  // P3:图片放大态与变换控制——放大后单指拖动为平移(内层吃掉手势),
-  // 捏回原大复位并交还横滑切页。
-  var _zoomed = false;
-  final _transform = TransformationController();
-
-  // C3:双击缩放动画(220ms)——双击点为锚点,平移钳制防出界;捏合开始即停。
-  late final AnimationController _zoomCtrl = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 220),
-  );
-  VoidCallback? _zoomTick; // 当前动画取值监听(每次动画重建,先摘旧的)
-
-  // C2/C3:单击/双击手动消歧。不注册框架 onDoubleTap——其底层
-  // DoubleTapGestureRecognizer 在指针按下即挂 40ms 倒计时 Timer 且不可取消,
-  // 横滑/捏合(每次 pointer down)都会遗留 pending Timer(widget 测试
-  // pending-timer 不变量必炸,真机无碍但测试红线不许)。改自管「双击窗口」:
-  // 首击 tapUp 挂 kDoubleTapTimeout 窗口,窗口内第二击(位移 ≤kDoubleTapSlop)
-  // =双击缩放;窗口自然到期=单击上抛。拖拽/捏合不产生 tapUp,零 Timer 遗留。
-  Timer? _tapWindow;
-  var _awaitingSecondTap = false;
-  Offset? _doubleTapAnchor;
-
-  // P3:未放大态横滑切页的位移累计——图片分支的手势被 InteractiveViewer 的
-  // scale 识别器持有(panEnabled:false 只是让它忽略平移,arena 仍归它),
-  // 故在交互回调里按焦距位移/速度手动判切页,阈值口径与外层一致。
-  var _swipeDx = 0.0;
-
-  // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字提示)。
-  // G2 起图片分支反向复用:放大签原图失败(403/网络)时保持缩略图+同一提示。
-  // P2-1:原图签发成功但下载/解码失败(Image errorBuilder)同口径——缩略图
-  // 可用则回退保持缩略图+提示,仅无缩略图可用时保留失败卡。
+  // P7(mobile-ux-polish):原图 inline 失败回退缩略图预览(叠不打断的小字
+  // 提示,视频 inline 失败同口径降级为静态帧渲染)。
   var _thumbFallback = false;
 
-  // P2-1:本张缩略图 URL(_loadThumb 就绪时记录,不重签)——原图下载/解码
-  // 失败时经 errorBuilder 回退复用。
-  String? _thumbUrl;
+  // W6 #23:共享取字节任务句柄。每 State 生命周期只允许发起一次——切张由
+  // 父级 ValueKey(asset.id) 重建 State 保证;重入会泄漏旧句柄无人 cancel。
+  ThumbHandle? _thumbHandle;
 
-  // G2(app-polish-2)缩略图优先状态机:
-  var _showingThumb = false; // 当前 _url 为缩略图(进入默认;换原图后 false)
-  var _originalRequested = false; // 本张原图签发去重(缩放反复越线只签一次)
+  // W6 #23/#25:本次加载捕获的磁盘代数(read 前捕获,贯穿 write/remove,
+  // 防跨代误写/误删)。
+  int _thumbGen = 0;
 
   Asset get _a => widget.asset;
 
   PreviewKind get _kind =>
       detectKind(filename: _a.filename, contentType: _a.contentType);
 
-  /// 播放器挂载 URL:video=原图 inline;livp=实况短片。
+  /// 播放器挂载 URL:video=原图 inline;livp=实况短片(W6:语义不变)。
   String? get _playUrl => switch (_kind) {
-        PreviewKind.video => _url,
-        PreviewKind.livp => _liveUrl,
-        _ => null,
-      };
+    PreviewKind.video => _url,
+    PreviewKind.livp => _liveUrl,
+    _ => null,
+  };
 
   @override
   void initState() {
@@ -150,189 +114,39 @@ class _PreviewMediaState extends State<PreviewMedia>
 
   @override
   void dispose() {
-    _tapWindow?.cancel();
-    _zoomCtrl.dispose();
-    _transform.dispose();
+    // W6 #23:横切/退出即取消共享任务(最后订阅者离开 → 管线终止/释放名额),
+    // 防任务残留占名额与 watchdog 至 20s。
+    _thumbHandle?.cancel();
+    _thumbHandle = null;
     super.dispose();
-  }
-
-  /// P3:交互中按当前缩放分流——未放大(scale≈1)累计横滑位移(供切页判定),
-  /// 放大后位移归 InteractiveViewer 平移,不再累计。
-  /// G2:捏合放大越过 1.5x 阈值即触发原图签发(去重内闸,连发安全)。
-  void _onInteractionUpdate(ScaleUpdateDetails d) {
-    if (_transform.value.getMaxScaleOnAxis() <= 1.01) {
-      _swipeDx += d.focalPointDelta.dx;
-    }
-    if (_transform.value.getMaxScaleOnAxis() > kOriginalZoomThreshold) {
-      _maybeRequestOriginal();
-    }
-  }
-
-  /// P3:交互结束分流——未放大则复位变换并按位移/速度判切页(边界即停由
-  /// 父级 pager 保证);缩放过则维护放大态(拖动交给 panEnabled:true 平移)。
-  void _onInteractionEnd(ScaleEndDetails d) {
-    final dx = _swipeDx;
-    _swipeDx = 0;
-    final zoomedNow = _transform.value.getMaxScaleOnAxis() > 1.01;
-    if (!zoomedNow) {
-      _transform.value = Matrix4.identity();
-      final v = d.velocity.pixelsPerSecond.dx;
-      if (dx < -kSwipeDistanceThreshold || v < -kSwipeVelocityThreshold) {
-        widget.onSwipe?.call(true);
-      } else if (dx > kSwipeDistanceThreshold ||
-          v > kSwipeVelocityThreshold) {
-        widget.onSwipe?.call(false);
-      }
-    }
-    if (zoomedNow != _zoomed) {
-      setState(() => _zoomed = zoomedNow);
-      widget.onZoomChanged?.call(zoomedNow);
-    }
-  }
-
-  // ── C3 双击缩放 ──────────────────────────────────────────────────────────
-
-  /// 捏合开始即停双击动画(实变换以捏合为准,避免两路互写变换矩阵)。
-  void _onInteractionStart(ScaleStartDetails d) {
-    if (_zoomTick != null) {
-      _zoomCtrl.removeListener(_zoomTick!);
-      _zoomTick = null;
-    }
-    if (_zoomCtrl.isAnimating) _zoomCtrl.stop();
-  }
-
-  /// C2/C3:tapUp 手动消歧(见字段注释)——非图片分支单击即时上抛;图片
-  /// 分支首击挂双击窗口,窗口内近距第二击=双击缩放,否则到期按单击上抛。
-  void _onTapUp(TapUpDetails d) {
-    if (!_zoomable) {
-      widget.onSingleTap?.call();
-      return;
-    }
-    final anchor = _doubleTapAnchor;
-    if (_awaitingSecondTap &&
-        anchor != null &&
-        (d.localPosition - anchor).distance <= kDoubleTapSlop) {
-      _tapWindow?.cancel();
-      _tapWindow = null;
-      _awaitingSecondTap = false;
-      _handleDoubleTap(); // 第二击 → 双击缩放(锚点=首击点)
-      return;
-    }
-    _doubleTapAnchor = d.localPosition;
-    _awaitingSecondTap = true;
-    _tapWindow?.cancel();
-    _tapWindow = Timer(kDoubleTapTimeout, _firePendingSingle);
-  }
-
-  /// 双击窗口到期未成双 → 按单击上抛(页面沉浸切换)。
-  void _firePendingSingle() {
-    _tapWindow = null;
-    if (!mounted) return;
-    if (_awaitingSecondTap) {
-      _awaitingSecondTap = false;
-      widget.onSingleTap?.call();
-    }
-  }
-
-  /// 双击 1x↔2.5x(Matrix4Tween 动画;放大锚点=双击点,平移钳制在半幅内
-  /// 防出界;复位恒回 identity)。缩放态即时同步(外层横滑让位/交还随动)。
-  void _handleDoubleTap() {
-    final zoomTo = !_zoomed;
-    final box = context.findRenderObject();
-    final size = box is RenderBox && box.hasSize ? box.size : Size.zero;
-    final anchor = _doubleTapAnchor ?? size.center(Offset.zero);
-    final s = zoomTo ? kDoubleTapScale : 1.0;
-    final maxT = (s - 1) / 2;
-    final tx = zoomTo
-        ? (-anchor.dx * (s - 1)).clamp(-maxT * size.width, maxT * size.width)
-        : 0.0;
-    final ty = zoomTo
-        ? (-anchor.dy * (s - 1)).clamp(-maxT * size.height, maxT * size.height)
-        : 0.0;
-    final target = Matrix4.identity()
-      ..translateByDouble(tx, ty, 0, 1)
-      ..scaleByDouble(s, s, 1, 1);
-    if (_zoomTick != null) _zoomCtrl.removeListener(_zoomTick!);
-    final anim =
-        _zoomCtrl.drive(Matrix4Tween(begin: _transform.value.clone(), end: target));
-    void tick() => _transform.value = anim.value;
-    _zoomTick = tick;
-    _zoomCtrl.addListener(tick);
-    _zoomCtrl.forward(from: 0);
-    if (_zoomed != zoomTo) {
-      setState(() => _zoomed = zoomTo);
-      widget.onZoomChanged?.call(zoomTo);
-    }
-    // G2:双击放大目标 2.5x > 1.5x 阈值 → 签发原图(去重内闸)
-    if (zoomTo) _maybeRequestOriginal();
-  }
-
-  // ── G2 缩略图优先 + 放大换原图 ────────────────────────────────────────────
-
-  /// 当前张是否允许「放大换原图」:仅普通可解码图片且缩略图在显
-  /// (svg/avif/ico/heic 恒缩略图;无缩略图进入时已是原图;其余分支零改动)。
-  bool get _canUpgradeToOriginal =>
-      _kind == PreviewKind.image &&
-      _a.hasThumbnail &&
-      !kUnDecodableImageExts
-          .any((e) => _a.filename.toLowerCase().endsWith(e)) &&
-      _showingThumb &&
-      _fail == null;
-
-  /// 缩放(捏合或双击)>1.5x 触发一次原图签发;签发去重:同一张预览会话内
-  /// 只签一次(反复缩放/复位不重签;切张重建 State 后视为新会话)。
-  void _maybeRequestOriginal() {
-    if (!_canUpgradeToOriginal || _originalRequested) return;
-    _originalRequested = true; // 同步置位,手势连发不双签
-    _requestOriginal();
-  }
-
-  /// 签发 download-link 原图并平滑替换:就绪后仅换 _url(fade 由渲染层
-  /// AnimatedSwitcher 承担,InteractiveViewer/变换矩阵不动,缩放态不打断;
-  /// 复位 1x 不回退);失败(403 无下载权/网络)保持缩略图,叠 P7 式小字提示。
-  /// 切张防串:State 随 asset.id 重建,旧请求落地经 mounted 守卫丢弃。
-  Future<void> _requestOriginal() async {
-    try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
-      if (!mounted) return;
-      setState(() {
-        _url = url;
-        _showingThumb = false;
-      });
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _thumbFallback = true);
-    }
   }
 
   Future<void> _load() async {
     switch (_kind) {
       case PreviewKind.livp:
+        // W4 #21:livePreviewUrl 与 _loadThumb 并行发起(冷缓存下 live URL
+        // 不被缩略图字节最坏 20s 阻塞,断网 35s 落降级破验收 2)。
+        final live = _loadLiveUrl();
         await _loadThumb();
-        try {
-          final r = await session.api!.assets.livePreviewUrl(_a.id);
-          if (mounted) _liveUrl = r.url;
-        } catch (_) {/* 403/404 → 只显示静态图(web 同口径) */}
         if (mounted) setState(() => _loading = false);
+        await live;
       case PreviewKind.heic:
         await _loadThumb();
         if (mounted) setState(() => _loading = false);
       case PreviewKind.image:
         // svg/avif/ico 超出 Flutter 解码:走缩略图(JPEG 转码),无则色块
-        if (kUnDecodableImageExts
-            .any((e) => _a.filename.toLowerCase().endsWith(e))) {
+        if (kUnDecodableImageExts.any(
+          (e) => _a.filename.toLowerCase().endsWith(e),
+        )) {
           await _loadThumb();
           if (mounted) setState(() => _loading = false);
           return;
         }
-        // G2:有缩略图先缩略图直显(原图待放大 >1.5x 再签,见
-        // _maybeRequestOriginal);无缩略图维持原图 inline(现状,web 同口径)
+        // W4/W6:有缩略图缩略图直显(磁盘直读/共享取字节,放大恒缩略图);
+        // 无缩略图维持原图 inline(现状,web 同口径)
         if (_a.hasThumbnail) {
           await _loadThumb();
-          if (!mounted) return;
-          if (_fail == null) _showingThumb = true;
-          setState(() => _loading = false);
+          if (mounted) setState(() => _loading = false);
         } else {
           await _loadInlineUrl();
         }
@@ -348,14 +162,28 @@ class _PreviewMediaState extends State<PreviewMedia>
     }
   }
 
+  /// livp 实况短片 URL(W4 #21 并行发起;失败静默回退静态图,web 同口径)。
+  /// 晚到的 live URL 必须 setState——并行后 _loading=false 的刷新先于本回调,
+  /// 不 setState 则「播放实况」按钮/播放器永不出现。
+  Future<void> _loadLiveUrl() async {
+    try {
+      final r = await session.api!.assets.livePreviewUrl(_a.id);
+      if (mounted) setState(() => _liveUrl = r.url);
+    } catch (_) {
+      /* 403/404 → 只显示静态图(web 同口径) */
+    }
+  }
+
   /// download-link(inline)原图/媒体 URL;失败置 _fail。
   /// P7(mobile-ux-polish):失败(403 无下载权/网络错)时若有缩略图则回退
   /// 缩略图预览(叠不打断的小字提示,不阻断查看);无缩略图维持原失败卡。
   /// 视频 inline 失败同口径降级(渲染侧按静态图处理,不再挂播放器)。
   Future<void> _loadInlineUrl() async {
     try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
+      final url = await session.api!.assets.downloadLink(
+        _a.id,
+        asAttachment: false,
+      );
       if (mounted) _url = url;
     } catch (_) {
       if (!mounted) return;
@@ -373,28 +201,79 @@ class _PreviewMediaState extends State<PreviewMedia>
     }
   }
 
-  /// 缩略图大图(heic/livp 静态/不可解码 image/G2 默认首显);缺失/失败按
-  /// P2-6 两态置 _fail。P2-1:URL 就绪时记入 _thumbUrl(原图失败回退复用)。
+  /// W6 #23:缩略图数据源(顺序写死)——
+  /// ① 无 thumbnail_key 直接两态失败卡(不读盘,走现状 inline/失败分支);
+  /// ② 捕获磁盘代数 → ThumbDiskStore.read(读返回后先查 mounted——read 期间
+  ///    dispose 直接返回不发 fetch,防无人取消的任务占名额至 20s;再校验代数,
+  ///    跨代丢弃视同 miss:重新捕获当前代数续走,不得直接 return——三空会
+  ///    永久转圈)→ 命中记 _thumbBytes 零网络;
+  /// ③ miss 经共享取字节入口 fetchThumb(与宫格/胶片条共享任务不重复下载),
+  ///    句柄存 _thumbHandle(dispose 必 cancel);外层 .timeout(20s) 为 UI
+  ///    总等待上限,onTimeout 先 cancel 再落失败;成功记 _thumbBytes 并按
+  ///    捕获代数写盘(fire-and-forget);收到 null(cancel/clear)仍 mounted
+  ///    也置 _fail(防 _thumbBytes/_url/_fail 三空永久 loading)。
+  /// 签名/下载失败(404/5xx/网络)统一 P2-6 两态文案置 _fail。
   Future<void> _loadThumb() async {
+    if (!_a.hasThumbnail) {
+      _fail = thumbFailText(_a.tags);
+      return;
+    }
+    final id = _a.id;
     try {
-      if (!_a.hasThumbnail) {
-        _fail = thumbFailText(_a.tags);
+      // 磁盘代数必须在 read 之前捕获(write 紧前才捕获形同虚设)
+      var gen = ThumbDiskStore.I.generation;
+      _thumbGen = gen;
+      final cached = await ThumbDiskStore.I.read(id);
+      if (!mounted) return; // read 期间 dispose:不发 fetch
+      final nowGen = ThumbDiskStore.I.generation;
+      if (nowGen != gen) {
+        // read 期间 clear(跨代):丢弃视同 miss,重新捕获当前代数继续
+        gen = nowGen;
+        _thumbGen = nowGen;
+      }
+      if (cached != null) {
+        setState(() => _thumbBytes = cached); // 磁盘命中:零网络直出
         return;
       }
-      _url = _thumbUrl = await thumbnailCache.urlOf(_a.id);
+      final handle = fetchThumb(id);
+      _thumbHandle = handle; // 每 State 只发起一次(见字段注释)
+      final bytes = await handle.future.timeout(
+        _thumbWaitLimit,
+        onTimeout: () {
+          // UI 总等待上限(含排队):先取消任务再落失败
+          handle.cancel();
+          throw TimeoutException('预览缩略图等待超时', _thumbWaitLimit);
+        },
+      );
+      if (!mounted) return;
+      if (bytes == null || bytes.isEmpty) {
+        // cancel(null)/clear:仍 mounted 也落失败,防三空永久 loading
+        setState(() => _fail = thumbFailText(_a.tags));
+        return;
+      }
+      setState(() => _thumbBytes = bytes);
+      // 写盘 fire-and-forget(带捕获代数;全局写互斥在 store 内部)
+      ThumbDiskStore.I.write(id, bytes, expectedGeneration: gen).ignore();
     } catch (_) {
-      _fail = thumbFailText(_a.tags);
+      // 签名失败(404/5xx)/下载失败/超时:统一两态文案(p7-both 500 语义同)
+      if (mounted) setState(() => _fail = thumbFailText(_a.tags));
     }
   }
 
   /// md/text 正文(拆 preview_text_load.dart;P2-8 超限断流降级)。
   Future<void> _loadText() async {
     try {
-      final url =
-          await session.api!.assets.downloadLink(_a.id, asAttachment: false);
-      final text = await fetchInlineText((token) =>
-          openPresignedStream(session.api!.presignedHttp, url,
-              cancelToken: token));
+      final url = await session.api!.assets.downloadLink(
+        _a.id,
+        asAttachment: false,
+      );
+      final text = await fetchInlineText(
+        (token) => openPresignedStream(
+          session.api!.presignedHttp,
+          url,
+          cancelToken: token,
+        ),
+      );
       if (mounted) _text = text;
     } on TextTooLargeException catch (e) {
       if (mounted) {
@@ -433,242 +312,65 @@ class _PreviewMediaState extends State<PreviewMedia>
     });
   }
 
-  /// 当前渲染分支是否图片(复用 plan 纯函数;决定双击缩放手势是否注册)。
-  bool get _zoomable {
-    if (_loading || _fail != null || _url == null) return false;
-    final planKind = _thumbFallback && _kind == PreviewKind.video
-        ? PreviewKind.image
-        : _kind;
-    return previewBodyPlan(
-          kind: planKind,
-          videoReady: _videoReady,
-          hasFail: _fail != null,
-          hasUrl: _url != null,
-          playingLive: _playingLive,
-        ) ==
-        PreviewBody.image;
+  /// W6 #25:Image.memory 解码失败(view 层 errorBuilder 上抛)——删盘上
+  /// 坏字节(带捕获代数,防跨代误删新会话写入)+ post-frame 置失败卡
+  /// (文案与「预览图还在生成」语义区分;同时清 _thumbFallback 防视频回退
+  /// 分支残留矛盾提示)。
+  void _onThumbDecodeFailed() {
+    final id = _a.id;
+    final gen = _thumbGen;
+    ThumbDiskStore.I.remove(id, expectedGeneration: gen).ignore();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() {
+        _fail = '图片解码失败,建议下载后打开';
+        _thumbFallback = false;
+      });
+    });
   }
 
-  /// C2/C3:媒体区点按统一包一层(tapUp 手动消歧,见 _onTapUp 注释)。
-  Widget _tapRegion(Widget child) => GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTapUp: _onTapUp,
-        child: child,
-      );
+  /// P3:播放器就绪/失败(状态机侧;view 层挂载)。
+  void _onPlayerReady() {
+    if (!mounted) return;
+    setState(() => _videoReady = true);
+  }
+
+  void _onPlayerError() {
+    if (!mounted) return;
+    setState(() {
+      _playerDead = true;
+      if (_kind == PreviewKind.livp) {
+        _playingLive = false; // 实况起播失败落回静态图(可重试)
+      } else {
+        _fail = '视频解码失败,建议下载后打开';
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
-    if (_kind == PreviewKind.unsupported) {
-      return _tapRegion(_block('该类型暂不支持预览'));
-    }
-    if (_kind == PreviewKind.pdf && !Platform.isIOS) {
-      // C6(app-polish):Android 不再「需下载后打开」死胡同——就地面板可下载可打开
-      return _tapRegion(AndroidPdfPanel(asset: _a));
-    }
-    final core = Center(
-      child: _loading
-          ? const CircularProgressIndicator(color: Colors.white70)
-          : _render(),
-    );
-    Widget content = core;
-    // P7/G2:缩略图兜底(原图 inline 失败回退/放大签原图失败保持)时叠加
-    // 不打断的小字提示(纯展示,手势穿透不阻断查看)
-    if (_thumbFallback) {
-      content = Stack(
-        fit: StackFit.expand,
-        children: [
-          core,
-          Positioned(
-            left: Tk.spaceLg,
-            right: Tk.spaceLg,
-            bottom: Tk.spaceMd,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    // 横 10 就近归 spaceSm;竖 5 属同容器比例微缝保留
-                    horizontal: 10,
-                    vertical: 5),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(Tk.rSm),
-                ),
-                child: const Text(
-                  '原图不可用(无下载权限或加载失败),当前为缩略图预览',
-                  style: TextStyle(color: Tk.previewFg2, fontSize: Tk.fzXs),
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-    return _tapRegion(content);
-  }
-
-  Widget _render() {
-    // P7:视频 inline 失败回退缩略图 → 不挂播放器,按静态图渲染(可放大看帧)
-    final planKind = _thumbFallback && _kind == PreviewKind.video
-        ? PreviewKind.image
-        : _kind;
-    final body = previewBodyPlan(
-      kind: planKind,
+    return PreviewImageView(
+      asset: _a,
+      kind: _kind,
+      loading: _loading,
+      thumbBytes: _thumbBytes,
+      url: _url,
+      text: _text,
+      fail: _fail,
+      thumbFallback: _thumbFallback,
       videoReady: _videoReady,
-      hasFail: _fail != null,
-      hasUrl: _url != null,
+      playerDead: _playerDead,
       playingLive: _playingLive,
+      playUrl: _playUrl,
+      liveUrl: _liveUrl,
+      onSingleTap: widget.onSingleTap,
+      onSwipe: widget.onSwipe,
+      onZoomChanged: widget.onZoomChanged,
+      onThumbDecodeFailed: _onThumbDecodeFailed,
+      onToggleLive: _toggleLive,
+      onPlayerReady: _onPlayerReady,
+      onPlayerError: _onPlayerError,
+      onSharePdf: _sharePdf,
     );
-    switch (body) {
-      case PreviewBody.block:
-        return _block(_fail ?? '暂无可预览内容');
-      case PreviewBody.markdown:
-        return DocSheet(child: MarkdownBody(data: _text ?? ''));
-      case PreviewBody.text:
-        return DocSheet(
-          child: SelectableText(
-            _text ?? '',
-            style: const TextStyle(fontSize: Tk.fzMd, color: Tk.previewFg),
-          ),
-        );
-      case PreviewBody.pdf:
-        return PdfReadyPanel(onShare: _sharePdf);
-      case PreviewBody.player:
-      case PreviewBody.loading:
-        // loading 且可播 URL 已在:挂播放器(自显转圈;livp 静起播同款)
-        if (_playUrl != null && !_playerDead) return _player();
-        return const Center(
-            child: CircularProgressIndicator(color: Colors.white70));
-      case PreviewBody.image:
-        return _image();
-    }
   }
-
-  Widget _player() => MediaVideoPlayer(
-        key: ValueKey(_playUrl!),
-        url: _playUrl!,
-        playing: _kind == PreviewKind.video || _playingLive,
-        isLive: _kind == PreviewKind.livp,
-        onReady: () {
-          if (!mounted) return;
-          setState(() => _videoReady = true);
-        },
-        onError: () {
-          if (!mounted) return;
-          setState(() {
-            _playerDead = true;
-            if (_kind == PreviewKind.livp) {
-              _playingLive = false; // 实况起播失败落回静态图(可重试)
-            } else {
-              _fail = '视频解码失败,建议下载后打开';
-            }
-          });
-        },
-      );
-
-  /// G2:缩略图→原图平滑替换——AnimatedSwitcher 同尺寸 fade 交叠(布局恒满幅,
-  /// StackFit.expand),InteractiveViewer/变换矩阵不动,缩放态不打断。
-  Widget _previewImage(String url) => AnimatedSwitcher(
-        duration: const Duration(milliseconds: 200),
-        // 默认 layoutBuilder 居中 Stack 会让 Image 收缩到内在尺寸,这里恒撑满
-        layoutBuilder: (currentChild, previousChildren) => Stack(
-          fit: StackFit.expand,
-          alignment: Alignment.center,
-          children: [
-            ...previousChildren,
-            ?currentChild,
-          ],
-        ),
-        child: Image.network(
-          url,
-          key: ValueKey(url), // URL 变化即触发 fade(thumb→原图)
-          fit: BoxFit.contain,
-          errorBuilder: (_, _, _) {
-            // P2-1(测试实证缺陷修复):原图签发成功但下载/解码失败——缩略图
-            // 可用态回退保持缩略图(_thumbFallback 叠 P7 式小字提示,与 403
-            // 路径同观感),仅无缩略图可用(或失败的正是缩略图)时保留失败卡。
-            // errorBuilder 处于 build 期,回退经 post-frame setState 落地:
-            // 本帧先现失败卡,下帧起 fade 回缩略图(同 thumb↔原图交叠款)。
-            if (_thumbUrl != null && url != _thumbUrl) {
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
-                setState(() {
-                  _url = _thumbUrl;
-                  _showingThumb = true;
-                  _thumbFallback = true; // 复位不重签(_originalRequested 保持)
-                });
-              });
-            }
-            return _block('图片解码失败,建议下载后打开');
-          },
-        ),
-      );
-
-  Widget _image() {
-    final stack = <Widget>[
-      InteractiveViewer(
-        // P3(mobile-ux-polish):未放大关 pan(交互回调判横滑切页),放大后
-        // 开(拖图平移不切页);缩回 ~1 由 _onInteractionEnd 复位交还横滑。
-        transformationController: _transform,
-        panEnabled: _zoomed,
-        minScale: 1,
-        maxScale: 4,
-        onInteractionStart: _onInteractionStart, // C3:捏合打断双击动画
-        onInteractionUpdate: _onInteractionUpdate,
-        onInteractionEnd: _onInteractionEnd,
-        child: _previewImage(_url!),
-      ),
-    ];
-    // livp 起播中:静态图上叠加加载圈(播放器 Offstage 预热)
-    if (_kind == PreviewKind.livp && _playingLive && !_videoReady) {
-      stack.add(const Positioned.fill(
-        child: Center(
-            child: CircularProgressIndicator(color: Colors.white70)),
-      ));
-    }
-    // livp 回切按钮(P2-2):静态态显「播放实况」(web liveUrl 非空才出按钮)
-    if (_kind == PreviewKind.livp && _liveUrl != null && !_playingLive) {
-      stack.add(_liveToggle());
-    }
-    // 播放器后台挂载保活(livp 静态态/起播中):暂停续播免重新起播
-    if (_playUrl != null && !_playerDead && bodyBehindImage) {
-      stack.add(Offstage(
-        offstage: true,
-        child: _player(),
-      ));
-    }
-    return Stack(fit: StackFit.expand, children: stack);
-  }
-
-  /// image 分支下播放器需后台挂载的条件:livp 已有就绪控制器或正在起播
-  /// (video 类 plan 恒走 player/loading 分支,不经此处)。
-  bool get bodyBehindImage =>
-      _kind == PreviewKind.livp && (_videoReady || _playingLive);
-
-  Widget _liveToggle() => Positioned(
-        left: 0,
-        right: 0,
-        bottom: Tk.spaceLg,
-        child: Center(
-          child: TextButton.icon(
-            onPressed: _toggleLive,
-            style: TextButton.styleFrom(
-              backgroundColor: Colors.black54,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: Tk.spaceLg, vertical: Tk.spaceSm),
-            ),
-            icon: Icon(
-              _playingLive ? Icons.image_outlined : Icons.play_arrow,
-              size: 16,
-            ),
-            label: Text(_playingLive ? '查看照片' : '播放实况'),
-          ),
-        ),
-      );
-
-  Widget _block(String msg) => PreviewBlock(
-        kind: _kind,
-        filename: _a.filename,
-        message: msg,
-      );
 }

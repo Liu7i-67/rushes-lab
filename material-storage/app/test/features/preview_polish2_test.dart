@@ -1,21 +1,31 @@
-/// app-polish-2(P2 批)预览包验收用例(对应需求文档 2026-10-22-app-polish-2.md):
+/// app-polish-2(P2 批)预览包验收用例(对应需求文档 2026-10-22-app-polish-2.md;
+/// G2 段经 app-thumbnail-storm-fix W4/W6 改写,2026-10-26):
 /// - G1(#2) 胶片条恒居中跟随:去掉「已完整可见则不滚」守卫——点选视口内
 ///   贴边可见项后该项滚至条中央(offset 断言);横滑到屏外张后跟随(保留语义);
-/// - G2(#3) 缩略图优先+放大换原图:进入预览仅请求 thumbnail-url、未签
-///   download-link(fake api 记录);放大(双击,2.5x>1.5x 阈值)后签发原图
-///   恰好一次、双击复位不重签;放大签发 403 → 保持缩略图 + P7 式小字提示。
+/// - W6(#23-#26,原 G2「进入仅请求 thumbnail-url」改写):预写磁盘字节进
+///   预览 → Image.memory 直出,thumbnail-url/download-link 全零调用、无失败卡;
+/// - W4(#19-#21,原 G2「放大换原图/403 回退」链路整体删除):双击放大只动
+///   缩放矩阵(scale>1.05),零新增 dio 调用;复位回 1x 仍零调用;403 桩在场
+///   也零调用、恒显缩略图、无「原图不可用」提示与失败卡。
 ///
-/// 套路:同 preview_polish_test.dart——内存假 API(downloadLink 即回假 URL /
-/// 可编排 403;thumbnailUrl 记录调用并回假地址),网络图在测试区恒
-/// errorBuilder,不影响手势与 API 记录断言;全程逐 pump(加载圈为不定长
-/// 动画,勿 pumpAndSettle)。G1/G2 已交付,先红阶段的 TODO 标注已摘除。
+/// 套路:同 preview_polish_test.dart——内存假 API(thumbnailUrl/downloadLink
+/// 均记录调用);胶片条小格网络段在测试区恒降级色块,不影响手势与 API 记录
+/// 断言。字节源按 T12 配方磁盘预写:setUp 挂临时目录(debugAttachDirectory),
+/// tearDown 删目录并复位单例;ThumbDiskStore 已同步 IO 化,测试体内直接
+/// await write 预写即可。磁盘命中链跨多拍,统一小轮询 pump(加载圈为不定长
+/// 动画,勿 pumpAndSettle)。
 library;
+
+import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart' show kDoubleTapMinTime;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/session.dart';
+import 'package:ms_app/core/thumb_disk_store.dart';
 import 'package:ms_app/features/assets/thumbnail_image.dart'
     show ThumbnailImage, thumbnailCache;
 import 'package:ms_app/features/preview/filmstrip.dart';
@@ -33,8 +43,15 @@ const double _kThumb = 48;
 const double _kStride = 56;
 const double _kEdgePad = 8;
 
-/// G1/G2 假 assets API:thumbnailUrl 记录调用并即回假地址;downloadLink
-/// 记录调用、结果可编排(403 注入测「保持缩略图+提示」)。
+/// 1×1 透明 PNG(经典字节,磁盘预写后可真实解码出帧)。
+final Uint8List _kPng1x1 = base64Decode(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ'
+  'AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+);
+
+/// G1/W4/W6 假 assets API:thumbnailUrl/downloadLink 均只记录调用(W6 断言
+/// 磁盘命中零签名、W4 断言放大零原图签发);downloadLink 结果可编排(403
+/// 桩在场,验证放大时依旧零调用)。
 class _G2AssetsApi extends FakeAssetsApi {
   _G2AssetsApi(super.api);
 
@@ -106,6 +123,15 @@ Future<_G2AssetsApi> _pumpPreview(
   return fake.assets;
 }
 
+/// 小轮询推进假时钟直到 [ready](磁盘命中/缩略图链跨多拍微任务调度,
+/// pumpAndSettle 一轮不可达;加载圈为不定长动画,勿 pumpAndSettle)。
+Future<void> _pollUntil(WidgetTester tester, bool Function() ready) async {
+  for (var i = 0; i < 10; i++) {
+    if (ready()) return;
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+}
+
 /// 胶片条里「当前张」小格(previewGold 高亮描边,区别于其余 previewLine)。
 Finder _currentStripItem() => find.descendant(
   of: find.byType(Filmstrip),
@@ -161,7 +187,22 @@ double _mediaScale(WidgetTester tester) => tester
     .getMaxScaleOnAxis();
 
 void main() {
-  setUp(() => thumbnailCache.clear());
+  late Directory dir;
+
+  setUp(() {
+    thumbnailCache.clear();
+    // T12 配方:磁盘预写夹具(临时目录挂单例)。G1 用例磁盘 miss 与旧
+    // _dir null 同为 miss,行为不变;W4/W6 用例经 write 预写字节走命中路径。
+    dir = Directory.systemTemp.createTempSync('preview_polish2');
+    ThumbDiskStore.I.debugAttachDirectory(dir);
+  });
+
+  tearDown(() {
+    try {
+      dir.deleteSync(recursive: true);
+    } catch (_) {}
+    ThumbDiskStore.I.debugAttachDirectory(null); // 单例全局,必须复位
+  });
 
   // ── G1 胶片条恒居中跟随 ──────────────────────────────────────────────────
   testWidgets('G1:点选视口内贴边可见缩略图后,当前项滚至条中央(offset 断言)', (tester) async {
@@ -242,8 +283,10 @@ void main() {
     );
   });
 
-  // ── G2 缩略图优先+放大换原图 ─────────────────────────────────────────────
-  testWidgets('G2:进入预览仅请求 thumbnail-url,未签 download-link', (tester) async {
+  // ── W6 磁盘命中直出 / W4 放大恒缩略图(原 G2 段改写)────────────────────
+  testWidgets('W6:进入预览磁盘命中零签名零原图,Image.memory 直出', (tester) async {
+    // ThumbDiskStore 已同步 IO 化:测试体内直接预写,不再需要 runAsync
+    await ThumbDiskStore.I.write('g2a', _kPng1x1);
     final api = await _pumpPreview(
       tester,
       PreviewArgs(
@@ -253,20 +296,34 @@ void main() {
         canDownload: true,
       ),
     );
+    await _pollUntil(
+      tester,
+      () => find
+          .byWidgetPredicate((w) => w is Image && w.image is MemoryImage)
+          .evaluate()
+          .isNotEmpty,
+    );
     expect(
       api.thumbCalls,
-      contains('g2a'),
-      reason: 'G2:进入即签缩略图(thumbnail-url)',
+      isEmpty,
+      reason: 'W6:磁盘命中零签名(不再进预览即签 thumbnail-url)',
     );
     expect(
       api.downloadLinkCalls,
       isEmpty,
-      reason: 'G2:默认不签原图 download-link(放大超过 1.5x 才签)',
+      reason: 'W6:磁盘命中零原图签发(download-link 恒不触发)',
     );
-    expect(find.text('预览加载失败'), findsNothing, reason: '缩略图就绪非失败卡');
+    // 胶片条小格命中时也走同一磁盘字节,故用「至少一个」口径(勿钉死数量)
+    expect(
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      findsWidgets,
+      reason: 'W6:主图 Image.memory 直出(磁盘位图上屏,零网络)',
+    );
+    expect(find.text('预览加载失败'), findsNothing, reason: '磁盘命中非失败卡');
   });
 
-  testWidgets('G2:双击放大后原图签发恰好一次;双击复位不重签', (tester) async {
+  testWidgets('W4:双击放大零新增原图签发;缩放生效;复位正常', (tester) async {
+    await ThumbDiskStore.I.write('g2b', _kPng1x1);
     final api = await _pumpPreview(
       tester,
       PreviewArgs(
@@ -276,8 +333,17 @@ void main() {
         canDownload: true,
       ),
     );
-    // G2 交付后:进预览只签缩略图,此断言同时锁「入口零签发」
-    expect(api.downloadLinkCalls, isEmpty, reason: 'G2 前置:进预览未签原图');
+    // 磁盘命中直出后图片分支才挂载 InteractiveViewer(轮询出图)
+    await _pollUntil(
+      tester,
+      () => find.byType(InteractiveViewer).evaluate().isNotEmpty,
+    );
+    expect(
+      find.byType(InteractiveViewer),
+      findsOneWidget,
+      reason: '前置:磁盘命中直出图片分支',
+    );
+    expect(api.downloadLinkCalls, isEmpty, reason: 'W4 前置:进预览(磁盘命中)未签原图');
 
     final center = tester.getCenter(find.byType(PreviewMedia));
     await _doubleTap(tester, center);
@@ -287,20 +353,24 @@ void main() {
     expect(
       _mediaScale(tester),
       greaterThan(1.05),
-      reason: '前置(既有 C3):双击放大到 2.5x(>1.5x 阈值)',
+      reason: 'W4:双击放大缩放生效(只动变换矩阵至 2.5x)',
+    );
+    expect(
+      api.downloadLinkCalls,
+      isEmpty,
+      reason: 'W4:放大零新增原图签发(自动换原图链路已删,防图未渲染假绿)',
     );
 
-    expect(api.downloadLinkCalls, ['g2b'], reason: 'G2:放大触发原图签发恰好一次');
-
-    // 已放大态再双击 = 复位,不回退原图、不重签
+    // 已放大态再双击 = 复位,同样零 dio 调用
     await _doubleTap(tester, center);
     await tester.pump(const Duration(milliseconds: 400));
     await tester.pump();
-    expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: '前置:复位 1x');
-    expect(api.downloadLinkCalls, ['g2b'], reason: 'G2:复位不再签发(仍一次)');
+    expect(_mediaScale(tester), closeTo(1.0, 0.05), reason: 'W4:复位回 1x');
+    expect(api.downloadLinkCalls, isEmpty, reason: 'W4:复位仍零原图签发(全程零 dio 调用)');
   });
 
-  testWidgets('G2:放大签发 403 → 保持缩略图 + P7 式小字提示(非失败卡)', (tester) async {
+  testWidgets('W4:放大不触发原图签发(403 桩在场零调用),恒显缩略图', (tester) async {
+    await ThumbDiskStore.I.write('g2c', _kPng1x1);
     final api = await _pumpPreview(
       tester,
       PreviewArgs(
@@ -311,24 +381,34 @@ void main() {
       ),
       linkStaged: ApiException(403, '无下载权限'),
     );
-    expect(api.thumbCalls, contains('g2c'), reason: '前置:缩略图已签');
-    // G2 交付后:进预览只看缩略图,尚无原图失败,提示不应出现
-    expect(find.textContaining('原图不可用'), findsNothing);
+    // 磁盘命中直出后图片分支才挂载 InteractiveViewer(轮询出图)
+    await _pollUntil(
+      tester,
+      () => find.byType(InteractiveViewer).evaluate().isNotEmpty,
+    );
+    expect(
+      find.byType(InteractiveViewer),
+      findsOneWidget,
+      reason: '前置:磁盘命中直出图片分支',
+    );
 
     final center = tester.getCenter(find.byType(PreviewMedia));
     await _doubleTap(tester, center);
-    await tester.pump(const Duration(milliseconds: 400));
+    await tester.pump(const Duration(milliseconds: 400)); // 220ms 缩放动画
     await tester.pump();
     await tester.pump();
-    expect(api.downloadLinkCalls, ['g2c'], reason: 'G2:放大签发原图(403)');
-
-    // 403 保持缩略图 + P7 式不打断小字提示(复用既有降级文案)
+    expect(
+      _mediaScale(tester),
+      greaterThan(1.05),
+      reason: 'W4:放大缩放生效(恒显缩略图不换源)',
+    );
+    expect(api.downloadLinkCalls, isEmpty, reason: 'W4:403 桩在场仍零调用(放大不签原图)');
     expect(
       find.textContaining('原图不可用'),
-      findsOneWidget,
-      reason: 'G2:原图签发失败保持缩略图并叠提示',
+      findsNothing,
+      reason: 'W4:无原图签发即无回退提示(P7 提示失去触发点)',
     );
-    expect(find.text('预览加载失败'), findsNothing, reason: 'G2:有缩略图不出失败卡');
-    expect(api.thumbCalls.length, 1, reason: '缩略图经缓存去重,不因原图失败重签');
+    expect(find.text('预览加载失败'), findsNothing, reason: 'W4:磁盘命中无失败卡');
+    expect(api.thumbCalls, isEmpty, reason: 'W4:磁盘命中恒显缩略图(零签名)');
   });
 }

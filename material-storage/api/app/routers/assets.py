@@ -2092,6 +2092,84 @@ async def get_thumbnail_url(
     return {"url": url, "expires_in": ttl}
 
 
+# ─── thumbnail URL 批量签发 — 宫格按页预热(app-thumbnail-storm-fix W3,纯新增)─
+class ThumbUrlOut(BaseModel):
+    """单条缩略图签名结果(App 按 asset_id 匹配,响应顺序不保证)。"""
+
+    asset_id: uuid.UUID
+    url: str
+    expires_in: int
+
+
+class ThumbUrlsIn(BaseModel):
+    """批量签收入参:1..100(超限由 pydantic 入参约束回 422,风格对齐
+    BatchDownloadLinkIn)。"""
+
+    asset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+
+
+class ThumbUrlsOut(BaseModel):
+    """批量签发响应:urls 只含有 thumbnail_key 的行;missing = 不存在或无
+    thumbnail_key(软删行照常签发,与单发端点同拍板口径)。"""
+
+    urls: list[ThumbUrlOut] = Field(default_factory=list)
+    missing: list[uuid.UUID] = Field(default_factory=list)  # 不存在或无 thumbnail_key
+
+
+@router.post("/thumbnail-urls", response_model=ThumbUrlsOut)
+async def post_thumbnail_urls(
+    payload: ThumbUrlsIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    presign: PresignService = Depends(get_presign),
+    user: CurrentUser = Depends(get_current_user),
+) -> ThumbUrlsOut:
+    """缩略图 presigned URL 批量签发 — 宫格页按页预热(D3),认证同单发端点
+    (get_current_user,不做 per-asset OpenFGA check:1024px 模糊化,信任组织内
+    可见性;同账号本可循环单发探测,批量化仅提高枚举效率,信任模型不变)。
+
+    单条 `SELECT … WHERE id IN`(AsyncSession 不允许并发,禁止逐资产 db.get 的
+    N+1);内存分流:有 thumbnail_key 逐个 sign_thumbnail_url(本地 HMAC),
+    不存在 / 无 key 进 missing;重复 id 以唯一 id 出;软删(deleted_at 置位)行
+    照常返回(回收站缩略图与单发同口径);request_base 跟随入口(缩略图与原片
+    同 vhost 同源);响应顺序不保证,App 按 asset_id 匹配。
+    """
+    _ = user.id  # 至少要认证
+    # 去重保序:重复 id 只查一次、只签一次,响应里以唯一 id 出
+    ids = list(dict.fromkeys(payload.asset_ids))
+    rows = list(
+        (await db.execute(select(Asset).where(Asset.id.in_(ids)))).scalars().all()
+    )
+    by_id = {row.id: row for row in rows}
+
+    ttl = 1800   # 30 min — 与单发同值(缩略图比原图 ttl 长,让浏览器缓存有效)
+    # ADR-0008 P1:缩略图走独立 bucket + 缩略图 MinIO(SSD);endpoint/bucket 由
+    # env 控制;host 跟随入口(与单发一致,request_base_from 取 scheme://host)
+    request_base = request_base_from(request)
+    urls: list[ThumbUrlOut] = []
+    missing: list[uuid.UUID] = []
+    for i, asset_id in enumerate(ids):
+        # 100 条串行签名:本地 HMAC 轻,但底层是同步 botocore 调用 —— 每 20 条
+        # 让出一次事件循环,不占死 loop(替代逐条 to_thread,免线程池开销盖过签名)
+        if i and i % 20 == 0:
+            await asyncio.sleep(0)
+        row = by_id.get(asset_id)
+        thumbnail_key = (row.tags or {}).get("thumbnail_key") if row is not None else None
+        if not thumbnail_key:
+            missing.append(asset_id)
+            continue
+        urls.append(
+            ThumbUrlOut(
+                asset_id=asset_id,
+                url=presign.sign_thumbnail_url(
+                    thumbnail_key, ttl, request_base=request_base
+                ),
+                expires_in=ttl,
+            )
+        )
+    return ThumbUrlsOut(urls=urls, missing=missing)
+
+
 # ─── delete(soft / hard)───────────────────────────────────────────────────
 @router.delete("/{asset_id}", status_code=204)
 async def delete_asset(

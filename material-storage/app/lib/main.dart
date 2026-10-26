@@ -13,8 +13,9 @@ import 'core/maintenance/banner_controller.dart';
 import 'core/polling_controller.dart';
 import 'core/session.dart';
 import 'core/thumb_disk_store.dart';
+import 'core/thumb_pipeline.dart';
+import 'core/thumbnail_cache.dart';
 import 'core/transfers/transfer_queue.dart';
-import 'features/assets/thumbnail_image.dart' show thumbnailCache;
 import 'services/app_log.dart';
 import 'services/notifier.dart';
 import 'services/transfer_foreground.dart';
@@ -30,16 +31,28 @@ const kAppBuildStamp = String.fromEnvironment(
   defaultValue: '',
 );
 
+/// 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
+/// core 层资源在此挂载)。**幂等**:重复调用不重复累积(T14 断言),抽函数
+/// 便于测试注入。
+bool _sessionClearHooksRegistered = false;
+void registerSessionClearHooks() {
+  if (_sessionClearHooksRegistered) return;
+  _sessionClearHooksRegistered = true;
+  // 顺序写死:字节任务闸(pipeline)→ URL 缓存(cache)→ 位图磁盘(disk)——
+  // 先停在途下载(句柄 null 完成 + abort 链放弃签名等待),再升缓存代数,
+  // 最后清磁盘(storm-fix W1/W2)
+  session.addSessionClearHook(thumbPipeline.clear);
+  session.addSessionClearHook(thumbnailCache.clear);
+  session.addSessionClearHook(ThumbDiskStore.I.clear);
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // WP0 双主题:启动读外观偏好(跟随系统/深/浅);读盘失败保持 system
   // 且不阻塞后续初始化(ThemeStore 内部已静默降级)。
   await themeController.load();
-  // 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
-  // 特性侧缓存在此挂载,core 不再反向 import features)
-  session.addSessionClearHook(thumbnailCache.clear);
-  // 包 B(app-polish-3):位图磁盘缓存随会话清空(登出/401 不残留用户素材)
-  session.addSessionClearHook(ThumbDiskStore.I.clear);
+  // 会话清空钩子(登出/401:缩略图字节任务/URL 缓存/磁盘位图全部清空)
+  registerSessionClearHooks();
   // B7 通知未读轮询(§8.7 单一 PollingController):挂 App 生命周期 +
   // Session 门控(登录/登出/401 清会话即经 syncGate 起停,仅前台+已登录才轮)
   unreadPoller.attach();
