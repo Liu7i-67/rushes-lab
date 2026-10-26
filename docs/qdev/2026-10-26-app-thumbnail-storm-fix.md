@@ -24,8 +24,7 @@
 | D7 | 超时/取消打断范围（分阶段写死） | **池排队/建连期**：无 request 对象不可主动断，靠 15s connectionTimeout 兜底，管线终止仅释放名额+置 `isCancelled`；**`getUrl` 返回后（连接已建）发现已取消 → 立即 `req.abort()`**（晚注册立即触发规则覆盖此点，防占用池连接后才丢弃）；**TTFB/响应头期**：`req.abort()` 有效（仅 `_responseCompleter` 未完成时销毁连接，`http_impl.dart:1702-1709`）；**响应体期**：`subscription.cancel()` 触发 `onCancel` 关闭连接（`http_parser.dart:1264-1270`），取消同时以异常完成下载 completer——`await for` 拿不到 subscription，下载必须改显式 `resp.listen`。签名不强杀（不加 CancelToken，防破坏十余处测试 fake），靠 `abandonAwait` 放弃等待 + 根 future swallow（W2 #11）+ `isCancelled` 短路后续 | dart:io 语义精确化：`abort()` 对响应头已到的连接是空操作（`http.dart:1877`）；「连接即时归还」仅对 TTFB/body 期成立，建连期最坏等 15s |
 | D8 | 发布顺序 | **API 先行部署，App 后发版** | 新 App + 旧后端：预热 404 静默 + 单发兜底（经 D1 签名闸限流，退化窗口也不风暴） |
 | D9 | 入口层（跳板机 nginx/隧道） | **不在本批**，记遗留核查项 | 客户端治理先行 |
-| D10 | `preview_media.dart` 300 行硬顶 | **默认 b（本方案推荐），派发前向用户确认一次，否决则改 a**：a) 历史债务豁免（本批净减 ~20 行，674→~654，需用户明确接受违规——仓库先例 `2026-10-23-app-ink-gold-ui.md:338-342` 定的是「超限文件先拆再改」，仅 2 处颜色替换才豁免，本批改动远超该口径）；b) **提交顺序写死：先拆分（独立 commit）→ W4+W6 合并 commit**：拆 `preview_image_view.dart`（渲染/手势/InteractiveViewer/`_player`/`_liveToggle`，约 -224）→ 拆 `preview_media_loader.dart`（`_load`/`_loadThumb`/`_loadInlineUrl` 编排与状态，约 -130）→ W4+W6 合并改造（合计净减 ~20）→ 主文件 674-224-130-20 ≈ 300 行达标（+1 天，本方案推荐；**W4/W6 各条目引用的行号一律以拆分前 `preview_media.dart` 为参照，拆分时按符号迁移定位**，符合 ink-gold「先拆再改」规矩） | 单拆 image_view 一层只能到 ~454 行不达标（674-60-200+40），b 必须两步拆分；拆分本身独立成 commit，W4/W6 改动落在小文件里更安全 |
-
+| D10 | `preview_media.dart` 行数硬顶 | **已落定（2026-10-26 用户指令：单文件 ≤500 行）：b-精简版——只拆 `preview_image_view.dart` 一层（渲染/手势/InteractiveViewer/`_player`/`_liveToggle`，约 -224 行），主文件 674-224-20(W4+W6 合计净减) ≈ 430 ≤ 500 达标；`preview_media_loader.dart` 拆分取消** | 拆分独立成 commit 在先，再 W4+W6 合并 commit；本文行号引用一律以拆分前 `preview_media.dart` 为参照、拆分时按符号迁移定位 |
 ## 架构：共享取字节入口（本方案的拼合件）
 
 `thumbnailCache` 实例与字节下载器现散在 `features/assets/thumbnail_image.dart`（实例 `:24-29`、静态 `_http` `:56`、`_download` `:115`），core 层无法复用（预览要走管线就会 core→features 反向依赖，`main.dart:38-39` 解耦红线）。本批下沉：
@@ -67,7 +66,7 @@
 14. 实现：单条 `select(Asset).where(Asset.id.in_(ids))`（禁止 N+1）；内存分流——有 `thumbnail_key` 逐个 `sign_thumbnail_url`（本地 HMAC；**100 条串行签名走 `asyncio.to_thread` 或每批 20 条 `await asyncio.sleep(0)` 让出事件循环**，防同步 botocore 阻塞），不存在/无 key 进 `missing`；重复 id 以唯一 id 出。软删照常返回；`request_base` 跟随入口；响应顺序不保证，App 按 `asset_id` 匹配。
 15. `ThumbnailCache` 批量接口与容量校准：`missingOf(ids)`；`putBatch(entries, {int? expectedGeneration})`（TTL 语义与 `_sign` 现状一致：`expiresIn ≤ 0` → `fallbackTtl`；`0 < expiresIn ≤ margin(300s)` → **不缓存该条**（`_sign` 现状 clamp 0 即立即过期，不缓存更省且等价）；预热方发请求前捕获 `generation` 透传）。**`defaultEntryBytes` 256KB→4KB**（URL 只存字符串，256KB 估权 LRU 上限仅 ~320 条，千格夹整页预热会抖动驱逐；4KB≈2 万条）+ **LRU 改 running total 维护**（`_put`/逐出 O(1)，现状 fold 是 2 万条下 O(n²)）；`urlOf` 按代数过滤旧代 `_inflight`；文件头旧注释同步更新。
 16. 新建 `features/assets/thumb_prewarm.dart`：`prewarmThumbUrls(List<Asset> items)` async + 最外层 catch——过滤 `hasThumbnail` 且 `missingOf` 命中 → 捕获代数 → 分批 ≤100 → `assets.thumbnailUrls` → `putBatch(带代数)`；失败静默，不自动重试、不做负缓存（`missing` 项忽略——有 `thumbnail_key` 的格子进入视野时单发兜底，端点 404 的格子弹一次后落色块；无 key 格子本就不发请求、直接色块）。
-17. 宫格页接入**两个挂点**（`assets_page.dart`）：① `_applyPage` 之后（首载/下拉刷新/重试/静默刷新共用落点）；② `_loadMore` merge `[..._items, ...page.items]` 完成后（**`_loadMore` 不经 `_applyPage`**，`:147-176` 手工 merge，是快速滚动新增数据的唯一路径）。两处均传增量 `page.items`，页面净增 ≤5 行守 300 硬顶（现 294 行）。
+17. 宫格页接入**两个挂点**（`assets_page.dart`）：① `_applyPage` 之后（首载/下拉刷新/重试/静默刷新共用落点）；② `_loadMore` merge `[..._items, ...page.items]` 完成后（**`_loadMore` 不经 `_applyPage`**，`:147-176` 手工 merge，是快速滚动新增数据的唯一路径）。两处均传增量 `page.items`（现 294 行，500 纪律内余量充足）。
 18. 预热与单格签名并发写同一 assetId：幂等覆盖，最坏重复一次签名（`_inflight` 单飞仍在）。
 
 ### W4 预览放大不换原图（P1，用户拍板）
@@ -98,10 +97,9 @@
 |---|---|---|
 | `app/lib/core/thumb_pipeline.dart` | 任务闸：并发 6、FIFO、同 assetId 订阅去重、句柄 cancel（最后订阅者即终止）、ThumbTaskContext、20s watchdog、管线级 swallow、代际、clear/reset | ~200 |
 | `app/lib/core/thumb_fetch.dart` | 共享取字节入口：`fetchThumb(assetId)`（签名→下载 job：isCancelled 检查+两段式 abort）+ 静态 `_thumbHttp`（不设池限）+ 显式 `resp.listen` 下载 | ~130 |
-| `app/lib/core/thumb_sign_gate.dart` | 签名并发闸独立件（现 `thumbnail_cache.dart` 仅 118 行，加闸/abandon/代际/putBatch/running total 必超 300 硬顶）：上限 6 FIFO + queued/running/abandoned 三态 + race 20s + slotHeld releaseOnce + 代数 | ~140 |
+| `app/lib/core/thumb_sign_gate.dart` | 签名并发闸独立件（`thumbnail_cache.dart` 现 118 行，加闸/abandon/代际/putBatch/running total 后职责过重，独立成件边界更清晰）：上限 6 FIFO + queued/running/abandoned 三态 + race 20s + slotHeld releaseOnce + 代数 | ~140 |
 | `app/lib/features/assets/thumb_prewarm.dart` | 批量预热编排：过滤/捕获代数/分批/调 API/putBatch，失败静默 | ~90 |
-| `app/lib/features/preview/preview_image_view.dart`（D10 选 b 时） | 迁出 `_previewImage`/`_image`/双击捏合手势/InteractiveViewer | ~200 |
-| `app/lib/features/preview/preview_media_loader.dart`（D10 选 b 时） | 迁出 `_load`/`_loadThumb`/`_loadInlineUrl` 加载编排与状态（loader 持 `_url`/`_thumbBytes`/`_fail`/`_thumbHandle`，向 view 层暴露不可变快照） | ~130 |
+| `app/lib/features/preview/preview_image_view.dart`（D10 已落定） | 迁出 `_previewImage`/`_image`/双击捏合手势/InteractiveViewer/`_player`/`_liveToggle`（W4/W6 前先拆，独立 commit） | ~224 |
 | `app/test/flutter_test_config.dart` | 全局 tearDown：`thumbPipeline.reset()` + `thumbnailCache.clear()` | ~15 |
 | `app/test/core/thumb_pipeline_test.dart` | 闸单测（T1-T6、T14 管线部分） | ~240 |
 | `app/test/core/api/thumbnail_no_report_test.dart` | noErrorReport 钩子断言（T11②，runZonedGuarded 口径） | ~80 |
@@ -201,8 +199,8 @@ class ThumbUrlsOut(BaseModel):
 | `app/lib/core/thumbnail_cache.dart` | 全局实例移入 + 挂接 `thumb_sign_gate`（闸实现独立文件防超 300）+ missingOf/putBatch/generation + 代际 + 4KB 权重 + LRU running total |
 | `app/lib/core/thumb_disk_store.dart` | generation/write(串行+双校验)/remove/`_clearing` try-finally/写闸注入 |
 | `app/lib/core/api/assets_api.dart` | `thumbnailUrl` 与 `livePreviewUrl` 加 noErrorReport；新增 `thumbnailUrls` |
-| `app/lib/features/assets/assets_page.dart` | `_applyPage` 后 + `_loadMore` merge 后各 1 行 `prewarmThumbUrls(page.items)`（现 294 行，净增 ≤5 守 300 硬顶） |
-| `app/lib/features/preview/preview_media.dart` | W4 删 G2 链路与 AnimatedSwitcher（净减 ~60 行）+ W6 `fetchThumb` 化数据源与状态机改造（净增 ~40 行）；D10 口径实施前落定 |
+| `app/lib/features/assets/assets_page.dart` | `_applyPage` 后 + `_loadMore` merge 后各 1 行 `prewarmThumbUrls(page.items)`（现 294 行，500 纪律内余量充足） |
+| `app/lib/features/preview/preview_media.dart` | W4 删 G2 链路与 AnimatedSwitcher（净减 ~60 行）+ W6 `fetchThumb` 化数据源与状态机改造（净增 ~40 行）；D10 已落定（先拆 view 独立 commit） |
 | `app/lib/main.dart` | 会话清空钩子加 `thumbPipeline.clear()`（顺序 pipeline → cache → disk）；钩子注册抽 `registerSessionClearHooks()`（幂等防重复累积）便于测试 |
 | `app/lib/core/session.dart` | 仅加 `@visibleForTesting` 钩子观测（T14 用） |
 | `app/test/probe_qa_boundary_test.dart`（既有，修改，**唯一归属包 C**） | C2 预览用例（`:357-390`，`_img` 带 `thumbnail_key`、`thumbnailUrl` 永挂起桩）按 W6 数据源适配；B 包对该文件只读不改（避免并行冲突） |
@@ -242,9 +240,9 @@ class ThumbUrlsOut(BaseModel):
 |---|---|---|---|
 | A（后端） | W3 端点 + T7-T10 | `api/app/routers/assets.py`、`api/tests/test_thumbnail_urls_batch.py` | 无（契约本文档已定） |
 | B（App core+assets 底座） | W1 管线 + 共享取字节入口 + W2 签名闸/标记 + W3 缓存批量/api 方法/预热编排 + W5 池参数 + T1-T6/T11②/T14 | `lib/core/thumb_pipeline.dart`（新）、`lib/core/thumb_fetch.dart`（新）、`lib/core/thumb_sign_gate.dart`（新）、`lib/features/assets/thumb_prewarm.dart`（新）、`lib/core/thumbnail_cache.dart`、`lib/core/thumb_disk_store.dart`、`lib/core/api/assets_api.dart`、`lib/features/assets/thumbnail_image.dart`、`lib/main.dart`、`lib/core/session.dart`（仅加 `@visibleForTesting` 钩子观测，T14 用）、`test/flutter_test_config.dart`（新）、`test/core/thumb_pipeline_test.dart`（新）、`test/core/thumb_fetch_test.dart`（新）、`test/core/api/thumbnail_no_report_test.dart`（新）、`test/features/thumb_prewarm_test.dart`（新）、`test/core/thumbnail_cache_test.dart`、`test/core/thumb_disk_store_test.dart`、`test/features/thumbnail_image_disk_test.dart`（兜底权：abandonAwait 链若影响既有用例可就地适配）、`test/probe_qa_boundary_test.dart`（只读；适配唯一归属包 C） | 无（按契约可与 A 并行） |
-| C（App features） | 宫格预热接入 + W4 预览改版 + W6 + T11①/T12/T13（D10 选 b 时含两步拆分） | `lib/features/assets/assets_page.dart`、`lib/features/preview/preview_media.dart`、`lib/features/preview/preview_image_view.dart`（选 b 时新）、`lib/features/preview/preview_media_loader.dart`（选 b 时新）、`test/helpers/api_harness.dart`、`test/features/assets_page_prewarm_test.dart`（新）、`test/features/preview_thumb_source_test.dart`（新，T13 落点）、`test/features/preview_polish2_test.dart`、`test/features/preview_polish_test.dart`、`test/features/probe_p2_test.dart`、`test/features/preview_fallback_thumb_test.dart`、`test/features/preview_media_fallback_test.dart`、`test/features/preview_filmstrip_tap_test.dart`（`preview_page_swipe_test.dart` 已核验：无缩略图 inline 失败不改状态的行为保留后无需改动，不占清单）、`test/probe_qa_boundary_test.dart`（C2 用例 W6 适配唯一归属此包） | B 的接口 |
+| C（App features） | 宫格预热接入 + W4 预览改版 + W6 + T11①/T12/T13（D10 选 b 时含两步拆分） | `lib/features/assets/assets_page.dart`、`lib/features/preview/preview_media.dart`、`lib/features/preview/preview_image_view.dart`（选 b 时新）、`test/helpers/api_harness.dart`、`test/features/assets_page_prewarm_test.dart`（新）、`test/features/preview_thumb_source_test.dart`（新，T13 落点）、`test/features/preview_polish2_test.dart`、`test/features/preview_polish_test.dart`、`test/features/probe_p2_test.dart`、`test/features/preview_fallback_thumb_test.dart`、`test/features/preview_media_fallback_test.dart`、`test/features/preview_filmstrip_tap_test.dart`（`preview_page_swipe_test.dart` 已核验：无缩略图 inline 失败不改状态的行为保留后无需改动，不占清单）、`test/probe_qa_boundary_test.dart`（C2 用例 W6 适配唯一归属此包） | B 的接口 |
 
-交付约定：`scripts/changelog.md` 按天记条目（W4 为用户可感知行为变更，须含 commit hash）；W4 与 W6 **合并为一个 commit**（耦合过深拆不开，单一 revert 单元=整个预览改造）；选 b 时提交顺序「先拆分（独立 commit）→ W4+W6 合并 commit」，改造落在 loader/view 层；**派发包 C 前向用户确认 D10（默认 b）**。
+交付约定：`scripts/changelog.md` 按天记条目（W4 为用户可感知行为变更，须含 commit hash）；W4 与 W6 **合并为一个 commit**（耦合过深拆不开，单一 revert 单元=整个预览改造）；提交顺序「先拆 `preview_image_view`（独立 commit）→ W4+W6 合并 commit」，改造落在 view 层；D10 已按 500 行纪律落定（b-精简版）。
 
 ## 验收标准
 
