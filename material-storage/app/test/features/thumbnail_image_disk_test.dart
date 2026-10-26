@@ -175,16 +175,21 @@ void main() {
     } catch (_) {}
   });
 
-  /// 写盘改 fire-and-forget 后 pumpAndSettle 不等文件 IO:轮询等待落盘。
+  /// 写盘 fire-and-forget 的微任务链在 fakeAsync 下不被 tester.pump flush
+  /// (嵌套 zone 内注册,收尾才跑):pump 出帧 + 真实 await 提供事件循环拍
+  /// 催化其推进,轮询探测落盘。
   Future<void> waitForWritten(WidgetTester tester, String assetId) async {
-    final ok = await tester.runAsync(() async {
-      for (var i = 0; i < 300; i++) {
-        if (await ThumbDiskStore.I.read(assetId) != null) return true;
-        await Future<void>.delayed(const Duration(milliseconds: 10));
-      }
-      return false;
-    });
-    expect(ok, isTrue, reason: '写盘 fire-and-forget 应在轮询窗口内落地');
+    for (var i = 0; i < 100; i++) {
+      if (ThumbDiskStore.I.debugHas(assetId)) return;
+      await tester.pump(const Duration(milliseconds: 50));
+      // 真实 async 让出 isolate 一拍:催化 fire-and-forget 微任务链推进
+      await ThumbDiskStore.I.read(assetId);
+    }
+    expect(
+      ThumbDiskStore.I.debugHas(assetId),
+      isTrue,
+      reason: '写盘 fire-and-forget 应在 pump 轮询窗口内落地',
+    );
   }
 
   testWidgets('P2-2:TypeBlock 浅/深主题均内置 AssetPlate,扩展名可见不抛', (tester) async {
@@ -219,7 +224,10 @@ void main() {
     inStubZone((tester) async {
       final api = installFakeApi(_ThumbMsApi()) as _ThumbMsApi;
       addTearDown(() => session.api = null);
-      await ThumbDiskStore.I.write('cached-a', kPng1x1);
+      // 预写为真实文件 IO:fakeAsync 下裸 await 挂死,经 runAsync 落盘
+      await tester.runAsync(() async {
+        await ThumbDiskStore.I.write('cached-a', kPng1x1);
+      });
 
       await tester.pumpWidget(_host(_asset('cached-a')));
       await tester.pumpAndSettle();
@@ -235,7 +243,7 @@ void main() {
         reason: '磁盘位图直接上屏(消三段闪烁的第一段白屏)',
       );
       expect(find.byType(TypeBlock), findsNothing, reason: '非降级路径');
-    });
+    })(tester);
   });
 
   testWidgets('功能点 2:磁盘未命中 → 签 1 次并落盘;二次进入 0 次新签名', (tester) async {
@@ -246,7 +254,12 @@ void main() {
       _stubBytes = kPng1x1;
 
       await tester.pumpWidget(_host(_asset('fresh-a'), key: const Key('v1')));
-      await tester.pumpAndSettle();
+      // 管线/签名闸/下载链跨多拍事件队列调度,pumpAndSettle 一轮不可达:
+      // 轮询推进假时钟直到字节上屏(与 preview_fallback_thumb 同配方)。
+      for (var i = 0; i < 40; i++) {
+        if (find.byType(Image).evaluate().isNotEmpty) break;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
 
       expect(api.assets.thumbCalls, ['fresh-a'], reason: '未命中磁盘签 1 次 URL');
       expect(
@@ -255,6 +268,8 @@ void main() {
         reason: '用签名 URL 下载位图字节',
       );
       await waitForWritten(tester, 'fresh-a');
+      // runAsync 轮询期间 fakeAsync 时钟未走:回来补一拍出帧再断言
+      await tester.pump();
       expect(
         await ThumbDiskStore.I.read('fresh-a'),
         kPng1x1,
@@ -266,13 +281,16 @@ void main() {
 
       // 二次进入:重建同 asset 的 ThumbnailImage(URL 内存缓存仍在)
       await tester.pumpWidget(_host(_asset('fresh-a'), key: const Key('v2')));
-      await tester.pumpAndSettle();
+      for (var i = 0; i < 40; i++) {
+        if (find.byType(Image).evaluate().isNotEmpty) break;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
 
       expect(api.assets.thumbCalls, [
         'fresh-a',
       ], reason: '第二格位走磁盘缓存,0 次新签名(功能点 2 的「第二次进入 0 次」)');
       expect(find.byType(Image), findsOneWidget);
-    });
+    })(tester);
   });
 
   testWidgets('功能点 3:加载中占位为纯 ColoredBox(surface3),'
@@ -298,7 +316,7 @@ void main() {
         reason: '占位态不含加载动画(用户原话「不要转圈」)',
       );
       expect(find.byType(Image), findsNothing);
-    });
+    })(tester);
   });
 
   testWidgets('功能点 3:无 thumbnail_key 资产走 TypeBlock 色块,不发任何请求', (tester) async {
@@ -321,7 +339,7 @@ void main() {
       );
       expect(find.text('JPG'), findsOneWidget, reason: '扩展名小字可读可见');
       expect(api.assets.thumbCalls, isEmpty, reason: '零签名请求');
-    });
+    })(tester);
   });
 
   testWidgets('功能点 2:下载失败(非 200)降级 TypeBlock 色块,不白屏不转圈', (tester) async {
@@ -342,6 +360,6 @@ void main() {
       );
       expect(find.byType(Image), findsNothing);
       expect(find.byType(CircularProgressIndicator), findsNothing);
-    });
+    })(tester);
   });
 }

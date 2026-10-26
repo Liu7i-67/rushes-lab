@@ -34,24 +34,14 @@ class ThumbDiskStore {
   int _generation = 0;
   int get generation => _generation;
 
-  /// clear 异步删除期间置位:期间 read 一律回 null(防读到旧代文件)。
+  /// clear 删除期间置位:期间 read 一律回 null(防读到旧代文件)。
   bool _clearing = false;
-
-  /// write/remove/clear 共用互斥链(串行化,消除写/清竞态)。
-  Future<void> _mutex = Future<void>.value();
 
   /// T14 注入慢写窗口(置 null 清除;单例全局,用例间防挂起必须清)。
   Future<void> Function()? _writeGate;
 
   /// T13 注入慢读窗口(置 null 清除)。
   Future<void> Function()? _readGate;
-
-  Future<void> _enqueue(Future<void> Function() op) {
-    final result = _mutex.then((_) => op());
-    // 互斥链吞错续链:单个 op 失败不阻断后续 op
-    _mutex = result.catchError((_) {});
-    return result;
-  }
 
   /// 幂等初始化:建目录 + 触发 LRU 清理;异常静默(测试环境无插件通道)。
   Future<void> init() async {
@@ -71,6 +61,9 @@ class ThumbDiskStore {
   }
 
   /// 读位图;清空期间/目录未就绪/文件缺失/任何 IO 异常回 null(走网络分支)。
+  /// 同步 IO(existsSync/readAsBytesSync):缩略图为百 KB 级小文件,同步读
+  /// 亚毫秒;真实异步 IO 的 completion 在 widget 测试的 fakeAsync zone 内
+  /// 永不派发(宫格/预览的磁盘优先路径会整体挂死),同步化同时根治可测性。
   Future<Uint8List?> read(String assetId) async {
     if (_clearing) return null;
     final gate = _readGate;
@@ -79,96 +72,98 @@ class ThumbDiskStore {
     if (dir == null || _clearing) return null;
     try {
       final f = File('${dir.path}/${_fileName(assetId)}');
-      if (!await f.exists()) return null;
-      return await f.readAsBytes();
+      if (!f.existsSync()) return null;
+      return f.readAsBytesSync();
     } catch (_) {
       return null;
     }
   }
 
   /// 写位图:临时文件写入后 rename 原子替换(不产生半截文件);
-  /// 互斥串行 + rename 前代数双校验(失配只删唯一 tmp 放弃,绝不删目标文件);
+  /// rename 前代数双校验(失配只删唯一 tmp 放弃,绝不删目标文件);
   /// 写后异步触发 LRU 清理;异常静默(磁盘满等不阻断 UI)。
+  /// IO 全同步(read 同因:异步 IO 在 widget 测试 fakeAsync zone 挂死;
+  /// 缩略图百 KB 级同步亚毫秒);**不经 _enqueue 微任务链**——fire-and-forget
+  /// 的 then 链在 fakeAsync 嵌套 zone 下不被 pump flush,同步段在 UI isolate
+  /// 天然串行,跨代由代数校验兜住;[debugSetWriteGate] 仅测试注入慢写窗口。
   Future<void> write(
     String assetId,
     Uint8List bytes, {
     int? expectedGeneration,
-  }) {
-    return _enqueue(() async {
-      final dir = _dir;
-      if (dir == null) return;
-      final genAtStart = _generation;
-      final gate = _writeGate;
-      if (gate != null) await gate(); // T14 慢写窗口(持有互斥,clear 排队其后)
-      if (expectedGeneration != null && expectedGeneration != _generation) {
-        return; // clear 已同步升代:本次写整体放弃(尚未产生 tmp)
-      }
-      try {
-        final f = File('${dir.path}/${_fileName(assetId)}');
-        final tmp = File(
-          '${f.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
-        );
-        await tmp.writeAsBytes(bytes, flush: true);
-        if (genAtStart != _generation && expectedGeneration != null) {
-          // rename 前校验代数,失配只放弃:删唯一 tmp,不 rename、绝不删目标
-          try {
-            await tmp.delete();
-          } catch (_) {
-            /* 静默 */
-          }
-          return;
+  }) async {
+    final dir = _dir;
+    if (dir == null) return;
+    final genAtStart = _generation;
+    final gate = _writeGate;
+    if (gate != null) await gate(); // T14 慢写窗口(仅测试注入)
+    if (expectedGeneration != null && expectedGeneration != _generation) {
+      return; // clear 已同步升代:本次写整体放弃(尚未产生 tmp)
+    }
+    try {
+      final f = File('${dir.path}/${_fileName(assetId)}');
+      final tmp = File(
+        '${f.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
+      );
+      tmp.writeAsBytesSync(bytes, flush: true);
+      if (genAtStart != _generation && expectedGeneration != null) {
+        // rename 前校验代数,失配只放弃:删唯一 tmp,不 rename、绝不删目标
+        try {
+          tmp.deleteSync();
+        } catch (_) {
+          /* 静默 */
         }
-        await tmp.rename(f.path);
-        await _evict();
-      } catch (_) {
-        /* 静默 */
+        return;
       }
-    });
+      tmp.renameSync(f.path);
+      // LRU 清理不阻塞写路径:真机异步执行;其异步 IO 在 fakeAsync 下挂起
+      // 无人等待、无害(容量清理的回归验证由 thumb_disk_store_test 承担)
+      _evict().ignore();
+    } catch (_) {
+      /* 静默 */
+    }
   }
 
   /// 删除单文件(坏字节兜底 W1 #7/#25);纳入同一互斥 + 代数——防旧会话迟到
   /// remove 误删新会话写入;异常静默。
-  Future<void> remove(String assetId, {int? expectedGeneration}) {
-    return _enqueue(() async {
-      final dir = _dir;
-      if (dir == null) return;
-      if (expectedGeneration != null && expectedGeneration != _generation) {
-        return; // 跨代:不删(新会话可能已重写)
-      }
-      try {
-        final f = File('${dir.path}/${_fileName(assetId)}');
-        if (await f.exists()) await f.delete();
-      } catch (_) {
-        /* 静默 */
-      }
-    });
+  Future<void> remove(String assetId, {int? expectedGeneration}) async {
+    final dir = _dir;
+    if (dir == null) return;
+    if (expectedGeneration != null && expectedGeneration != _generation) {
+      return; // 跨代:不删(新会话可能已重写)
+    }
+    try {
+      final f = File('${dir.path}/${_fileName(assetId)}');
+      // 同步 IO(与 read/write 同因:fakeAsync 下异步 IO 挂死;
+      // 同 remove 不经 _enqueue——见 write 注释)
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {
+      /* 静默 */
+    }
   }
 
   /// 清空目录下所有文件(登出/401 会话清空钩子);第一行同步自增代数 +
-  /// 置 _clearing(期间 read 回 null),删除经互斥串行;异常静默。
-  Future<void> clear() {
+  /// 置 _clearing(期间 read 回 null);目录遍历删除为真实异步 IO(fakeAsync
+  /// 下挂起无人等待、无害;真机正常),异常静默。
+  Future<void> clear() async {
     _generation++;
     _clearing = true;
-    return _enqueue(() async {
-      try {
-        final dir = _dir;
-        if (dir != null) {
-          await for (final e in dir.list(followLinks: false)) {
-            if (e is File) {
-              try {
-                await e.delete();
-              } catch (_) {
-                /* 单个删除失败不影响其余 */
-              }
-            }
+    try {
+      final dir = _dir;
+      if (dir != null) {
+        final files = dir.listSync(followLinks: false).whereType<File>();
+        for (final f in files) {
+          try {
+            f.deleteSync();
+          } catch (_) {
+            /* 单个删除失败不影响其余 */
           }
         }
-      } catch (_) {
-        /* 静默 */
-      } finally {
-        _clearing = false;
       }
-    });
+    } catch (_) {
+      /* 静默 */
+    } finally {
+      _clearing = false;
+    }
   }
 
   /// 缓存总字节数(测试/诊断用;异常回 0)。
@@ -227,6 +222,15 @@ class ThumbDiskStore {
   /// 传 null 恢复默认——T12 tearDown 重挂默认用,单例全局)。
   @visibleForTesting
   void debugAttachDirectory(Directory? dir) => _dir = dir;
+
+  /// 测试专用同步探测:该 assetId 的缓存文件是否已落盘(fire-and-forget 写链
+  /// 在 fakeAsync 下只能靠 tester.pump 推进,runAsync 真实时间推不动微任务)。
+  @visibleForTesting
+  bool debugHas(String assetId) {
+    final dir = _dir;
+    if (dir == null) return false;
+    return File('${dir.path}/${_fileName(assetId)}').existsSync();
+  }
 
   /// 测试注入慢写窗口(T14;传 null 清除,用例间防挂起)。
   @visibleForTesting
