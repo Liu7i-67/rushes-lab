@@ -40,6 +40,10 @@ List<int> _stubBytes = const [];
 /// 桩请求已命中的 URL(断言下载目标用)。
 final _stubUrls = <Uri>[];
 
+/// 桩请求 abort 调用计数(storm-fix:abort 链可观测;现状 noSuchMethod
+/// 静默 no-op——tear-off 非空不抛 TypeError,但取消行为不可见,补齐计数)。
+int _abortCalls = 0;
+
 class _StubHttpClient implements HttpClient {
   @override
   Future<HttpClientRequest> getUrl(Uri url) async {
@@ -57,6 +61,11 @@ class _StubHttpClient implements HttpClient {
 class _StubRequest implements HttpClientRequest {
   @override
   Future<HttpClientResponse> close() async => _StubResponse();
+
+  @override
+  void abort([Object? exception, StackTrace? stackTrace]) {
+    _abortCalls++;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
@@ -155,6 +164,7 @@ void main() {
     _stubStatus = 200;
     _stubBytes = const [];
     _stubUrls.clear();
+    _abortCalls = 0;
     dir = Directory.systemTemp.createTempSync('thumb_img_test');
     ThumbDiskStore.I.debugAttachDirectory(dir);
   });
@@ -164,6 +174,18 @@ void main() {
       dir.deleteSync(recursive: true);
     } catch (_) {}
   });
+
+  /// 写盘改 fire-and-forget 后 pumpAndSettle 不等文件 IO:轮询等待落盘。
+  Future<void> waitForWritten(WidgetTester tester, String assetId) async {
+    final ok = await tester.runAsync(() async {
+      for (var i = 0; i < 300; i++) {
+        if (await ThumbDiskStore.I.read(assetId) != null) return true;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      return false;
+    });
+    expect(ok, isTrue, reason: '写盘 fire-and-forget 应在轮询窗口内落地');
+  }
 
   testWidgets('P2-2:TypeBlock 浅/深主题均内置 AssetPlate,扩展名可见不抛', (tester) async {
     for (final brightness in [Brightness.light, Brightness.dark]) {
@@ -232,10 +254,13 @@ void main() {
         contains('http://thumb.test/fresh-a'),
         reason: '用签名 URL 下载位图字节',
       );
+      await waitForWritten(tester, 'fresh-a');
       expect(
         await ThumbDiskStore.I.read('fresh-a'),
         kPng1x1,
-        reason: '下载成功即落盘(下次进入/URL 轮换不再整图重下)',
+        reason:
+            '下载成功即落盘(写盘 fire-and-forget,轮询等待落地;'
+            '下次进入/URL 轮换不再整图重下)',
       );
       expect(find.byType(Image), findsOneWidget);
 
@@ -309,6 +334,7 @@ void main() {
       await tester.pumpWidget(_host(_asset('broken-a')));
       await tester.pumpAndSettle();
 
+      expect(_abortCalls, 0, reason: '非 200 走 drain→失败路径,abort 链未触发(可观测性冒烟)');
       expect(
         find.byType(TypeBlock),
         findsOneWidget,
