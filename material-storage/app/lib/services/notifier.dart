@@ -443,7 +443,7 @@ const kTransferDarwinDetails = DarwinNotificationDetails(
 
 /// Android 应用包名(构建 applicationId;跳应用详情设置页用)。与 upload_pick
 /// 的 kAndroidAppPackage 同值——各自独立常量,避免 services→features 反向依赖。
-const kNotifierAndroidAppPackage = 'com.rushes.lab.tx';
+const kNotifierAndroidAppPackage = 'com.taoxiplan.huanhuashijie';
 
 /// R4a:「去设置」跳应用详情设置页(一期 upload_pick.openAlbumPermissionSettings
 /// 同款:url_launcher 走 ACTION_VIEW+package: data,系统设置对该意图即应用详情

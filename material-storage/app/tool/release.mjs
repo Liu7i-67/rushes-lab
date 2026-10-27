@@ -13,6 +13,7 @@
 //                     （pubspec.yaml 会真实改写以验证改写逻辑，结束时还原）
 //   --skip-build      跳过 flutter build 与产物清理（产物不存在时不再报错），可与 --dry-run 组合
 //   默认（无参数）= patch+1、build+1 并改写回 pubspec.yaml
+//   上传前会用 apksigner / aapt2 校验产物证书 MD5 与包名，不符即中止（工具缺失则只告警）
 //
 // 凭证与配置：worktree 根 scripts/env/qiniu.env（QINIU_HHSJ_*，gitignored，绝不硬编码）：
 //   QINIU_HHSJ_ACCESS_KEY / QINIU_HHSJ_SECRET_KEY   七牛 AK/SK（必填）
@@ -568,6 +569,92 @@ function cleanApkOutputs(keepFile) {
   return keepPath;
 }
 
+// ---------- 签名 / 包名闸 ----------
+// 自 0.1.9 起 release 由正式证书签名(scripts/env/huanhuashijie-release.jks)。
+// keystore.properties 缺失时 gradle 会回退 debug 签名——那种包与 App 备案登记的公钥/证书
+// MD5 不一致,也无法覆盖升级既有安装,绝不能发出去,故在真正上传前拦一道。
+// 工具缺失或解析失败一律放行(只告警),仅在"确认读到不匹配的值"时中止。
+const EXPECTED_CERT_MD5 = "9467fc1b5be3b57d5ae7cdf3cb58da57";
+const EXPECTED_APP_ID = "com.taoxiplan.huanhuashijie";
+
+function findBuildToolsDir() {
+  const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT;
+  if (!sdk) return null;
+  const btDir = path.join(sdk, "build-tools");
+  if (!fs.existsSync(btDir)) return null;
+  const versions = fs
+    .readdirSync(btDir)
+    .filter((v) => /^\d+\.\d+\.\d+$/.test(v))
+    .sort((a, b) => {
+      const [a1, a2, a3] = a.split(".").map(Number);
+      const [b1, b2, b3] = b.split(".").map(Number);
+      return a1 - b1 || a2 - b2 || a3 - b3;
+    });
+  for (let i = versions.length - 1; i >= 0; i--) {
+    const dir = path.join(btDir, versions[i]);
+    if (toolPath(dir, "apksigner")) return dir;
+  }
+  return null;
+}
+
+// apksigner 在 Windows 是 .bat、aapt2 是 .exe，按候选后缀取第一个存在的
+function toolPath(dir, name) {
+  const candidates =
+    process.platform === "win32" ? [`${name}.bat`, `${name}.exe`, name] : [name];
+  for (const c of candidates) {
+    const p = path.join(dir, c);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function runTool(dir, name, args) {
+  const exe = toolPath(dir, name);
+  if (!exe) return null;
+  const res = spawnSync(`"${exe}" ${args}`, { shell: true, encoding: "utf8" });
+  return { status: res.status, out: `${res.stdout || ""}${res.stderr || ""}` };
+}
+
+function verifyApkArtifact(apkPath) {
+  const btDir = findBuildToolsDir();
+  if (!btDir) {
+    log("[warn] 未找到 Android build-tools（ANDROID_HOME/ANDROID_SDK_ROOT），跳过签名与包名校验");
+    return;
+  }
+
+  const sign = runTool(btDir, "apksigner", `verify --print-certs "${apkPath}"`);
+  if (!sign || sign.status !== 0) {
+    log(`[warn] apksigner 执行失败，跳过签名校验（请人工确认证书）`);
+  } else {
+    const md5 = (sign.out.match(/certificate MD5 digest:\s*([0-9a-f]{32})/i) || [])[1];
+    const dn = (sign.out.match(/certificate DN:\s*(.+)/i) || [])[1];
+    if (!md5) {
+      log("[warn] 未能从 apksigner 输出解析证书 MD5，跳过签名校验");
+    } else if (md5.toLowerCase() !== EXPECTED_CERT_MD5) {
+      throw new Error(
+        `APK 签名证书不匹配：实际 MD5=${md5.toLowerCase()}（DN=${dn ? dn.trim() : "未知"}），` +
+          `期望 ${EXPECTED_CERT_MD5}。\n` +
+          "  多半是 scripts/env/keystore.properties 缺失导致 gradle 回退 debug 签名；" +
+          "该包与 App 备案登记的公钥/MD5 不一致，且无法覆盖升级既有安装，禁止发布。"
+      );
+    } else {
+      log(`签名校验通过：证书 MD5=${md5.toLowerCase()}（${dn ? dn.trim() : "DN 未知"}）`);
+    }
+  }
+
+  const badging = runTool(btDir, "aapt2", `dump badging "${apkPath}"`);
+  const pkg = badging && badging.out.match(/package: name='([^']+)'/);
+  if (!pkg) {
+    log("[warn] aapt2 未能读取包名，跳过包名校验");
+  } else if (pkg[1] !== EXPECTED_APP_ID) {
+    throw new Error(
+      `APK 包名不匹配：实际 ${pkg[1]}，期望 ${EXPECTED_APP_ID}。可能是 --skip-build 复用了旧产物。`
+    );
+  } else {
+    log(`包名校验通过：${pkg[1]}`);
+  }
+}
+
 // ---------- 发布计划打印 ----------
 
 function printPlan({ env, uploadHost, rsHost, target, changelog, keys, urls, versionJson, apkPath, dryRun }) {
@@ -720,6 +807,9 @@ async function main() {
       log("dry-run 完成：未执行任何七牛网络操作");
       return;
     }
+
+    // 7.5 上传前闸：证书 MD5 与包名必须与 App 备案登记口径一致
+    if (apkPath) verifyApkArtifact(apkPath);
 
     // 8. 上传版本化 APK（scope 锁 桶:键，允许覆盖）
     log(`直传版本化 APK：${keys.versionedApk}`);

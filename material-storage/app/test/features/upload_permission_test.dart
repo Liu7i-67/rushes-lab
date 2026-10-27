@@ -84,8 +84,8 @@ void main() {
     test('package: scheme + 现役 applicationId(ACTION_VIEW 即应用详情页)', () {
       final uri = androidAppDetailsSettingsUri();
       expect(uri.scheme, 'package');
-      expect(uri.path, 'com.rushes.lab.tx');
-      expect(uri.toString(), 'package:com.rushes.lab.tx');
+      expect(uri.path, 'com.taoxiplan.huanhuashijie');
+      expect(uri.toString(), 'package:com.taoxiplan.huanhuashijie');
     });
 
     test('可注入其他包名', () {

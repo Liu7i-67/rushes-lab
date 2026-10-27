@@ -1,4 +1,4 @@
-package com.rushes.lab.tx
+package com.taoxiplan.huanhuashijie
 
 import io.flutter.embedding.android.FlutterActivity
 

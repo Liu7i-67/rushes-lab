@@ -97,7 +97,7 @@ Future<AlbumPermissionAction?> showAlbumPermissionDialog(
 }
 
 /// Android 应用包名(构建 applicationId;跳应用详情设置页用)。
-const kAndroidAppPackage = 'com.rushes.lab.tx';
+const kAndroidAppPackage = 'com.taoxiplan.huanhuashijie';
 
 /// P2:「去设置」跳应用详情设置页(ACTION_APPLICATION_DETAILS_SETTINGS)。
 /// url_launcher 走 ACTION_VIEW+data,系统设置对 `package:` scheme 的 VIEW
