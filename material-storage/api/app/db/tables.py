@@ -285,6 +285,9 @@ class AuditEvent(Base):
     __table_args__ = (
         Index("ix_audit_event_type_time", "event_type", "event_time"),
         Index("ix_audit_actor_time", "actor_user_id", "event_time"),
+        # event_time 单列索引:使用统计按纯时间窗口过滤/分桶,复合索引前导列
+        # 都不是 event_time(usage-analytics-plan,2026-10-27)
+        Index("ix_audit_event_time", "event_time"),
     )
 
 

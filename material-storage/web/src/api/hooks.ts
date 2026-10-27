@@ -1326,3 +1326,56 @@ export const useAdminBaiduTaskFiles = (
     placeholderData: keepPreviousData,
     refetchInterval: active ? 15_000 : false,
   });
+
+// ─── 使用统计(F5;GET /api/v1/admin/usage/stats,require_system_admin)───────
+// 响应模型照需求文档 §4 契约(后端并行开发中,字段名以文档为准)。users 均为
+// count(DISTINCT actor_user_id) —— 跨分组不可加:totals / by_platform /
+// by_platform_class / by_network / cross 各自独立分组去重,前端只展示不二次聚合。
+// 非系统 admin 后端 403(全局 queryCache 对 403 静默跳过,页面自行空态兜底)。
+export type UsageMetric = 'active_users' | 'logins';
+
+export interface UsageTotals { users: number; events: number; }
+export interface UsagePlatformRow { platform: string; users: number; events: number; }
+export interface UsagePlatformClassRow { platform_class: string; users: number; events: number; }
+export interface UsageNetworkRow { network: string; users: number; events: number; }
+export interface UsageCrossRow { platform: string; network: string; users: number; events: number; }
+export interface UsageDailyRow {
+  date: string;      // 'YYYY-MM-DD'(date_trunc day @ Asia/Shanghai)
+  platform: string;
+  network: string;
+  users: number;     // (date, platform, network) 分组内去重 —— 跨行不可加
+  events: number;    // 可加(计数非去重)
+}
+
+export interface UsageStatsOut {
+  metric: UsageMetric;
+  from: string;      // 服务端解析后的窗口起止(tz-aware ISO 回显)
+  to: string;
+  totals: UsageTotals;
+  by_platform: UsagePlatformRow[];
+  by_platform_class: UsagePlatformClassRow[];
+  by_network: UsageNetworkRow[];
+  cross: UsageCrossRow[];
+  daily: UsageDailyRow[];   // daily=false 时为 []
+}
+
+export interface UsageStatsParams {
+  from?: string;          // tz-aware ISO;缺省由后端时间规则补齐(now-30d / now)
+  to?: string;
+  metric?: UsageMetric;   // 缺省 active_users
+  daily?: boolean;        // 缺省 true;false 时响应 daily=[]
+}
+
+/** GET /api/v1/admin/usage/stats。params 传 null = 不启用;参数整体进 queryKey,
+ *  日期 / metric / daily 各组合独立缓存,keepPreviousData 保旧数据切参不白屏
+ *  (照 useAdminBaiduTasks)。 */
+export const useAdminUsageStats = (params: UsageStatsParams | null = {}) =>
+  useQuery({
+    queryKey: ['admin-usage-stats', params],
+    queryFn: async () =>
+      (await http.get<UsageStatsOut>('/api/v1/admin/usage/stats', {
+        params: params ?? {},
+      })).data,
+    enabled: params !== null,
+    placeholderData: keepPreviousData,
+  });

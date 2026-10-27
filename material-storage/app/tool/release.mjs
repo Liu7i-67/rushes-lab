@@ -537,14 +537,25 @@ function buildPublicUrls({ cdnBase, keyPrefix, version }) {
 
 // ---------- flutter build ----------
 
-function flutterBuild() {
+function flutterBuild(appVersion) {
   log("开始 flutter build apk --release --split-per-abi");
   const cmd = process.platform === "win32" ? "flutter.bat" : "flutter";
-  const res = spawnSync(cmd, ["build", "apk", "--release", "--split-per-abi"], {
-    cwd: projectRoot,
-    stdio: "inherit",
-    shell: true,
-  });
+  const res = spawnSync(
+    cmd,
+    [
+      "build",
+      "apk",
+      "--release",
+      "--split-per-abi",
+      // 客户端 UA 版本（使用统计 F2）：bump 后的最终版本（--no-bump 即当前 pubspec 版本）
+      `--dart-define=APP_VERSION=${appVersion}`,
+    ],
+    {
+      cwd: projectRoot,
+      stdio: "inherit",
+      shell: true,
+    }
+  );
   if (res.status !== 0) throw new Error(`flutter build 失败，退出码 ${res.status}`);
   log("flutter build 完成");
 }
@@ -745,7 +756,7 @@ async function main() {
     if (opts.skipBuild) {
       log("跳过 flutter build 与产物清理（--skip-build）");
     } else {
-      flutterBuild();
+      flutterBuild(target.version);
       apkPath = cleanApkOutputs(KEEP_APK_NAME);
     }
 

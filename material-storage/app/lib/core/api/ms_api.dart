@@ -11,6 +11,7 @@ import 'package:cookie_jar/cookie_jar.dart';
 import 'package:dio/dio.dart';
 import 'package:dio_cookie_manager/dio_cookie_manager.dart';
 
+import '../../main.dart';
 import '../../services/app_log.dart';
 import 'admin_baidu_api.dart';
 import 'admin_templates_api.dart';
@@ -29,6 +30,7 @@ import 'projects_api.dart';
 import 'projects_ops_api.dart';
 import 'request_links_api.dart';
 import 'share_api.dart';
+import 'user_agent.dart';
 import 'users_api.dart';
 
 class ApiException implements Exception {
@@ -108,6 +110,10 @@ class MsApi {
           // 路径——后端 detail 有则透传,无则落中文兜底,不再有 DioException.
           // badResponse 裸渲染;超时/断网等传输层异常仍走 DioException 由调用方
           // 按 §4.1「GET 可重试、写操作不自动重放」处置。
+          // 客户端 UA(使用统计 F2):`msapp/<version> (<platform>)`,后端审计
+          // 按此识别三端;版本打包期 dart-define 注入,未注入为空。仅主 Dio 挂——
+          // _put 裸 Dio/探活/缩略图通道有意不挂(方案 §4.1,App 行为零变化)。
+          headers: {'User-Agent': buildClientUserAgent(kAppVersion)},
           validateStatus: (s) => s != null,
         )) {
     _jar = jar ?? CookieJar();

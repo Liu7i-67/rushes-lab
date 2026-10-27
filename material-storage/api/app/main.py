@@ -29,6 +29,7 @@ from app.routers import (
     projects,
     request_links,
     share,
+    usage_stats,
     users,
 )
 from app.settings import get_settings
@@ -137,6 +138,8 @@ def create_app() -> FastAPI:
     app.include_router(maintenance.router, prefix="/api/v1/maintenance", tags=["maintenance"])
     app.include_router(request_links.router, prefix="/api/v1/request-links", tags=["request-links"])
     app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
+    # 客户端使用统计(2026-10-27 usage-analytics;只读聚合,仅 system admin)
+    app.include_router(usage_stats.router, prefix="/api/v1/admin/usage", tags=["usage-stats"])
     # 百度网盘备份(方案 §5.2;受 BAIDU_BACKUP_ENABLED 门控,未启用统一 404)
     app.include_router(baidu_backup.router, prefix="/api/v1/baidu", tags=["baidu-backup"])
 

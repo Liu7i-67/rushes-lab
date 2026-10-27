@@ -107,6 +107,7 @@ async def share_asset(
         sharer_user_id=user_id,
         expires_in_seconds=payload.expires_in_seconds,
         requires_login=payload.requires_login,
+        ctx=ctx,
     )
     settings = get_settings()
     return ShareCreateOut(
@@ -154,6 +155,7 @@ async def share_folder(
         sharer_user_id=user_id,
         expires_in_seconds=payload.expires_in_seconds,
         requires_login=payload.requires_login,
+        ctx=ctx,
     )
     settings = get_settings()
     return ShareCreateOut(

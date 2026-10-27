@@ -63,10 +63,11 @@ def test_folder_unique_constraint() -> None:
 
 
 def test_audit_event_indices() -> None:
-    """audit_events 必须有 event_type + time 复合索引(查询性能)。"""
+    """audit_events 必须有 event_type + time 复合索引与 event_time 单列索引。"""
     indices = {idx.name for idx in AuditEvent.__table__.indexes}
     assert "ix_audit_event_type_time" in indices
     assert "ix_audit_actor_time" in indices
+    assert "ix_audit_event_time" in indices
 
 
 def test_user_open_id_unique() -> None:
