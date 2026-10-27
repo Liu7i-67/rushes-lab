@@ -1,7 +1,7 @@
 name: ms_app
 description: 医美素材库移动端(iOS 实况照片 livp 通道 MVP)
 publish_to: 'none'
-version: 0.1.8+12
+version: 0.1.9+13
 
 environment:
   sdk: ^3.13.5
