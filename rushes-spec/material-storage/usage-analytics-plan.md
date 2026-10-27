@@ -69,9 +69,9 @@
 
   | 序 | 条件(user_agent) | 归类 |
   | --- | --- | --- |
-    | 1 | `ILIKE '%msapp%'` 且 `ILIKE '%android%'` | `android_app` |
-  | 2 | `ILIKE '%msapp%'` 且 `ILIKE '%ios%'` | `ios_app` |
-  | 3 | `ILIKE '%msapp%'` 或 `ILIKE '%Dart%'` | `app_legacy`(App 但平台未知:存量 Dart UA,或未来 msapp UA 漏平台段的变体) |
+  | 1 | `ILIKE '%msapp%'` 且 `ILIKE '%(android)%'` | `android_app` |
+  | 2 | `ILIKE '%msapp%'` 且 `ILIKE '%(ios)%'` | `ios_app` |
+  | 3 | `ILIKE '%msapp%'` 或 `ILIKE '%Dart%'` | `app_legacy`(App 但平台未知:存量 Dart UA,或未来 msapp UA 漏平台段的变体——平台段匹配收紧到带括号形态后,如 `msapp/bios` 这类子串误命中落此兜底) |
   | 4 | 含 `Android` / `iPhone` / `iPad` / `iPod`(Android 平板无 Mobile 标记亦归此) | `web_mobile` |
   | 5 | 非空 | `web_desktop` |
   | 6 | NULL/空 | `unknown` |
@@ -82,7 +82,7 @@
   | 序 | 条件 | 归类 |
   | --- | --- | --- |
   | 1 | NULL / 空串 / `'unknown'`(auth.py 的哨兵字符串) | `unknown` |
-  | 2 | `~*` 正则 `^(10\.|192\.168\.|172\.(1[6-9]\|2[0-9]\|3[01])\.|127\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:|fe80:)`(大小写不敏感,兼容 IPv6 文本大写;`::1` loopback 显式覆盖) | `lan` |
+  | 2 | `~*` 正则 `^(10\.|192\.168\.|172\.(1[6-9]\|2[0-9]\|3[01])\.|127\.|169\.254\.|::1$|::ffff:(10\.\|192\.168\.\|172\.(1[6-9]\|2[0-9]\|3[01])\.)|f[cd][0-9a-f]{2}:|fe80:)`(大小写不敏感,兼容 IPv6 文本大写;`::1` loopback 与 **IPv4-mapped 私网 `::ffff:10.0.0.1` 形态**显式覆盖) | `lan` |
   | 3 | 其余 | `wan` |
 
   注:172.15/172.32 等非 /12 段不得误配(正则分段写死);`172.20.x`/`172.22.x`(docker 网关,XFF 意外缺失时的兜底表现)归 `lan`,语义上「未经过公网入口」,可接受。
@@ -173,7 +173,7 @@ GROUP BY GROUPING SETS (
 
 - **单测/集成**(容器内 `pytest -o asyncio_mode=auto`):
   - platform:各 platform 类别至少 1 个 UA 样本 + 边界(`msapp/0.1.11 (android)`、`msapp/ (android)` 无版本、`msapp/0.2.0` 漏平台段(须 app_legacy)、`Dart/3.5 (dart:io)`、含 `Android` 的 Android 平板 UA(无 Mobile 标记,须 web_mobile)、iPhone Safari、桌面 Chrome;空 UA 行须**绕过 `audit.write` 直插**(服务层已把空串归一 None,直插才能覆盖历史空串行→unknown 的兜底分支);
-  - network 正则边界:`172.15.x`/`172.32.x`/`172.168.x`(须 wan)、`172.20.x`(须 lan)、`10.x`/`192.168.x`/`127.0.0.1`/`::1`/`FD00::`(大写)/`fe80::`(须 lan)、公网 IP(wan)、NULL / `''` / `'unknown'` 哨兵(须 unknown);零压缩 ULA(如 `fd::1`,正则要求前两组两位 hex)误归 wan——**接受的口径边界**(hh2 内网为 IPv4 私网,真实流量不会出现该形态,记入 §6.9 同款噪声清单);
+  - network 正则边界:`172.15.x`/`172.32.x`/`172.168.x`(须 wan)、`172.20.x`(须 lan)、`10.x`/`192.168.x`/`127.0.0.1`/`::1`/`FD00::`(大写)/`fe80::`(须 lan)、**`::ffff:10.0.0.1`(须 lan)/`::ffff:8.8.8.8`(须 wan,IPv4-mapped 形态)**、公网 IP(wan)、NULL / `''` / `'unknown'` 哨兵(须 unknown);零压缩 ULA(如 `fd::1`,正则要求前两组两位 hex)误归 wan——**接受的口径边界**(hh2 内网为 IPv4 私网,真实流量不会出现该形态,记入 §6.9 同款噪声清单);
   - 端点时间参数:四分支(双缺省默认 30 天/仅 from→to=now/仅 to→from=to-30d)、乱序 from≥to(422)、naive datetime(422)、窗口 >366 天(422);
   - 聚合端点:seed 多用户多 UA/IP 事件 → 断言 by_platform/by_platform_class/by_network/cross/daily 数值与去重语义;**by_platform_class 对账断言**:构造同一用户 web_desktop+web_mobile 双用样本,断言 `by_platform_class.web.users = 1` 而 `by_platform 两行 users 各为 1(求和=2 虚增)`;**失败登录排除断言**(带 actor 的 `local_login_failed` 不进 active_users);**对账断言**(count DISTINCT 跨组不可加):存在跨 network 用户时 `by_platform.users ≠ 该 platform 的 cross 行 users 求和`,存在多端用户时 `totals.users ≠ by_platform 行 users 求和`;logins 口径只计登录事件;worker 事件(UA NULL)不进 active_users;`share_link_created` 补 ctx 后出现在 active_users(端点回归该事件 UA 非空)。
   - 权限:非 system admin 403;未认证 401。

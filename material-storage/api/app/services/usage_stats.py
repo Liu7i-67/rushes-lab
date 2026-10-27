@@ -28,8 +28,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # 兜底分支,方案 §3.1);规则 6 即 ELSE 兜底(write 侧已把空串归一 None,
 # 新数据不可达,枚举不设、仅 SQL 兜底保留)。
 _PLATFORM_CASE = """CASE
-    WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%android%' THEN 'android_app'
-    WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%ios%' THEN 'ios_app'
+    WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%(android)%' THEN 'android_app'
+    WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%(ios)%' THEN 'ios_app'
     WHEN user_agent ILIKE '%msapp%' OR user_agent ILIKE '%Dart%' THEN 'app_legacy'
     WHEN user_agent ILIKE '%Android%' OR user_agent ILIKE '%iPhone%'
          OR user_agent ILIKE '%iPad%' OR user_agent ILIKE '%iPod%' THEN 'web_mobile'
@@ -46,12 +46,13 @@ _PLATFORM_CLASS_CASE = (
 )
 
 # network:request_ip 解析。~* 大小写不敏感正则(逐字按需求 §2,覆盖
-# RFC1918 + loopback + link-local + IPv6 ULA;172.15/172.32 等非 /12 段
-# 不得误配);NULL / 空串 / 'unknown' 哨兵(routers/auth.py ctx 缺 IP 时写
-# 的就是该字符串)→ unknown。
+# RFC1918 + loopback + link-local + IPv6 ULA + IPv4-mapped 私网
+# `::ffff:` 前缀形态显式覆盖,`::ffff:8.8.8.8` 仍落 wan;172.15/172.32
+# 等非 /12 段不得误配);NULL / 空串 / 'unknown' 哨兵(routers/auth.py
+# ctx 缺 IP 时写的就是该字符串)→ unknown。
 _NETWORK_CASE = r"""CASE
     WHEN request_ip IS NULL OR request_ip = '' OR request_ip = 'unknown' THEN 'unknown'
-    WHEN request_ip ~* '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:|fe80:)' THEN 'lan'
+    WHEN request_ip ~* '^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|169\.254\.|::1$|::ffff:(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)|f[cd][0-9a-f]{2}:|fe80:)' THEN 'lan'
     ELSE 'wan'
 END"""
 

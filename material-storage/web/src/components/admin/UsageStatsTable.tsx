@@ -13,22 +13,7 @@ import { Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo } from 'react';
 import type { UsageCrossRow, UsageStatsOut } from '../../api/hooks';
-
-// P5 决策:统计枚举中文文案为页面私有映射(不进 labels.ts)。
-// UsageStatBars.tsx 有孪生副本,新增枚举值两处同步。
-const PLATFORM_LABEL: Record<string, string> = {
-  web_desktop: 'Web · 桌面浏览器',
-  web_mobile: 'Web · 移动浏览器',
-  android_app: 'Android App',
-  ios_app: 'iOS App',
-  app_legacy: '旧版 App',
-  unknown: '未知',
-};
-const NETWORK_LABEL: Record<string, string> = {
-  lan: '内网',
-  wan: '外网',
-  unknown: '未知',
-};
+import { NETWORK_LABEL, PLATFORM_LABEL, Section } from './usage_shared';
 
 const crossColumns: ColumnsType<UsageCrossRow> = [
   {
@@ -58,33 +43,6 @@ const crossColumns: ColumnsType<UsageCrossRow> = [
   },
 ];
 
-// ─── 卡片节(与 UsageStatBars 的 Section 孪生,页内私有组件不外借)────────────
-function Panel({ title, caption, children }: {
-  title: string;
-  caption?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section style={{
-      background: 'var(--ms-surface)',
-      border: '1px solid var(--ms-hairline)',
-      borderRadius: 'var(--ms-radius-md)',
-      padding: '16px 20px',
-    }}>
-      <h2 style={{
-        margin: 0, fontSize: 13.5, fontWeight: 500,
-        color: 'var(--ms-ink)', lineHeight: 1.4,
-      }}>{title}</h2>
-      {caption && (
-        <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--ms-ink-subtle)' }}>
-          {caption}
-        </p>
-      )}
-      <div style={{ marginTop: 14 }}>{children}</div>
-    </section>
-  );
-}
-
 export function UsageStatsTable({ stats }: { stats: UsageStatsOut }) {
   // 日趋势数据源:按 date 聚合 events(可加)。daily 行已按 date ASC 排序,Map 保序
   // 兜底再 sort 一次,防御后端排序契约变化。
@@ -101,7 +59,7 @@ export function UsageStatsTable({ stats }: { stats: UsageStatsOut }) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <Panel
+      <Section
         title="客户端 × 网络交叉"
         caption="users 为该 (客户端, 网络) 组合内去重,跨行相加不等于总去重用户数。"
       >
@@ -112,10 +70,10 @@ export function UsageStatsTable({ stats }: { stats: UsageStatsOut }) {
           pagination={false}
           size="small"
         />
-      </Panel>
+      </Section>
 
       {dayBars.length > 0 && (
-        <Panel
+        <Section
           title="日趋势(事件数)"
           caption="按天(Asia/Shanghai)聚合事件数,事件计数跨维度可加;用户数按天去重跨维度不可加,不做按日求和展示。网络维度(内外网)自 2026-10-19 起数据可信。"
         >
@@ -156,7 +114,7 @@ export function UsageStatsTable({ stats }: { stats: UsageStatsOut }) {
               </div>
             ))}
           </div>
-        </Panel>
+        </Section>
       )}
     </div>
   );

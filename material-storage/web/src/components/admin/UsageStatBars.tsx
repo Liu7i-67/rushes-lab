@@ -15,27 +15,15 @@ import type {
   UsagePlatformRow,
   UsageStatsOut,
 } from '../../api/hooks';
+import { NETWORK_LABEL, PLATFORM_LABEL, Section } from './usage_shared';
 
-// P5 决策:统计枚举中文文案为页面私有映射(不进 labels.ts)。
-// UsageStatsTable.tsx 有 PLATFORM_LABEL / NETWORK_LABEL 孪生副本,新增枚举值两处同步。
+// P5 决策:统计枚举中文文案为页面私有映射(不进 labels.ts);
+// PLATFORM_LABEL / NETWORK_LABEL 与 Section 已收拢至 usage_shared.tsx,两处共用。
 const PLATFORM_CLASS_LABEL: Record<string, string> = {
   web: 'Web 网页端',
   android_app: 'Android App',
   ios_app: 'iOS App',
   app_legacy: '旧版 App',
-  unknown: '未知',
-};
-const PLATFORM_LABEL: Record<string, string> = {
-  web_desktop: 'Web · 桌面浏览器',
-  web_mobile: 'Web · 移动浏览器',
-  android_app: 'Android App',
-  ios_app: 'iOS App',
-  app_legacy: '旧版 App',
-  unknown: '未知',
-};
-const NETWORK_LABEL: Record<string, string> = {
-  lan: '内网',
-  wan: '外网',
   unknown: '未知',
 };
 
@@ -51,35 +39,6 @@ const BAR_COLOR: Record<string, string> = {
   wan: 'var(--ms-accent)',
   unknown: 'var(--ms-ink-subtle)',
 };
-
-// ─── 卡片节(与 UsageStatsTable 的 Panel 孪生,页内私有组件不外借)────────────
-function Section({ title, caption, children }: {
-  title: string;
-  caption?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section style={{
-      background: 'var(--ms-surface)',
-      border: '1px solid var(--ms-hairline)',
-      borderRadius: 'var(--ms-radius-md)',
-      padding: '16px 20px',
-    }}>
-      <h2 style={{
-        margin: 0, fontSize: 13.5, fontWeight: 500,
-        color: 'var(--ms-ink)', lineHeight: 1.4,
-      }}>{title}</h2>
-      {caption && (
-        <p style={{ margin: '4px 0 0', fontSize: 11.5, color: 'var(--ms-ink-subtle)' }}>
-          {caption}
-        </p>
-      )}
-      <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 14 }}>
-        {children}
-      </div>
-    </section>
-  );
-}
 
 // ─── 单行占比条 ─────────────────────────────────────────────────────────────
 function StatRow({ label, users, events, percent, color }: {

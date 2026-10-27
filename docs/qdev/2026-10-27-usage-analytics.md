@@ -22,15 +22,15 @@
 
   | 序 | 条件(user_agent) | 归类 |
   | --- | --- | --- |
-  | 1 | `ILIKE '%msapp%'` 且 `ILIKE '%android%'` | `android_app` |
-  | 2 | `ILIKE '%msapp%'` 且 `ILIKE '%ios%'` | `ios_app` |
-  | 3 | `ILIKE '%msapp%'` 或 `ILIKE '%Dart%'` | `app_legacy` |
+  | 1 | `ILIKE '%msapp%'` 且 `ILIKE '%(android)%'` | `android_app` |
+  | 2 | `ILIKE '%msapp%'` 且 `ILIKE '%(ios)%'` | `ios_app` |
+  | 3 | `ILIKE '%msapp%'` 或 `ILIKE '%Dart%'` | `app_legacy`(平台段收紧到带括号形态后,子串误命中如 `msapp/bios` 落此兜底) |
   | 4 | 含 `Android` / `iPhone` / `iPad` / `iPod` | `web_mobile` |
   | 5 | 非空 | `web_desktop` |
   | 6 | else | `unknown`(兜底分支,新数据不可达) |
 
 - **platform_class**:`web_desktop`/`web_mobile` → `web`,其余原值(`android_app`/`ios_app`/`app_legacy`/`unknown`)。
-- **network 规则**:`request_ip` 为 NULL/空串/`'unknown'` → `unknown`;匹配大小写不敏感正则(`~*`)`^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|169\.254\.|::1$|f[cd][0-9a-f]{2}:|fe80:)` → `lan`;其余 → `wan`。
+- **network 规则**:`request_ip` 为 NULL/空串/`'unknown'` → `unknown`;匹配大小写不敏感正则(`~*`)`^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.|169\.254\.|::1$|::ffff:(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)|f[cd][0-9a-f]{2}:|fe80:)` → `lan`(IPv4-mapped 私网 `::ffff:10.0.0.1` 显式覆盖);其余 → `wan`。
 - **口径过滤**:
   - active_users(默认):`actor_user_id IS NOT NULL AND user_agent IS NOT NULL AND event_type NOT IN ('local_login_failed','local_login_locked')`
   - logins:`event_type = 'local_login_success'`(其余过滤同上保留)
@@ -134,8 +134,8 @@ Query 参数:
 
 ## 6. 测试功能点(tests/test_usage_stats.py,容器内跑)
 
-1. **platform 分桶表驱动**(直插 audit 行绕过 audit.write 构造样本):`msapp/0.1.11 (android)`→android_app;`msapp/ (android)`(无版本)→android_app;`msapp/0.1.11 (ios)`→ios_app;`msapp/0.2.0`(漏平台段)→app_legacy;`Dart/3.5 (dart:io)`→app_legacy;含 `Android` 的平板 UA(无 Mobile 标记)→web_mobile;`Mozilla/5.0 (iPhone; …)`→web_mobile;桌面 Chrome UA→web_desktop;空串 UA 行(直插)→**落 unknown 兜底桶**(`'' IS NOT NULL` 为真、CASE 规则 5 排除空串;历史空串行语义,与方案 §3.1 一致——本条初稿误写"被过滤",以方案口径为准)。
-2. **network 分桶**:`172.15.x`/`172.32.x`/`172.168.x`→wan;`172.20.0.7`→lan;`10.1.2.3`/`192.168.1.5`/`127.0.0.1`/`::1`/`FD00::`(大写)/`fe80::1`→lan;`8.8.8.8`→wan;NULL/`''`/`'unknown'`→unknown(哨兵来自 auth.py:293)。
+1. **platform 分桶表驱动**(直插 audit 行绕过 audit.write 构造样本):`msapp/0.1.11 (android)`→android_app;`msapp/ (android)`(无版本)→android_app;`msapp/0.1.11 (ios)`→ios_app;`msapp/0.2.0`(漏平台段)→app_legacy;**`msapp/bios`(子串陷阱,平台段须带括号)→app_legacy**;`Dart/3.5 (dart:io)`→app_legacy;含 `Android` 的平板 UA(无 Mobile 标记)→web_mobile;`Mozilla/5.0 (iPhone; …)`→web_mobile;桌面 Chrome UA→web_desktop;空串 UA 行(直插)→**落 unknown 兜底桶**(`'' IS NOT NULL` 为真、CASE 规则 5 排除空串;历史空串行语义,与方案 §3.1 一致——本条初稿误写"被过滤",以方案口径为准)。
+2. **network 分桶**:`172.15.x`/`172.32.x`/`172.168.x`→wan;`172.20.0.7`→lan;`10.1.2.3`/`192.168.1.5`/`127.0.0.1`/`::1`/`FD00::`(大写)/`fe80::1`→lan;**`::ffff:10.1.2.3`→lan / `::ffff:8.8.8.8`→wan(IPv4-mapped 形态)**;`8.8.8.8`→wan;NULL/`''`/`'unknown'`→unknown(哨兵来自 auth.py:293)。
 3. **时间参数**:双缺省(默认 30 天窗口断言 from/to 差值)/仅 from(to=now)/仅 to(from=to-30d)/乱序 from≥to→422/naive→422/窗口 367d→422。
 4. **口径过滤**:带 actor 的 `local_login_failed` 不进 active_users;UA NULL 的 worker 事件不进;actor NULL 事件不进;logins 口径只计 `local_login_success`;UA NULL 的登录也不进(两口径统一 UA 非空)。
 5. **对账断言**(count DISTINCT 跨组不可加):构造同一用户 web_desktop+web_mobile 双用 → `by_platform_class` 的 web 行 users=1,而 by_platform 两行 users 各 1;构造同一用户跨 lan/wan → `by_platform.users ≠ 该 platform 的 cross 行 users 求和`;多端用户 → `totals.users ≠ by_platform 行 users 求和`。

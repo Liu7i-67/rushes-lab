@@ -1,23 +1,21 @@
 """客户端使用统计集成测试 — GET /api/v1/admin/usage/stats(feat/usage-analytics)。
 
-唯一需求依据:docs/qdev/2026-10-27-usage-analytics.md(§2 口径 / §4 契约 /
-§6 测试功能点)+ 方案文档 rushes-spec/material-storage/usage-analytics-plan.md
-(口径语义冲突时以方案文档为准)。跑在容器内(PM 统一执行)。前置同
-tests/test_boundary_ext.py:seed_demo_data 已跑(Evan=system admin、bob=普通
-member);env=dev(X-User-Id header 模拟身份)。覆盖 §6 全部 9 组测试功能点。
-
-造数:样本全部 **直插 audit_events 行**(绕过 audit.write)以精确控制 UA / IP /
-actor / event_type / event_time(含空 UA、哨兵 'unknown' IP、UA NULL 的 worker
-行);dedup_key 用固定前缀 + 随机 uuid,clean_usage_events fixture finally 按前缀
-清理(插入前再清一次防残留),并禁用 _make_actors 建的临时用户(无删除 API)。
-样本 event_time 落在 90~200 天前的随机窄窗口,与其它 now() 行互不干扰,窗口内
-可精确计数;分桶用例每样本行用独立 actor(同 actor 去重 users 恒 1,断言必挂)。
-注:空串 UA 直插历史行可达 unknown 兜底分支(方案 §3 规则 6 优先于需求文档初稿)。
+唯一需求依据:docs/qdev/2026-10-27-usage-analytics.md(§2 口径/§4 契约/§6 测试功能点)
++ 方案文档 rushes-spec/material-storage/usage-analytics-plan.md(口径语义冲突时以方案为准)。
+跑在容器内(PM 统一执行)。前置同 tests/test_boundary_ext.py:seed_demo_data 已跑
+(Evan=system admin、bob=普通 member);env=dev(X-User-Id header 模拟身份)。覆盖 §6 全部 9 组。
+造数:样本全部 **直插 audit_events 行**(绕过 audit.write)精确控制 UA/IP/actor/
+event_type/event_time(含空 UA、'unknown' IP 哨兵、UA NULL worker 行);dedup_key 固定
+前缀+随机 uuid,clean_usage_events fixture 开头残留清扫(usage_t_ 前缀活跃用户兜底
+禁用,幂等)、finally 按前缀清理直插行并禁用临时用户(无删除 API)。样本 event_time
+落 90~200 天前随机窄窗口,与 now() 行隔离可精确计数;分桶用例每样本行独立 actor
+(同 actor 去重 users 恒 1)。空串 UA 直插历史行可达 unknown 兜底(方案 §3 规则 6 优先于初稿)。
 """
 from __future__ import annotations
 
 import random
 import uuid
+from collections import Counter
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -59,7 +57,8 @@ _TMP_USERS: list[str] = []  # _make_actors 建的临时用户(marker=usage_t_),�
 
 @pytest.fixture
 async def clean_usage_events(client):
-    """收尾:删本文件直插的 audit_events(dedup 前缀圈定)+ 禁用临时用户。"""
+    """开头残留清扫(usage_t_ 前缀活跃用户兜底禁用);收尾删直插行+禁用临时用户。"""
+    await _sweep_residual_users(client)
     _TMP_USERS.clear()
     try:
         yield
@@ -104,14 +103,11 @@ async def _seed_events(rows: list[dict]) -> tuple[datetime, datetime]:
     async with get_sessionmaker()() as db:
         for r in rows:
             db.add(AuditEvent(
-                id=uuid.uuid4(),
-                event_type=r["event_type"],
+                id=uuid.uuid4(), event_type=r["event_type"],
                 actor_user_id=uuid.UUID(r["actor"]) if r.get("actor") else None,
                 dedup_key=f"{DEDUP_PREFIX}{uuid.uuid4().hex}",
-                request_ip=r.get("ip"),
-                user_agent=r.get("ua"),
-                details={},
-                event_time=r["t"],
+                request_ip=r.get("ip"), user_agent=r.get("ua"),
+                details={}, event_time=r["t"],
             ))
         await db.commit()
     times = [r["t"] for r in rows]
@@ -122,11 +118,9 @@ async def _make_actors(client: AsyncClient, n: int) -> list[str]:
     """建 n 个真实用户作独立样本 actor(FK 需真实用户;登记 _TMP_USERS 收尾统一禁用)。"""
     actors: list[str] = []
     for i in range(n):
-        r = await client.post(
-            "/api/v1/admin/directory/users",
-            json={"username": f"usage_t_{uuid.uuid4().hex[:10]}", "name": f"Usage 样本 {i}"},
-            headers=_h(EVAN_ID),
-        )
+        r = await client.post("/api/v1/admin/directory/users", json={
+            "username": f"usage_t_{uuid.uuid4().hex[:10]}", "name": f"Usage 样本 {i}",
+        }, headers=_h(EVAN_ID))
         assert r.status_code == 201, r.text
         actors.append(r.json()["id"])
     _TMP_USERS.extend(actors)
@@ -140,6 +134,15 @@ async def _disable_users(client: AsyncClient, uids: list[str]) -> None:
         assert rd.status_code in (200, 409), rd.text  # 409=重复禁用,幂等容忍
 
 
+async def _sweep_residual_users(client: AsyncClient) -> None:
+    """残留清扫:username 前缀 usage_t_ 的历史活跃用户一律禁用(硬中断遗留兜底,幂等)。"""
+    r = await client.get("/api/v1/admin/directory/users", params={
+        "q": "usage_t_", "is_active": True, "limit": 200}, headers=_h(EVAN_ID))
+    assert r.status_code == 200, r.text
+    stale = [u["id"] for u in r.json()["items"] if u["username"].startswith("usage_t_")]
+    await _disable_users(client, stale)
+
+
 # ─── §6.1 platform 分桶(表驱动;CASE 规则序,方案 §3)─────────────────────────
 async def test_platform_bucketing_table_driven(
     client: AsyncClient, clean_usage_events,
@@ -149,6 +152,7 @@ async def test_platform_bucketing_table_driven(
         ("msapp/ (android)", "android_app"),  # 规则1 无版本
         ("msapp/0.1.11 (ios)", "ios_app"),  # 规则2
         ("msapp/0.2.0", "app_legacy"),  # 规则3 msapp 漏平台段
+        ("msapp/bios", "app_legacy"),  # 规则3 子串陷阱:平台段须带括号(§6.1 新口径)
         ("Dart/3.5 (dart:io)", "app_legacy"),  # 规则3 Dart UA
         (_TABLET, "web_mobile"),  # 规则4 含 Android 无 Mobile 标记
         (_IPHONE, "web_mobile"),  # 规则4 iPhone
@@ -166,11 +170,7 @@ async def test_platform_bucketing_table_driven(
     assert r.status_code == 200, r.text
     body = r.json()
     got = {x["platform"]: (x["users"], x["events"]) for x in body["by_platform"]}
-    want: dict[str, tuple[int, int]] = {}
-    for _, plat in ua_cases:
-        u, e = want.get(plat, (0, 0))
-        want[plat] = (u + 1, e + 1)
-    assert got == want, got
+    assert got == {k: (v, v) for k, v in Counter(p for _, p in ua_cases).items()}, got
     assert body["totals"] == {"users": len(ua_cases), "events": len(ua_cases)}, body["totals"]
 
 
@@ -187,6 +187,8 @@ async def test_network_bucketing(client: AsyncClient, clean_usage_events) -> Non
         ("::1", "lan"),
         ("FD00::", "lan"),  # 大写 ULA(正则 ~* 大小写不敏感)
         ("fe80::1", "lan"),
+        ("::ffff:10.1.2.3", "lan"),  # IPv4-mapped 私网(§6.2 新口径显式覆盖)
+        ("::ffff:8.8.8.8", "wan"),  # IPv4-mapped 公网
         ("8.8.8.8", "wan"),  # 公网
         (None, "unknown"),  # NULL
         ("", "unknown"),  # 空串
@@ -202,11 +204,7 @@ async def test_network_bucketing(client: AsyncClient, clean_usage_events) -> Non
     )
     assert r.status_code == 200, r.text
     got = {x["network"]: (x["users"], x["events"]) for x in r.json()["by_network"]}
-    want: dict[str, tuple[int, int]] = {}
-    for _, net in ip_cases:
-        u, e = want.get(net, (0, 0))
-        want[net] = (u + 1, e + 1)
-    assert got == want, got
+    assert got == {k: (v, v) for k, v in Counter(n for _, n in ip_cases).items()}, got
 
 
 # ─── §6.3 时间参数四分支 + 三类 422 ──────────────────────────────────────────
