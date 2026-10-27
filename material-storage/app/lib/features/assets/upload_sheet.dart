@@ -121,6 +121,16 @@ void showUploadBatchToast(
   );
 }
 
+/// 上传 content_type:显式 override 优先,其次 .livp 固定 zip,再按扩展名推断。
+/// override 来自相册名解析(真 MIME 优先于文件名猜测,如 iOS 兜底名无扩展名);
+/// 空串/纯空白视同未传,避免把空值当显式类型发给后端。
+String uploadContentTypeFor(String filename, {String? override}) {
+  final explicit = (override ?? '').trim();
+  if (explicit.isNotEmpty) return explicit;
+  if (filename.toLowerCase().endsWith('.livp')) return 'application/zip';
+  return contentTypeForFilename(filename);
+}
+
 /// 入队一个本地上传(相册/文件两路汇合点):bytes 走小包轨(livp),
 /// path 走流式轨;成功后失效 assets/folders scope。返回任务 id。
 Future<String> enqueueLocalUpload({
@@ -129,12 +139,11 @@ Future<String> enqueueLocalUpload({
   required String filename,
   String? path,
   List<int>? bytes,
+  String? contentType,
 }) async {
   assert((path == null) != (bytes == null), 'path / bytes 必须二选一');
   final api = session.api!;
-  final contentType = filename.toLowerCase().endsWith('.livp')
-      ? 'application/zip'
-      : contentTypeForFilename(filename);
+  final type = uploadContentTypeFor(filename, override: contentType);
   final totalBytes = bytes != null ? bytes.length : await File(path!).length();
   return TransferQueue.I.enqueue(
     TransferRequest(
@@ -148,7 +157,7 @@ Future<String> enqueueLocalUpload({
             folderId: folderId,
             filename: filename,
             bytes: bytes,
-            contentType: contentType,
+            contentType: type,
             cancelToken: token,
             onPartsDone: (d, t) => onProgress(
               (bytes.length * d / t).round().clamp(0, bytes.length),
@@ -159,7 +168,7 @@ Future<String> enqueueLocalUpload({
             path: path!,
             folderId: folderId,
             filename: filename,
-            contentType: contentType,
+            contentType: type,
             cancelToken: token,
             onProgress: (done, total) => onProgress(done),
           );

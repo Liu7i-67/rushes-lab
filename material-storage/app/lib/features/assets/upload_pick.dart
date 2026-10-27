@@ -17,6 +17,7 @@ import '../../services/album.dart';
 import '../../services/app_log.dart';
 import '../../services/livp.dart';
 import '../../widgets/toast.dart';
+import 'album_upload_name.dart';
 import 'upload_sheet.dart';
 import 'upload_source_sheet.dart';
 
@@ -64,8 +65,9 @@ Future<void> _pickFromAlbum(
   }
   // D6:改带名收集(文件名+跳过原因),汇总 toast 有跳过带「查看」action
   // 打开跳过清单(语义不变:入队数/跳过数同口径,单点失败不中断)。
-  // 展示名取 title(兜底 `IMG_<id>`);实际入队名在 title 为空时取原文件
-  // basename,清单展示的边缘差异可接受(逐项闭包内才拿得到 originFile)。
+  // 展示名取 [_albumDisplayName] 的同步兜底名(仅 title,兜底 `IMG_<id>`),
+  // 真实入队名由 [_enqueueAlbumAsset] 异步解析(titleAsync 真名 + 扩展名);
+  // 两者可能不同,属已知取舍(D6),勿当 bug 返工。
   if (!context.mounted) return;
   await enqueueNamedBatchAndReport(
     context,
@@ -79,9 +81,10 @@ Future<void> _pickFromAlbum(
   );
 }
 
-/// D6:相册资产展示名(跳过清单用;兜底 `IMG_<id>`)。实际入队名见
-/// [_enqueueAlbumAsset]——title 为空时取原文件 basename,此处未取 originFile
-/// (避免逐项预读),仅该边缘场景两者不同。
+/// D6:相册资产展示名(跳过清单用;仅同步 title,兜底 `IMG_<id>`)。
+/// 真实入队名见 [_enqueueAlbumAsset]——经 [resolveAlbumUploadName] 异步补
+/// 真名与扩展名(iOS title 恒空串);本函数保持同步是 D6 决策(不为失败清单
+/// 文案重构 items 契约),展示名与上传名可能不同,属已知取舍,勿当 bug 改。
 String _albumDisplayName(AssetEntity e) =>
     sanitizeUploadName(e.title ?? 'IMG_${e.id}', fallback: 'IMG_${e.id}');
 
@@ -201,6 +204,8 @@ Future<bool> waitForAppResume({
 
 /// 单个相册资产打包+入队(iOS 实况 → livp 小包轨,其余原文件流式轨;
 /// Android 全原文件)。抛错由 [enqueueBatch] 逐项捕获计跳过。
+/// 文件名/content_type 一律经 [resolveAlbumUploadName] 解析:iOS title 空串
+/// 时靠 titleAsync/缓存路径/MIME 补真名与扩展名,不再落裸名 + octet-stream。
 Future<void> _enqueueAlbumAsset(
   AssetEntity e, {
   required String folderId,
@@ -208,12 +213,15 @@ Future<void> _enqueueAlbumAsset(
 }) async {
   final live = AlbumService.isSupported && e.isLivePhoto;
   if (live) {
-    // 现役实况链路:打包 .livp(小包轨,uploadBytes;iCloud 未下载在此抛)
-    final bytes = await AlbumService.entityToLivp(e);
+    // 现役实况链路:打包 .livp(小包轨,uploadBytes;iCloud 未下载在此抛)。
+    // 扩展名恒为 .livp,只为借真名做上传名与 zip 内条目基名(同源,勿分叉)
+    final r = await resolveAlbumUploadName(e);
+    final base = LivpService.baseNameOf(r.filename, 'IMG_${e.id}');
+    final bytes = await AlbumService.entityToLivp(e, baseName: base);
     await enqueueLocalUpload(
       folderId: folderId,
       where: where,
-      filename: '${LivpService.baseNameOf(e.title, 'IMG_${e.id}')}.livp',
+      filename: '$base.livp',
       bytes: bytes,
     );
     return;
@@ -222,14 +230,13 @@ Future<void> _enqueueAlbumAsset(
   if (f == null) {
     throw StateError('读取原文件失败 asset=${e.id}');
   }
+  final r = await resolveAlbumUploadName(e, originPath: f.path);
   await enqueueLocalUpload(
     folderId: folderId,
     where: where,
-    filename: sanitizeUploadName(
-      e.title ?? f.path.split('/').last,
-      fallback: 'IMG_${e.id}',
-    ),
+    filename: r.filename,
     path: f.path,
+    contentType: r.contentType,
   );
 }
 

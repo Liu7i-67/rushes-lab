@@ -47,20 +47,28 @@ class AlbumService {
   }
 
   /// 实况照片 → .livp 字节(静态帧 + 配对视频原文件直接 zip,零转码)。
-  static Future<List<int>> entityToLivp(AssetEntity e) async {
+  /// [baseName] 由调用方给出解析后的真名基名(iOS title 空串时本地兜底名不
+  /// 可读);空值维持按 e.title 旧口径,zip 内条目基名与上传文件名须同源。
+  static Future<List<int>> entityToLivp(
+    AssetEntity e, {
+    String? baseName,
+  }) async {
     final image = await e.originFile;
     final video = await e.originFileWithSubtype;
     if (image == null) {
       throw StateError('读取静态帧失败(资源可能在 iCloud 未下载)');
     }
-    final baseName = LivpService.baseNameOf(e.title, 'IMG_${e.id}');
+    final explicitBase = (baseName ?? '').trim();
+    final zipBase = explicitBase.isEmpty
+        ? LivpService.baseNameOf(e.title, 'IMG_${e.id}')
+        : explicitBase;
     final imgBytes = await image.readAsBytes();
     if (video == null) {
       // 非实况(onlyLivePhotos 已滤,理论不可达)→ 退化为纯静态 livp
       AppLog.info('album', 'asset ${e.id} 无配对视频,打包为无实况 livp');
       final arc = Archive()
         ..addFile(ArchiveFile(
-            '$baseName.${_extOf(image.path, 'HEIC')}',
+            '$zipBase.${_extOf(image.path, 'HEIC')}',
             imgBytes.length,
             imgBytes));
       return ZipEncoder().encode(arc)!;
@@ -70,7 +78,7 @@ class AlbumService {
       imageExt: _extOf(image.path, 'HEIC'),
       videoBytes: await video.readAsBytes(),
       videoExt: _extOf(video.path, 'MOV'),
-      baseName: baseName,
+      baseName: zipBase,
     );
   }
 

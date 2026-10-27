@@ -16,6 +16,8 @@ const _byExt = <String, String>{
   'heic': 'image/heic',
   'heif': 'image/heif',
   'bmp': 'image/bmp',
+  'tif': 'image/tiff',
+  'tiff': 'image/tiff',
   'svg': 'image/svg+xml',
   // 视频
   'mov': 'video/quicktime',
