@@ -1,22 +1,29 @@
 /// ThumbnailCache — 缩略图 presigned URL 缓存(B2 §8.1,app-thumbnail-storm-fix
-/// W2/W3 增量):① URL+过期时间内存缓存,临期自动重签(后端签 30min,留 5min
-/// 余量,web 同哲学);② 同 assetId 并发去重(单飞,经 [ThumbSignGate] 签名并发
-/// 闸:上限 6 FIFO + 槽内 20s race 放槽 + abandonAwait 放弃链);③ LRU 驱逐:
-/// 条目按近似字节计权,总量超 [capacityBytes] 时从最久未用开始逐出(running
-/// total O(1) 维护;每条默认按 URL 字符串 4KB 估算,上限 ~2 万条)。
-/// ④ 代际:clear() 升代,旧代 in-flight/putBatch 一律丢弃;abandonAwait 带
-/// 代数防旧代 late 注册误伤新代。
+/// W2/W3 增量;thumb-variant 批 A1 键全链加 variant 维度):① URL+过期时间内存
+/// 缓存(键 `'$assetId:${variant.diskTag}'`,large/small 互不串),临期自动重签
+/// (后端签 30min,留 5min 余量,web 同哲学);② 同 assetId+variant 并发去重
+/// (单飞,经 [ThumbSignGate] 签名并发闸:上限 6 FIFO + 槽内 20s race 放槽 +
+/// abandonAwait 放弃链);③ LRU 驱逐:条目按近似字节计权,总量超
+/// [capacityBytes] 时从最久未用开始逐出(running total O(1) 维护;每条默认按
+/// URL 字符串 4KB 估算,上限 ~2 万条)。④ 代际:clear() 升代,旧代
+/// in-flight/putBatch 一律丢弃;abandonAwait 带代数防旧代 late 注册误伤新代。
 ///
 /// 只管 URL 不持有位图字节;位图磁盘见 ThumbDiskStore,Image 解码缓存交给
 /// Flutter ImageCache。全局实例 [thumbnailCache] 移入 core(签名只依赖
 /// session.api,core 内合法;features 侧经 thumbnail_image.dart 一行 export
-/// 兼容旧 import)。
+/// 兼容旧 import)。签名请求带 variant(单发 `?size=`);响应新增 `variant`
+/// 字段按手工 JSON 解析容忍语义忽略未知键,不新增必填解析。
 library;
 
 import 'package:flutter/foundation.dart';
 
 import 'session.dart';
 import 'thumb_sign_gate.dart';
+import 'thumb_variant.dart';
+
+/// 缓存/单飞键:`'$assetId:${variant.diskTag}'`(全链统一,漏一环即互串)。
+String _thumbCacheKey(String assetId, ThumbVariant variant) =>
+    '$assetId:${variant.diskTag}';
 
 class SignedThumb {
   SignedThumb({
@@ -32,7 +39,10 @@ class SignedThumb {
   final int? approxBytes;
 }
 
-typedef ThumbSigner = Future<SignedThumb> Function(String assetId);
+typedef ThumbSigner = Future<SignedThumb> Function(
+  String assetId,
+  ThumbVariant variant,
+);
 
 class _Entry {
   _Entry({
@@ -48,8 +58,11 @@ class _Entry {
 
 /// 进程级缩略图 URL 缓存(只存 URL 不存位图;签名走会话 API,失败静默)。
 final thumbnailCache = ThumbnailCache(
-  signer: (assetId) async {
-    final r = await session.api!.assets.thumbnailUrl(assetId);
+  signer: (assetId, variant) async {
+    final r = await session.api!.assets.thumbnailUrl(
+      assetId,
+      size: variant.apiSize,
+    );
     return SignedThumb(url: r.url, expiresInSeconds: r.expiresIn);
   },
 );
@@ -101,43 +114,58 @@ class ThumbnailCache {
   @visibleForTesting
   int get debugGatePendingJobs => _gate.pendingJobCount;
 
-  /// 取 assetId 的缩略图 URL:命中未过期直接回;过期/未命中走单飞签名(经闸)。
-  Future<String> urlOf(String assetId) {
-    final hit = _cache[assetId];
+  /// 取 assetId 缩略图 URL([variant] 维度:命中未过期直接回;过期/未命中走
+  /// 单飞签名(经闸);large/small 各自独立缓存与单飞)。
+  Future<String> urlOf(
+    String assetId, {
+    ThumbVariant variant = ThumbVariant.large,
+  }) {
+    final key = _thumbCacheKey(assetId, variant);
+    final hit = _cache[key];
     if (hit != null && _now().isBefore(hit.expiresAt)) {
-      _touch(assetId, hit);
+      _touch(key, hit);
       return Future.value(hit.url);
     }
-    if (hit != null) _cache.remove(assetId); // 过期条目先逐出再重签
-    final existing = _inflight[assetId];
+    if (hit != null) _cache.remove(key); // 过期条目先逐出再重签
+    final existing = _inflight[key];
     if (existing != null &&
         (existing.settled || existing.generation != _gate.generation)) {
       // 旧代/已终 inflight 过滤(成功/失败都按代清理的兜底面):不 join
-      _inflight.remove(assetId);
+      _inflight.remove(key);
     }
-    final job = _inflight[assetId] ??= _openSign(assetId);
+    final job = _inflight[key] ??= _openSign(key, assetId, variant);
     return _gate.addWaiter(job).then((s) => s.url);
   }
 
-  SignJob<SignedThumb> _openSign(String assetId) {
+  SignJob<SignedThumb> _openSign(
+    String key,
+    String assetId,
+    ThumbVariant variant,
+  ) {
     final gen = _gate.generation;
     SignJob<SignedThumb>? job;
     job = _gate.open(
       assetId,
-      () => _sign(assetId, gen),
+      () => _sign(key, assetId, variant, gen),
+      variant: variant,
       onSettled: () {
         // 根 future 成功/失败都按代清 _inflight(身份比对防误删 clear 后新单飞)
         final j = job;
-        if (j != null && identical(_inflight[assetId], j)) {
-          _inflight.remove(assetId);
+        if (j != null && identical(_inflight[key], j)) {
+          _inflight.remove(key);
         }
       },
     );
     return job;
   }
 
-  Future<SignedThumb> _sign(String assetId, int gen) async {
-    final s = await signer(assetId);
+  Future<SignedThumb> _sign(
+    String key,
+    String assetId,
+    ThumbVariant variant,
+    int gen,
+  ) async {
+    final s = await signer(assetId, variant);
     if (gen != _gate.generation) {
       // clear 后旧代迟到完成:不落缓存(登出不残留旧会话 URL);
       // 同代放弃(abandonAwait)不受影响,仍落缓存供下次复用
@@ -153,7 +181,7 @@ class ThumbnailCache {
       ttl = t;
     }
     _put(
-      assetId,
+      key,
       _Entry(
         url: s.url,
         expiresAt: _now().add(ttl),
@@ -163,13 +191,17 @@ class ThumbnailCache {
     return s;
   }
 
-  /// 未命中未过期缓存的 assetId(宫格批量预热 W3 #16 过滤用;去重保序)。
-  Iterable<String> missingOf(Iterable<String> assetIds) {
+  /// 未命中未过期缓存的 assetId(宫格批量预热 W3 #16 过滤用;去重保序;
+  /// [variant] 维度按对应缓存键判定)。
+  Iterable<String> missingOf(
+    Iterable<String> assetIds, {
+    ThumbVariant variant = ThumbVariant.large,
+  }) {
     final seen = <String>{};
     final out = <String>[];
     for (final id in assetIds) {
       if (!seen.add(id)) continue;
-      final e = _cache[id];
+      final e = _cache[_thumbCacheKey(id, variant)];
       if (e == null || !_now().isBefore(e.expiresAt)) out.add(id);
     }
     return out;
@@ -177,10 +209,12 @@ class ThumbnailCache {
 
   /// 批量写入(宫格预热 W3 #15):TTL 语义与 [_sign] 一致——expiresIn≤0 落
   /// [fallbackTtl];0<expiresIn≤margin 不缓存该条。[expectedGeneration] 为
-  /// 预热方发请求前捕获的代数,clear 后旧代整批丢弃。
+  /// 预热方发请求前捕获的代数,clear 后旧代整批丢弃;[variant] 决定写入的
+  /// 缓存键维度(与预热请求的 size 对应)。
   void putBatch(
     Iterable<({String assetId, String url, int expiresIn})> entries, {
     int? expectedGeneration,
+    ThumbVariant variant = ThumbVariant.large,
   }) {
     if (expectedGeneration != null && expectedGeneration != _gate.generation) {
       return; // 跨代:整批丢弃(内存写无需慢闸)
@@ -195,7 +229,7 @@ class ThumbnailCache {
         ttl = t;
       }
       _put(
-        e.assetId,
+        _thumbCacheKey(e.assetId, variant),
         _Entry(
           url: e.url,
           expiresAt: _now().add(ttl),
@@ -208,22 +242,27 @@ class ThumbnailCache {
   /// 管线任务终态时经 abort 链同步调用:取消闸 race 计时器、无其他等待者则
   /// 归还闸槽、等待者以取消异常完成(底层 signer 继续跑,落缓存供下次复用)。
   /// [generation] 指 [ThumbnailCache].generation(签名闸代数,勿传磁盘代数);
-  /// 带 clear 前旧代则 no-op。
-  void abandonAwait(String assetId, {int? generation}) {
-    _gate.abandon(assetId, generation: generation);
+  /// [variant] 与发起 urlOf 的变体一致(闸注册表键维度);带 clear 前旧代则
+  /// no-op。
+  void abandonAwait(
+    String assetId, {
+    ThumbVariant variant = ThumbVariant.large,
+    int? generation,
+  }) {
+    _gate.abandon(assetId, variant: variant, generation: generation);
   }
 
-  void _put(String assetId, _Entry e) {
-    final old = _cache.remove(assetId);
+  void _put(String key, _Entry e) {
+    final old = _cache.remove(key);
     if (old != null) _totalBytes -= old.approxBytes;
-    _cache[assetId] = e;
+    _cache[key] = e;
     _totalBytes += e.approxBytes;
     _evict();
   }
 
-  void _touch(String assetId, _Entry e) {
-    _cache.remove(assetId);
-    _cache[assetId] = e;
+  void _touch(String key, _Entry e) {
+    _cache.remove(key);
+    _cache[key] = e;
   }
 
   /// ③ LRU:从头(最久未用)逐出,直到总量回到 [capacityBytes] 内;

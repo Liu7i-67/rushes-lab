@@ -15,6 +15,7 @@ import '../../core/preview_kind.dart';
 import '../../core/thumb_disk_store.dart';
 import '../../core/thumb_fetch.dart';
 import '../../core/thumb_pipeline.dart' show ThumbHandle;
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../widgets/type_block.dart';
@@ -26,11 +27,18 @@ class ThumbnailImage extends StatefulWidget {
   const ThumbnailImage({
     super.key,
     required this.asset,
+    this.variant = ThumbVariant.large,
     this.fallbackIconSize,
     this.fallback,
   });
 
   final Asset asset;
+
+  /// 缩略图规格(thumb-variant 批 D1):宫格 cell/胶片条 48px 小格/搜索行传
+  /// [ThumbVariant.small](240px 源,省流量省解码);预览页维持 [ThumbVariant.large]
+  /// (清晰度上限 1024,W4 语义不变)。缓存全链按 variant 隔离(磁盘文件名
+  /// `<id>.<lg|s>.bin`/管线键/URL 缓存键/签名闸键),默认 large 不影响未迁移面。
+  final ThumbVariant variant;
 
   /// 降级色块图标边长(缺省 32;B7 搜索结果小格 48px 用 20 防 overflow)。
   final double? fallbackIconSize;
@@ -58,7 +66,10 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
   @override
   void didUpdateWidget(covariant ThumbnailImage old) {
     super.didUpdateWidget(old);
-    if (old.asset.id == widget.asset.id) return;
+    // 同 id 且同规格才免重载;换 variant 亦按换资产处理(规格隔离的缓存键不同)
+    if (old.asset.id == widget.asset.id && old.variant == widget.variant) {
+      return;
+    }
     setState(() {
       _bytes = null;
       _failed = false;
@@ -80,16 +91,18 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
 
   /// 磁盘 → fetchThumb(签名+下载,受管线闸治理)→ setState → 写盘
   /// fire-and-forget;任一步异常/取消置 _failed,下次重建自然重试。
+  /// 全链按 widget.variant 取数/落盘(磁盘文件名与共享任务键均带规格维度)。
   Future<void> _load() async {
     final tag = ++_tag;
     final id = widget.asset.id;
+    final variant = widget.variant;
     _handle?.cancel();
     _handle = null;
     try {
       // 磁盘代数必须在 read 之前捕获(write 紧前才捕获形同虚设)
       var gen = ThumbDiskStore.I.generation;
       _gen = gen;
-      final cached = await ThumbDiskStore.I.read(id);
+      final cached = await ThumbDiskStore.I.read(id, variant: variant);
       if (tag != _tag || !mounted) return;
       if (cached != null) {
         setState(() => _bytes = cached);
@@ -102,7 +115,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
         gen = nowGen;
         _gen = nowGen;
       }
-      final handle = fetchThumb(id);
+      final handle = fetchThumb(id, variant: variant);
       _handle = handle;
       final bytes = await handle.future;
       if (tag != _tag || !mounted) return;
@@ -112,7 +125,9 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
       }
       // 字节就位先 setState 显示;写盘 fire-and-forget(带代数防跨代误写)
       setState(() => _bytes = bytes);
-      ThumbDiskStore.I.write(id, bytes, expectedGeneration: gen).ignore();
+      ThumbDiskStore.I
+          .write(id, bytes, expectedGeneration: gen, variant: variant)
+          .ignore();
     } catch (_) {
       if (tag == _tag && mounted) setState(() => _failed = true);
     }
@@ -140,6 +155,7 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
     final tag = _tag;
     final id = widget.asset.id;
     final gen = _gen;
+    final variant = widget.variant;
     return LayoutBuilder(
       builder: (context, box) {
         // 解码降采样:格宽 × dpr 取整 clamp 96..600(省内存;放大预览走他路)
@@ -163,7 +179,9 @@ class _ThumbnailImageState extends State<ThumbnailImage> {
                 ),
           errorBuilder: (_, _, _) {
             // 坏字节兜底:删盘上坏文件(带代数防跨代误删)+ post-frame 置降级
-            ThumbDiskStore.I.remove(id, expectedGeneration: gen).ignore();
+            ThumbDiskStore.I
+                .remove(id, expectedGeneration: gen, variant: variant)
+                .ignore();
             WidgetsBinding.instance.addPostFrameCallback((_) {
               // 先比对捕获 tag/assetId 再 setState(防切张后旧资产回调误伤新格)
               if (!mounted || _tag != tag || widget.asset.id != id) return;

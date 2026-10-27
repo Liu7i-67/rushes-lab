@@ -8,6 +8,10 @@ tasks:
   - generate_video_thumbnail(asset_id):视频 → ffmpeg 抽帧 → MinIO thumbnails/(B-4 iter2, #101)
   - generate_livp_thumbnail(asset_id):iOS Live Photo(.livp = zip)→ 静态图 thumbnail
     + 实况短片 H.264 转码(实况预览)
+  - derive_small_thumbnail(asset_id):small(240px)变体回补 —— 读缩略图桶 1024 产物
+    就地缩出 thumbnails/{id}_s.jpg + tags 落 thumbnail_small_key(实现见
+    workers/thumb_variants.py;backfill --mode derive-small 派发,timeout=60/
+    max_tries=1)
   - generate_livp_download(asset_id):livp 下载级解包(全分辨率 JPG + 全长 H.264 MP4
     组 zip 上传主桶 derivatives/{id}/livp.zip;timeout=300/max_tries=2 per-function
     覆盖,livp-download-unpack 方案 §2)
@@ -46,6 +50,7 @@ from PIL import Image, ImageOps
 
 from app.db.session import get_sessionmaker
 from app.db.tables import Asset
+from app.services import thumb_exts
 from app.settings import get_settings
 
 log = logging.getLogger("worker")
@@ -58,10 +63,10 @@ try:
 except ImportError:  # pragma: no cover
     log.warning("pillow_heif 不可用,HEIC 静态图的 livp 预览将失败")
 
-# image content_types we handle
-_IMAGE_PREFIXES = ("image/",)
 _THUMBNAIL_MAX_PX = 1024
 _THUMBNAIL_QUALITY = 80
+# 受纳判定(扩展名清单 / content_type 口径)与 small 规格、8GB 防御上限统一收敛到
+# app/services/thumb_exts.py(thumb-variant 方案 §3.1;worker 三族与派发点共用一份)
 
 
 def _thumb_s3_client(settings: Any) -> Any:
@@ -111,7 +116,12 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             return {"status": "asset_not_found", "asset_id": asset_id}
         if asset.deleted_at is not None:
             return {"status": "asset_deleted", "asset_id": asset_id}
-        if not asset.content_type or not asset.content_type.startswith(_IMAGE_PREFIXES):
+        # 受纳判定改 is_image_asset(content_type 前缀 OR 扩展名兜底,方案 §3.4):
+        # Firefox 上传 octet-stream + .heic/.jpg 等盲区行不再被前缀判断误 skip;
+        # 不过受纳 → 写 thumbnail_skipped 标记(指令口径统一 'non_video'),让回补
+        # 脚本 thumbnail_skipped IS NULL 筛选天然排除、不再重复派发
+        if not thumb_exts.is_image_asset(asset.filename or "", asset.content_type):
+            await _merge_asset_tags(sm, aid, sets={"thumbnail_skipped": "non_video"})
             return {"status": "skip_non_image", "content_type": asset.content_type}
 
         bucket = asset.minio_bucket
@@ -171,7 +181,8 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
         await _merge_asset_tags(sm, aid, sets={"thumbnail_failed": _thumb_fail_token(e)})
         return {"status": "failed", "asset_id": asset_id, "error": str(e)[:200]}
 
-    # 5) 更新 db(jsonb_set 单条 UPDATE 原子合并 —— 双 writer 防线,§2.2 第 7 步)
+    # 5) 更新 db(jsonb_set 单条 UPDATE 原子合并 —— 双 writer 防线,§2.2 第 7 步);
+    #    removes 顺带清 thumbnail_skipped(此前被 skip 的行重跑成功即翻正)
     await _merge_asset_tags(
         sm, aid,
         sets={
@@ -180,8 +191,12 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             "thumbnail_width": img_w,
             "thumbnail_height": img_h,
         },
-        removes=("thumbnail_failed",),
+        removes=("thumbnail_failed", "thumbnail_skipped"),
     )
+
+    # 6) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant ——
+    #    1024 主产物与 thumbnail_key tags 已落,small 段异常不影响本 job 结果)
+    await _derive_small_variant(asset_id, thumbnail_bytes)
 
     return {
         "status": "ok", "asset_id": asset_id,
@@ -189,10 +204,13 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
     }
 
 
-_VIDEO_PREFIXES = ("video/",)
-_VIDEO_THUMBNAIL_MAX_BYTES = 50 * 1024 * 1024   # 50MB cap pilot(ROADMAP §63 风险段)
+# 全量下载兜底段 cap(方案 §3 A1/D4:ffmpeg 直读 URL 主路径传输量与文件大小解耦,
+# 不再受 50MB 约束 —— acceptance 防御上限放到 8GB(thumb_exts.VIDEO_THUMB_ABSOLUTE_
+# MAX_BYTES);URL 主路径失败回落本链时,已知 >50MB 的文件不进全量拉取段)
+_VIDEO_THUMBNAIL_MAX_BYTES = 50 * 1024 * 1024
 _VIDEO_HEAD_RANGE = 10 * 1024 * 1024            # 只拉头部 10MB 给 ffmpeg 用,避免大文件拉全
-_FFMPEG_TIMEOUT_SEC = 30                         # subprocess 硬上限
+_FFMPEG_TIMEOUT_SEC = 30                         # subprocess 硬上限(head/full 回落链)
+_FFMPEG_URL_TIMEOUT_SEC = 60                     # URL 直读主路径 subprocess 硬上限(A4 算术 60sx2)
 
 # ─── livp(iOS Live Photo)────────────────────────────────────────────────────
 # .livp 实为 zip:内含静态图(IMG_x.JPG.jpeg / .HEIC)+ 实况短片(IMG_x.JPG.mov)。
@@ -310,6 +328,20 @@ async def _merge_asset_tags(
         await db.commit()
 
 
+async def _derive_small_variant(asset_id: str, source: bytes) -> None:
+    """small(240px) 变体派生接线(thumb-variant 方案 §4 B1;实现见 workers/
+    thumb_variants.py,本模块底部延迟 import —— 顶部互拉成环)。
+
+    三族 job 成功产出 1024 主产物后调用。失败隔离:独立 try/except 仅 log
+    warning,异常不得逃进主链路(1024 主产物与 thumbnail_key tags 必须照常落);
+    派生失败的行由回补脚本 --mode derive-small 兜底重跑。
+    """
+    try:
+        await thumb_variants.derive_and_put_small(asset_id, source)
+    except Exception as e:
+        log.warning("small thumbnail derive fail asset=%s err=%s", asset_id, e)
+
+
 def _transcode_live_video(in_path: Path, out_path: Path, timeout: int) -> bool:
     """实况短片 → H.264 MP4(浏览器兼容;原片多为 HEVC,Chrome 常放不了)。
 
@@ -354,6 +386,9 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
         if not (asset.filename or "").lower().endswith(".livp"):
             return {"status": "skip_not_livp", "filename": asset.filename}
         if asset.size_bytes and asset.size_bytes > _LIVP_MAX_BYTES:
+            # 静默口子补标记(thumb-variant 方案 §3.4 A3):'too_large' 让回补脚本
+            # thumbnail_skipped IS NULL 筛选天然排除,排查不再需要进 DB
+            await _merge_asset_tags(sm, aid, sets={"thumbnail_skipped": "too_large"})
             return {"status": "skip_too_large", "size_bytes": asset.size_bytes}
         bucket = asset.minio_bucket
         src_key = asset.minio_key
@@ -415,7 +450,8 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             Metadata={"source_asset": asset_id, "kind": "livp_still"},
         )
 
-        # 2) 静态图先落库(jsonb_set 原子合并;转码失败不影响照片预览)
+        # 2) 静态图先落库(jsonb_set 原子合并;转码失败不影响照片预览);removes
+        #    顺带清 thumbnail_skipped(此前被 skip 的行重跑成功即翻正)
         await _merge_asset_tags(
             sm, aid,
             sets={
@@ -424,8 +460,12 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
                 "thumbnail_width": img_w,
                 "thumbnail_height": img_h,
             },
-            removes=("thumbnail_failed",),
+            removes=("thumbnail_failed", "thumbnail_skipped"),
         )
+
+        # 2b) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant
+        #     —— 1024 主产物与 thumbnail_key tags 已落,small 段异常不影响实况转码)
+        await _derive_small_variant(asset_id, thumb_bytes)
 
         # 3) 实况短片转码(best-effort:解压超限 / HEVC 解码缺失 / ffmpeg 失败
         #    → 仅无实况,静态图已落库,不误标 thumbnail_failed)
@@ -796,19 +836,58 @@ def _extract_video_frame(in_path: Any, out_path: Any, timeout: int) -> bool:
     return False
 
 
+def _extract_video_frame_from_url(url: str, out_path: Any, timeout: int) -> bool:
+    """ffmpeg 直读 presigned URL 抽 1 帧(URL 主路径,thumb-variant 方案 §3.4 A1)。
+
+    参数族与契约逐字对齐:`-y -ss 1 -i <url> -frames:v 1 -vf scale=1024:-2 -q:v 3
+    -f image2 out.jpg`;HTTP demuxer 自发 Range 请求,传输量只有 moov 索引 + 关键帧
+    段(几 MB),与文件大小解耦。`-y` 必带:与回落链共用同一 tmpdir/out_path,
+    残留旧 out.jpg 会触发覆盖交互提示把 ffmpeg 挂到 subprocess 超时。-ss 1 干净
+    失败(非零退出)→ -ss 0 重试一次(与 _extract_video_frame 同款双重试);
+    subprocess.TimeoutExpired **不在此吞掉**、原样上抛,由调用方「URL 段 catch →
+    回落 head/full 链」统一处置。
+
+    ⚠ 日志卫生:cmd / TimeoutExpired.cmd / ffmpeg stderr(如「Server returned 403
+    for URL '…'」)都可能含 presigned URL —— 本函数仅返回 bool 或上抛异常,绝不
+    把上述内容拼进返回值;调用方 catch 后只 log asset_id(对齐 _thumb_fail_token
+    只存异常类型名的哲学,main.py:272 附近)。
+    """
+    import subprocess
+    for ss in ("1", "0"):
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-y", "-ss", ss, "-i", url,
+            "-frames:v", "1", "-vf", "scale=1024:-2",
+            "-q:v", "3", "-f", "image2", str(out_path),
+        ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
+        if proc.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            return True
+    return False
+
+
 async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
-    """视频缩略图生成(B-4 iter2, issue #101)。
+    """视频缩略图生成(B-4 iter2, issue #101;URL 直读主路径见 thumb-variant 方案 §3.4 A1)。
 
     流程:
+      0. 主路径:主桶内部端点 client 签 presigned GET(ExpiresIn=600)→ ffmpeg 直读
+         URL 抽帧(-ss 1 失败 -ss 0 重试;subprocess timeout 60s)—— HTTP demuxer
+         自发 Range,传输量与文件大小解耦;任一异常回落旧「头部 10MB → 全量下载
+         (cap 50MB)」链
       1. db 查 asset(content_type / size / minio_bucket / minio_key)
-      2. content_type 不 video/* → skip
-      3. size > 50MB → skip(pilot;后续 deferred queue)
+      2. 受纳 is_video_asset(content_type video/* 前缀 OR 扩展名,octet-stream
+         盲区行不再漏);不过 → tags['thumbnail_skipped']='non_video'
+      3. size > 8GB → skip + tags['thumbnail_skipped']='too_large'(防御病态对象;
+         50MB cap 只留在全量下载兜底段)
       4. boto3 get_object Range bytes=0-{HEAD_RANGE} 流式拉头部 → /tmp/<aid>.bin
-      5. ffmpeg -ss 1 -i in -frames:v 1 -vf scale=1024:-1 out.jpg
+      5. ffmpeg -ss 1 -i in -frames:v 1 -vf scale=1024:-2 out.jpg
          (-ss 1 抽 1s 帧,避开首帧黑屏;若 duration<1s 兜底 -ss 0)
       6. 上传 thumbnails/{asset_id}.jpg + 写 asset.tags.thumbnail_key
+         (+ small 240px 变体派生,失败隔离仅 log)
       7. 失败兜底 tags['thumbnail_failed']
       finally: cleanup /tmp
+    ⚠ 日志卫生:presigned URL 经 ffmpeg cmd / TimeoutExpired.cmd / stderr 三个
+    泄露向量可能进异常串 —— URL 主路径段只 log asset_id,不落 e/str(e)/traceback。
     """
     import pathlib
     import subprocess
@@ -823,13 +902,20 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             return {"status": "asset_not_found", "asset_id": asset_id}
         if asset.deleted_at is not None:
             return {"status": "asset_deleted", "asset_id": asset_id}
-        if not asset.content_type or not asset.content_type.startswith(_VIDEO_PREFIXES):
+        # 受纳判定改 is_video_asset(content_type video/* 前缀 OR 扩展名,方案 §3.4):
+        # octet-stream + .mov/.mp4 等盲区行不再被前缀判断误 skip;不过受纳 → 写
+        # thumbnail_skipped('non_video'),回补脚本 IS NULL 筛选天然排除
+        if not thumb_exts.is_video_asset(asset.filename or "", asset.content_type):
+            await _merge_asset_tags(sm, aid, sets={"thumbnail_skipped": "non_video"})
             return {"status": "skip_non_video", "content_type": asset.content_type}
-        if asset.size_bytes and asset.size_bytes > _VIDEO_THUMBNAIL_MAX_BYTES:
+        if asset.size_bytes and asset.size_bytes > thumb_exts.VIDEO_THUMB_ABSOLUTE_MAX_BYTES:
+            # 8GB 防御上限(D4):URL 主路径传输量与大小解耦,cap 只防病态对象;
+            # 超 8GB 视频回落链必然失败,直接 skip + 'too_large' 标记
+            await _merge_asset_tags(sm, aid, sets={"thumbnail_skipped": "too_large"})
             return {
                 "status": "skip_too_large",
                 "size_bytes": asset.size_bytes,
-                "cap": _VIDEO_THUMBNAIL_MAX_BYTES,
+                "cap": thumb_exts.VIDEO_THUMB_ABSOLUTE_MAX_BYTES,
             }
         bucket = asset.minio_bucket
         src_key = asset.minio_key
@@ -853,36 +939,72 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
     in_path = tmpdir / "in.bin"
     out_path = tmpdir / "out.jpg"
     thumbnail_size = 0
+    small_source: bytes | None = None
     try:
-        # 1) 先拉头部 ~10MB(关键帧通常在前几秒;faststart 文件 moov 也在头部)
-        def _fetch_head() -> None:
-            resp = s3.get_object(Bucket=bucket, Key=src_key,
-                                 Range=f"bytes=0-{_VIDEO_HEAD_RANGE - 1}")
-            with open(in_path, "wb") as f:
-                for chunk in resp["Body"].iter_chunks(chunk_size=1024 * 1024):
-                    f.write(chunk)
+        # 0) 主路径:ffmpeg 直读 presigned URL 抽帧(thumb-variant 方案 §3.4 A1)。
+        #    用主桶内部端点 boto3 client 签 GET URL(与上方 download_file 同源 client,
+        #    容器网络直连不绕公网);HTTP demuxer 自发 Range 请求,传输量只有 moov
+        #    索引 + 关键帧段(几 MB 级),与文件大小解耦 —— >50MB 视频不再依赖全量
+        #    下载,50MB cap 对本路径失去意义(全量兜底段维持 cap,见 2b)。
+        #    ⚠ 日志卫生:本段异常串(ffmpeg cmd / subprocess.TimeoutExpired.cmd /
+        #    ffmpeg stderr 回显)可能含 presigned URL —— 只 log asset_id,不落 e /
+        #    str(e) / traceback(对齐 _thumb_fail_token 只存类型名的哲学);任何异常
+        #    统一转 url_ok=False 回落下方「头部 10MB → 全量下载」既有链。
+        url_ok = False
+        try:
+            presigned_url = await asyncio.to_thread(
+                s3.generate_presigned_url,
+                "get_object",
+                Params={"Bucket": bucket, "Key": src_key},
+                ExpiresIn=600,
+            )
+            url_ok = await asyncio.to_thread(
+                _extract_video_frame_from_url,
+                presigned_url, out_path, _FFMPEG_URL_TIMEOUT_SEC,
+            )
+        except Exception:
+            log.warning("video thumbnail url-path fail asset=%s(fallback to head/full)",
+                        asset_id)
 
-        await asyncio.to_thread(_fetch_head)
+        ok = url_ok
+        if not ok:
+            # 1) 回落链(原 pilot 链路,逻辑不动):先拉头部 ~10MB(关键帧通常在
+            #    前几秒;faststart 文件 moov 也在头部)
+            def _fetch_head() -> None:
+                resp = s3.get_object(Bucket=bucket, Key=src_key,
+                                     Range=f"bytes=0-{_VIDEO_HEAD_RANGE - 1}")
+                with open(in_path, "wb") as f:
+                    for chunk in resp["Body"].iter_chunks(chunk_size=1024 * 1024):
+                        f.write(chunk)
 
-        # 2) ffmpeg 抽帧(subprocess 同步阻塞,同批 to_thread 化)
-        ok = await asyncio.to_thread(
-            _extract_video_frame, in_path, out_path, _FFMPEG_TIMEOUT_SEC,
-        )
+            await asyncio.to_thread(_fetch_head)
 
-        # 2b) #135 fallback:头部抽帧失败 + 文件可能比头部大 → 拉完整文件重试。
-        #     moov box 在文件尾部(iOS / 屏录 / ffmpeg 默认输出)时,头部 10MB 不含 moov
-        #     → demux fail。size_bytes None 视为"可能很大"一并 fallback。已被上面 50MB cap 兜住,
-        #     fallback 最多拉 50MB。faststart 文件头部就成功,不进此路径,无性能回归。
-        if not ok and (asset_size is None or asset_size > _VIDEO_HEAD_RANGE):
-            log.info("video thumbnail head-fail, fallback to full file asset=%s size=%s",
-                     asset_id, asset_size)
-            await asyncio.to_thread(s3.download_file, bucket, src_key, str(in_path))
+            # 2) ffmpeg 抽帧(subprocess 同步阻塞,同批 to_thread 化)
             ok = await asyncio.to_thread(
                 _extract_video_frame, in_path, out_path, _FFMPEG_TIMEOUT_SEC,
             )
 
+            # 2b) #135 fallback:头部抽帧失败 + 文件可能比头部大 → 拉完整文件重试。
+            #     moov box 在文件尾部(iOS / 屏录 / ffmpeg 默认输出)时,头部 10MB 不含
+            #     moov → demux fail。size_bytes None 视为"可能很大"一并 fallback。
+            #     全量段 cap 维持 50MB(方案 §3.4 A1/D4:acceptance 上限已放开到 8GB,
+            #     >50MB 的已知大小文件不再进全量拉取 —— 大文件由 URL 主路径承接;
+            #     旧版此处靠 acceptance 50MB cap 间接兜住,现须本段显式复检)。
+            #     faststart 文件头部就成功,不进此路径,无性能回归。
+            if not ok and (asset_size is None or asset_size > _VIDEO_HEAD_RANGE):
+                if asset_size is not None and asset_size > _VIDEO_THUMBNAIL_MAX_BYTES:
+                    log.info("video thumbnail full-fallback skip(>50MB cap) "
+                             "asset=%s size=%s", asset_id, asset_size)
+                else:
+                    log.info("video thumbnail head-fail, fallback to full file "
+                             "asset=%s size=%s", asset_id, asset_size)
+                    await asyncio.to_thread(s3.download_file, bucket, src_key, str(in_path))
+                    ok = await asyncio.to_thread(
+                        _extract_video_frame, in_path, out_path, _FFMPEG_TIMEOUT_SEC,
+                    )
+
         if not ok:
-            raise RuntimeError("ffmpeg failed to extract frame (head + full fallback)")
+            raise RuntimeError("ffmpeg failed to extract frame (url + head + full fallback)")
 
         thumbnail_size = out_path.stat().st_size
 
@@ -899,6 +1021,14 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             )
         log.info("video thumbnail asset=%s bucket=%s key=%s size=%d",
                  asset_id, thumb_bucket, thumbnail_key, thumbnail_size)
+
+        # 3b) small 派生源读回:tmp out.jpg 在 finally 清理前先读进内存,派生本体
+        #     放到主 tags 合并之后执行(_derive_small_variant)。读失败仅 log 不影响
+        #     1024 主产物(该行后由回补 --mode derive-small 兜底)。
+        try:
+            small_source = await asyncio.to_thread(out_path.read_bytes)
+        except Exception:
+            log.warning("small source readback fail asset=%s", asset_id)
     except subprocess.TimeoutExpired:
         log.warning("ffmpeg timeout asset=%s", asset_id)
         await _merge_asset_tags(sm, aid, sets={"thumbnail_failed": "ffmpeg_timeout"})
@@ -919,7 +1049,8 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             pass
 
-    # 4) 更新 db(jsonb_set 单条 UPDATE 原子合并 —— 双 writer 防线,§2.2 第 7 步)
+    # 4) 更新 db(jsonb_set 单条 UPDATE 原子合并 —— 双 writer 防线,§2.2 第 7 步);
+    #    removes 顺带清 thumbnail_skipped(此前被 skip 的行重跑成功即翻正)
     await _merge_asset_tags(
         sm, aid,
         sets={
@@ -927,8 +1058,13 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             "thumbnail_size_bytes": thumbnail_size,
             "thumbnail_kind": "video_frame",
         },
-        removes=("thumbnail_failed",),
+        removes=("thumbnail_failed", "thumbnail_skipped"),
     )
+
+    # 5) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant ——
+    #    1024 主产物与 thumbnail_key tags 已落,small 段异常不影响本 job 结果)
+    if small_source is not None:
+        await _derive_small_variant(asset_id, small_source)
 
     return {
         "status": "ok", "asset_id": asset_id,
@@ -996,6 +1132,11 @@ def _build_redis_settings() -> RedisSettings:
 from arq.cron import cron  # noqa: E402
 from arq.worker import func  # noqa: E402
 
+# small(240px) 变体派生模块(thumb-variant 方案 §3.4 B1/B5):放模块底部 import ——
+# thumb_variants 对本模块(_merge_asset_tags / _thumb_s3_client 等)的引用全部是
+# 函数体内延迟 import,顶部互拉会成环;底部时点本模块符号已全量就绪,不成环。
+# 三族 job 接线点(_derive_small_variant)与 WorkerSettings 注册都走模块属性访问。
+from app.workers import thumb_variants  # noqa: E402
 from app.workers.baidu_backup import (  # noqa: E402
     baidu_backup_run,
     sweep_stalled_baidu_tasks,
@@ -1029,15 +1170,23 @@ async def _validate_baidu_settings_on_startup(ctx: dict[str, Any]) -> None:
 
 class WorkerSettings:
     functions = [
-        generate_thumbnail,
-        generate_video_thumbnail,
-        generate_livp_thumbnail,
+        # 三族缩略图(thumb-variant 方案 §3.4):max_tries=1 显式设定(勿用 arq 默认
+        # 5 —— 与仓库先例对齐,封死「worker 重启 → CancelledError → 自动重跑」路径,
+        # 重试语义统一交给回补脚本);视频 timeout=360 覆盖 URL 直读主路径 +
+        # head/full 回落链最坏算术(60sx2 + 30sx2 + 拉取 ≈ 280s < 360s,方案 A4)
+        func(generate_thumbnail, max_tries=1),
+        func(generate_video_thumbnail, timeout=360, max_tries=1),
+        func(generate_livp_thumbnail, max_tries=1),
         # livp 下载级解包:timeout=300/max_tries=2 per-function 覆盖(先例:百度任务
         # baidu_backup_run;全局 job_timeout=60 装不下全分辨率转码,300s = 200MB 拉源
         # + HEIC 全分辨率解码 + ffmpeg ≤120s + zip + 上传的核算余量,§2.1;max_tries
         # 显式设定,勿用 arq 默认 5 —— 瞬时失败一次重试,永久失败由 tag 挡住不重派)
         func(generate_livp_download, timeout=300, max_tries=2),
         mark_expired_approvals,
+        # small(240px) 变体回补 job(方案 §3.4 B5):纯 SSD 读 + 内存缩放,亚秒级,
+        # 白天跑也无感;timeout=60/max_tries=1。注册漏了 = arq 从队列取出即判
+        # JobExecutionFailed 出队(不积压),回补脚本派发前须确认本行存在
+        func(thumb_variants.derive_small_thumbnail, timeout=60, max_tries=1),
         # 百度备份导入(方案 §6):timeout=3600/max_tries=1 per-function 覆盖;
         # 55min 接力模式续跑,重试语义由自家状态机 + 租约接管实现
         func(baidu_backup_run, timeout=3600, max_tries=1),

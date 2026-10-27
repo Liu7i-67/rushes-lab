@@ -1,4 +1,5 @@
-/// ThumbSignGate — 缩略图签名并发闸独立件(app-thumbnail-storm-fix W2 #11):
+/// ThumbSignGate — 缩略图签名并发闸独立件(app-thumbnail-storm-fix W2 #11;
+/// thumb-variant 批 A1 注册表键加 variant 维度):
 /// 上限 6 FIFO;内部结构写死「sign job(根 future)+ waiter completer」两层,
 /// waiter 显式三态 queued/running/abandoned;**race 计时器每 waiter 一个**
 /// (20s,进入 running 态起算):waiter abandon/超时取消自身计时器,根 future
@@ -8,6 +9,9 @@
 /// 落缓存供下次复用);全部 waiter 已放弃后根 future 迟到失败一律 swallow +
 /// AppLog 留痕(防未处理异步异常经 onSystemError 弹报错页架空 D2)。
 ///
+/// **键维度**:注册表 `_jobs` 以 `'$assetId:${variant.diskTag}'` 为键
+/// ([_Job.key])——同 assetId 的 large/small 签名互不串闸;日志仍打纯 assetId。
+///
 /// Timer 纪律:唯一 Timer 是 per-waiter race 计时器,随 waiter 放弃/超时、根
 /// 终态、clear 在调用栈内同步取消。
 library;
@@ -15,6 +19,7 @@ library;
 import 'dart:async';
 
 import '../services/app_log.dart';
+import 'thumb_variant.dart';
 
 /// waiter 被放弃(abandonAwait/clear)时收到的取消异常。
 class ThumbSignAbandoned implements Exception {
@@ -33,10 +38,17 @@ class _Waiter<T> {
 }
 
 class _Job<T> implements SignJob<T> {
-  _Job(this.assetId, this.generation, this.run, this.onSettled);
+  _Job(this.assetId, this.variant, this.generation, this.run, this.onSettled);
 
   @override
   final String assetId;
+
+  /// 规格变体(注册表键维度:同 assetId 的 large/small 各自独立 job)。
+  final ThumbVariant variant;
+
+  /// 注册表键:`'$assetId:${variant.diskTag}'`(_jobs 以此为键防互串)。
+  String get key => '$assetId:${variant.diskTag}';
+
   @override
   final int generation;
   final Future<T> Function() run;
@@ -93,19 +105,25 @@ class ThumbSignGate<T> {
   SignJob<T> open(
     String assetId,
     Future<T> Function() run, {
+    ThumbVariant variant = ThumbVariant.large,
     void Function()? onSettled,
   }) {
-    final job = _Job<T>(assetId, _generation, run, onSettled);
-    _jobs[assetId] = job;
+    final job = _Job<T>(assetId, variant, _generation, run, onSettled);
+    _jobs[job.key] = job;
     _fifo.add(job);
     return job;
   }
 
-  void abandon(String assetId, {int? generation}) {
+  void abandon(
+    String assetId, {
+    ThumbVariant variant = ThumbVariant.large,
+    int? generation,
+  }) {
     if (generation != null && generation != _generation) {
       return; // clear 后旧代 late 注册的 abandon 一律 no-op
     }
-    final job = _jobs[assetId];
+    final key = '$assetId:${variant.diskTag}';
+    final job = _jobs[key];
     if (job == null || job.settled) return;
     final active = job.activeWaiters().toList();
     if (active.isEmpty) return; // waiter 已成功完成/出表:no-op
@@ -120,7 +138,7 @@ class ThumbSignGate<T> {
     if (!job.started) {
       // 排队态:该 job 已无任何 waiter → 整体出 FIFO + 出注册表,不动闸计数
       _fifo.remove(job);
-      if (identical(_jobs[assetId], job)) _jobs.remove(assetId);
+      if (identical(_jobs[key], job)) _jobs.remove(key);
       _settle(job);
     } else if (job.slotHeld) {
       // 运行态且是最后 waiter:还槽(计时器已逐个取消——计时器与还槽绑定为一件)
@@ -220,7 +238,7 @@ class ThumbSignGate<T> {
     if (job.settled) return; // 已被 clear 整体终结
     _settle(job);
     _releaseSlot(job);
-    if (identical(_jobs[job.assetId], job)) _jobs.remove(job.assetId);
+    if (identical(_jobs[job.key], job)) _jobs.remove(job.key);
     for (final w in job.waiters) {
       if (w.state == _WaiterState.abandoned) continue;
       w.state = _WaiterState.abandoned;
@@ -235,7 +253,7 @@ class ThumbSignGate<T> {
     if (job.settled) return;
     _settle(job);
     _releaseSlot(job);
-    if (identical(_jobs[job.assetId], job)) _jobs.remove(job.assetId);
+    if (identical(_jobs[job.key], job)) _jobs.remove(job.key);
     final active = job.activeWaiters().toList();
     if (active.isEmpty) {
       // 全部 waiter 已放弃/超时/清场:迟到失败仅留痕,不上抛(D2)

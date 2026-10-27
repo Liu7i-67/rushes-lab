@@ -41,8 +41,10 @@ class _SwipeAssetsApi extends FakeAssetsApi {
 
   /// 永挂起:G2 后仅 hasThumbnail 资产才会请求;本文件资产均无 thumbnail_key。
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) =>
-      Completer<({String url, int expiresIn})>().future;
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) => Completer<({String url, int expiresIn})>().future;
 }
 
 class _SwipeFakeMsApi extends FakeMsApi {

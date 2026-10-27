@@ -229,7 +229,10 @@ class FakeAssetsApi extends AssetsApi {
   Object? thumbUrlStaged;
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbUrlCalls.add(assetId);
     final staged = thumbUrlStaged;
     if (staged is Exception) throw staged;
@@ -246,7 +249,7 @@ class FakeAssetsApi extends AssetsApi {
   Future<
     ({Map<String, ({String url, int expiresIn})> byId, Set<String> missing})
   >
-  thumbnailUrls(List<String> assetIds) async {
+  thumbnailUrls(List<String> assetIds, {String? size}) async {
     thumbnailUrlsCalls.add(List.of(assetIds));
     final staged = thumbnailUrlsStaged;
     if (staged is Exception) throw staged;

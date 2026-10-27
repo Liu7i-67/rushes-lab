@@ -102,12 +102,20 @@ class AssetsApi {
     return AssetPage.fromJson(r.data as Map<String, dynamic>);
   }
 
-  /// 缩略图 presigned URL(B2 宫格):tags.thumbnail_key 不存在时端点 404
-  /// → ApiException(404),调用方降级类型色块。后台缩略图请求一律打
-  /// noErrorReport(风暴修复 D2):5xx/传输异常不进全局报错页,仅格内降级。
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  /// 缩略图 presigned URL(B2 宫格;thumb-variant 批加 size 维度 §3.2/§3.7):
+  /// [size]='small' 时带 `?size=small`(后端优先签 small 对象,缺失回落 large,
+  /// 响应新增 `variant` 字段标实际规格);'large'/其余值保持现行为不带参数
+  /// (后端默认 large)。tags.thumbnail_key 不存在时端点 404 → ApiException(404),
+  /// 调用方降级类型色块。响应手工 JSON 解析只取 url/expires_in,容忍未知字段
+  /// (variant 等)不新增必填解析。后台缩略图请求一律打 noErrorReport(风暴修复
+  /// D2):5xx/传输异常不进全局报错页,仅格内降级。
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     final r = await _api.http.get(
       '/api/v1/assets/$assetId/thumbnail-url',
+      queryParameters: size == 'small' ? const {'size': 'small'} : null,
       options: Options(extra: const {'noErrorReport': true}),
     );
     if (r.statusCode != 200) throw _api.err(r, '缩略图加载失败');
@@ -118,16 +126,20 @@ class AssetsApi {
     );
   }
 
-  /// 批量缩略图 presigned URL(W3 #13-#16,宫格整页预热):后端按 asset_id
-  /// 出 urls + missing(不存在或无 thumbnail_key);响应顺序不保证,按 id 匹配。
-  /// 同打 noErrorReport(预热失败静默,等单发兜底)。
+  /// 批量缩略图 presigned URL(W3 #13-#16,宫格整页预热;thumb-variant 批加
+  /// size 维度 §3.2/§3.7):[size]='small' 时 body 追加 `"size": "small"`;
+  /// 不传/'large' 保持现行为(不带 size 字段,后端默认 large;旧后端对未知
+  /// size 字段忽略,双向兼容)。后端按 asset_id 出 urls + missing(不存在或无
+  /// thumbnail_key);响应顺序不保证,按 id 匹配;urls[] 每项新增 `variant`
+  /// 字段按手工 JSON 解析容忍语义忽略。同打 noErrorReport(预热失败静默,
+  /// 等单发兜底)。
   Future<
     ({Map<String, ({String url, int expiresIn})> byId, Set<String> missing})
   >
-  thumbnailUrls(List<String> assetIds) async {
+  thumbnailUrls(List<String> assetIds, {String? size}) async {
     final r = await _api.http.post(
       '/api/v1/assets/thumbnail-urls',
-      data: {'asset_ids': assetIds},
+      data: {'asset_ids': assetIds, if (size == 'small') 'size': size},
       options: Options(extra: const {'noErrorReport': true}),
     );
     if (r.statusCode != 200) throw _api.err(r, '缩略图批量加载失败');

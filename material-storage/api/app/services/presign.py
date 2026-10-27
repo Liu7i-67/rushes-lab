@@ -261,7 +261,11 @@ class PresignService:
         )
 
     def sign_thumbnail_url(
-        self, key: str, expires_seconds: int, request_base: str | None = None
+        self,
+        key: str,
+        expires_seconds: int,
+        request_base: str | None = None,
+        cache_control: str | None = None,
     ) -> str:
         """缩略图 presigned URL(ADR-0008 P1)。
 
@@ -271,14 +275,22 @@ class PresignService:
         request_base 传入时 endpoint 整体替换为该 host(缩略图与原片同 vhost,
         nginx 按 /ms-thumbs/ 路径分流,host 同源);MINIO_THUMBNAIL_ENDPOINT_PUBLIC
         仅作无请求上下文的回落。
+        cache_control(thumb-variant 方案 §4 B4)非 None 时并入 Params 的
+        ResponseCacheControl,让同一签名 URL 的重复 GET 确定性命中浏览器缓存
+        (缩略图按 asset_id 定 key、内容不可变,7 天安全);默认 None 时 Params
+        与旧版完全一致 —— live-preview-url 复用本方法(livp 实况短片会被
+        generate_livp_thumbnail 重跑覆盖),调用点不传即保持原行为。
         """
+        params: dict[str, Any] = {
+            "Bucket": self._settings.minio_thumbnail_bucket,
+            "Key": key,
+        }
+        if cache_control is not None:
+            params["ResponseCacheControl"] = cache_control
         signer = self._signer_for(request_base, self._s3_thumb_signer)
         return signer.generate_presigned_url(  # type: ignore[no-any-return]
             "get_object",
-            Params={
-                "Bucket": self._settings.minio_thumbnail_bucket,
-                "Key": key,
-            },
+            Params=params,
             ExpiresIn=expires_seconds,
         )
 

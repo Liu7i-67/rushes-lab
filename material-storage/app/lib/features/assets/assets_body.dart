@@ -6,6 +6,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
@@ -160,6 +161,8 @@ class _AssetsBodyState extends State<AssetsBody> {
         return AssetGridTile(
           index: i,
           asset: a,
+          // thumb-variant 批 D1:宫格 cell 实渲染 ≈110dp → small(240px)变体
+          variant: ThumbVariant.small,
           selected: selected,
           selecting: widget.selecting,
           onTap: widget.selecting

@@ -121,7 +121,10 @@ class _FetchAssetsApi extends FakeAssetsApi {
   final thumbCalls = <String>[];
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     return (url: 'http://thumb.test/$assetId', expiresIn: 1800);
   }

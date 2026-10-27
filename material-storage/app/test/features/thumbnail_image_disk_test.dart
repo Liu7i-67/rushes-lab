@@ -104,7 +104,10 @@ class _ThumbAssetsApi extends FakeAssetsApi {
   Completer<({String url, int expiresIn})>? signHang;
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     final hang = signHang;
     if (hang != null) return hang.future;

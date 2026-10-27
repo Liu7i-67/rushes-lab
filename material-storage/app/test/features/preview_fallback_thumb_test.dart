@@ -25,7 +25,6 @@ import 'package:ms_app/models/models.dart';
 
 import '../helpers/api_harness.dart';
 
-
 /// 假 HttpClient:任何请求都回 200 + 1x1 PNG 字节(fetchThumb 字节下载桩;
 /// 桩风格对齐 thumbnail_image_disk_test——noSuchMethod 返回 null)。
 class _PngHttpClient implements HttpClient {
@@ -55,13 +54,12 @@ class _PngResponse implements HttpClientResponse {
     Function? onError,
     void Function()? onDone,
     bool? cancelOnError,
-  }) =>
-      Stream<List<int>>.fromIterable([kPng1x1]).listen(
-        onData,
-        onError: onError,
-        onDone: onDone,
-        cancelOnError: cancelOnError,
-      );
+  }) => Stream<List<int>>.fromIterable([kPng1x1]).listen(
+    onData,
+    onError: onError,
+    onDone: onDone,
+    cancelOnError: cancelOnError,
+  );
   @override
   dynamic noSuchMethod(Invocation invocation) => null;
 }
@@ -89,7 +87,10 @@ class FallbackFakeAssetsApi extends FakeAssetsApi {
   }
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     return (url: 'http://thumb.test/$assetId', expiresIn: 1800);
   }
@@ -158,48 +159,47 @@ void main() {
     ThumbDiskStore.I.debugAttachDirectory(null);
   });
 
-  testWidgets('W6:图片有缩略图 miss → 签名+取字节直出,不签原图无提示(原 G2/P7 用例改因)', (tester) async {
+  testWidgets('W6:图片有缩略图 miss → 签名+取字节直出,不签原图无提示(原 G2/P7 用例改因)', (
+    tester,
+  ) async {
     // W6 起预览缩略图走「磁盘 miss → fetchThumb(签名+字节下载)→ Image.memory」;
     // 磁盘命中路径含真实文件 IO(fakeAsync 下不可达),本用例经 HttpOverrides 假
     // HttpClient 提供字节(T12 配方:同文件首个 fetch 前装桩,静态客户端首建即被拦)。
-    await HttpOverrides.runZoned(
-      () async {
-        final fake = await pumpMedia(
-          tester,
-          asset: assetOf('a403', tags: {'thumbnail_key': 'tk'}),
-          downloadLinkStaged: ApiException(403, '无下载权限'),
-        );
-        // 签名(微任务)+下载(假客户端)+解码调度均经 pump 推进;解码出帧再断言
-        for (var i = 0; i < 40; i++) {
-          if (find.byType(InteractiveViewer).evaluate().isNotEmpty) break;
-          await tester.pump(const Duration(milliseconds: 50));
-        }
+    await HttpOverrides.runZoned(() async {
+      final fake = await pumpMedia(
+        tester,
+        asset: assetOf('a403', tags: {'thumbnail_key': 'tk'}),
+        downloadLinkStaged: ApiException(403, '无下载权限'),
+      );
+      // 签名(微任务)+下载(假客户端)+解码调度均经 pump 推进;解码出帧再断言
+      for (var i = 0; i < 40; i++) {
+        if (find.byType(InteractiveViewer).evaluate().isNotEmpty) break;
+        await tester.pump(const Duration(milliseconds: 50));
+      }
 
-        expect(
-          fake.downloadLinkCalls,
-          isEmpty,
-          reason: '缩略图优先,入口不签 download-link 原图(签了也不会触发)',
-        );
-        expect(
-          fake.thumbCalls,
-          contains('a403'),
-          reason: 'W6:磁盘 miss 经 fetchThumb 签一次 thumbnail-url',
-        );
-        expect(find.textContaining('原图不可用'), findsNothing, reason: '缩略图正常直显,无提示');
-        expect(find.text('预览加载失败'), findsNothing, reason: '有缩略图不落失败卡');
-        expect(
-          find.byType(InteractiveViewer),
-          findsOneWidget,
-          reason: '缩略图直显仍为图片分支(可放大)',
-        );
-        expect(
-          find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
-          findsOneWidget,
-          reason: 'W6:预览主体直出来源为 Image.memory(fetchThumb 字节)',
-        );
-      },
-      createHttpClient: (_) => _PngHttpClient(),
-    );
+      expect(
+        fake.downloadLinkCalls,
+        isEmpty,
+        reason: '缩略图优先,入口不签 download-link 原图(签了也不会触发)',
+      );
+      expect(
+        fake.thumbCalls,
+        contains('a403'),
+        reason: 'W6:磁盘 miss 经 fetchThumb 签一次 thumbnail-url',
+      );
+      expect(find.textContaining('原图不可用'), findsNothing, reason: '缩略图正常直显,无提示');
+      expect(find.text('预览加载失败'), findsNothing, reason: '有缩略图不落失败卡');
+      expect(
+        find.byType(InteractiveViewer),
+        findsOneWidget,
+        reason: '缩略图直显仍为图片分支(可放大)',
+      );
+      expect(
+        find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+        findsOneWidget,
+        reason: 'W6:预览主体直出来源为 Image.memory(fetchThumb 字节)',
+      );
+    }, createHttpClient: (_) => _PngHttpClient());
   });
 
   testWidgets('inline 403 + 无缩略图 → 维持「预览加载失败」卡,不发缩略图请求', (tester) async {

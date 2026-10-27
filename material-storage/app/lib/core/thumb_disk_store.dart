@@ -1,5 +1,7 @@
 /// ThumbDiskStore — 缩略图位图磁盘缓存(app-polish-3 包 B1;storm-fix W1 #7/#9
-/// 增量代际与调试闸):按 assetId 落盘 `<getApplicationCacheDirectory()>/thumbs`,
+/// 增量代际与调试闸;thumb-variant 批 A1 加 variant 维度):按 assetId+变体
+/// 落盘 `<getApplicationCacheDirectory()>/thumbs_v2/<净化id>.<diskTag>.bin`
+/// (lg=1024 large / s=240 small;v2 与旧 `thumbs/` 同级,禁止嵌套)。
 /// presigned URL ~25min 轮换/冷启动/二次进入均本地秒出,不再整图重下。
 ///
 /// 容量上限 150MB,按文件 mtime 升序 LRU 淘汰(init 与每次写后触发);
@@ -17,6 +19,8 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+
+import 'thumb_variant.dart';
 
 /// 容量上限 150MB(D3 定稿:覆盖数千格缩略图)。
 const _kCapacityBytes = 150 * 1024 * 1024;
@@ -43,15 +47,17 @@ class ThumbDiskStore {
   /// T13 注入慢读窗口(置 null 清除)。
   Future<void> Function()? _readGate;
 
-  /// 幂等初始化:建目录 + 触发 LRU 清理;异常静默(测试环境无插件通道)。
+  /// 幂等初始化:建 v2 目录 + 文件级清空旧 `thumbs/` 内 *.bin(一次性迁移,
+  /// 非递归、不删旧目录本身)+ 触发 LRU 清理;异常静默(测试环境无插件通道)。
   Future<void> init() async {
     if (_dir != null || _initing) return;
     _initing = true;
     try {
       final base = await getApplicationCacheDirectory();
-      final dir = Directory('${base.path}/thumbs');
+      final dir = Directory('${base.path}/thumbs_v2');
       if (!await dir.exists()) await dir.create(recursive: true);
       _dir = dir;
+      await _clearLegacyThumbs(base);
       await _evict();
     } catch (_) {
       _dir = null; // 降级:仅内存 URL 缓存 + 网络直取,行为同旧版
@@ -60,18 +66,44 @@ class ThumbDiskStore {
     }
   }
 
-  /// 读位图;清空期间/目录未就绪/文件缺失/任何 IO 异常回 null(走网络分支)。
+  /// 一次性迁移(v2 上线):文件级删除旧 `thumbs/` 目录内的 `*.bin`
+  /// (沿用 [clear] 的 listSync 逐文件删除模式,非递归、不删目录本身);
+  /// 独立 try/catch:清旧失败不影响 v2 正常初始化。旧目录清空后后续 init
+  /// 仅剩一次 exists() 探测,成本可忽略。
+  Future<void> _clearLegacyThumbs(Directory base) async {
+    try {
+      final legacy = Directory('${base.path}/thumbs');
+      if (!await legacy.exists()) return;
+      final files = legacy.listSync(followLinks: false).whereType<File>();
+      for (final f in files) {
+        if (!f.path.endsWith('.bin')) continue;
+        try {
+          f.deleteSync();
+        } catch (_) {
+          /* 单个删除失败不影响其余 */
+        }
+      }
+    } catch (_) {
+      /* 旧目录遍历失败静默 */
+    }
+  }
+
+  /// 读位图([variant] 维度:large/small 各自独立文件);清空期间/目录未就绪/
+  /// 文件缺失/任何 IO 异常回 null(走网络分支)。
   /// 同步 IO(existsSync/readAsBytesSync):缩略图为百 KB 级小文件,同步读
   /// 亚毫秒;真实异步 IO 的 completion 在 widget 测试的 fakeAsync zone 内
   /// 永不派发(宫格/预览的磁盘优先路径会整体挂死),同步化同时根治可测性。
-  Future<Uint8List?> read(String assetId) async {
+  Future<Uint8List?> read(
+    String assetId, {
+    ThumbVariant variant = ThumbVariant.large,
+  }) async {
     if (_clearing) return null;
     final gate = _readGate;
     if (gate != null) await gate();
     final dir = _dir;
     if (dir == null || _clearing) return null;
     try {
-      final f = File('${dir.path}/${_fileName(assetId)}');
+      final f = File('${dir.path}/${_fileName(assetId, variant)}');
       if (!f.existsSync()) return null;
       return f.readAsBytesSync();
     } catch (_) {
@@ -90,6 +122,7 @@ class ThumbDiskStore {
     String assetId,
     Uint8List bytes, {
     int? expectedGeneration,
+    ThumbVariant variant = ThumbVariant.large,
   }) async {
     final dir = _dir;
     if (dir == null) return;
@@ -100,7 +133,7 @@ class ThumbDiskStore {
       return; // clear 已同步升代:本次写整体放弃(尚未产生 tmp)
     }
     try {
-      final f = File('${dir.path}/${_fileName(assetId)}');
+      final f = File('${dir.path}/${_fileName(assetId, variant)}');
       final tmp = File(
         '${f.path}.${DateTime.now().microsecondsSinceEpoch}.tmp',
       );
@@ -125,14 +158,18 @@ class ThumbDiskStore {
 
   /// 删除单文件(坏字节兜底 W1 #7/#25);纳入同一互斥 + 代数——防旧会话迟到
   /// remove 误删新会话写入;异常静默。
-  Future<void> remove(String assetId, {int? expectedGeneration}) async {
+  Future<void> remove(
+    String assetId, {
+    int? expectedGeneration,
+    ThumbVariant variant = ThumbVariant.large,
+  }) async {
     final dir = _dir;
     if (dir == null) return;
     if (expectedGeneration != null && expectedGeneration != _generation) {
       return; // 跨代:不删(新会话可能已重写)
     }
     try {
-      final f = File('${dir.path}/${_fileName(assetId)}');
+      final f = File('${dir.path}/${_fileName(assetId, variant)}');
       // 同步 IO(与 read/write 同因:fakeAsync 下异步 IO 挂死;
       // 同 remove 不经 _enqueue——见 write 注释)
       if (f.existsSync()) f.deleteSync();
@@ -211,11 +248,13 @@ class ThumbDiskStore {
   }
 
   /// 文件名:assetId 仅保留 `[A-Za-z0-9_-]`,其余丢弃;清空后回退 hashCode
-  /// 十六进制(保证非空可写)。内容即图片字节,扩展名固定 `.bin`。
-  String _fileName(String assetId) {
+  /// 十六进制(保证非空可写)。内容即图片字节,按 variant 加磁盘标签后固定
+  /// `.bin`:`<name>.lg.bin`(large)/ `<name>.s.bin`(small)。
+  String _fileName(String assetId, ThumbVariant variant) {
     final name = assetId.replaceAll(RegExp(r'[^A-Za-z0-9_-]'), '');
-    if (name.isNotEmpty) return '$name.bin';
-    return '${assetId.hashCode.toRadixString(16)}.bin';
+    final tag = variant.diskTag;
+    if (name.isNotEmpty) return '$name.$tag.bin';
+    return '${assetId.hashCode.toRadixString(16)}.$tag.bin';
   }
 
   /// 测试注入目录(生产走 [init];单测 LRU/落盘语义用临时目录;
@@ -223,13 +262,13 @@ class ThumbDiskStore {
   @visibleForTesting
   void debugAttachDirectory(Directory? dir) => _dir = dir;
 
-  /// 测试专用同步探测:该 assetId 的缓存文件是否已落盘(fire-and-forget 写链
-  /// 在 fakeAsync 下只能靠 tester.pump 推进,runAsync 真实时间推不动微任务)。
+  /// 测试专用同步探测:该 assetId+variant 的缓存文件是否已落盘(fire-and-forget
+  /// 写链在 fakeAsync 下只能靠 tester.pump 推进,runAsync 真实时间推不动微任务)。
   @visibleForTesting
-  bool debugHas(String assetId) {
+  bool debugHas(String assetId, {ThumbVariant variant = ThumbVariant.large}) {
     final dir = _dir;
     if (dir == null) return false;
-    return File('${dir.path}/${_fileName(assetId)}').existsSync();
+    return File('${dir.path}/${_fileName(assetId, variant)}').existsSync();
   }
 
   /// 测试注入慢写窗口(T14;传 null 清除,用例间防挂起)。

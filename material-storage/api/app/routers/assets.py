@@ -57,6 +57,7 @@ from app.services.audit import AuditService, mint_trace_id
 from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService, is_already_exists_error
 from app.services.presign import PresignService, request_base_from
+from app.services.thumb_exts import is_image_asset, is_video_asset
 from app.settings import get_settings
 from app.workers.batch_download import (
     AUDITED_TTL,
@@ -271,15 +272,18 @@ async def complete_upload(
     # B-4:enqueue thumbnail 生成 — image 走 Pillow worker;video 走 ffmpeg worker (B-4 iter2 #101)
     # .livp(iOS Live Photo,实为 zip)浏览器不识别 content-type,按扩展名分派专属 worker;
     # livp 分支并排多派一个下载级解包 job(livp-download-unpack 方案 §2.1,F2)
+    # thumb-variant 方案 §3.5:video/image 判定改 is_video_asset/is_image_asset
+    # (content_type 前缀 OR 扩展名兜底,修 Firefox 上传 .mov/.heic 落 octet-stream
+    # 的派发盲区;svg 不派发属预期,清单刻意不含);livp 文件名判定维持现状且优先级最高
     ct = asset.content_type or ""
     if asset.filename.lower().endswith(".livp"):
         from app.services.arq_pool import enqueue_livp_download, enqueue_livp_thumbnail
         await enqueue_livp_thumbnail(request.app.state.arq_pool, str(asset.id))
         await enqueue_livp_download(request.app.state.arq_pool, str(asset.id))
-    elif ct.startswith("image/"):
+    elif is_image_asset(asset.filename, ct):
         from app.services.arq_pool import enqueue_thumbnail
         await enqueue_thumbnail(request.app.state.arq_pool, str(asset.id))
-    elif ct.startswith("video/"):
+    elif is_video_asset(asset.filename, ct):
         from app.services.arq_pool import enqueue_video_thumbnail
         await enqueue_video_thumbnail(request.app.state.arq_pool, str(asset.id))
 
@@ -2066,6 +2070,7 @@ async def batch_download_link(
 async def get_thumbnail_url(
     asset_id: uuid.UUID,
     request: Request,
+    size: Literal["large", "small"] = "large",
     db: AsyncSession = Depends(get_db),
     presign: PresignService = Depends(get_presign),
     user: CurrentUser = Depends(get_current_user),
@@ -2076,36 +2081,58 @@ async def get_thumbnail_url(
     软删(deleted_at 置位)行照常返回 —— 回收站列表(管理员可见)的缩略图
     走同一 endpoint,拒绝会让回收站里每行都打一个 404;彻底删除后行不存
     在才 404。无 thumbnail_key(还没生成 / 非图)→ 404。
+
+    size(thumb-variant 方案 §3.2):small 请求优先签 tags.thumbnail_small_key,
+    缺失回落签 thumbnail_key(响应 variant 标实际签发的对象规格,web/app 据此
+    短路渐进替换;回落让三端切换与存量回补解耦,small 请求永因缺 small 404);
+    large/缺省行为与旧版一致。鉴权/审计/TTL 均不变(认证不鉴权、无审计)。
     """
     _ = user.id  # 至少要认证
     asset = await db.get(Asset, asset_id)
     if asset is None:
         raise HTTPException(404, "asset not found")
-    thumbnail_key = (asset.tags or {}).get("thumbnail_key")
+    tags = asset.tags or {}
+    if size == "small" and tags.get("thumbnail_small_key"):
+        thumbnail_key = tags["thumbnail_small_key"]
+        variant = "small"
+    else:
+        thumbnail_key = tags.get("thumbnail_key")
+        variant = "large"
     if not thumbnail_key:
         raise HTTPException(404, "no thumbnail yet(可能还在生成 / 非图片)")
 
     ttl = 1800   # 30 min — 缩略图比原图 ttl 长(让浏览器缓存有效)
     # ADR-0008 P1:缩略图走独立 bucket + 缩略图 MinIO(SSD);endpoint/bucket 由 env 控制。
     # 动态签发:request_base 传入时 host 跟随入口(缩略图与原片同 vhost 同源)
-    url = presign.sign_thumbnail_url(thumbnail_key, ttl, request_base=request_base_from(request))
-    return {"url": url, "expires_in": ttl}
+    # cache_control(B4 卫生项):同一签名 URL 的重复 GET 确定性命中浏览器缓存
+    url = presign.sign_thumbnail_url(
+        thumbnail_key, ttl, request_base=request_base_from(request),
+        cache_control="public, max-age=604800",
+    )
+    return {"url": url, "expires_in": ttl, "variant": variant}
 
 
 # ─── thumbnail URL 批量签发 — 宫格按页预热(app-thumbnail-storm-fix W3,纯新增)─
 class ThumbUrlOut(BaseModel):
-    """单条缩略图签名结果(App 按 asset_id 匹配,响应顺序不保证)。"""
+    """单条缩略图签名结果(App 按 asset_id 匹配,响应顺序不保证)。
+
+    variant(thumb-variant 方案 §3.2)= 实际签发的对象规格:请求 small 且
+    small 变体存在为 "small";large 请求或 small 缺失回落签 1024 主图为 "large"。
+    """
 
     asset_id: uuid.UUID
     url: str
     expires_in: int
+    variant: Literal["large", "small"]
 
 
 class ThumbUrlsIn(BaseModel):
     """批量签收入参:1..100(超限由 pydantic 入参约束回 422,风格对齐
-    BatchDownloadLinkIn)。"""
+    BatchDownloadLinkIn)。size(thumb-variant 方案 §3.2)逐条 small 优先/
+    缺失回落 large,语义与单发端点一致,默认 large(旧客户端零感知)。"""
 
     asset_ids: list[uuid.UUID] = Field(..., min_length=1, max_length=100)
+    size: Literal["large", "small"] = "large"
 
 
 class ThumbUrlsOut(BaseModel):
@@ -2132,7 +2159,8 @@ async def post_thumbnail_urls(
     N+1);内存分流:有 thumbnail_key 逐个 sign_thumbnail_url(本地 HMAC),
     不存在 / 无 key 进 missing;重复 id 以唯一 id 出;软删(deleted_at 置位)行
     照常返回(回收站缩略图与单发同口径);request_base 跟随入口(缩略图与原片
-    同 vhost 同源);响应顺序不保证,App 按 asset_id 匹配。
+    同 vhost 同源);响应顺序不保证,App 按 asset_id 匹配。size=small 逐条
+    优先签 thumbnail_small_key、缺失回落 thumbnail_key(variant 随实签规格)。
     """
     _ = user.id  # 至少要认证
     # 去重保序:重复 id 只查一次、只签一次,响应里以唯一 id 出
@@ -2154,7 +2182,14 @@ async def post_thumbnail_urls(
         if i and i % 20 == 0:
             await asyncio.sleep(0)
         row = by_id.get(asset_id)
-        thumbnail_key = (row.tags or {}).get("thumbnail_key") if row is not None else None
+        tags = (row.tags or {}) if row is not None else {}
+        # small 优先 / 缺失回落 large(与单发端点同拍板,thumb-variant 方案 §3.2)
+        if payload.size == "small" and tags.get("thumbnail_small_key"):
+            thumbnail_key = tags["thumbnail_small_key"]
+            variant = "small"
+        else:
+            thumbnail_key = tags.get("thumbnail_key")
+            variant = "large"
         if not thumbnail_key:
             missing.append(asset_id)
             continue
@@ -2162,9 +2197,11 @@ async def post_thumbnail_urls(
             ThumbUrlOut(
                 asset_id=asset_id,
                 url=presign.sign_thumbnail_url(
-                    thumbnail_key, ttl, request_base=request_base
+                    thumbnail_key, ttl, request_base=request_base,
+                    cache_control="public, max-age=604800",
                 ),
                 expires_in=ttl,
+                variant=variant,
             )
         )
     return ThumbUrlsOut(urls=urls, missing=missing)

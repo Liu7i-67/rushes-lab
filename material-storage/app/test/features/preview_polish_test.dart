@@ -58,8 +58,10 @@ class _PreviewAssetsApi extends FakeAssetsApi {
   }
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) =>
-      Completer<({String url, int expiresIn})>().future;
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) => Completer<({String url, int expiresIn})>().future;
 }
 
 class _PreviewFakeMsApi extends FakeMsApi {
@@ -84,7 +86,10 @@ class _G2AssetsApi extends FakeAssetsApi {
   Object? linkStaged;
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) async {
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) async {
     thumbCalls.add(assetId);
     return (url: 'http://thumb.test/$assetId', expiresIn: 1800);
   }

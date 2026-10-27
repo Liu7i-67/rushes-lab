@@ -30,6 +30,7 @@ import '../../core/session.dart';
 import '../../core/thumb_disk_store.dart';
 import '../../core/thumb_fetch.dart';
 import '../../core/thumb_pipeline.dart' show ThumbHandle;
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import 'preview_image_view.dart';
 import 'preview_plan.dart';
@@ -213,17 +214,23 @@ class _PreviewMediaState extends State<PreviewMedia> {
   ///    捕获代数写盘(fire-and-forget);收到 null(cancel/clear)仍 mounted
   ///    也置 _fail(防 _thumbBytes/_url/_fail 三空永久 loading)。
   /// 签名/下载失败(404/5xx/网络)统一 P2-6 两态文案置 _fail。
+  /// thumb-variant 批 D1:**缩略图恒 large**(磁盘直读/fetchThumb/写盘同规格
+  /// 传 [ThumbVariant.large],写盘落 `<id>.lg.bin`)——预览清晰度上限 1024,
+  /// W4「放大不换原图」与 W6「重开零网络」语义均不变;宫格/胶片条/搜索行的
+  /// small 变体不进预览链。
   Future<void> _loadThumb() async {
     if (!_a.hasThumbnail) {
       _fail = thumbFailText(_a.tags);
       return;
     }
     final id = _a.id;
+    // 恒 large(见方法注释):磁盘直读与 fetchThumb 同规格,与宫格 small 互不串
+    const variant = ThumbVariant.large;
     try {
       // 磁盘代数必须在 read 之前捕获(write 紧前才捕获形同虚设)
       var gen = ThumbDiskStore.I.generation;
       _thumbGen = gen;
-      final cached = await ThumbDiskStore.I.read(id);
+      final cached = await ThumbDiskStore.I.read(id, variant: variant);
       if (!mounted) return; // read 期间 dispose:不发 fetch
       final nowGen = ThumbDiskStore.I.generation;
       if (nowGen != gen) {
@@ -235,7 +242,7 @@ class _PreviewMediaState extends State<PreviewMedia> {
         setState(() => _thumbBytes = cached); // 磁盘命中:零网络直出
         return;
       }
-      final handle = fetchThumb(id);
+      final handle = fetchThumb(id, variant: variant);
       _thumbHandle = handle; // 每 State 只发起一次(见字段注释)
       final bytes = await handle.future.timeout(
         _thumbWaitLimit,
@@ -252,8 +259,11 @@ class _PreviewMediaState extends State<PreviewMedia> {
         return;
       }
       setState(() => _thumbBytes = bytes);
-      // 写盘 fire-and-forget(带捕获代数;全局写互斥在 store 内部)
-      ThumbDiskStore.I.write(id, bytes, expectedGeneration: gen).ignore();
+      // 写盘 fire-and-forget(带捕获代数;全局写互斥在 store 内部);large 落
+      // `<id>.lg.bin`,保留「取到字节即写盘」现状(W6 语义不变,不回退)
+      ThumbDiskStore.I
+          .write(id, bytes, expectedGeneration: gen, variant: variant)
+          .ignore();
     } catch (_) {
       // 签名失败(404/5xx)/下载失败/超时:统一两态文案(p7-both 500 语义同)
       if (mounted) setState(() => _fail = thumbFailText(_a.tags));
@@ -319,7 +329,10 @@ class _PreviewMediaState extends State<PreviewMedia> {
   void _onThumbDecodeFailed() {
     final id = _a.id;
     final gen = _thumbGen;
-    ThumbDiskStore.I.remove(id, expectedGeneration: gen).ignore();
+    // 解码失败的是预览自己取的 large 字节:按 large 删盘(防误删宫格 small 文件)
+    ThumbDiskStore.I
+        .remove(id, expectedGeneration: gen, variant: ThumbVariant.large)
+        .ignore();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       setState(() {

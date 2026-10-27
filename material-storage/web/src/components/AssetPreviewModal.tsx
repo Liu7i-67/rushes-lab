@@ -3,19 +3,25 @@
  * 后续二期可加 docx (mammoth) + xlsx (sheetjs)。
  * livp(iOS Live Photo):静态图走缩略图,实况短片走 live-preview-url(可播放)。
  * heic/heif:浏览器(除 Safari)不解码原图,大图预览走服务端转码的缩略图。
+ * image kind(非 GIF):渐进缩略图(small→large,useProgressiveThumb),原图仅兜底/显式按钮。
  */
 import { App, Button, Modal, Spin, Tooltip } from 'antd';
-import { ChevronLeft, ChevronRight, Download, FileText, Image as ImageIcon, Play } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download, Image as ImageIcon } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Asset } from '../api/types';
 import { useDownloadLink } from '../api/hooks';
 import { http, errorMessage } from '../api/client';
+import { useProgressiveThumb, useVideoPoster } from '../hooks/useProgressiveThumb';
 import { useDownloads } from '../lib/download-store';
 import { downloadAsset } from '../lib/asset-download';
 import { useCompactViewport } from '../lib/use-viewports';
-import { isIOS } from '../lib/ua';
+import { PreviewHeicImage } from './preview/PreviewHeicImage';
+import { PreviewImage } from './preview/PreviewImage';
+import { ViewOriginalButton } from './preview/PreviewImageFooter';
+import { PreviewLivp } from './preview/PreviewLivp';
+import { PreviewPdf } from './preview/PreviewPdf';
 
 interface Props {
   asset: Asset;
@@ -82,11 +88,36 @@ export function AssetPreviewModal({
   const [content, setContent] = useState<string | null>(null);
   // livp 实况短片 URL(null = 无/未生成/无权限 — 只显示静态图)
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
-  const [playingLive, setPlayingLive] = useState(false);
   const [loading, setLoading] = useState(false);
   // 切换重置钉子的 asset.id 比较基准(见下方 effect)
   const prevAssetIdRef = useRef<string | null>(null);
   const kind = detectKind(asset);
+  // ── 渐进式缩略图(doc §3.6):image kind(非 GIF 非 heic)small 先行 → onload 后换 large;
+  // GIF 刻意维持原图预览(可播动画,carve-out);heic 分支独立不动。
+  const isGif = asset.filename.toLowerCase().endsWith('.gif');
+  const hasThumbKey = !!asset.tags?.thumbnail_key;
+  const progressive = kind === 'image' && !isGif && hasThumbKey;
+  const { smallUrl, largeUrl, phase } = useProgressiveThumb({
+    assetId: asset.id, enabled: open && progressive,
+  });
+  // video poster(doc §3.6.7):large 缩略图;无 thumbnail_key 不设 poster,src 仍走原文件
+  const posterUrl = useVideoPoster(asset.id, open && kind === 'video' && hasThumbKey);
+  // 「查看原图」点击后 POST download-link 换 src(显式出口,审计随之产生;doc §3.6.5)
+  const [viewOriginalUrl, setViewOriginalUrl] = useState<string | null>(null);
+  // 缩略图 <img> 加载失败(presigned 过期/被撤):记下 asset.id,切张后旧标记自动失效
+  const [imgFailedFor, setImgFailedFor] = useState<string | null>(null);
+  // 渐进链路失败回落原图(仅渐进 asset 会写入;非渐进回落本就经由 content)
+  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
+  // 「查看原图」独立 mutation 实例(P2-6 同理:loading 与下载按钮互不影响)
+  const dlLinkViewOriginal = useDownloadLink();
+  // image 渲染 src 优先级:显式查看原图 > 失败回落原图 > 渐进 small/large;
+  // 非渐进(GIF/无 key)维持 content(原图)不变
+  const imageSrc = progressive ? (viewOriginalUrl ?? fallbackUrl ?? smallUrl) : content;
+  // 正在显示原图 → 压缩图提示与「查看原图」按钮都应消失
+  const showingOriginal = !!viewOriginalUrl || !!fallbackUrl;
+  // 渐进链路失败(fetchQuery 失败或缩略图 <img> onError)→ 回落 download-link 原图
+  const needFallback = progressive
+    && (phase === 'fallback-needed' || imgFailedFor === asset.id);
 
   // iOS PDF 降级卡(§3.6)的下载按钮 — 走共享 helper(F12:livp 默认请求解包 zip,
   // 未就绪回落原始 + 提示;非 livp 行为零变化);forceOriginal = 「下载源文件」次选项(F14)。
@@ -106,16 +137,32 @@ export function AssetPreviewModal({
     }
   };
 
+  // 「查看原图」(doc §3.6.5):点击才 POST download-link 换 <img src>;403 兜底与
+  // handleDownload 同文案;切张后迟到的响应按 prevAssetIdRef 判定丢弃,不串图
+  const handleViewOriginal = async () => {
+    const targetId = asset.id;
+    try {
+      const link = await dlLinkViewOriginal.mutateAsync(targetId);
+      if (targetId === prevAssetIdRef.current) setViewOriginalUrl(link.url);
+    } catch (e) {
+      if (targetId !== prevAssetIdRef.current) return;
+      const err = e as { response?: { status?: number } };
+      if (err.response?.status === 403) message.warning('无下载权限,请联系项目管理员');
+      else message.error(errorMessage(e, '预览加载失败'));
+    }
+  };
+
   // 关闭即清预览态:有意的 modal 生命周期重置;重排为 render 期重置会改动态,豁免 cascading 警告
   /* eslint-disable react-hooks/set-state-in-effect */
   useLayoutEffect(() => {
-    // 切换重置钉子:asset.id 变化(列表导航切张)时也清三态 — 不清的话 livp A
-    // 播放实况中切到 C 再切回,残留的 playingLive/liveUrl 会把 A 的实况串到 C 上;
-    // content 同步清空(loading 态盖住,新请求立即覆盖),无视觉问题
+    // 切换重置钉子:asset.id 变化(列表导航切张)时也清状态 — 不清的话 livp A
+    // 播放实况中切到 C 再切回,残留的 liveUrl 会把 A 的实况串到 C 上(playingLive
+    // 随 PreviewLivp 重挂载自清);content 同步清空(loading 态盖住),无视觉问题
     const assetChanged = prevAssetIdRef.current !== asset.id;
     prevAssetIdRef.current = asset.id;
     if (!open || assetChanged) {
-      setContent(null); setLiveUrl(null); setPlayingLive(false);
+      setContent(null); setLiveUrl(null);
+      setViewOriginalUrl(null); setFallbackUrl(null); setImgFailedFor(null);
     }
     if (!open) return;
     if (kind === 'unsupported') return;
@@ -148,6 +195,9 @@ export function AssetPreviewModal({
           }
           return;
         }
+        // image 渐进路径(doc §3.6.1):缩略图 URL 由 useProgressiveThumb 拉取,此处不发
+        // download-link — 打开预览不再必拉原图,审计只在「查看原图」/失败回落时产生
+        if (progressive) return;
         const { data } = await http.post<{ url: string }>(
           `/api/v1/assets/${asset.id}/download-link`, {},
         );
@@ -169,8 +219,26 @@ export function AssetPreviewModal({
       }
     })();
     return () => { cancelled = true; };
-  }, [open, asset.id, kind, message]);
+  }, [open, asset.id, kind, progressive, message]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // 渐进链路失败回落(doc §3.6.2):small/large fetchQuery 失败(phase)或缩略图 <img>
+  // onError → 沿用主 effect 的 download-link 调用路径拉原图兜底(fallbackUrl 切张即清)
+  useEffect(() => {
+    if (!open || !needFallback || fallbackUrl !== null) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await http.post<{ url: string }>(
+          `/api/v1/assets/${asset.id}/download-link`, {},
+        );
+        if (!cancelled) setFallbackUrl(data.url);
+      } catch (e) {
+        if (!cancelled) message.error(errorMessage(e, '预览加载失败'));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, needFallback, fallbackUrl, asset.id, message]);
 
   // 键盘导航(B6):预览打开且列表 >1 时 ←/→ 切张(边界即停,与导航条禁用同语义)。
   // livp 播放态 video 有自己的键位,e.target 是 video 时忽略;Esc 维持 antd Modal 自带
@@ -237,6 +305,17 @@ export function AssetPreviewModal({
     </Button>
   );
 
+  // 「查看原图」(doc §3.6.5):仅非 GIF image kind 且有 thumbnail_key 时显示;
+  // 已显示原图(点击后/失败回落)则无意义 → 隐藏;无下载权禁用(403 与下载按钮同语义)
+  const viewOriginalButton = progressive && !showingOriginal && (
+    <ViewOriginalButton
+      compact={compact}
+      disabled={canDownload === false}
+      loading={dlLinkViewOriginal.isPending}
+      onClick={() => void handleViewOriginal()}
+    />
+  );
+
   return (
     <Modal
       open={open}
@@ -244,6 +323,7 @@ export function AssetPreviewModal({
       footer={
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           {originalLivpButton}
+          {viewOriginalButton}
           {canDownload === false ? (
             <Tooltip title="无下载权限,可在文件面板点『申请下载』">{downloadButton}</Tooltip>
           ) : downloadButton}
@@ -286,64 +366,32 @@ export function AssetPreviewModal({
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
         </div>
       )}
-      {!loading && (kind === 'image' || kind === 'heic') && content !== null && (
-        <div>
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'var(--ms-hairline-soft)',
-            borderRadius: 'var(--ms-radius-sm)',
-            minHeight: 200,
-          }}>
-            <img src={content} alt={asset.filename} style={{
-              maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
-              objectFit: 'contain', display: 'block',
-            }} />
-          </div>
-          {kind === 'heic' && (
-            <div style={{
-              textAlign: 'center', marginTop: 8,
-              fontSize: 12, color: 'var(--ms-ink-subtle)',
-            }}>
-              HEIC 预览为服务端压缩图(≤1024px),下载可获取原片。
-            </div>
-          )}
-        </div>
-      )}
-      {!loading && kind === 'pdf' && content !== null && isIOS() && (
-        // iOS 内嵌 PDF 受限(Safari 不支持 iframe 内嵌 PDF 交互),降级为提示卡(§3.6)
-        <div style={{
-          padding: 32, textAlign: 'center',
-          border: '1px dashed var(--ms-hairline)',
-          borderRadius: 'var(--ms-radius-sm)',
-          background: 'var(--ms-hairline-soft)',
-        }}>
-          <FileText size={28} strokeWidth={1.5}
-                    style={{ color: 'var(--ms-ink-subtle)', marginBottom: 12 }} />
-          <div style={{
-            fontSize: 13, color: 'var(--ms-ink-muted)', lineHeight: 1.7,
-            marginBottom: 16,
-          }}>
-            iOS 内嵌预览受限,<br />点击下载后用系统预览打开。
-          </div>
-          <Button type="primary" size={compact ? 'large' : 'middle'}
-                  icon={<Download size={15} strokeWidth={1.8} />}
-                  loading={dlLink.isPending}
-                  onClick={() => void handleDownload()}>
-            下载 PDF
-          </Button>
-        </div>
-      )}
-      {!loading && kind === 'pdf' && content !== null && !isIOS() && (
-        <iframe
-          src={content}
-          title={asset.filename}
-          style={{
-            width: '100%', height: 'min(68vh, 68dvh)',
-            border: '1px solid var(--ms-hairline)',
-            borderRadius: 'var(--ms-radius-sm)',
-            background: 'var(--ms-hairline-soft)',
-          }}
+      {!loading && kind === 'image' && imageSrc && (
+        <PreviewImage
+          key={asset.id}
+          asset={asset}
+          src={imageSrc}
+          largeUrl={progressive && !showingOriginal ? largeUrl : null}
+          showHint={progressive && !showingOriginal}
+          onImgError={progressive && !showingOriginal ? () => {
+            // 缩略图 URL 加载失败(presigned 过期/被撤)→ 回落原图兜底;已显原图不触发
+            if (imgFailedFor !== asset.id) setImgFailedFor(asset.id);
+          } : undefined}
         />
+      )}
+      {!loading && kind === 'image' && progressive && !imageSrc && (
+        // 渐进缩略图 URL 拉取中 / 失败回落请求中(缓存命中时瞬通;失败有 toast 提示)
+        <div style={{ padding: 60, textAlign: 'center' }}>
+          <Spin />
+        </div>
+      )}
+      {!loading && kind === 'heic' && content !== null && (
+        <PreviewHeicImage asset={asset} url={content} />
+      )}
+      {!loading && kind === 'pdf' && content !== null && (
+        <PreviewPdf asset={asset} content={content} compact={compact}
+                    downloadPending={dlLink.isPending}
+                    onDownload={() => void handleDownload()} />
       )}
       {!loading && kind === 'video' && content !== null && (
         <div style={{
@@ -354,6 +402,7 @@ export function AssetPreviewModal({
           <video
             controls
             src={content}
+            poster={posterUrl ?? undefined}
             style={{
               width: '100%', maxHeight: 'min(68vh, 68dvh)',
               display: 'block', borderRadius: 'var(--ms-radius-sm)',
@@ -433,47 +482,8 @@ export function AssetPreviewModal({
         )
       )}
       {!loading && kind === 'livp' && content !== null && (
-        <div>
-          <div style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: '#000',
-            borderRadius: 'var(--ms-radius-sm)',
-            minHeight: 200,
-          }}>
-            {playingLive && liveUrl ? (
-              <video
-                autoPlay loop muted playsInline
-                src={liveUrl}
-                style={{
-                  width: '100%', maxHeight: 'min(65vh, 65dvh)',
-                  display: 'block', borderRadius: 'var(--ms-radius-sm)',
-                }}
-              />
-            ) : (
-              <img src={content} alt={asset.filename} style={{
-                maxWidth: '100%', maxHeight: 'min(65vh, 65dvh)',
-                objectFit: 'contain', display: 'block',
-              }} />
-            )}
-          </div>
-          {liveUrl && (
-            <div style={{ textAlign: 'center', marginTop: 12 }}>
-              <Button
-                size={compact ? 'middle' : 'small'}
-                icon={playingLive ? <ImageIcon size={13} strokeWidth={1.8} /> : <Play size={13} strokeWidth={1.8} />}
-                onClick={() => setPlayingLive(v => !v)}
-              >
-                {playingLive ? '查看照片' : '播放实况'}
-              </Button>
-            </div>
-          )}
-          <div style={{
-            textAlign: 'center', marginTop: 8,
-            fontSize: 12, color: 'var(--ms-ink-subtle)',
-          }}>
-            Live Photo(实况照片)= 静态图 + 短视频;此处为压缩预览,下载可获取原片。
-          </div>
-        </div>
+        <PreviewLivp key={asset.id} asset={asset} thumbUrl={content}
+                     liveUrl={liveUrl} compact={compact} />
       )}
     </Modal>
   );

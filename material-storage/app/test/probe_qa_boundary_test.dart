@@ -66,8 +66,10 @@ class _ProbePreviewAssetsApi extends FakeAssetsApi {
   }) async => 'http://presigned/$assetId';
 
   @override
-  Future<({String url, int expiresIn})> thumbnailUrl(String assetId) =>
-      Completer<({String url, int expiresIn})>().future;
+  Future<({String url, int expiresIn})> thumbnailUrl(
+    String assetId, {
+    required String size,
+  }) => Completer<({String url, int expiresIn})>().future;
 }
 
 class _ProbePreviewMsApi extends FakeMsApi {

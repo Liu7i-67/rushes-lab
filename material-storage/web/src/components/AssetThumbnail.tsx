@@ -19,10 +19,11 @@ export function AssetThumbnail({ asset, size = 32 }: Props) {
   const [imgError, setImgError] = useState(false);
 
   const { data } = useQuery({
-    queryKey: ['thumbnail-url', asset.id],
+    // key 含 'small' 维度(全局契约):AssetPreviewModal 渐进链路按同 key fetchQuery 共享缓存
+    queryKey: ['thumbnail-url', asset.id, 'small'],
     queryFn: async () =>
-      (await http.get<{ url: string; expires_in: number }>(
-        `/api/v1/assets/${asset.id}/thumbnail-url`,
+      (await http.get<{ url: string; expires_in: number; variant?: 'small' | 'large' }>(
+        `/api/v1/assets/${asset.id}/thumbnail-url?size=small`,
       )).data,
     enabled: hasThumb && !imgError,
     staleTime: 25 * 60 * 1000,   // 25 min(presigned 30 min,留余量)
@@ -45,6 +46,8 @@ export function AssetThumbnail({ asset, size = 32 }: Props) {
           src={data.url}
           alt=""
           width={size} height={size}
+          loading="lazy"
+          decoding="async"
           onError={() => setImgError(true)}
           style={{
             width: '100%', height: '100%',

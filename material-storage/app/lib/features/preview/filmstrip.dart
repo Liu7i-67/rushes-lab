@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../core/haptics.dart';
+import '../../core/thumb_variant.dart';
 import '../../models/models.dart';
 import '../../theme/tokens.dart';
 import '../assets/thumbnail_image.dart';
@@ -159,7 +160,11 @@ class _FilmstripState extends State<Filmstrip> {
                     color: current ? Tk.previewGold : Tk.previewLine,
                   ),
                 ),
-                child: ThumbnailImage(asset: widget.items[i]),
+                child: ThumbnailImage(
+                  // thumb-variant 批 D1:48px 小格(3x=144px)→ small(240px)
+                  asset: widget.items[i],
+                  variant: ThumbVariant.small,
+                ),
               ),
             ),
           );

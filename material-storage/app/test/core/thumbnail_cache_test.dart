@@ -19,7 +19,7 @@ void main() {
       var t = DateTime(2026, 10, 20, 12);
       var signs = 0;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           signs++;
           return SignedThumb(url: 'u$signs', expiresInSeconds: 1800);
         },
@@ -40,7 +40,8 @@ void main() {
     test('expiresInSeconds<=0 落 fallbackTtl,不至于秒过期', () async {
       var t = DateTime(2026, 10, 20, 12);
       final cache = ThumbnailCache(
-        signer: (id) async => SignedThumb(url: 'u', expiresInSeconds: 0),
+        signer: (id, variant) async =>
+            SignedThumb(url: 'u', expiresInSeconds: 0),
         now: () => t,
         fallbackTtl: const Duration(minutes: 25),
       );
@@ -54,7 +55,7 @@ void main() {
     test('同 assetId 并发共享一次签名;不同 assetId 各自签', () async {
       var signs = 0;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           signs++;
           await Future<void>.delayed(const Duration(milliseconds: 10));
           return SignedThumb(url: 'u-$id-$signs');
@@ -74,7 +75,7 @@ void main() {
     test('签名失败不缓存毒:并发方同败,下次重试重签', () async {
       var calls = 0;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls++;
           if (calls == 1) throw Exception('404 no thumbnail yet');
           return SignedThumb(url: 'u-ok');
@@ -97,7 +98,7 @@ void main() {
       var t = DateTime(2026, 10, 20, 12);
       var signs = 0;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           signs++;
           return SignedThumb(url: 'u-$id-$signs', expiresInSeconds: 1800);
         },
@@ -130,7 +131,7 @@ void main() {
 
     test('单条超大不自我驱逐(保证恒可取)', () async {
       final cache = ThumbnailCache(
-        signer: (id) async => SignedThumb(url: 'u-$id'),
+        signer: (id, variant) async => SignedThumb(url: 'u-$id'),
         capacityBytes: 100,
         defaultEntryBytes: 500, // 单条即超容量
       );
@@ -145,7 +146,7 @@ void main() {
       final calls = <String>[];
       final hang = Completer<void>();
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls.add(id);
           await hang.future;
           return SignedThumb(url: 'u-$id');
@@ -177,7 +178,7 @@ void main() {
       final calls = <String>[];
       final done = Completer<void>();
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls.add(id);
           await done.future;
           return SignedThumb(url: 'u-slow-$id');
@@ -214,7 +215,7 @@ void main() {
       final calls = <String>[];
       final hang = Completer<void>();
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls.add(id);
           await hang.future;
           return SignedThumb(url: 'u-$id');
@@ -265,7 +266,7 @@ void main() {
       final calls = <String>[];
       final hangs = <Completer<void>>[Completer<void>()];
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls.add(id);
           await hangs.last.future;
           throw Exception('late-dead-$id');
@@ -327,7 +328,7 @@ void main() {
         '存在 active waiter 时签名失败照常传播', (tester) async {
       var flip = false;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           if (!flip) {
             flip = true;
             return SignedThumb(url: 'u-ok');
@@ -360,7 +361,7 @@ void main() {
       final hang = Completer<void>();
       var released = false;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           calls.add(id);
           if (!released) await hang.future;
           return SignedThumb(
@@ -402,7 +403,7 @@ void main() {
     test('putBatch 后 missingOf 不含未过期项;过期/未命中仍报 missing', () {
       var t = DateTime(2026, 10, 26, 12);
       final cache = ThumbnailCache(
-        signer: (id) async => SignedThumb(url: 'u-$id'),
+        signer: (id, variant) async => SignedThumb(url: 'u-$id'),
         now: () => t,
       );
       addTearDown(cache.clear);
@@ -417,7 +418,7 @@ void main() {
     test('putBatch TTL:expiresIn≤0 落 fallbackTtl;0<expiresIn≤300 不缓存', () {
       var t = DateTime(2026, 10, 26, 12);
       final cache = ThumbnailCache(
-        signer: (id) async => SignedThumb(url: 'u-$id'),
+        signer: (id, variant) async => SignedThumb(url: 'u-$id'),
         now: () => t,
         fallbackTtl: const Duration(minutes: 25),
       );
@@ -444,7 +445,7 @@ void main() {
       var t = DateTime(2026, 10, 26, 12);
       var signs = 0;
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           signs++;
           return SignedThumb(url: 'u-$id-$signs', expiresInSeconds: 1800);
         },
@@ -469,7 +470,7 @@ void main() {
     test('abandonAwait 带旧代数 → no-op(不误伤新代 waiter)', () async {
       final hang = Completer<void>();
       final cache = ThumbnailCache(
-        signer: (id) async {
+        signer: (id, variant) async {
           await hang.future;
           return SignedThumb(url: 'u-$id');
         },
