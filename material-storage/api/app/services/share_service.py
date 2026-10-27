@@ -43,12 +43,15 @@ async def create_share(
     sharer_user_id: uuid.UUID,
     expires_in_seconds: int,
     requires_login: bool = True,
+    ctx: dict[str, str | None],
 ) -> dict[str, Any]:
     """生成短链 token + 写 audit;不查 target 存在性(调用方 router 自己 enforce)。
 
     W2b:audit 补 target_project_id —— asset 分支按 asset→folder 链取,folder
     分支取 folder.project_id(取法照 target_resolve.resolve_target_name_and_project
     的分派;目标行被并发删的竞速窗口回 None,不炸)。
+    ctx:请求级 IP/UA(get_request_context 产物,usage-analytics F3);写法照
+    folder_templates.apply_folder_template 先例。
     """
     token = secrets.token_urlsafe(24)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
@@ -74,6 +77,8 @@ async def create_share(
             "requires_login": requires_login,
             "sharer_user_id": str(sharer_user_id),
         },
+        request_ip=ctx.get("request_ip"),
+        user_agent=ctx.get("user_agent"),
     )
     return {"token": token, "expires_at": expires_at}
 

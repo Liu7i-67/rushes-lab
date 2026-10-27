@@ -31,6 +31,15 @@ const kAppBuildStamp = String.fromEnvironment(
   defaultValue: '',
 );
 
+/// 客户端版本号(x.y.z),打包期注入(release.mjs 构建命令 dart-define 传入
+/// bump 后的 pubspec 版本)、随 User-Agent 上报供后端使用统计识别三端:
+///   flutter build apk --release --dart-define=APP_VERSION=0.1.11
+/// 未注入(本地 flutter run/test)为空 → UA 输出 `msapp/ (<platform>)`。
+const kAppVersion = String.fromEnvironment(
+  'APP_VERSION',
+  defaultValue: '',
+);
+
 /// 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
 /// core 层资源在此挂载)。**幂等**:重复调用不重复累积(T14 断言),抽函数
 /// 便于测试注入。

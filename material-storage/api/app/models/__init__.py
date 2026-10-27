@@ -689,3 +689,74 @@ class DirectoryUsersPageOut(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ─── 使用统计聚合(2026-10-27 usage-analytics,需求 §4)────────────────────────
+# 各行 users 由 GROUPING SETS 对应分组集独立去重产出,跨组不可加(严禁行间求和
+# 推导);排序契约在服务层单点实现,模型只定形状。
+UsageMetric = Literal["active_users", "logins"]
+
+
+class UsageTotalsRow(BaseModel):
+    """全窗口总计(GROUPING SETS () 分组集独立产出)。"""
+
+    users: int
+    events: int
+
+
+class UsagePlatformRow(BaseModel):
+    platform: str          # android_app/ios_app/app_legacy/web_desktop/web_mobile/unknown
+    users: int
+    events: int
+
+
+class UsagePlatformClassRow(BaseModel):
+    platform_class: str    # web(= web_desktop+web_mobile 合并去重)/android_app/ios_app/app_legacy/unknown
+    users: int
+    events: int
+
+
+class UsageNetworkRow(BaseModel):
+    network: str           # lan/wan/unknown
+    users: int
+    events: int
+
+
+class UsageCrossRow(BaseModel):
+    """(platform, network) 交叉行;users 为该组合内去重,与 by_platform 行不可互推。"""
+
+    platform: str
+    network: str
+    users: int
+    events: int
+
+
+class UsageDailyRow(BaseModel):
+    """(date, platform, network) 完整三元组日行(无日粒度部分合计);date=Asia/Shanghai 日界。
+
+    daily 的 users 跨行不可加(同日跨维度求和会重复计数),events 可加。
+    """
+
+    date: str
+    platform: str
+    network: str
+    users: int
+    events: int
+
+
+class UsageStatsOut(BaseModel):
+    """GET /api/v1/admin/usage/stats 响应(需求 §4)。
+
+    from/to 响应键为 SQL/JSON 常用字 `from`(`to`),Python 侧用 from_/to_time
+    + Field alias 承载;FastAPI 响应序列化默认 by_alias=True,线上键名正确。
+    """
+
+    metric: UsageMetric
+    from_time: datetime = Field(..., alias="from")
+    to_time: datetime = Field(..., alias="to")
+    totals: UsageTotalsRow
+    by_platform: list[UsagePlatformRow] = []
+    by_platform_class: list[UsagePlatformClassRow] = []
+    by_network: list[UsageNetworkRow] = []
+    cross: list[UsageCrossRow] = []
+    daily: list[UsageDailyRow] = []
