@@ -30,7 +30,6 @@ export function renderFolderNode({
   folder: f, disabled, ops, hasChildren, showCount = true,
 }: Args): {
   title: ReactNode;
-  icon: ReactNode;
 } {
   // 子树含活跃文件(subtree_file_count>0,软删不计)→ 图标实心;空夹保持空心。
   // lucide 透传 fill 覆盖默认 fill="none"(已核实 v1.16.0 Icon 源码)。
@@ -39,15 +38,31 @@ export function renderFolderNode({
   const directCount = f.direct_file_count ?? 0;
   const iconColor = hasFiles ? 'var(--ms-ink)' : 'var(--ms-ink-muted)';
 
+  const icon = f.is_sensitive
+    ? <FolderIcon size={14} strokeWidth={1.7}
+                  fill={hasFiles ? 'currentColor' : 'none'}
+                  style={{ color: 'var(--ms-sensitive)' }} />
+    : hasChildren
+      ? <FolderOpen size={14} strokeWidth={1.7}
+                    fill={hasFiles ? 'currentColor' : 'none'}
+                    style={{ color: iconColor }} />
+      : <FolderIcon size={14} strokeWidth={1.7}
+                    fill={hasFiles ? 'currentColor' : 'none'}
+                    style={{ color: iconColor }} />;
+
   const title = (
-    // display:flex + minWidth:0(2026-10-28 长名称修复):占满 antd wrapper 宽度,
-    // 名称 span 才能在容器内收缩省略 —— inline-flex 是 shrink-to-fit,会被长
-    // 名称撑开导致溢出换行(图标与名称不同行)。pill/锁/ops 保持 flexShrink:0。
+    // 2026-10-28 三次修复(图标与名称分行根因):antd v6 的 iconEle 与 title 同处
+    // wrapper 的 inline 流,长名 title 收缩到 100% 宽未扣图标占位、放不下整体
+    // 换行 → 图标名称恒分行。根治=**图标并入 title 内部**(FolderTree 不再走
+    // antd icon 列),icon+名称+pill+锁+ops 同一 inline-flex 自洽收缩:
+    // 容器 inline 级(不破坏 .ant-tree-title 的 display:inline)+ maxWidth:100%
+    // + 名称 minWidth:0(解除 flex 子项不收缩)+ tokens.css wrapper min-width:0。
     <span style={{
-      display: 'flex',
+      display: 'inline-flex',
       alignItems: 'center',
       gap: 8,
-      minWidth: 0,
+      maxWidth: '100%',
+      verticalAlign: 'bottom',
       position: 'relative',
       paddingLeft: f.is_sensitive ? 6 : 0,
       color: 'var(--ms-ink)',
@@ -66,6 +81,7 @@ export function renderFolderNode({
           }}
         />
       )}
+      <span style={{ flexShrink: 0, display: 'inline-flex' }}>{icon}</span>
       <span style={{
         flex: 1,
         minWidth: 0,
@@ -95,17 +111,5 @@ export function renderFolderNode({
     </span>
   );
 
-  const icon = f.is_sensitive
-    ? <FolderIcon size={14} strokeWidth={1.7}
-                  fill={hasFiles ? 'currentColor' : 'none'}
-                  style={{ color: 'var(--ms-sensitive)' }} />
-    : hasChildren
-      ? <FolderOpen size={14} strokeWidth={1.7}
-                    fill={hasFiles ? 'currentColor' : 'none'}
-                    style={{ color: iconColor }} />
-      : <FolderIcon size={14} strokeWidth={1.7}
-                    fill={hasFiles ? 'currentColor' : 'none'}
-                    style={{ color: iconColor }} />;
-
-  return { title, icon };
+  return { title };
 }

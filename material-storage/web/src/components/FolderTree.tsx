@@ -52,7 +52,6 @@ interface Props {
 interface TreeNode {
   key: string;
   title: React.ReactNode;
-  icon: React.ReactNode;
   isLeaf?: boolean;
   disabled?: boolean;
   children?: TreeNode[];
@@ -110,8 +109,10 @@ function buildTree(
       const sub = build(f.id, ancestorDisabled || disabledSet.has(f.id));
       // 2026-10-22 两端统一:图标=子树含活跃文件(subtree>0)实心深色、空夹空心灰;
       // 数字=直属文件数(direct>0)才显示「N 项」,直属=0 不显示(即使子树有文件)。
-      // title/icon 渲染已抽到 folderNodeTitle.tsx(加 pill 后主文件超 400 行)。
-      const { title, icon } = renderFolderNode({
+      // title/icon 渲染已抽到 folderNodeTitle.tsx(加 pill 后主文件超 400 行);
+      // 2026-10-28 三次修复:icon 并入 title 内部渲染(antd v6 iconEle 与 title 同
+      // 处 inline 流,长名收缩换行致图标名称恒分行),不再走 antd icon 列。
+      const { title } = renderFolderNode({
         folder: f,
         disabled,
         ops: renderNodeOps?.(f),
@@ -122,7 +123,6 @@ function buildTree(
         key: f.id,
         disabled: disabled || undefined,
         title,
-        icon,
         children: sub.length > 0 ? sub : undefined,
       };
     });
@@ -311,8 +311,6 @@ export function FolderTree({
       <div className="ms-folder-tree" style={{ padding: '6px 4px 12px' }}>
         <Tree
           treeData={tree}
-          showIcon
-          blockNode
           defaultExpandAll={tree.length < 30}
           defaultExpandedKeys={defaultExpanded}
           selectedKeys={activeFolderId ? [activeFolderId] : []}
