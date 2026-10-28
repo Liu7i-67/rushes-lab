@@ -1170,7 +1170,10 @@ export default function ProjectDetailPage() {
         background: 'var(--ms-surface)',
         display: 'flex', flexDirection: 'column',
       }}>
-        {/* folder header — sensitive 标记用 accent dot */}
+        {/* folder header — sensitive 标记用 accent dot。
+            2026-10-28 移除文件夹名大标题(用户拍板):长名折 N 行且与顶部
+            AppBreadcrumb(项目名+文件夹名完整展示)重复;权限 chips 靠左、
+            操作按钮靠右,布局语义不变 */}
         <div style={{
           padding: '16px 24px 12px',
           borderBottom: '1px solid var(--ms-hairline-soft)',
@@ -1184,19 +1187,14 @@ export default function ProjectDetailPage() {
                 color: 'var(--ms-accent)',
                 borderRadius: 3,
                 fontSize: 10.5, fontWeight: 500, letterSpacing: '0.02em',
+                flexShrink: 0,
               }}>
                 <Lock size={10} strokeWidth={2.2} />
                 SENSITIVE
               </span>
             )}
-            <span style={{
-              fontFamily: 'var(--ms-font-display)',
-              fontSize: 18, fontWeight: 500,
-              color: 'var(--ms-ink)',
-              letterSpacing: '-0.01em',
-              flex: 1,
-            }}>{folder?.name ?? '—'}</span>
             {folder && <MyFolderPerms folder={folder} />}
+            <span style={{ flex: 1 }} />
             {project && me && (
               <Button size="small" icon={<UsersIcon size={13} strokeWidth={1.8} />}
                       onClick={() => setMembersOpen(true)}>
@@ -1266,11 +1264,14 @@ export default function ProjectDetailPage() {
             )}
           </div>
           {folder?.minio_prefix && (
-            <div style={{
+            <div
+              title={folder.minio_prefix}
+              style={{
               marginTop: 4,
               fontFamily: 'var(--ms-font-mono)',
               fontSize: 11,
               color: 'var(--ms-ink-subtle)',
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
             }}>{folder.minio_prefix}</div>
           )}
         </div>
