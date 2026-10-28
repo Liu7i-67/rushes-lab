@@ -764,3 +764,72 @@ class UsageStatsOut(BaseModel):
     by_network: list[UsageNetworkRow] = []
     cross: list[UsageCrossRow] = []
     daily: list[UsageDailyRow] = []
+
+
+# ─── 登录风控(2026-10-28 risk-control-module-plan §3.1)──────────────────────
+RiskMatchKind = Literal["unique", "none", "ambiguous"]
+
+
+class RiskMatchedUser(BaseModel):
+    """锁的登录名形态(form)反查命中的账号条目。
+
+    username 可空:老飞书用户无本地登录名(tables.py username 列 nullable),
+    name 形态锁命中这类用户时为 None —— 声明成 str 会让整个端点
+    ValidationError 500(§3.1 ⚠)。
+    """
+
+    id: uuid.UUID
+    username: str | None
+    name: str
+
+
+class RiskUserLock(BaseModel):
+    """被锁的登录名形态行;form = 锁 key 的登录名形态(小写)。
+
+    match 口径与登录三级匹配同构但**刻意保守**:批量 OR 单查询下
+    「form 命中 A.username 又命中 B.name」判 ambiguous(登录分层短路语义下
+    是 unique),歧义展示不给解锁入口,防误伤重名用户(§3.1 已知偏差,非 bug)。
+    matched_users:unique = 1 条;ambiguous = 全部命中;none = []。
+    """
+
+    form: str
+    match: RiskMatchKind
+    matched_users: list[RiskMatchedUser] = []
+    # 当前窗口失败计数(滚动窗口,每次失败刷新 TTL,非累计)
+    fail_count: int
+    # 锁剩余秒数(PTTL 毫秒上取整)
+    lock_ttl_seconds: int
+
+
+class RiskIpLock(BaseModel):
+    """被锁 IP 行。
+
+    ip 可能是哨兵 ``unknown``(login 链路 request_ip 缺失回落值,如实展示,
+    「未知 IP(链路异常,IP 缺失)」标注由前端渲染;后端不做静默过滤)。
+    recent_failed_userforms = 近 24h 该 IP 的 local_login_failed 审计反查
+    用户名去重集(lower 口径,与 W1 解锁连带清一致)。
+    """
+
+    ip: str
+    fail_count: int
+    lock_ttl_seconds: int
+    recent_failed_userforms: list[str] = []
+
+
+class RiskLocksOut(BaseModel):
+    """GET /api/v1/admin/risk/locks 响应;users / ips 均按 lock_ttl_seconds
+    降序(新触发的在前),两列表为空 = 当前无任何锁。"""
+
+    users: list[RiskUserLock] = []
+    ips: list[RiskIpLock] = []
+
+
+class RiskIpUnlockOut(BaseModel):
+    """POST /api/v1/admin/risk/locks/ips/{ip}/unlock 响应。
+
+    was_locked 严格语义 = 锁 key 曾存在(先 ip_lock_exists 预判再清除;
+    残留失败计数被清不算锁过)。
+    """
+
+    ip: str
+    was_locked: bool

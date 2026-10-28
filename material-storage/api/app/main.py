@@ -28,6 +28,7 @@ from app.routers import (
     notifications,
     projects,
     request_links,
+    risk,
     share,
     usage_stats,
     users,
@@ -140,6 +141,8 @@ def create_app() -> FastAPI:
     app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
     # 客户端使用统计(2026-10-27 usage-analytics;只读聚合,仅 system admin)
     app.include_router(usage_stats.router, prefix="/api/v1/admin/usage", tags=["usage-stats"])
+    # 登录风控(2026-10-28 risk-control-module-plan §3;锁列表 + 解 IP 锁,仅 system admin)
+    app.include_router(risk.router, prefix="/api/v1/admin/risk", tags=["risk"])
     # 百度网盘备份(方案 §5.2;受 BAIDU_BACKUP_ENABLED 门控,未启用统一 404)
     app.include_router(baidu_backup.router, prefix="/api/v1/baidu", tags=["baidu-backup"])
 

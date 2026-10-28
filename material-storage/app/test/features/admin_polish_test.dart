@@ -143,7 +143,7 @@ void main() {
   group('墨金管理后台(WP9 视觉验收)', () {
     tearDown(() => session.me = null);
 
-    testWidgets('管理首页:17 标题 + 副标题,六磁贴 2 列(卡间 10,同列左对齐)', (tester) async {
+    testWidgets('管理首页:17 标题 + 副标题,八磁贴 2 列(卡间 10,同列左对齐)', (tester) async {
       session.me = Me.fromJson({
         'id': 'u1',
         'name': '管理员',
@@ -154,7 +154,17 @@ void main() {
 
       expect(find.text('管理后台'), findsOneWidget);
       expect(find.text('系统管理员 · 用户、用户组、审计与模板'), findsOneWidget);
-      for (final label in ['用户', '用户组', '审计日志', '授权模板', '目录模板', '备份任务']) {
+      // 风控模块(2026-10-28 §5.1):新增「风控」「使用统计」两磁贴(6→8)
+      for (final label in [
+        '用户',
+        '用户组',
+        '审计日志',
+        '授权模板',
+        '目录模板',
+        '备份任务',
+        '风控',
+        '使用统计',
+      ]) {
         expect(find.text(label), findsOneWidget, reason: '磁贴:$label');
       }
 
@@ -168,7 +178,7 @@ void main() {
       expect(r3.left, closeTo(r1.left, 0.5), reason: '左列对齐');
       // 卡间 10 + 最小高 104
       final cards = find.byType(AppCard);
-      expect(cards, findsNWidgets(6));
+      expect(cards, findsNWidgets(8));
       final c1 = tester.getRect(cards.at(0));
       final c2 = tester.getRect(cards.at(1));
       expect(c2.left - c1.right, closeTo(10, 0.5), reason: '2 列卡间 10');
@@ -201,7 +211,7 @@ void main() {
         isNull,
         reason: '320×640 + 1.3 无 overflow',
       );
-      expect(find.byType(AppCard), findsNWidgets(6));
+      expect(find.byType(AppCard), findsNWidgets(8)); // 风控模块 +2 磁贴
     });
 
     testWidgets('非 admin 深链兜底:PageHeader 返回 + lock 空态', (tester) async {

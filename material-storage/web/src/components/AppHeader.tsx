@@ -115,6 +115,8 @@ export function AppHeader({ me }: Props) {
               <NavChip to="/admin/baidu-tasks" label="备份任务" navigate={navigate} />
               {/* F5: 客户端使用统计 — 仅系统管理员可见 */}
               <NavChip to="/admin/usage" label="使用统计" navigate={navigate} />
+              {/* 风控模块: 登录风控 — 仅系统管理员可见 */}
+              <NavChip to="/admin/risk" label="风控" navigate={navigate} />
             </>
           )}
           {/* 目录模板(folder-templates 方案 §3.3)— org admin / 系统管理员 / 持组 flag 成员可见;

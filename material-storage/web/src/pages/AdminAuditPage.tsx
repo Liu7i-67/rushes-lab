@@ -23,7 +23,9 @@ import type { AuditEvent } from '../api/types';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-// event_type 过滤下拉 = 后端写入全集 55 项 + 「全部」,共 56 行。
+// event_type 过滤下拉 = 后端写入全集 61 项 + 「全部」,共 62 行。
+// (原注释「55 项/56 行」自 W1/W4/W5/W6 五个事件随包回填起未同步过期;2026-10-28
+// 风控模块 +1(ip_login_unlocked)时按本数组实数更正,后续随包回填须同步本数。)
 // 注意:Select 未开 tags 模式,showSearch 只能在既有选项里搜,输不了自定义值 —
 // 后端新增 event_type 写入点时须回来补选项(后端对 event_type 是任意字符串精确匹配,无白名单)。
 // 全集核对依据:rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
@@ -62,6 +64,8 @@ const EVENT_TYPES = [
   'user_login_unlocked', 'local_login_locked',
   // W4/W5/W6 目录改名/移动 + 批量移动资产(前端2 包回填)
   'folder_renamed', 'folder_moved', 'asset_batch_moved',
+  // 风控模块(2026-10-28):单独解 IP 锁写入点(routers/risk.py;labels.ts 文案同步)
+  'ip_login_unlocked',
 ];
 
 const PAGE_SIZE = 30;

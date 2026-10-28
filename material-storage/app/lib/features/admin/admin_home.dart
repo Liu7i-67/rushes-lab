@@ -1,5 +1,5 @@
 /// AdminHomePage — 管理后台入口(B8 功能点 1;方案 §8.9):二级页大标题 +
-/// 2 列磁贴(用户/用户组/审计/权限模板/目录模板/备份任务)。
+/// 2 列磁贴(用户/用户组/审计/权限模板/目录模板/备份任务/风控/使用统计)。
 ///
 /// 闸门:页面本身仅 is_system_admin(我的页入口已闸;深链兜底二次判),
 /// 目录模板例外闸门 `is_folder_template_manager ?? is_system_admin` 由
@@ -19,6 +19,8 @@ import 'admin_baidu_tasks_page.dart';
 import 'admin_folder_templates_page.dart';
 import 'admin_grant_templates_page.dart';
 import 'admin_groups_page.dart';
+import 'admin_risk_page.dart';
+import 'admin_usage_page.dart';
 import 'admin_users_page.dart';
 
 class AdminHomePage extends StatelessWidget {
@@ -82,6 +84,19 @@ class AdminHomePage extends StatelessWidget {
         '备份任务',
         '全站备份视图',
         () => _open(context, const AdminBaiduTasksPage()),
+      ),
+      // 风控模块(2026-10-28 §5.1):导航照既有磁贴 _open 直推 widget,不走 pushNamed
+      _Tile(
+        Icons.shield_outlined,
+        '风控',
+        '登录锁定处置',
+        () => _open(context, const AdminRiskPage()),
+      ),
+      _Tile(
+        Icons.insights,
+        '使用统计',
+        '三端与内外网占比',
+        () => _open(context, const AdminUsagePage()),
       ),
     ];
     return Scaffold(

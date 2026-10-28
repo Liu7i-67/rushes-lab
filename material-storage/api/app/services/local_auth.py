@@ -6,6 +6,8 @@
   - 登录限流(Redis 计数,per IP + per username 双维度;失败 5 次锁 15min)
   - 管理员解锁(W1):clear_locks / clear_ip_locks 清三形态 user key 与 IP key,
     users_login_locked 供用户列表批量回显锁定状态
+  - 风控(risk §3):scan_locks / lock_details / ip_lock_exists 只读枚举锁与
+    明细、解 IP 前的锁 key 严格预判(2026-10-28 risk-control-module-plan)
   - username 解析:不强制邮箱格式 — 拼音 / 工号友好;
     匹配优先级 username 精确 → email(含 @)→ name 兜底,全部忽略大小写;
     任一维度重复(如 name 重名)→ 拒绝登录
@@ -17,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import uuid
 from collections.abc import Iterable, Sequence
@@ -38,6 +41,9 @@ _FAIL_IP_KEY = "auth:fail:ip:{ip}"
 _FAIL_USER_KEY = "auth:fail:user:{username}"
 _LOCK_IP_KEY = "auth:lock:ip:{ip}"
 _LOCK_USER_KEY = "auth:lock:user:{username}"
+# 风控 scan 用前缀(risk §3.1;从既有 key 模板派生,防前缀拼写与模板漂移)
+_LOCK_USER_PREFIX = _LOCK_USER_KEY.split("{")[0]
+_LOCK_IP_PREFIX = _LOCK_IP_KEY.split("{")[0]
 
 
 @dataclass
@@ -52,6 +58,20 @@ class ClearLocksResult:
 
     forms: list[str]
     was_locked: bool
+
+
+@dataclass
+class LockDetail:
+    """单个锁主体的明细行(风控列表 §3.1)。
+
+    - lock_ttl_seconds:锁剩余秒数(PTTL 毫秒上取整换算;无过期 -1 按 0)
+    - fail_count:对应 ``auth:fail:*`` 计数 key 当前值(计数 key 已过期 = 0,
+      锁尾段计数先过期属正常,如实展示)
+    """
+
+    lock_ttl_seconds: int
+    fail_count: int
+
 
 # 密码策略:字母与数字各至少一个(拼音/工号友好的同时保持基本强度)
 _LETTER_RE = re.compile(r"[A-Za-z]")
@@ -245,3 +265,72 @@ class LocalAuthService:
             log.warning("login username ambiguous username=%s", username)
             return None
         return users[0] if users else None
+
+    # ─── 风控(risk §3.1/§3.2)— 锁枚举 / 明细 / IP 锁严格预判(全部只读 Redis)──
+    async def scan_locks(self) -> tuple[list[str], list[str]]:
+        """枚举当前全部登录锁 key,剥前缀得 (user_forms, ips)(风控列表 §3.1)。
+
+        对 ``auth:lock:user:*`` 与 ``auth:lock:ip:*`` 各做一次 scan_iter
+        (**SCAN 与 pipeline 不能混用**;keyspace 极小,单实例 Redis)。forms 为
+        登录名 lower 形态,ips 为原始 IP —— login 链路 request_ip 缺失时落
+        哨兵 ``unknown``(routers/auth.py),如实返回不过滤,展示标注归前端。
+        SCAN 是游标遍历,可能重复返回同一 key:dict.fromkeys 保序去重。
+        """
+        forms: list[str] = []
+        ips: list[str] = []
+        async for key in self._redis.scan_iter(match=f"{_LOCK_USER_PREFIX}*"):
+            forms.append(str(key)[len(_LOCK_USER_PREFIX):])
+        async for key in self._redis.scan_iter(match=f"{_LOCK_IP_PREFIX}*"):
+            ips.append(str(key)[len(_LOCK_IP_PREFIX):])
+        return list(dict.fromkeys(forms)), list(dict.fromkeys(ips))
+
+    async def lock_details(
+        self, forms: Sequence[str], ips: Sequence[str],
+    ) -> tuple[dict[str, LockDetail], dict[str, LockDetail]]:
+        """批量取锁明细(pipeline 一次往返):每个主体的 (lock_ttl_seconds, fail_count)。
+
+        返回 (user_details, ip_details),键为 form / ip 原文。守卫(§3.1):
+        - PTTL 返回**毫秒**,``lock_ttl_seconds = ceil(PTTL / 1000)``(漏换算会
+          把 12 分钟显示成 742000 秒);
+        - ``-2`` = 枚举与读取之间已过期,该行丢弃;``-1`` = 无过期(理论不出现)按 0;
+        - 计数 key 不存在时 ``fail_count = 0``(锁尾段计数先过期属正常,如实展示)。
+        """
+        pipe = self._redis.pipeline()
+        for u in forms:
+            pipe.pttl(_LOCK_USER_KEY.format(username=u))
+            pipe.get(_FAIL_USER_KEY.format(username=u))
+        for ip in ips:
+            pipe.pttl(_LOCK_IP_KEY.format(ip=ip))
+            pipe.get(_FAIL_IP_KEY.format(ip=ip))
+        values = await pipe.execute()  # [pttl_0, fail_0, pttl_1, fail_1, ...]
+
+        def _row(pttl: int, fail: int | str | None) -> LockDetail | None:
+            if pttl == -2:  # 枚举与读取之间已过期 → 丢弃该行
+                return None
+            ttl = 0 if pttl < 0 else math.ceil(pttl / 1000)
+            return LockDetail(
+                lock_ttl_seconds=ttl,
+                fail_count=int(fail) if fail is not None else 0,
+            )
+
+        user_details: dict[str, LockDetail] = {}
+        for i, u in enumerate(forms):
+            row = _row(values[2 * i], values[2 * i + 1])
+            if row is not None:
+                user_details[u] = row
+        ip_details: dict[str, LockDetail] = {}
+        base = 2 * len(forms)
+        for i, ip in enumerate(ips):
+            row = _row(values[base + 2 * i], values[base + 2 * i + 1])
+            if row is not None:
+                ip_details[ip] = row
+        return user_details, ip_details
+
+    async def ip_lock_exists(self, ip: str) -> bool:
+        """GET ``auth:lock:ip:{ip}`` — IP 锁 key 存在性严格判定(风控解 IP §3.2)。
+
+        clear_ip_locks 返回非空只代表「锁或计数任一被清」(残留失败计数也会
+        命中),不能当 was_locked 用;本方法与 ClearLocksResult.was_locked 同
+        口径只认锁 key。端点先预判再清除,was_locked 以预判为准。
+        """
+        return await self._redis.get(_LOCK_IP_KEY.format(ip=ip)) is not None

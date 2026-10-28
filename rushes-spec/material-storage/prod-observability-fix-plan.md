@@ -211,9 +211,12 @@ WHERE event_type IN ('approval_notified','invite_notified') GROUP BY 1;
 - 用户/组(7):`user_disabled` `user_enabled` `user_password_reset` `group_created` `group_updated` `group_deleted` `password_changed`
 - 登录/通知(3):`local_login_success` `local_login_failed` `notification_sent`
 - 权限模板/目录/授权(4):`folder_grant_added` `folder_grant_removed` `grant_template_changed` `grant_revoked`(projects.py:1261 写入,labels.ts:34 已有「授权撤回」)
+- 登录风控(1,2026-10-28 增补):`ip_login_unlocked`(routers/risk.py 单独解 IP 锁写入点;labels.ts 文案「解除 IP 登录锁定」,同 `user_login_unlocked` 同口径计入活跃用户)
 
 删除死选项(2,后端从不写入):`approval_notified` `invite_notified`。
-加全后下拉命名选项 = 后端写入全集 55(既有保留 22 + 新增 33),外加「全部」共 56 行。
+加全后下拉命名选项 = 后端写入全集 55(既有保留 22 + 新增 33),外加「全部」共 56 行
+(2026-10-14 时点实数;此后 W1/W4/W5/W6/风控模块写入点随包增补,当前实数以
+AdminAuditPage.tsx EVENT_TYPES 计数注释为准)。
 
 ## 附录 B:验收/排查 SQL(prod ms-db,`docker exec -i ms-db psql -U msuser -d material_storage`)
 

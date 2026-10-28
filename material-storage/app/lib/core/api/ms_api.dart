@@ -29,7 +29,9 @@ import 'notifications_api.dart';
 import 'projects_api.dart';
 import 'projects_ops_api.dart';
 import 'request_links_api.dart';
+import 'risk_api.dart';
 import 'share_api.dart';
+import 'usage_api.dart';
 import 'user_agent.dart';
 import 'users_api.dart';
 
@@ -221,6 +223,8 @@ class MsApi {
   late final directory = DirectoryApi(this); // B8:用户/组管理后台
   late final audit = AuditApi(this); // B8:审计查询+CSV 导出
   late final adminBaidu = AdminBaiduApi(this); // B8:备份任务 admin 观测+文件三操作
+  late final risk = RiskApi(this); // 风控:锁定快照+单 IP 解锁(2026-10-28)
+  late final usage = UsageApi(this); // 使用统计(消费既有 usage/stats 端点)
 
   InterceptorsWrapper _logInterceptor({
     bool withQuery = true,
