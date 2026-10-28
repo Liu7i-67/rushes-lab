@@ -1,6 +1,7 @@
 /// B8 管理后台页面 widget 测试(testWidgets + 记录式假 API 族):
 /// 入口双闸门显隐、用户建号一次性密码回显/解锁入口与确认、组移出成员、
 /// 应用默认批量结果逐项目呈现、百度任务详情文件级三操作。
+/// 风控 / 使用统计页面用例已拆至 admin_risk_usage_pages_test.dart(2026-10-28)。
 library;
 
 import 'package:flutter/material.dart';

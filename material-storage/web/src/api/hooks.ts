@@ -43,6 +43,8 @@ import type {
   NotificationsList,
   Project,
   ProjectCreated,
+  RiskIpUnlockOut,
+  RiskLocksOut,
   SearchResult,
   ShareCreateOut,
   ShareResolve,
@@ -1409,3 +1411,29 @@ export const useAdminUsageStats = (params: UsageStatsParams | null = {}) =>
     enabled: params !== null,
     placeholderData: keepPreviousData,
   });
+
+// ─── 登录风控(2026-10-28;GET /api/v1/admin/risk/locks,require_system_admin)──
+// 只读快照(拉取式):项目 QueryClient 全局 refetchOnWindowFocus: false + staleTime 30s,
+// **不开轮询、不开聚焦刷新**,列表更新只靠挂载拉取与页面手动「刷新」按钮(方案 D1;
+// 锁 15 分钟自动过期,列表自然清空)。非 admin 后端 403 由全局 queryCache 静默跳过,
+// 页面自行 me 层 Alert 兜底(照 useAdminUsageStats / AdminUsageStatsPage 双层模式)。
+export const useRiskLocks = () =>
+  useQuery({
+    queryKey: ['risk-locks'],
+    queryFn: async () => (await http.get<RiskLocksOut>('/api/v1/admin/risk/locks')).data,
+  });
+
+/** POST /api/v1/admin/risk/locks/ips/{ip}/unlock — 单独解 IP 锁(写审计
+ *  ip_login_unlocked;ip 不做格式校验仅 strip,此处 encodeURIComponent 防畸形 key 破坏
+ *  路径)。成功 invalidate ['risk-locks'];**toast 归页面层,本 hook 不带**
+ *  (照 useUnlockUser 惯例)。 */
+export const useUnlockIp = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (ip: string) =>
+      (await http.post<RiskIpUnlockOut>(
+        `/api/v1/admin/risk/locks/ips/${encodeURIComponent(ip.trim())}/unlock`,
+      )).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['risk-locks'] }),
+  });
+};

@@ -657,3 +657,47 @@ export interface AuditEvent {
   // 不带类型后缀;查不到/垃圾值不进 dict)。可选 —— 旧后端无此字段,消费侧回落现行为。
   resolved_names?: Record<string, string>;
 }
+
+// ─── 登录风控(2026-10-28;GET /api/v1/admin/risk/locks,require_system_admin)──
+// 契约照 risk-control-module-plan.md §3.1。user 维度按锁 key 的登录名形态(form)
+// 反查账号:unique=唯一命中 / none=查无此人(typo、探测)/ ambiguous=name 重名歧义。
+
+/** 锁 key 命中的账号行。⚠ username 可空(老飞书用户无本地登录名,tables.py username 列
+ *  nullable;name 形态锁命中老用户时该行 username=null)—— 声明成 string 会在渲染层炸。 */
+export interface RiskMatchedUser {
+  id: string;
+  username: string | null;
+  name: string;
+}
+
+/** 被锁账号行(form = 锁 key 的登录名形态,小写;fail_count 为当前滚动窗口计数,非累计)。 */
+export interface RiskUserLock {
+  form: string;
+  match: 'unique' | 'none' | 'ambiguous';
+  // unique=1 条;ambiguous=全部命中;none=[]
+  matched_users: RiskMatchedUser[];
+  fail_count: number;
+  lock_ttl_seconds: number;
+}
+
+/** 被锁 IP 行(unknown 为链路异常哨兵 IP,如实展示但页面须标注)。 */
+export interface RiskIpLock {
+  ip: string;
+  fail_count: number;
+  lock_ttl_seconds: number;
+  // 近 24h 该 IP 登录失败用户名去重(小写;详情缺失事件不在此列)
+  recent_failed_userforms: string[];
+}
+
+/** GET /admin/risk/locks 响应(两列表按 lock_ttl_seconds 降序;均空 = 当前无任何锁)。 */
+export interface RiskLocksOut {
+  users: RiskUserLock[];
+  ips: RiskIpLock[];
+}
+
+/** POST /admin/risk/locks/ips/{ip}/unlock 响应(was_locked 严格语义 = 锁 key 曾存在;
+ *  预判与 DEL 之间自然过期时 was_locked=true 但未实际清 key,幂等无害)。 */
+export interface RiskIpUnlockOut {
+  ip: string;
+  was_locked: boolean;
+}

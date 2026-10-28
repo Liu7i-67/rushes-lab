@@ -82,6 +82,9 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   //    W4/W5/W6 三事件由并行包自行追加,勿在此代填)────────────────────────────
   user_login_unlocked: '解除登录锁定',
   local_login_locked: '触发登录锁定',
+  // ── 风控模块(2026-10-28):单独解 IP 锁写入点(risk.py;AdminAuditPage
+  //    EVENT_TYPES 同步)────────────────────────────────────────────────────────
+  ip_login_unlocked: '解除 IP 登录锁定',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

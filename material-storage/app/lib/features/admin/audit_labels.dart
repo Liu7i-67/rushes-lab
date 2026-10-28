@@ -1,6 +1,10 @@
 /// 审计展示常量(B8;web AdminAuditPage EVENT_TYPES / labels.ts 映射对齐):
-/// 事件类型筛选全集(56 项,后端任意字符串精确匹配无白名单——新增写入点须回补)
-/// 与粗分类配色(details 键中文 label 桌面已有,移动端仅挑高频键,缺省回落裸键)。
+/// 事件类型筛选全集(62 项含『全部』= 61 个事件类型,后端任意字符串精确匹配
+/// 无白名单——新增写入点须回补)与粗分类配色(details 键中文 label 桌面已有,
+/// 移动端仅挑高频键,缺省回落裸键)。
+/// 计数注释 2026-10-28 风控模块 +1('ip_login_unlocked')时按实数更正:基线
+/// 「56 项」系 W1/W4/W5/W6 批次回填未同步的旧值,web AdminAuditPage.tsx 同批
+/// 已按实数 61 事件+『全部』=62 对齐,两侧集合已核对一致。
 library;
 
 import 'package:flutter/material.dart';
@@ -38,6 +42,8 @@ const kAuditEventTypes = <String>[
   'grant_revoked',
   // 六项优化(2026-10-17)与后续批次回填
   'user_login_unlocked', 'local_login_locked',
+  // 风控模块(2026-10-28 §3.2):解 IP 登录锁审计写入点
+  'ip_login_unlocked',
   'folder_renamed', 'folder_moved', 'asset_batch_moved',
 ];
 
@@ -67,6 +73,8 @@ const kAuditEventLabels = <String, String>{
   'folder_template_changed': '目录模板变更',
   'grant_revoked': '授权撤回',
   'grant_template_changed': '权限模板变更',
+  // 风控模块(2026-10-28;web labels.ts 同文案)
+  'ip_login_unlocked': '解除 IP 登录锁定',
   'local_login_failed': '本地账号登录失败',
   'local_login_success': '本地账号登录',
   'local_login_locked': '触发登录锁定',

@@ -33,6 +33,8 @@ const AdminGrantTemplatesPage = lazy(() => import('./pages/AdminGrantTemplatesPa
 const AdminFolderTemplatesPage = lazy(() => import('./pages/AdminFolderTemplatesPage'));
 const AdminBaiduTasksPage = lazy(() => import('./pages/AdminBaiduTasksPage'));
 const AdminUsageStatsPage = lazy(() => import('./pages/AdminUsageStatsPage'));
+// 风控模块(2026-10-28):登录风控(被锁账号/被锁 IP + 解锁处置;仅系统管理员,后端 require_system_admin)
+const AdminRiskPage = lazy(() => import('./pages/AdminRiskPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
@@ -78,6 +80,8 @@ const RouterRoutes = () => (
       <Route path="/admin/baidu-tasks" element={<AdminBaiduTasksPage />} />
       {/* F5: 客户端使用统计(三端占比 + 内外网占比;仅系统管理员,后端 require_system_admin) */}
       <Route path="/admin/usage" element={<AdminUsageStatsPage />} />
+      {/* 风控模块: 登录风控(被锁账号/被锁 IP 视图 + 解锁处置;仅系统管理员,后端 require_system_admin) */}
+      <Route path="/admin/risk" element={<AdminRiskPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/s/:token" element={<ShareLandingPage />} />
       <Route path="/r/:token" element={<RequestLinkLandingPage />} />

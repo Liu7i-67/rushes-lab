@@ -17,6 +17,8 @@ import 'features/admin/admin_folder_templates_page.dart';
 import 'features/admin/admin_grant_templates_page.dart';
 import 'features/admin/admin_groups_page.dart';
 import 'features/admin/admin_home.dart';
+import 'features/admin/admin_risk_page.dart';
+import 'features/admin/admin_usage_page.dart';
 import 'features/admin/admin_users_page.dart';
 import 'features/assets/assets_page.dart';
 import 'features/assets/trash_page.dart';
@@ -210,6 +212,12 @@ class _MsAppState extends State<MsApp> {
               return MaterialPageRoute(
                 builder: (_) => const AdminBaiduTasksPage(),
               );
+            case '/admin/risk':
+              // 风控(§5.1 深链;页面级 EmptyState 闸,非 admin 直接锁定态)
+              return MaterialPageRoute(builder: (_) => const AdminRiskPage());
+            case '/admin/usage':
+              // 使用统计(§5.1 深链;同款页面级闸)
+              return MaterialPageRoute(builder: (_) => const AdminUsagePage());
             case '/error-report':
               // feat/app-error-page F1-F3:全局报错提醒页;无构造参数,
               // 页面自行从 errorReporter.currentError 取首条错误详情(D2)。
