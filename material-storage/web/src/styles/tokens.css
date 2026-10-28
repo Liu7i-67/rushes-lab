@@ -252,3 +252,12 @@ body.ms-compact { margin: 0; }
        不带 min-width:0,被长内容撑开)。允许收缩 → 名称 span 的 ellipsis 才生效,
        图标列(iconEle)与标题恒同行 ── */
 .ms-folder-tree .ant-tree-node-content-wrapper { min-width: 0; }
+
+/* 2026-10-28 四次修复(x 轴滚动条根因):antd 虚拟列表 holder-inner 是 flex column
+   容器,宽度 shrink-to-fit=max-content 被长名节点撑到容器外(treenode 实测 1082 >
+   容器 259,整树横向溢出);且 .ant-tree-title 是 display:inline(不吃 max-width)。
+   三连钳制:holder-inner/treenode 宽=100%,title 升级 inline-block+maxWidth ——
+   titleSpan 的 maxWidth:100% 链路走通,名称省略、pill/锁/…操作恒可见零滚动。 */
+.ms-folder-tree .ant-tree-list-holder-inner { width: 100%; }
+.ms-folder-tree .ant-tree-treenode { width: 100%; }
+.ms-folder-tree .ant-tree-title { display: inline-block; max-width: 100%; vertical-align: bottom; }
