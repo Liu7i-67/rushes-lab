@@ -226,7 +226,7 @@ void main() {
     expect(stats.isEmptyData, isFalse);
   });
 
-  test('usage stats:metric 缺省 active_users;非 admin 403 detail 透传', () async {
+  test('usage stats:metric 缺省 active_users(403 透传已由 unlockIp 用例覆盖)', () async {
     final stats = await h.api!.usage.fetchUsageStats(
       from: DateTime(2026, 10, 1),
       to: DateTime(2026, 10, 28),

@@ -74,6 +74,9 @@ class _AdminRiskPageState extends State<AdminRiskPage> {
   // ── 账号解锁(照 admin_user_row.dart 'unlock' 先例 :117-137)──────────────
 
   Future<void> _openUserActions(RiskUserLock lock) async {
+    // 契约外防御(与 Web AdminRiskPage.tsx 口径一致):unique 但 matched_users
+    // 为空时不给任何解锁动作,`.first` 前必须判空,防后端异常数据炸动作层。
+    if (lock.matchedUsers.isEmpty) return;
     final user = lock.matchedUsers.first;
     final action = await showModalBottomSheet<String>(
       context: context,
@@ -286,6 +289,13 @@ class _AdminRiskPageState extends State<AdminRiskPage> {
     final meta =
         '${lock.form} · 当前窗口失败 ${lock.failCount} 次 · 剩余约 ${lock.remainingMinutes} 分钟';
     final (title, badge, onTap) = switch (lock.match) {
+      // 契约外防御(与 Web AdminRiskPage.tsx:123-129 口径一致):unique 但
+      // matched_users 空属后端异常,按 none 态渲染(无解锁动作)。
+      RiskUserLockMatch.unique when lock.matchedUsers.isEmpty => (
+        lock.form,
+        const Badge(label: '未匹配账号', tone: BadgeTone.outline),
+        null,
+      ),
       RiskUserLockMatch.unique => (
         _displayName(lock.matchedUsers.first),
         null,

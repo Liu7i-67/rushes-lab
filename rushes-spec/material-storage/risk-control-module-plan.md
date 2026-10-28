@@ -165,11 +165,12 @@
   ② `web/src/pages/AdminAuditPage.tsx`(:31 起 `EVENT_TYPES`)筛选全集;
   ③ `app/lib/features/admin/audit_labels.dart`:`kAuditEventTypes`(声明于 :11;文件头注释明言
   「新增写入点须回补」)+ 中文 label map(:91 附近,文案同①);
-  ④ 两处「全集 N 项」计数注释同步:`AdminAuditPage.tsx:26` 与 `audit_labels.dart:2`
-  (加一项后数字过期,顺带更正;**注意两处计数基准本就不同**——前者「55 项(不含『』)+『全部』
-  共 56 行」、后者「56 项(含『』)」,各自 +1 即可,勿「统一成同一数字」);另
-  `AdminAuditPage.tsx:29` 点名的全集核对依据 `prod-observability-fix-plan.md` 附录 A
-  (写死 55/56)同步补一行,或把注释口径改为「新事件随新增随补」。
+  ④ 两处「全集 N 项」计数注释同步:`AdminAuditPage.tsx:26` 与 `audit_labels.dart:2`。
+  **实施回填(2026-10-28)**:基线注释本就过期——W1/W4/W5/W6 五事件回填时未同步,加
+  `ip_login_unlocked` 前两数组实数已达 60 事件,机械「+1」会写出与数组不符的数字,故**按实数更正**:
+  web = 61 事件 + 『全部』= 62 行,app = 62 项(含『』空串占位),两侧集合已程序化核对一致;
+  `prod-observability-fix-plan.md` 附录 A 保持历史数字、加时点括注「当前实数以
+  AdminAuditPage 计数注释为准」。**后续新增事件:改数组必须同步两侧计数注释(勿再让基线漂移)。**
 - 活跃用户口径核对:`services/usage_stats.py` 的 `_ACTIVE_USERS_PREDICATE` 只排除
   `local_login_failed / local_login_locked`;`ip_login_unlocked` 是 admin 主动行为,**与
   `user_login_unlocked` 同口径计入活跃**,`usage_stats.py` 零改动(D9,写入核对项)。
@@ -411,6 +412,9 @@ qdev 预计 2~3 包(api / web / app 各一,或 api+web 合包)。
 - **Dart 时区钉子**:序列化必须 `DateTime.toUtc().toIso8601String()`——本地 DateTime 直接
   `toIso8601String()` 产出**无 offset 后缀的 naive 串**,必吃 422;Web 的 `toISOString()`
   恒 UTC「Z」形,「照抄 Web」指窗口**算法**而非该序列化细节。
+- **D3 边界补充(实施实证)**:含 `/` 的畸形 key 形态(`%2F`、`..`)在路由层即 404,到不了解锁
+  端点——真实锁形态(IPv4 / `unknown` 哨兵)不含 slash,不受影响;若真出现含 slash 的异常
+  key,只能手工 `redis-cli DEL`,端点无法触达。
 - `PTTL` 返回**毫秒**,`lock_ttl_seconds = ceil(PTTL / 1000)`;`-1`(无过期)/ `-2`(不存在)守卫见 §3.1。
 - `fail_count` 是滚动窗口计数(每次失败刷新 TTL),展示文案统一「当前窗口失败次数」,勿写「累计」。
 - 审计 `details.username` 为原始输入未 lower,反查与展示统一 lower 口径(既有钉子,`directory.py:539-551`)。
