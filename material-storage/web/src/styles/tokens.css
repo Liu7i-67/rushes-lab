@@ -246,3 +246,9 @@ body.ms-compact, body.ms-compact *, body.ms-compact *::before, body.ms-compact *
       底部文档流 TabBar 超出视口(375×812 实测 bottom 820 > 812)。
       只 reset body 自身 — 不能并入上面分组选择器,否则全部后代 margin 归零 ── */
 body.ms-compact { margin: 0; }
+
+/* ── folder 树节点长名称省略(2026-10-28 UI 修复):title 用 display:flex+minWidth:0
+       后,还需 wrapper 自身可收缩(antd .ant-tree-node-content-wrapper 在部分版本
+       不带 min-width:0,被长内容撑开)。允许收缩 → 名称 span 的 ellipsis 才生效,
+       图标列(iconEle)与标题恒同行 ── */
+.ms-folder-tree .ant-tree-node-content-wrapper { min-width: 0; }

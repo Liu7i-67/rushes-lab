@@ -40,10 +40,14 @@ export function renderFolderNode({
   const iconColor = hasFiles ? 'var(--ms-ink)' : 'var(--ms-ink-muted)';
 
   const title = (
+    // display:flex + minWidth:0(2026-10-28 长名称修复):占满 antd wrapper 宽度,
+    // 名称 span 才能在容器内收缩省略 —— inline-flex 是 shrink-to-fit,会被长
+    // 名称撑开导致溢出换行(图标与名称不同行)。pill/锁/ops 保持 flexShrink:0。
     <span style={{
-      display: 'inline-flex',
+      display: 'flex',
       alignItems: 'center',
       gap: 8,
+      minWidth: 0,
       position: 'relative',
       paddingLeft: f.is_sensitive ? 6 : 0,
       color: 'var(--ms-ink)',
@@ -64,6 +68,7 @@ export function renderFolderNode({
       )}
       <span style={{
         flex: 1,
+        minWidth: 0,
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         whiteSpace: 'nowrap',
