@@ -510,11 +510,26 @@ class FakeProjectsApi extends ProjectsApi {
   int listCalls = 0;
   Object? listStaged;
 
+  /// B5 置顶:pin/unpin 调用记录(基类新方法走真实 dio,widget 测试
+  /// FakeAsync 区永不落网,必须覆写假实现)。
+  final pinCalls = <String>[];
+  final unpinCalls = <String>[];
+
   @override
   Future<List<Project>> list() async {
     listCalls++;
     if (listStaged is Exception) throw listStaged!;
     return (listStaged as List<Project>?) ?? const [];
+  }
+
+  @override
+  Future<void> pin(String projectId) async {
+    pinCalls.add(projectId);
+  }
+
+  @override
+  Future<void> unpin(String projectId) async {
+    unpinCalls.add(projectId);
   }
 }
 

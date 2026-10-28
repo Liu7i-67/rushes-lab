@@ -20,7 +20,8 @@ Widget _host({
   home: Scaffold(
     body: SingleChildScrollView(
       child: StatefulBuilder(
-        builder: (ctx, setState) => AuditFilterBar(
+        builder: (ctx, setState) => AuditFilterDrawer(
+          // 2026-10-28 抽屉化迁移:AuditFilterBar → AuditFilterDrawer(补 onReset)
           eventType: '',
           projectId: '',
           actor: actor,
@@ -31,6 +32,7 @@ Widget _host({
           onActorChanged: onActorChanged,
           onPickDate: () {},
           onClearDate: () {},
+          onReset: () {},
         ),
       ),
     ),

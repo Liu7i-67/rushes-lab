@@ -241,7 +241,8 @@ void main() {
 
     await tester.longPress(find.text('项目A'));
     await tester.pumpAndSettle();
-    expect(find.text('项目A · 管理'), findsOneWidget);
+    // 2026-10-28 置顶迁移:菜单标题统一「项目操作」(置顶项全员可见后「管理」语义偏)
+    expect(find.text('项目A · 项目操作'), findsOneWidget);
     expect(find.text('成员管理'), findsOneWidget);
     expect(find.text('请求链接'), findsOneWidget);
   });

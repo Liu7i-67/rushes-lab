@@ -5,13 +5,15 @@
  * (逻辑删除,project_deleter 权限,Popconfirm 二次确认)。
  */
 import { App, Button, Popconfirm, Skeleton, Tooltip } from 'antd';
-import { Plus, Lock, Globe, EyeOff, Link2, Archive, Trash2 } from 'lucide-react';
+import { Plus, Lock, Globe, EyeOff, Link2, Archive, Trash2, Pin, PinOff } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import 'dayjs/locale/zh-cn';
 import relativeTime from 'dayjs/plugin/relativeTime';
-import { useMe, useProjects, useDeleteProject } from '../api/hooks';
+import {
+  useMe, useProjects, useDeleteProject, usePinProject, useUnpinProject,
+} from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { NewProjectModal } from '../components/NewProjectModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
@@ -136,6 +138,11 @@ function ProjectCard({ project: p, canDelete }: { project: Project; canDelete: b
   const isAdmin = (p.my_roles ?? []).includes('admin');
   const [linkOpen, setLinkOpen] = useState(false);
   const delProject = useDeleteProject();
+  // 项目置顶(方案 §2.5):user 私有偏好,任意用户可用;不做乐观更新,
+  // mutate 成功后 hook 内失效两列表 key 重取(后端已按置顶优先排序)
+  const pinned = !!p.is_pinned;
+  const pinProject = usePinProject();
+  const unpinProject = useUnpinProject();
 
   // 逻辑删除:二次确认后提交;成功提示 + 列表失效(hook 内),卡片随重取消失
   const handleDelete = async () => {
@@ -144,6 +151,16 @@ function ProjectCard({ project: p, canDelete }: { project: Project; canDelete: b
       message.success(`项目「${p.name}」已删除,可在「已删除项目」中恢复`);
     } catch (e) {
       message.error(errorMessage(e, '删除失败'));
+    }
+  };
+
+  // 置顶/取消置顶:两端点均 204 幂等;失败兜底照 handleDelete 的 errorMessage 模式
+  const handlePin = async () => {
+    try {
+      await (pinned ? unpinProject : pinProject).mutateAsync(p.id);
+      message.success(pinned ? `已取消置顶「${p.name}」` : `已置顶「${p.name}」,已排到列表最前`);
+    } catch (e) {
+      message.error(errorMessage(e, pinned ? '取消置顶失败' : '置顶失败'));
     }
   };
   return (
@@ -190,7 +207,17 @@ function ProjectCard({ project: p, canDelete }: { project: Project; canDelete: b
           fontSize: 20, fontWeight: 500,
           lineHeight: 1.25, letterSpacing: '-0.01em',
           color: 'var(--ms-ink)',
-        }}>{p.name}</h2>
+        }}>{p.name}
+          {/* 已置顶标识(方案 §2.5②):金色小图钉,12px;span 承载原生 title(lucide 无 title prop) */}
+          {pinned && (
+            <span title="已置顶" style={{
+              display: 'inline-flex', alignItems: 'center',
+              marginLeft: 6, color: 'var(--ms-accent)', verticalAlign: '-1px',
+            }}>
+              <Pin size={12} strokeWidth={2.2} fill="currentColor" />
+            </span>
+          )}
+        </h2>
         <MyRolesBadge roles={p.my_roles || []} />
       </div>
 
@@ -289,6 +316,28 @@ function ProjectCard({ project: p, canDelete }: { project: Project; canDelete: b
           {vis.label}
         </span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 10, color: 'var(--ms-ink-subtle)' }}>
+          {/* 置顶按钮(方案 §2.5①):任意用户可用;与申请链接/删除同在 Link 子树外,
+              无 portal 冒泡问题。已置顶=Pin 实心金 --ms-accent / 未置顶=PinOff 灰 */}
+          <Tooltip title={pinned ? '取消置顶' : '置顶到列表最前'}>
+            <button
+              onClick={handlePin}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '2px 8px', fontSize: 11,
+                color: pinned ? 'var(--ms-accent)' : 'var(--ms-ink-subtle)',
+                background: 'transparent',
+                border: `1px solid ${pinned ? 'var(--ms-accent)' : 'var(--ms-hairline)'}`,
+                borderRadius: 'var(--ms-radius-sm)',
+                cursor: 'pointer',
+                lineHeight: 1.4,
+              }}
+            >
+              {pinned
+                ? <Pin size={11} strokeWidth={2} fill="currentColor" />
+                : <PinOff size={11} strokeWidth={2} />}
+              {pinned ? '取消置顶' : '置顶'}
+            </button>
+          </Tooltip>
           {isAdmin && (
             <Tooltip title="生成一个申请链接,发给别人让他来申请这个项目的权限(不直接授权)">
               <button

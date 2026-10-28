@@ -3,6 +3,7 @@
 不连真实 DB,只 verify model 定义有效(metadata create / drop OK)。
 集成 test 需要起 PG + 跑 migration,留 Phase B-3 CI。
 """
+
 from app.db.tables import (
     Asset,
     AuditEvent,
@@ -28,6 +29,8 @@ def test_all_tables_in_metadata() -> None:
         "request_link_tokens",
         "groups",
         "group_memberships",
+        # 0019:用户↔项目置顶(用户私有偏好;照 group_memberships 复合主键风格)
+        "user_project_pins",
         "notifications",
         "project_grant_templates",
         "project_grant_template_items",
@@ -95,6 +98,7 @@ def test_user_username_column() -> None:
 
 # ─── 百度网盘备份三表(方案 §4,migration 20261008_0013)────────────────────────
 
+
 def test_baidu_binding_unique_user() -> None:
     """每 user 至多一条绑定(方案 §4:unique — one binding per user)。"""
     constraints = {c.name for c in BaiduBinding.__table__.constraints}
@@ -111,8 +115,9 @@ def test_baidu_task_running_partial_unique_index() -> None:
     (D3:DB 护下载互斥、准入护执行互斥)。断言口径 = 模型元数据。
     """
     indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
-    assert "uq_baidu_task_active" not in indices, \
+    assert "uq_baidu_task_active" not in indices, (
         "旧全活动唯一索引必须已删(并发方案 §2.2 第 1 条,否则第二个任务建不出来)"
+    )
     idx = indices.get("uq_baidu_task_running")
     assert idx is not None, "缺 uq_baidu_task_running(并发方案 §2.2 第 2 条)"
     assert idx.unique is True
@@ -136,8 +141,7 @@ def test_baidu_task_running_index_predicate_is_deliberate_subset() -> None:
     where_sql = str(idx.dialect_options["postgresql"]["where"])
     statuses_in_predicate = set(re.findall(r"'([a-z_]+)'", where_sql))
     assert statuses_in_predicate == {"running"}, (
-        f"uq_baidu_task_running 谓词状态集应为刻意子集 {{'running'}}(D3),"
-        f"实际 {sorted(statuses_in_predicate)}"
+        f"uq_baidu_task_running 谓词状态集应为刻意子集 {{'running'}}(D3),实际 {sorted(statuses_in_predicate)}"
     )
 
 
@@ -225,10 +229,18 @@ async def test_live_db_unique_constraints_on_local_identity() -> None:
 
     try:
         async with get_sessionmaker()() as db:
-            rows = (await db.execute(text(
-                "SELECT conname FROM pg_constraint"
-                " WHERE conrelid = 'users'::regclass AND contype = 'u'"
-            ))).scalars().all()
+            rows = (
+                (
+                    await db.execute(
+                        text(
+                            "SELECT conname FROM pg_constraint"
+                            " WHERE conrelid = 'users'::regclass AND contype = 'u'"
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
     except Exception as e:  # 环境不可用 → skip(连接拒绝 / 无 docker 等)
         pytest.skip(f"需要可连的 PG(容器测试,待 docker): {e}")
     uniques = set(rows)

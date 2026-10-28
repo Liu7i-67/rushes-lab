@@ -89,6 +89,10 @@ class ProjectOut(ORMModel):
     # 当前 user 在本项目的有效 role 列表(单 user 可有多 role,如 admin+uploader);
     # ['admin'|'uploader'|'downloader'|'viewer'];空 = 仅靠 visibility=public 见
     my_roles: list[str] = []
+    # user 私有置顶标记(项目置顶,2026-10-28):列表与详情 GET /projects/{id} 均由
+    # 路由层按当前 user 批量回填;ProjectCreatedOut 继承本模型,POST /projects 201
+    # 响应恒默认 False(新建即置顶无意义,消费方勿依赖)
+    is_pinned: bool = False
 
 
 class ArtistAccountCreatedOut(BaseModel):
