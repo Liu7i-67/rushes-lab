@@ -228,26 +228,28 @@ export function ProjectCard({ project: p, canDelete }: { project: Project; canDe
           color: 'var(--ms-ink-subtle)',
         }}>
           {/* 置顶按钮(方案 §2.5①):任意用户可用;与申请链接/删除同在 Link 子树外,
-              无 portal 冒泡问题。已置顶=Pin 实心金 --ms-accent / 未置顶=PinOff 灰 */}
+              无 portal 冒泡问题。恒 icon-only(2026-10-28 五修:激活态「取消置顶」
+              文字比「置顶」宽,状态切换会把同行按钮挤换行——icon 恒宽零布局跳动;
+              两态=Pin 实心金(已置顶)/PinOff 灰(未置顶),Tooltip 承载文案,标题旁
+              金色图钉标识提供状态冗余) */}
           <Tooltip title={pinned ? '取消置顶' : '置顶到列表最前'}>
             <button
+              aria-label={pinned ? '取消置顶' : '置顶到列表最前'}
               onClick={handlePin}
               style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '2px 8px', fontSize: 11,
+                display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                width: 26, height: 22,
                 color: pinned ? 'var(--ms-accent)' : 'var(--ms-ink-subtle)',
                 background: 'transparent',
                 border: `1px solid ${pinned ? 'var(--ms-accent)' : 'var(--ms-hairline)'}`,
                 borderRadius: 'var(--ms-radius-sm)',
                 cursor: 'pointer',
-                lineHeight: 1.4,
                 whiteSpace: 'nowrap', flexShrink: 0,
               }}
             >
               {pinned
-                ? <Pin size={11} strokeWidth={2} fill="currentColor" />
-                : <PinOff size={11} strokeWidth={2} />}
-              {pinned ? '取消置顶' : '置顶'}
+                ? <Pin size={12} strokeWidth={2} fill="currentColor" />
+                : <PinOff size={12} strokeWidth={2} />}
             </button>
           </Tooltip>
           {isAdmin && (
