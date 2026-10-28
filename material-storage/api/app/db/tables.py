@@ -658,3 +658,23 @@ class BaiduBackupTaskFile(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("task_id", "rel_path", name="uq_baidu_task_file_relpath"),
     )
+
+
+class UserProjectPin(Base):
+    """user ↔ project 置顶标记(用户私有偏好,2026-10-28;复合主键,只增删无更新)。
+
+    列表排序置顶优先(见 routers/projects.py);归档/删除/授权收回后 pin 行
+    残留为无害保留(重新可见后置顶自动复活,方案 §2.2.3);user / project
+    物理删除由 CASCADE 兜底。
+    """
+    __tablename__ = "user_project_pins"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

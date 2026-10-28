@@ -42,7 +42,8 @@ Widget _auditHost({
       body: SingleChildScrollView(
         child: StatefulBuilder(
           builder: (context, setState) {
-            return AuditFilterBar(
+            return AuditFilterDrawer(
+              // 2026-10-28 抽屉化迁移:AuditFilterBar → AuditFilterDrawer(补 onReset)
               eventType: eventType,
               projectId: projectId,
               actor: null,
@@ -62,6 +63,7 @@ Widget _auditHost({
               onActorChanged: (_) {},
               onPickDate: () {},
               onClearDate: () {},
+              onReset: () {},
             );
           },
         ),

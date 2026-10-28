@@ -1,4 +1,4 @@
-/// Project — /api/v1/projects 契约(B2 补 my_roles;素材计数后端无此字段)。
+/// Project — /api/v1/projects 契约(B2 补 my_roles;B5 补 is_pinned;素材计数后端无此字段)。
 library;
 
 class Project {
@@ -7,16 +7,20 @@ class Project {
     required this.name,
     required this.code,
     this.myRoles = const [],
+    this.isPinned = false,
   });
 
   factory Project.fromJson(Map<String, dynamic> j) => Project(
-        id: j['id'] as String,
-        name: (j['name'] ?? '') as String,
-        code: (j['code'] ?? '') as String,
-        myRoles: ((j['my_roles'] ?? const []) as List)
-            .map((e) => e as String)
-            .toList(),
-      );
+    id: j['id'] as String,
+    name: (j['name'] ?? '') as String,
+    code: (j['code'] ?? '') as String,
+    myRoles: ((j['my_roles'] ?? const []) as List)
+        .map((e) => e as String)
+        .toList(),
+    // B5 置顶:bool 字段按 `bool? ?? false` 直取(缺省 false 兼容旧后端;
+    // 非字符串字段,不涉「?? fallback 不盖空串」通式坑)。
+    isPinned: (j['is_pinned'] as bool?) ?? false,
+  );
 
   final String id;
   final String name;
@@ -25,6 +29,10 @@ class Project {
   /// 当前 user 在本项目的有效角色('admin'|'uploader'|'downloader'|'viewer');
   /// 空 = 仅靠 visibility=public 可见(「仅访客」)。
   final List<String> myRoles;
+
+  /// 当前 user 对本项目的置顶标记(B5;/projects 排序置顶优先;旧后端无此
+  /// 字段时缺省 false,用户私有偏好互相独立)。
+  final bool isPinned;
 }
 
 // ─── B6:项目管理(契约=routers/projects.py + models/__init__.py 实码)────────
@@ -38,11 +46,7 @@ class GrantEntry {
   final String id; // users.id / groups.id UUID
   final List<String> roles; // PROJECT_ROLES 子集,非空
 
-  Map<String, dynamic> toJson() => {
-        'kind': kind,
-        'id': id,
-        'roles': roles,
-      };
+  Map<String, dynamic> toJson() => {'kind': kind, 'id': id, 'roles': roles};
 }
 
 /// ArtistAccountCreated — 内嵌建号一次性回显(仅 POST /projects 201 响应体;
@@ -79,13 +83,15 @@ class ProjectCreated {
   });
 
   factory ProjectCreated.fromJson(Map<String, dynamic> j) => ProjectCreated(
-        id: j['id'] as String,
-        name: (j['name'] ?? '') as String,
-        code: (j['code'] ?? '') as String,
-        artistAccount: j['artist_account'] == null
-            ? null
-            : ArtistAccountCreated.fromJson(j['artist_account'] as Map<String, dynamic>),
-      );
+    id: j['id'] as String,
+    name: (j['name'] ?? '') as String,
+    code: (j['code'] ?? '') as String,
+    artistAccount: j['artist_account'] == null
+        ? null
+        : ArtistAccountCreated.fromJson(
+            j['artist_account'] as Map<String, dynamic>,
+          ),
+  );
 
   final String id;
   final String name;
@@ -104,12 +110,12 @@ class ProjectMember {
   });
 
   factory ProjectMember.fromJson(Map<String, dynamic> j) => ProjectMember(
-        subject: j['subject'] as String,
-        kind: j['kind'] as String,
-        subjectId: j['subject_id'] as String,
-        name: j['name'] as String?,
-        roles: ((j['roles'] ?? const []) as List).map((e) => e as String).toList(),
-      );
+    subject: j['subject'] as String,
+    kind: j['kind'] as String,
+    subjectId: j['subject_id'] as String,
+    name: j['name'] as String?,
+    roles: ((j['roles'] ?? const []) as List).map((e) => e as String).toList(),
+  );
 
   final String subject; // 完整 subject,撤销入参原样回传
   final String kind; // user / group / department(遗留)
@@ -136,18 +142,18 @@ class ProjectGrantRow {
   });
 
   factory ProjectGrantRow.fromJson(Map<String, dynamic> j) => ProjectGrantRow(
-        subject: j['subject'] as String,
-        kind: j['kind'] as String,
-        subjectId: j['subject_id'] as String,
-        name: j['name'] as String?,
-        objectType: j['object_type'] as String,
-        objectId: j['object_id'] as String,
-        objectName: j['object_name'] as String?,
-        relation: j['relation'] as String,
-        level: j['level'] as String,
-        permanent: (j['permanent'] ?? true) as bool,
-        expiresAt: j['expires_at'] as String?,
-      );
+    subject: j['subject'] as String,
+    kind: j['kind'] as String,
+    subjectId: j['subject_id'] as String,
+    name: j['name'] as String?,
+    objectType: j['object_type'] as String,
+    objectId: j['object_id'] as String,
+    objectName: j['object_name'] as String?,
+    relation: j['relation'] as String,
+    level: j['level'] as String,
+    permanent: (j['permanent'] ?? true) as bool,
+    expiresAt: j['expires_at'] as String?,
+  );
 
   final String subject;
   final String kind;
@@ -174,13 +180,13 @@ class DeletedProject {
   });
 
   factory DeletedProject.fromJson(Map<String, dynamic> j) => DeletedProject(
-        id: j['id'] as String,
-        code: (j['code'] ?? '') as String,
-        name: (j['name'] ?? '') as String,
-        description: j['description'] as String?,
-        deletedAt: (j['deleted_at'] ?? '') as String,
-        deletedByName: j['deleted_by_name'] as String?,
-      );
+    id: j['id'] as String,
+    code: (j['code'] ?? '') as String,
+    name: (j['name'] ?? '') as String,
+    description: j['description'] as String?,
+    deletedAt: (j['deleted_at'] ?? '') as String,
+    deletedByName: j['deleted_by_name'] as String?,
+  );
 
   final String id;
   final String code;
@@ -196,10 +202,7 @@ class DeletedProject {
 
 /// DeletedProjectsPage — 服务端分页窗口(items=当前页,total=全量计数)。
 class DeletedProjectsPage {
-  DeletedProjectsPage({
-    required this.items,
-    required this.total,
-  });
+  DeletedProjectsPage({required this.items, required this.total});
 
   factory DeletedProjectsPage.fromJson(Map<String, dynamic> j) =>
       DeletedProjectsPage(

@@ -1,7 +1,10 @@
 /// AdminAuditPage — 审计(B8 功能点 4;web AdminAuditPage 移动版):
-/// 快捷 chip 轨 + 事件类型/项目/操作者/单日时间筛选卡 + 金色竖线时间线 +
-/// 分页自动加载 + CSV 导出(dio 带会话,禁 url_launcher)。
+/// 快捷 chip 轨 + 事件类型/项目/操作者/单日时间四项精细筛选(收拢右侧
+/// endDrawer,页头「筛选」钮进入;生效筛选数>0 时按钮带 Material Badge 计数)+
+/// 金色竖线时间线 + 分页自动加载 + CSV 导出(dio 带会话,禁 url_launcher)。
 library;
+
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
@@ -205,9 +208,59 @@ class _AdminAuditPageState extends State<AdminAuditPage>
     _reload();
   }
 
+  /// 重置筛选(抽屉「重置」回调):四值清空后重查,即时生效语义不变。
+  void _resetFilters() {
+    setState(() {
+      _eventType = '';
+      _projectId = '';
+      _actor = null;
+      _day = null;
+    });
+    _reload();
+  }
+
+  /// 生效筛选计数 = 四项之和(eventType≠''/projectId≠''/actor≠null/day≠null);
+  /// chip 轨改 eventType 同计入,口径为「当前生效筛选总数」。
+  int get _activeFilterCount =>
+      (_eventType.isEmpty ? 0 : 1) +
+      (_projectId.isEmpty ? 0 : 1) +
+      (_actor == null ? 0 : 1) +
+      (_day == null ? 0 : 1);
+
   @override
   Widget build(BuildContext context) {
+    // 抽屉宽度:min(屏宽×0.85, 400),由外层 Drawer 控制
+    final drawerWidth = math.min(
+      MediaQuery.sizeOf(context).width * 0.85,
+      400.0,
+    );
     return Scaffold(
+      // 4 项精细筛选收拢右侧抽屉;抽屉受控无状态,改动回调即 _reload
+      endDrawer: Drawer(
+        width: drawerWidth,
+        child: AuditFilterDrawer(
+          eventType: _eventType,
+          projectId: _projectId,
+          actor: _actor,
+          day: _day,
+          projects: _projects,
+          onEventTypeChanged: _setEventType,
+          onProjectChanged: (v) {
+            setState(() => _projectId = v);
+            _reload();
+          },
+          onActorChanged: (v) {
+            setState(() => _actor = v.isEmpty ? null : v.first);
+            _reload();
+          },
+          onPickDate: _pickDay,
+          onClearDate: () {
+            setState(() => _day = null);
+            _reload();
+          },
+          onReset: _resetFilters,
+        ),
+      ),
       body: Column(
         children: [
           PageHeader(
@@ -215,6 +268,22 @@ class _AdminAuditPageState extends State<AdminAuditPage>
             title: '审计日志',
             subtitle: '关键操作留痕，保留 180 天',
             actions: [
+              // 「筛选」钮需 Scaffold.of 开 endDrawer,PageHeader 不下发
+              // context,用 Builder 取 Scaffold 内层 context
+              Builder(
+                builder: (btnCtx) {
+                  final btn = IconButton(
+                    key: const Key('audit_filter_btn'),
+                    tooltip: '筛选',
+                    onPressed: () => Scaffold.of(btnCtx).openEndDrawer(),
+                    icon: const Icon(Icons.tune),
+                  );
+                  // 生效筛选数>0 时套 Material 3 Badge 显示计数
+                  // (material 的 Badge,非 widgets/badge.dart 自研同名件)
+                  final n = _activeFilterCount;
+                  return n > 0 ? Badge(label: Text('$n'), child: btn) : btn;
+                },
+              ),
               IconButton(
                 tooltip: '导出 CSV',
                 onPressed: _exporting ? null : _exportCsv,
@@ -229,27 +298,6 @@ class _AdminAuditPageState extends State<AdminAuditPage>
             ],
           ),
           AuditQuickChips(value: _eventType, onChanged: _setEventType),
-          AuditFilterBar(
-            eventType: _eventType,
-            projectId: _projectId,
-            actor: _actor,
-            day: _day,
-            projects: _projects,
-            onEventTypeChanged: _setEventType,
-            onProjectChanged: (v) {
-              setState(() => _projectId = v);
-              _reload();
-            },
-            onActorChanged: (v) {
-              setState(() => _actor = v.isEmpty ? null : v.first);
-              _reload();
-            },
-            onPickDate: _pickDay,
-            onClearDate: () {
-              setState(() => _day = null);
-              _reload();
-            },
-          ),
           const SizedBox(height: Tk.spaceSm),
           Expanded(child: _body()),
         ],

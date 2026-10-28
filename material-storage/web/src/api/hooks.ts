@@ -207,6 +207,36 @@ export const useRestoreProject = () => {
   });
 };
 
+// ─── 项目置顶(方案 §2.3:POST/DELETE /projects/{id}/pin → 204 幂等)───────────
+// user 私有偏好(不记审计);端点无响应体,mutationFn 不取 .data。
+// 不做乐观更新:成功后失效 ['projects'] / ['projects-all'] 两 key 由后端按
+// 「置顶优先 + created_at desc」重取,前端直接渲染返回顺序
+export const usePinProject = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (projectId: string) => {
+      await http.post(`/api/v1/projects/${projectId}/pin`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['projects-all'] });
+    },
+  });
+};
+
+export const useUnpinProject = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (projectId: string) => {
+      await http.delete(`/api/v1/projects/${projectId}/pin`);
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['projects'] });
+      qc.invalidateQueries({ queryKey: ['projects-all'] });
+    },
+  });
+};
+
 export const useCreateProject = () => {
   const qc = useQueryClient();
   return useMutation({

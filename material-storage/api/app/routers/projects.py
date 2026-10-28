@@ -12,6 +12,10 @@
   GET  /projects/deleted       — 已删除项目分页列表(deleted_at 倒序)
   POST /projects/{id}/restore  — 清空 deleted_at/deleted_by(仅已删除者)
   主列表与详情一律过滤 deleted_at 非空(含 system admin,404)。
+  项目置顶(用户私有偏好,2026-10-28):
+  POST/DELETE /projects/{id}/pin — 置顶/取消(均 204 幂等;守门 404 同口径;
+                          不记 audit —— 决策 D3 私有 UI 偏好非关键操作)
+  GET /projects 与详情回填 is_pinned,列表排序置顶优先(created_at desc)。
 """
 from __future__ import annotations
 
@@ -23,12 +27,20 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, exists, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import Group, Project, ProjectFolderTemplate, ProjectFolderTemplateEntry, User
+from app.db.tables import (
+    Group,
+    Project,
+    ProjectFolderTemplate,
+    ProjectFolderTemplateEntry,
+    User,
+    UserProjectPin,
+)
 from app.deps import (
     CurrentUser,
     get_audit,
@@ -572,6 +584,27 @@ async def _fill_project_admins(
     return out
 
 
+async def _fill_pinned_ids(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+    projects: list[Project],
+) -> set[uuid.UUID]:
+    """对一批 project 批量查当前 user 已置顶的 id 集合(is_pinned 回填用)。
+
+    一次 in_ 批量查(照 _fill_project_admins 的 User.id.in_ 同款),无 N+1;
+    projects 为 ORM 对象(内部逐个取 .id),列表与详情两处回填共用。
+    """
+    if not projects:
+        return set()
+    res = await db.execute(
+        select(UserProjectPin.project_id).where(
+            UserProjectPin.user_id == user_id,
+            UserProjectPin.project_id.in_([p.id for p in projects]),
+        )
+    )
+    return {row[0] for row in res.all()}
+
+
 def _parse_uuids(ids: list[str] | set[str]) -> list[uuid.UUID]:
     """subject_id 字符串 → UUID,容错非法值(老 open_id 存量数据)直接跳过。"""
     out: list[uuid.UUID] = []
@@ -605,7 +638,15 @@ async def list_projects(
 
     系统 admin(organization.admin)→ 见全部 active project,无 filter
     普通 user → OpenFGA list_objects(can_view, project) UNION visibility=public
+    排序:当前 user 置顶优先(用户私有偏好),置顶间/其余按 created_at desc
     """
+    # 置顶谓词绑定当前 user.id(同请求内参数化稳定);置顶恒排最前(方案 §2.4.1)
+    pin_exists = exists(
+        select(1).where(
+            UserProjectPin.user_id == user.id,
+            UserProjectPin.project_id == Project.id,
+        )
+    )
     if is_system_admin:
         stmt = (
             select(Project)
@@ -613,7 +654,7 @@ async def list_projects(
                 Project.is_archived.is_(False),
                 Project.deleted_at.is_(None),   # F6.4:已删除对所有人隐藏
             )
-            .order_by(Project.created_at.desc())
+            .order_by(pin_exists.desc(), Project.created_at.desc())
             .limit(limit).offset(offset)
         )
     else:
@@ -631,7 +672,7 @@ async def list_projects(
                 Project.is_archived.is_(False),
                 Project.deleted_at.is_(None),   # F6.4:已删除对所有人隐藏
             )
-            .order_by(Project.created_at.desc())
+            .order_by(pin_exists.desc(), Project.created_at.desc())
             .limit(limit).offset(offset)
         )
     res = await db.execute(stmt)
@@ -642,11 +683,14 @@ async def list_projects(
     my_roles_by_pid = await _fill_my_roles(
         permissions, user.subject, rows, is_system_admin=is_system_admin,
     )
+    # batch fill is_pinned(用户私有置顶标记;排序与回填同源于 user_project_pins)
+    pinned_ids = await _fill_pinned_ids(db, user.id, rows)
     out: list[ProjectOut] = []
     for r in rows:
         po = ProjectOut.model_validate(r)
         po.admins = admins_by_pid.get(r.id, [])
         po.my_roles = my_roles_by_pid.get(r.id, [])
+        po.is_pinned = r.id in pinned_ids
         out.append(po)
     return out
 
@@ -859,7 +903,93 @@ async def get_project(
         permissions, user.subject, [project], is_system_admin=is_system_admin,
     )
     po.my_roles = my_roles_by_pid.get(project.id, [])
+    # is_pinned 回填(详情与列表同口径,消除「列表有值详情恒 False」;方案 §2.4.2)
+    po.is_pinned = project.id in await _fill_pinned_ids(db, user.id, [project])
     return po
+
+
+# ─── 项目置顶(user_project_pins,用户私有偏好;2026-10-28)────────────────────
+
+
+async def _load_pinnable_project(
+    db: AsyncSession,
+    permissions: PermissionsService,
+    user: CurrentUser,
+    project_id: uuid.UUID,
+    *,
+    is_system_admin: bool,
+) -> Project:
+    """pin/unpin 两端点共同守门(同口径,方案 §2.3.3)。
+
+    不存在 / 已逻辑删除(deleted_at 非空,对所有人含 system admin —— 与详情
+    F6.4 深隐藏同款:软删时 FGA tuple 残留,仅按 can_view 判会让原成员对已删
+    项目 pin 成功,等于把「已删除」变成可探测)/ 对当前用户不可见 → 404
+    (统一 404 反探测,不给私有项目存在性 oracle;与详情端点不可见 403 的
+    差异是有意更严)。is_system_admin 直过;否则 check(can_view) 或
+    visibility='public';已归档放行(pin 行残留,恢复归档后置顶自动生效)。
+    """
+    project = await db.get(Project, project_id)
+    if project is None or project.deleted_at is not None:
+        raise HTTPException(404, "project not found")
+    if not is_system_admin and project.visibility != "public":
+        allowed = await permissions.check(
+            user_subject=user.subject,
+            relation="can_view",
+            object_type="project",
+            object_id=str(project_id),
+        )
+        if not allowed:
+            raise HTTPException(404, "project not found")
+    return project
+
+
+@router.post("/{project_id}/pin", status_code=204)
+async def pin_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+) -> None:
+    """置顶项目 — 204;幂等:已置顶再置顶仍 204(pg insert on_conflict_do_nothing,
+    并发安全由复合主键兜底)。不记 audit_events(决策 D3)。"""
+    await _load_pinnable_project(
+        db,
+        permissions,
+        user,
+        project_id,
+        is_system_admin=is_system_admin,
+    )
+    await db.execute(
+        pg_insert(UserProjectPin).values(user_id=user.id, project_id=project_id).on_conflict_do_nothing()
+    )
+    await db.commit()
+
+
+@router.delete("/{project_id}/pin", status_code=204)
+async def unpin_project(
+    project_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    permissions: PermissionsService = Depends(get_permissions),
+    user: CurrentUser = Depends(get_current_user),
+    is_system_admin: bool = Depends(get_is_system_admin),
+) -> None:
+    """取消置顶 — 204;幂等:未置顶删除也 204(行不存在 = 目标态已达成)。
+    守门同 pin;不记 audit_events(决策 D3)。"""
+    await _load_pinnable_project(
+        db,
+        permissions,
+        user,
+        project_id,
+        is_system_admin=is_system_admin,
+    )
+    await db.execute(
+        delete(UserProjectPin).where(
+            UserProjectPin.user_id == user.id,
+            UserProjectPin.project_id == project_id,
+        )
+    )
+    await db.commit()
 
 
 # ─── project members CRUD (D iter4) ──────────────────────────────────────────

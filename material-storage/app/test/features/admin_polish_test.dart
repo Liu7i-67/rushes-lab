@@ -24,14 +24,16 @@ import 'package:ms_app/widgets/pickers/picker_sheet.dart';
 Finder _sheetRow(String label) =>
     find.descendant(of: find.byType(ListTile), matching: find.text(label));
 
-AuditFilterBar _bar({
+/// 2026-10-28 抽屉化迁移:AuditFilterBar → AuditFilterDrawer(补 onReset;
+/// 断言逻辑原样)。
+AuditFilterDrawer _bar({
   String eventType = '',
   String projectId = '',
   List<Project> projects = const [],
   required ValueChanged<String> onEventType,
   required ValueChanged<String> onProject,
 }) {
-  return AuditFilterBar(
+  return AuditFilterDrawer(
     eventType: eventType,
     projectId: projectId,
     actor: null,
@@ -42,6 +44,7 @@ AuditFilterBar _bar({
     onActorChanged: (_) {},
     onPickDate: () {},
     onClearDate: () {},
+    onReset: () {},
   );
 }
 

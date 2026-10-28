@@ -121,6 +121,10 @@ export interface Project {
   created_at: string;
   admins: AdminBrief[];
   my_roles: ('admin' | 'uploader' | 'downloader' | 'viewer')[];
+  // 项目置顶(方案 §2.4):当前用户是否已置顶(user 私有偏好;列表与详情两处回填,
+  // 排序为后端「置顶优先 + created_at desc」)。可选 —— 旧后端无此字段,消费侧
+  // 用 `!!p.is_pinned` 回落(缺省 false 同 ProjectCreatedOut 语义)。
+  is_pinned?: boolean;
 }
 
 // ─── 艺人账号内嵌(方案 §4.1:POST /api/v1/projects 扩展)──────────────────────

@@ -1,8 +1,8 @@
 /// 项目页(B2 §8.1;墨金重做 WP2 §6 F6):PageHeader 大标题 + 通知铃 +
 /// 新建项目(creator 闸门),标题下独立 46 高搜索行(即时过滤名称/code);
 /// 列表换成 ProjectCard(金底首字标记/角色徽标/chevron),整卡进文件夹,
-/// 长按保留「成员管理/请求链接」管理菜单;loading/error/empty 用共享组件,
-/// 下拉刷新覆盖全部状态。
+/// 长按菜单分级(B5:置顶/取消置顶全员可见,成员管理/请求链接仍仅 admin);
+/// loading/error/empty 用共享组件,下拉刷新覆盖全部状态。
 library;
 
 import 'package:flutter/material.dart';
@@ -22,6 +22,7 @@ import '../../widgets/list_skeleton.dart';
 import '../../widgets/page_header.dart';
 import '../../widgets/search_field.dart';
 import '../../widgets/sheet_scaffold.dart';
+import '../../widgets/toast.dart';
 import '../share/request_link_sheet.dart';
 import 'new_project_sheet.dart';
 import 'project_card.dart';
@@ -89,36 +90,47 @@ class _ProjectsPageState extends State<ProjectsPage> {
     }
   }
 
-  /// 长按管理菜单(admin 闸门不变):管理 shell 换成 SheetScaffold + AppRow。
+  /// 长按菜单(B5 分级):首项「置顶到最前/取消置顶」对所有用户开放(D4,
+  /// 长按对普通用户从无反应变为可置顶);「成员管理/请求链接」仍仅 canAdmin
+  /// 时加入。管理 shell 换成 SheetScaffold + AppRow,交互模式不变。
   Future<void> _showRowMenu(Project p) async {
     Haptics.light();
+    if (!mounted) return;
     final canAdmin = p.myRoles.contains('admin');
-    if (!canAdmin || !mounted) return;
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
       builder: (sheetCtx) => SheetScaffold(
-        title: '${p.name} · 管理',
+        title: '${p.name} · 项目操作',
         showClose: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             AppRow(
-              leading: const Icon(Icons.people_outline),
-              title: '成员管理',
-              onTap: () => Navigator.of(sheetCtx).pop('members'),
+              leading: const Icon(Icons.push_pin_outlined),
+              title: p.isPinned ? '取消置顶' : '置顶到最前',
+              onTap: () => Navigator.of(sheetCtx).pop('pin'),
             ),
-            AppRow(
-              leading: const Icon(Icons.link_outlined),
-              title: '请求链接',
-              onTap: () => Navigator.of(sheetCtx).pop('link'),
-            ),
+            if (canAdmin) ...[
+              AppRow(
+                leading: const Icon(Icons.people_outline),
+                title: '成员管理',
+                onTap: () => Navigator.of(sheetCtx).pop('members'),
+              ),
+              AppRow(
+                leading: const Icon(Icons.link_outlined),
+                title: '请求链接',
+                onTap: () => Navigator.of(sheetCtx).pop('link'),
+              ),
+            ],
           ],
         ),
       ),
     );
     if (action == null || !mounted) return;
     switch (action) {
+      case 'pin':
+        await _togglePin(p);
       case 'members':
         await showProjectMembersSheet(context, project: p);
       case 'link':
@@ -128,6 +140,43 @@ class _ProjectsPageState extends State<ProjectsPage> {
           targetId: p.id,
           targetLabel: p.name,
         );
+    }
+  }
+
+  /// 置顶/取消置顶(B5):调 pin/unpin → 成功 setState 翻本地标记(图钉即显)
+  /// 再 _reload()(后端已按置顶优先重排,照 RefreshBus 'projects' 等价语义
+  /// 直接重拉本页);失败 toast(ApiException 透传 detail,余落中文兜底)。
+  Future<void> _togglePin(Project p) async {
+    final pinned = p.isPinned;
+    try {
+      if (pinned) {
+        await session.api!.projects.unpin(p.id);
+      } else {
+        await session.api!.projects.pin(p.id);
+      }
+      if (!mounted) return;
+      setState(() {
+        _items = [
+          for (final it in _items)
+            it.id == p.id
+                ? Project(
+                    id: it.id,
+                    name: it.name,
+                    code: it.code,
+                    myRoles: it.myRoles,
+                    isPinned: !pinned,
+                  )
+                : it,
+        ];
+      });
+      await _reload();
+    } catch (e) {
+      if (!mounted) return;
+      toast(
+        context,
+        errorMessage(e, pinned ? '取消置顶失败,请稍后重试' : '置顶失败,请稍后重试'),
+        tone: ToastTone.error,
+      );
     }
   }
 
