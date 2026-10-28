@@ -3,13 +3,16 @@
 /// - 长按菜单分级(D4):非 admin 仅见置顶项,admin 另有成员管理/请求链接;
 ///   菜单标题统一「<名> · 项目操作」;首项文案按 isPinned 切换;
 /// - tap 置顶项调 fake.pin/unpin + _reload()(假桩按新排序返回,断言列表
-///   渲染顺序);卡片图钉标识仅已置顶显示(组件级 + 页面级各一)。
+///   渲染顺序);卡片图钉标识仅已置顶显示(组件级 + 页面级各一);
+/// - 失败路径(P2-3):pin/unpin 抛 ApiException → toast 透传文案,
+///   不翻本地标记、不触发 _reload(顺序与图钉维持原样)。
 /// 管理菜单形态迁移(标题「项目A · 管理」→「项目A · 项目操作」)见
 /// projects_page_ux_test 同步改断言。
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/projects/project_card.dart';
 import 'package:ms_app/features/projects/projects_page.dart';
@@ -174,6 +177,74 @@ void main() {
     expect(api.projects.listCalls, 2, reason: '取消置顶成功后 _reload');
     expect(_cardOrder(tester), ['p2', 'p1'], reason: '取消后回原序');
     expect(_pinIcon('p1'), findsNothing, reason: '图钉标识随之消失');
+  });
+
+  testWidgets('置顶失败:pin 抛 ApiException → toast 透传文案;不重拉,顺序与图钉不变', (
+    tester,
+  ) async {
+    final api = installFakeApi();
+    api.projects.listStaged = <Project>[
+      Project(id: 'p2', name: '写字楼B', code: 'OFF'),
+      Project(id: 'p1', name: '婚礼A', code: 'WED'),
+    ]; // 现状序(created_at desc):p2 在前
+    session.me = Me(id: 'u1', name: 'Evan'); // 非 admin(仅见置顶项)
+    addTearDown(_reset);
+    await _pumpPage(tester);
+    expect(api.projects.listCalls, 1);
+    expect(_pinIcon('p1'), findsNothing, reason: '前置:未置顶无图钉');
+
+    api.projects.pinStaged = ApiException(500, '置顶失败');
+    await tester.longPress(find.text('婚礼A'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('置顶到最前'));
+    await tester.pumpAndSettle();
+
+    expect(api.projects.pinCalls, ['p1'], reason: '请求已发出(失败在响应端)');
+    expect(
+      find.text('置顶失败'),
+      findsOneWidget,
+      reason: '失败 toast,ApiException 透传 e.message',
+    );
+    expect(api.projects.listCalls, 1, reason: '失败不走 _reload,列表不重拉');
+    expect(_cardOrder(tester), ['p2', 'p1'], reason: '失败不翻本地标记,顺序不变');
+    expect(_pinIcon('p1'), findsNothing, reason: '失败不显图钉');
+    // 收尾:排空 toast duration Timer(照 pages_polish_test 先例)
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('取消置顶失败:unpin 抛 ApiException → toast 透传文案;不重拉,顺序与图钉不变', (
+    tester,
+  ) async {
+    final api = installFakeApi();
+    api.projects.listStaged = <Project>[
+      Project(id: 'p1', name: '婚礼A', code: 'WED', isPinned: true),
+      Project(id: 'p2', name: '写字楼B', code: 'OFF'),
+    ];
+    session.me = Me(id: 'u1', name: 'Evan'); // 非 admin 同样可取消置顶
+    addTearDown(_reset);
+    await _pumpPage(tester);
+    expect(api.projects.listCalls, 1);
+    expect(_pinIcon('p1'), findsOneWidget, reason: '前置:已置顶有图钉');
+
+    api.projects.unpinStaged = ApiException(500, '取消置顶失败');
+    await tester.longPress(find.text('婚礼A'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消置顶'));
+    await tester.pumpAndSettle();
+
+    expect(api.projects.unpinCalls, ['p1'], reason: '请求已发出(失败在响应端)');
+    expect(
+      find.text('取消置顶失败'),
+      findsOneWidget,
+      reason: '失败 toast,ApiException 透传 e.message',
+    );
+    expect(api.projects.listCalls, 1, reason: '失败不走 _reload,列表不重拉');
+    expect(_cardOrder(tester), ['p1', 'p2'], reason: '失败不翻本地标记,置顶序不变');
+    expect(_pinIcon('p1'), findsOneWidget, reason: '失败图钉保留');
+    // 收尾:排空 toast duration Timer
+    await tester.pump(const Duration(seconds: 4));
+    await tester.pumpAndSettle();
   });
 
   testWidgets('ProjectCard 组件级:图钉标识仅 isPinned 显示', (tester) async {

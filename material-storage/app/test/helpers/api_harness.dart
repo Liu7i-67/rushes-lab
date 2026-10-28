@@ -515,6 +515,11 @@ class FakeProjectsApi extends ProjectsApi {
   final pinCalls = <String>[];
   final unpinCalls = <String>[];
 
+  /// P2-3 失败路径注入口(照 listStaged 同款:调用记录照旧,is Exception
+  /// 即抛,其余忽略)。
+  Object? pinStaged;
+  Object? unpinStaged;
+
   @override
   Future<List<Project>> list() async {
     listCalls++;
@@ -525,11 +530,13 @@ class FakeProjectsApi extends ProjectsApi {
   @override
   Future<void> pin(String projectId) async {
     pinCalls.add(projectId);
+    if (pinStaged is Exception) throw pinStaged!;
   }
 
   @override
   Future<void> unpin(String projectId) async {
     unpinCalls.add(projectId);
+    if (unpinStaged is Exception) throw unpinStaged!;
   }
 }
 

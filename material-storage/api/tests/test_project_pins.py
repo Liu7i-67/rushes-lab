@@ -29,6 +29,7 @@ test_boundary_ext / test_default_template 惯例);孤儿 pin 行无害保留(方
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -236,6 +237,44 @@ async def test_pin_visible_project_204_idempotent_single_row(
         await _soft_delete(client, pid)
 
 
+# ─── §4.1 组1 补强:真并发 pin 竞态 —— 双请求均 204、表内恰一行 ────────────────
+@pytest.mark.asyncio
+async def test_pin_concurrent_same_user_double_204_single_row(client: AsyncClient) -> None:
+    """同一用户对同一可见项目两个并发 pin(asyncio.gather 同时发出):两请求均
+    204、无 500 / 无异常,DB 直读表内仍恰一行,后续列表 is_pinned=true。
+    实现侧 pg insert on_conflict_do_nothing + 复合主键对并发构造性安全;本用例
+    是把该并发语义钉进自动化,防未来把 insert 改写成「先查后插」等形态时回现
+    唯一约束 500 或双行。两并发请求各走独立 db session(get_db 按请求建
+    session),同一 fixture client 的两个协程经 ASGITransport 并发进 app
+    (httpx AsyncClient 并发发请求安全),不另建 client、不动 fixture 结构。"""
+    actor = await _create_user(client, "pp_race", name="并发置顶用户")
+    p = await _create_project(
+        client,
+        admin_uid=EVAN_ID,
+        grants=_grant_viewer(actor),
+    )
+    pid = p["id"]
+    try:
+        # 前置:actor 确实可见
+        assert pid in await _list_ids(client, actor), "前置可见失败"
+
+        # 两个 pin 并发发出(独立 session,在 DB 侧真实竞争同一复合主键)
+        r1, r2 = await asyncio.gather(
+            _pin(client, actor, pid),
+            _pin(client, actor, pid),
+        )
+        assert r1.status_code == 204, r1.text
+        assert r2.status_code == 204, r2.text
+
+        # 竞态后表内仍恰一行(on_conflict_do_nothing 吸收冲突:无 500、无双行)
+        assert await _pin_user_ids(pid) == [actor]
+
+        # 后续列表回填 is_pinned=true
+        assert _proj_by_id(await _list_body(client, actor), pid)["is_pinned"] is True
+    finally:
+        await _soft_delete(client, pid)
+
+
 # ─── §4.1 组2:unpin 已置顶 204 / 未置顶 204 / 表内无残留 ────────────────────
 @pytest.mark.asyncio
 async def test_unpin_idempotent_no_residue(client: AsyncClient) -> None:
@@ -374,6 +413,44 @@ async def test_pin_archived_project_allowed_204(client: AsyncClient) -> None:
         assert await _pin_user_ids(pid) == [], "归档项目 unpin 同样应正常删行"
     finally:
         await _soft_delete(client, pid)  # 归档不拦删除,照常深隐藏收尾
+
+
+# ─── §4.1 组3:守门组合 —— 已归档+不可见:可见性判定先于归档放行 ──────────────
+@pytest.mark.asyncio
+async def test_pin_archived_but_invisible_404_member_still_204(client: AsyncClient) -> None:
+    """归档放行只对「本来可见」的用户生效(§2.3.3 判定顺序):private 项目 DB
+    直改 is_archived(照本文件归档先例)后,未授权用户 pin/unpin 仍 404
+    (可见性判定先于归档放行,不可见就是 404,反探测口径不因归档松动);对照:
+    同一项目授权成员 pin/unpin 204(归档放行语义不因可见性判定动摇)。注:列表
+    过滤 is_archived,成员可见性前置断言须在归档前完成,归档后对照走 DB 直读。"""
+    member = await _create_user(client, "pp_arcm", name="归档项目成员")
+    p = await _create_project(
+        client,
+        admin_uid=EVAN_ID,
+        grants=_grant_viewer(member),
+    )
+    pid = p["id"]
+    # 前置(归档前):成员确实可见;outsider 不可见
+    assert pid in await _list_ids(client, member), "前置:成员可见失败"
+    assert pid not in await _list_ids(client, OUTSIDER_ID), "前置:outsider 不可见失败"
+    await _update_project_row(pid, is_archived=True)
+    try:
+        # 未授权用户+已归档:pin/unpin 均 404(不可见压过归档放行)
+        r = await _pin(client, OUTSIDER_ID, pid)
+        assert r.status_code == 404, r.text
+        r2 = await _unpin(client, OUTSIDER_ID, pid)
+        assert r2.status_code == 404, r2.text
+        assert await _pin_user_ids(pid) == [], "404 守门不该落任何 pin 行"
+
+        # 对照:授权成员+同一归档项目:pin 204 落行、unpin 204 删行
+        r3 = await _pin(client, member, pid)
+        assert r3.status_code == 204, r3.text
+        assert await _pin_user_ids(pid) == [member]
+        r4 = await _unpin(client, member, pid)
+        assert r4.status_code == 204, r4.text
+        assert await _pin_user_ids(pid) == [], "成员对归档项目 unpin 同样正常删行"
+    finally:
+        await _soft_delete(client, pid)
 
 
 # ─── §4.1 组3:system admin 分支 —— 非成员 private 项目 pin/unpin 直过 204 ────
