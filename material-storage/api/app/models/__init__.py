@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ProjectRole Literal 定义处(permissions.py 只 import settings/openfga_sdk,无循环依赖)
 from app.services.permissions import ProjectRole
@@ -432,6 +432,78 @@ class ChangePasswordIn(BaseModel):
 
     old_password: str = Field(..., min_length=1, max_length=128)
     new_password: str = Field(..., min_length=1, max_length=128)
+
+
+# ─── MCP 素材服务:个人访问令牌(PAT;方案 D2/D3,2026-10-30)───────────────────
+class TokenCreateIn(BaseModel):
+    """POST /api/v1/auth/tokens 入参。
+
+    name 是用户自定义识别名(如「我的 ZCode」);expires_in_days 1~365、默认 90
+    (D3;0 与 366 由 Pydantic 直接 422)。
+    """
+
+    name: str = Field(..., min_length=1, max_length=128)
+    expires_in_days: int = Field(90, ge=1, le=365)
+
+
+class TokenCreatedOut(BaseModel):
+    """创建响应 —— **token 明文只在此回显一次**(响应带 Cache-Control: no-store)。
+
+    此后任何列表/详情端点都不再返回明文,只有 token_prefix 供识别。
+    """
+
+    id: uuid.UUID
+    name: str
+    token: str
+    token_prefix: str
+    expires_at: datetime
+
+
+class TokenOut(BaseModel):
+    """GET /api/v1/auth/tokens 列表项(永不含明文 / token_hash)。
+
+    expired 为响应期派生列(expires_at <= now),不落库;默认列表只回活跃行
+    (未吊销未过期),`?include_revoked=1` 才含历史行并带 revoked_at/expired 标注。
+    """
+
+    id: uuid.UUID
+    name: str
+    token_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    expired: bool = False
+
+
+# ─── MCP 通道配置(方案 D5/D6;PUT /admin/mcp-settings 与读侧解析共用)───────────
+class McpSettingsIn(BaseModel):
+    """MCP 通道配置(绝对配额两级闸 + 前置 IP 桶,方案 D5/D6)。
+
+    合法域与跨字段校验是 PUT 422 的唯一来源(admin 端点直接复用本模型):
+    - max_concurrency 1~8(3 倍并发 <= DB 连接池 30;上调须同步评估 pool);
+    - per_token_concurrency 1~8 且 <= max_concurrency(否则单令牌配额无意义);
+    - per_token_rpm 1~450(上限由 2 倍 <= per_ip_rpm 900 反推);
+    - per_ip_rpm 1~900(与边缘 limit_req 15r/s 对齐)且 >= 2 倍 per_token_rpm
+      (保证同出口至少容纳 2 个单令牌 agent)。
+
+    默认值 = 迁移 0020 的 seed 行,且**必须能通过本模型校验**(D6:管理员一开
+    通道就处于合法默认态)。
+    """
+
+    enabled: bool = False
+    max_concurrency: int = Field(8, ge=1, le=8)
+    per_token_concurrency: int = Field(4, ge=1, le=8)
+    per_token_rpm: int = Field(120, ge=1, le=450)
+    per_ip_rpm: int = Field(600, ge=1, le=900)
+
+    @model_validator(mode="after")
+    def _cross_field(self) -> McpSettingsIn:
+        if self.per_token_concurrency > self.max_concurrency:
+            raise ValueError("per_token_concurrency 不能大于 max_concurrency")
+        if self.per_ip_rpm < 2 * self.per_token_rpm:
+            raise ValueError("per_ip_rpm 必须 >= 2 * per_token_rpm(同出口至少容纳 2 个单令牌 agent)")
+        return self
 
 
 # ─── 百度网盘备份(方案 §5.2,批次 1:binding + 网盘目录浏览)───────────────────

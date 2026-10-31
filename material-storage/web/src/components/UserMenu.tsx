@@ -1,5 +1,5 @@
 import { App, Avatar, Dropdown } from 'antd';
-import { Check, CloudDownload, Copy, KeyRound, LogOut, User as UserIcon } from 'lucide-react';
+import { Check, CloudDownload, Copy, KeyRound, LogOut, Settings, User as UserIcon } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { setDevUserId, getDevUserId, http } from '../api/client';
@@ -98,6 +98,8 @@ export function UserMenu({ me }: { me: Me }) {
           },
           { type: 'divider' },
           { key: 'apps', icon: <UserIcon size={14} />, label: <Link to="/approvals">我的申请</Link> },
+          // 账号设置 / 访问令牌(MCP 素材服务 D15:Web 端自助签发 PAT)
+          { key: 'settings', icon: <Settings size={14} />, label: <Link to="/settings">设置</Link> },
           // #149: 仅已设本地密码的用户可自助改密(未设密码走管理员初始化)
           ...(me.password_set ? [{
             key: 'change-pw',

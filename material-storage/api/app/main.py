@@ -10,11 +10,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import structlog
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import __version__
+from app.middleware.mcp_stats import MCPStatsMiddleware
 from app.routers import (
     admin,
     approvals,
@@ -33,6 +34,8 @@ from app.routers import (
     usage_stats,
     users,
 )
+from app.services.mcp_gate import mcp_gate, validate_gate_routes
+from app.services.mcp_settings import McpSettingsService
 from app.settings import get_settings
 
 log = structlog.get_logger()
@@ -58,6 +61,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     import redis.asyncio as redis_asyncio
     app.state.redis = redis_asyncio.from_url(str(settings.redis_url), decode_responses=True)
 
+    # MCP 通道配置(DB 正本 + Redis mcp:flag + 进程内 5s 缓存;D5/D6)
+    # 必须在 app.state.redis 之后构造:PAT 认证链第 1 步即读它
+    app.state.mcp_settings = McpSettingsService(redis=app.state.redis)
+
     # #149 本地账号密码登录:密码哈希 + 登录限流(复用上面的 redis client)
     from app.services.local_auth import LocalAuthService
     app.state.local_auth = LocalAuthService(settings, app.state.redis)
@@ -69,7 +76,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.token_crypto = TokenCryptoService(settings)
     app.state.baidu_client = BaiduNetdiskClient(settings)
 
-    log.info("startup complete — permissions + presign + auth + arq + redis ready")
+    # MCP gate 启动自检:排除清单的 7 个路由模板必须存在(路由改名会让清单静默
+    # 失效)。失败**只 log.error + PAT 一律 403**,绝不让 ms-api 启动失败 ——
+    # 否则一次改名会让全站(含网页/App)崩溃循环,与「MCP 出问题不影响真人」相反。
+    await validate_gate_routes(app)
+
+    log.info("startup complete — permissions + presign + auth + arq + redis + mcp ready")
 
     yield
 
@@ -125,26 +137,50 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # MCP 通道流量统计(纯 ASGI;只认 PAT 分支,按 mcp_reject_reason 分桶)
+    app.add_middleware(MCPStatsMiddleware)
+
     # routers
+    # ★ MCP 第六步两级并发闸(router 级 yield 依赖;session 请求 no-op)。
+    #   **严禁挂 app 级**(会锁死 /healthz、/auth/local/login、/maintenance/banner);
+    #   严禁给整个 auth router 挂(同上,/auth/local/login 会被挡死)——
+    #   auth 只对 @router.get("/me") 单路由挂(in app/routers/auth.py)。
+    #   PAT=D1 全账号身份,下列 router 的端点同样可被 PAT 直调:漏挂即出现
+    #   「不过并发闸的 PAT 通道」。
+    gate = [Depends(mcp_gate)]
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
-    app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"])
-    app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])
-    app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"])
-    app.include_router(approvals.router, prefix="/api/v1/approvals", tags=["approvals"])
-    app.include_router(users.router, prefix="/api/v1/users", tags=["users"])
-    app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"])
-    app.include_router(share.router, prefix="/api/v1/share", tags=["share"])
-    app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
-    app.include_router(directory.router, prefix="/api/v1/admin/directory", tags=["directory"])
+    app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"], dependencies=gate)
+    app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"], dependencies=gate)
+    app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"], dependencies=gate)
+    app.include_router(
+        approvals.router, prefix="/api/v1/approvals", tags=["approvals"], dependencies=gate,
+    )
+    app.include_router(users.router, prefix="/api/v1/users", tags=["users"], dependencies=gate)
+    app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"], dependencies=gate)
+    app.include_router(share.router, prefix="/api/v1/share", tags=["share"], dependencies=gate)
+    app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"], dependencies=gate)
+    app.include_router(
+        directory.router, prefix="/api/v1/admin/directory", tags=["directory"], dependencies=gate,
+    )
     app.include_router(maintenance.router, prefix="/api/v1/maintenance", tags=["maintenance"])
-    app.include_router(request_links.router, prefix="/api/v1/request-links", tags=["request-links"])
-    app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["notifications"])
+    app.include_router(
+        request_links.router, prefix="/api/v1/request-links", tags=["request-links"],
+        dependencies=gate,
+    )
+    app.include_router(
+        notifications.router, prefix="/api/v1/notifications", tags=["notifications"],
+        dependencies=gate,
+    )
     # 客户端使用统计(2026-10-27 usage-analytics;只读聚合,仅 system admin)
-    app.include_router(usage_stats.router, prefix="/api/v1/admin/usage", tags=["usage-stats"])
-    # 登录风控(2026-10-28 risk-control-module-plan §3;锁列表 + 解 IP 锁,仅 system admin)
-    app.include_router(risk.router, prefix="/api/v1/admin/risk", tags=["risk"])
+    app.include_router(
+        usage_stats.router, prefix="/api/v1/admin/usage", tags=["usage-stats"], dependencies=gate,
+    )
+    # 登录风控(2026-10-28 risk-control-module-plan;锁列表 + 解 IP 锁,仅 system admin)
+    app.include_router(risk.router, prefix="/api/v1/admin/risk", tags=["risk"], dependencies=gate)
     # 百度网盘备份(方案 §5.2;受 BAIDU_BACKUP_ENABLED 门控,未启用统一 404)
-    app.include_router(baidu_backup.router, prefix="/api/v1/baidu", tags=["baidu-backup"])
+    app.include_router(
+        baidu_backup.router, prefix="/api/v1/baidu", tags=["baidu-backup"], dependencies=gate,
+    )
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict[str, str]:

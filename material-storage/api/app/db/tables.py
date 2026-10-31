@@ -274,6 +274,16 @@ class AuditEvent(Base):
     request_ip: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(String(512))
 
+    # MCP 素材服务(迁移 0020,D4):认证方式(session|pat,应用层 Literal 校验,
+    # 按仓库惯例不引入 DB enum/CHECK)+ 令牌 id。NULL = 未标注(存量行 / worker /
+    # CLI / 后台任务),筛选与 CSV 一律把 NULL 归入 session(非令牌操作)。
+    # auth_token_id ondelete=SET NULL 照审计列惯例(tables.py:256/263):CASCADE
+    # 会随删用户连带删审计行,RESTRICT 会让删用户失败。
+    auth_method: Mapped[str | None] = mapped_column(String(16))
+    auth_token_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("personal_access_tokens.id", ondelete="SET NULL")
+    )
+
     details: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     event_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -288,6 +298,9 @@ class AuditEvent(Base):
         # event_time 单列索引:使用统计按纯时间窗口过滤/分桶,复合索引前导列
         # 都不是 event_time(usage-analytics-plan,2026-10-27)
         Index("ix_audit_event_time", "event_time"),
+        # 迁移 0020:删用户级联删 PAT 时,audit_events.auth_token_id 的 SET NULL
+        # 会全表扫描 —— 首版就建索引(迁移内以 CREATE INDEX CONCURRENTLY 建)
+        Index("ix_audit_auth_token_id", "auth_token_id"),
     )
 
 
@@ -678,3 +691,47 @@ class UserProjectPin(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PersonalAccessToken(Base):
+    """个人访问令牌(PAT)— MCP 素材服务(方案 D2/D3,迁移 0020)。
+
+    明文只在创建响应回显一次;落库只存 SHA-256 hex(token_hash,64 字符),
+    token_prefix = 明文前 16 字符(``mspat_`` + 10)供列表识别。
+    活跃 = revoked_at IS NULL AND expires_at > now();每 user 活跃上限 5 个由
+    services/tokens.py 的事务级 advisory lock 串行化(防并发竞态超限)。
+
+    读写一律经 app/services/tokens.py(纯 DB 服务:不写审计、不 commit)。
+    """
+    __tablename__ = "personal_access_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    token_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # 显式命名供 test_db_schema 断言(迁移 0020 同名约束)
+        UniqueConstraint("token_hash", name="uq_pat_token_hash"),
+    )
+
+
+class SystemFlag(Base, TimestampMixin):
+    """系统级配置 KV(DB 为正本;迁移 0020 起承载 ``mcp_channel``)。
+
+    MCP 通道配置读侧有 Redis(``mcp:flag``,TTL 60s)+ 进程内 5s 缓存,回源以
+    本表为准;写侧 upsert 后刷新缓存(见 app/services/mcp_settings.py)。
+    """
+    __tablename__ = "system_flags"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)

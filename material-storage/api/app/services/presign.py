@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from typing import Any
 
 import boto3
@@ -58,6 +59,18 @@ _VALID_SCHEMES = frozenset({"http", "https"})
 # 建 boto3 client 刷单进程内存 —— 常数上限封顶,超限不再新建、回落静态
 # endpoint(签名仍可用,只是 host 不跟随入口;真实部署入口数远小于该值)
 MAX_DYNAMIC_SIGNERS = 16
+
+# 进程内计数:动态缓存打满后回落静态 endpoint 的次数(管理端 /admin/mcp-settings
+# 的 dynamic_signers_cap_hits 指标,方案接口 B;单 worker 局部值,重启清零。
+# 只增减计数,**不改变 presign 行为**)。多 worker 部署须另行聚合。
+_dynamic_signers_cap_hits = 0
+_cap_hits_lock = threading.Lock()
+
+
+def dynamic_signers_cap_hits() -> int:
+    """返回进程内「动态 signer 缓存打满 → 回落静态 endpoint」累计次数(重启清零)。"""
+    with _cap_hits_lock:
+        return _dynamic_signers_cap_hits
 
 
 def request_base_from(request: Request) -> str | None:
@@ -147,8 +160,9 @@ class PresignService:
             ValueError、「http://a:b:c」签名期抛 EndpointResolutionError)
             捕获、log.warning 并回落 fallback,不缓存半成品不抛错;
           - 缓存达 MAX_DYNAMIC_SIGNERS 不再新建,回落 fallback(防客户端
-            轮换 Host 刷单进程内存)。
+            轮换 Host 刷单进程内存);回落同时进程内计 cap_hits(管理端指标)。
         """
+        global _dynamic_signers_cap_hits
         if not request_base:
             return fallback
         base = request_base.lower()
@@ -156,6 +170,10 @@ class PresignService:
         if client is not None:
             return client
         if len(self._dynamic_signers) >= MAX_DYNAMIC_SIGNERS:
+            # 管理端 cap_hits 计数(方案接口 B 的 signer 缓存健康指标);
+            # 只计数,不改变回落行为
+            with _cap_hits_lock:
+                _dynamic_signers_cap_hits += 1
             if not self._dynamic_cap_warned:
                 log.warning(
                     "动态 signer 缓存达上限 %s,后续未知入口回落静态 endpoint"

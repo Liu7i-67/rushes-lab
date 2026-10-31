@@ -82,6 +82,47 @@ services:
     networks:
       - poc-net
 
+  # ─── MCP 素材服务(2026-10-30 MCP 服务方案 · 包 B)────────────────────────
+  # 官方 mcp 包 FastMCP Streamable HTTP 薄代理:不直连 DB/Redis/MinIO,
+  # 只经 HTTP 转发 api(身份=PAT)。单副本(会话态在进程内存)。
+  # ★ 禁止 env_file:那会把 DB/Redis/MinIO 凭证灌进本服务(架构红线)。
+  #   只允许下列显式 environment;宿主侧用 MS_MCP_* 覆盖(见 ../mcp/README.md)。
+  # ★ 不 publish 宿主端口:只能经 nginx(/mcp)到达,防绕过 nginx 伪造 XFF。
+  # ★ dev:docker-compose.override.yml 只覆盖 container_name / MS_API_BASE_URL /
+  #   顶层 networks.poc-net.name(重映射到 dev 网络),service 定义只在本文件。
+  # 首次/更新须 `docker compose up -d --build ms-mcp`(独立镜像,restart 不 build)。
+  ms-mcp:
+    build:
+      context: ../mcp
+      args:
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    container_name: ms-mcp
+    restart: unless-stopped
+    environment:
+      MS_API_BASE_URL: ${MS_MCP_API_BASE_URL:-http://ms-api:8000}
+      # 入口白名单(host=scheme,逗号分隔;按环境裁剪,条目 ≤14,去重 scheme://host ≤16)。
+      # 默认=方案全量示例(prod 入口为主 + localhost/127.0.0.1 调试拼法);dev 必在
+      # override/.env 覆盖为 dev 裁剪版(dev 8090、不得放行 prod Host)。
+      MS_MCP_ENTRY_ALLOWLIST: ${MS_MCP_ENTRY_ALLOWLIST:-ms.local=http,bucket.taoxiplan.com=https,bucket.taoxiplan.com:443=https,47.108.196.211=https,47.108.196.211:443=https,47.108.196.211:18080=http,47.108.196.211:8080=http,192.168.110.221=http,192.168.110.221:80=http,192.168.110.221:8090=http,localhost=http,localhost:8090=http,127.0.0.1=http,127.0.0.1:8090=http}
+      # 取缩略图字节的固定内网入口(必须是上面白名单内的条目,启动时校验)
+      MS_MCP_INTERNAL_BASE_URL: ${MS_MCP_INTERNAL_BASE_URL:-http://192.168.110.221}
+      # 空闲会话 TTL(秒),同时作为 FastMCP session_idle_timeout 与绑定表淘汰
+      MS_MCP_SESSION_TTL: ${MS_MCP_SESSION_TTL:-1800}
+      # TLS 信任(内网 http 不校验;公网自签阶段配 CA 或 false,证书转正后切回)
+      MS_MCP_VERIFY_TLS: ${MS_MCP_VERIFY_TLS:-true}
+      MS_MCP_CA_BUNDLE: ${MS_MCP_CA_BUNDLE:-}
+    mem_limit: 512m
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks:
+      - poc-net
+
 volumes:
   ms-db-data:
   ms-redis-data:

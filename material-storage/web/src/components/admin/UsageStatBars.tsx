@@ -1,8 +1,8 @@
 /**
  * UsageStatBars — 使用统计占比条(F5,需求 docs/qdev/2026-10-27-usage-analytics.md)。
  *
- * - platform 主展示用 by_platform_class(web / android_app / ios_app / app_legacy,
- *   直接回答「三端占比」);by_platform(web_desktop / web_mobile 拆分)作下钻展示;
+ * - platform 主展示用 by_platform_class(web / android_app / ios_app / app_legacy /
+ *   mcp,直接回答「三端占比」+ AI 渠道);by_platform(web_desktop / web_mobile 拆分)作下钻展示;
  * - network 一块(lan / wan / unknown);
  * - 占比 = 行 users / totals.users(分母是窗口内去重用户总数;各分组 users 独立去重、
  *   跨行不可加 → 同一用户多端重复计数,各行占比之和可 >100%,页内已标注);
@@ -24,6 +24,8 @@ const PLATFORM_CLASS_LABEL: Record<string, string> = {
   android_app: 'Android App',
   ios_app: 'iOS App',
   app_legacy: '旧版 App',
+  // MCP 素材服务(2026-10-30):AI 客户端渠道(不进 web 归并,后端 platform_class 原值透出)
+  mcp: 'MCP / AI 助手',
   unknown: '未知',
 };
 
@@ -35,6 +37,8 @@ const BAR_COLOR: Record<string, string> = {
   android_app: 'var(--ms-emerald)',
   ios_app: 'var(--ms-crimson)',
   app_legacy: 'var(--ms-ink-subtle)',
+  // MCP(2026-10-30):色板无第 5 个色相,复用 amber(与 Web 移动端同色不同分区,仅粗分类)
+  mcp: 'var(--ms-amber)',
   lan: 'var(--ms-emerald)',
   wan: 'var(--ms-accent)',
   unknown: 'var(--ms-ink-subtle)',
@@ -96,13 +100,21 @@ export function UsageStatBars({ stats }: { stats: UsageStatsOut }) {
             color={BAR_COLOR[r.platform_class] ?? 'var(--ms-ink-subtle)'}
           />
         ))}
+        {/* MCP 素材服务(2026-10-30):渠道口径标注(数据源是 audit_events,
+            搜索 / 缩略图等读操作无审计 → 只反映审计可见操作,读流量被低估) */}
+        {stats.by_platform_class.some((r: UsagePlatformClassRow) => r.platform_class === 'mcp') && (
+          <div style={{ marginTop: -4, fontSize: 11.5, color: 'var(--ms-ink-subtle)' }}>
+            注:MCP / AI 助手渠道仅统计审计可见操作(上传 / 下载签发等);搜索 / 缩略图等
+            读操作不写审计,该渠道读流量会低估。
+          </div>
+        )}
         {/* by_platform 下钻:web_desktop / web_mobile 拆分 */}
         <div style={{
           marginTop: 2, paddingTop: 12,
           borderTop: '1px dashed var(--ms-hairline)',
         }}>
           <div style={{ fontSize: 12, color: 'var(--ms-ink-muted)', marginBottom: 10 }}>
-            下钻 · 客户端明细(Web 拆分桌面 / 移动浏览器)
+            下钻 · 客户端明细(Web 拆分桌面 / 移动浏览器,另含 MCP / AI 助手)
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             {stats.by_platform.map((r: UsagePlatformRow) => (

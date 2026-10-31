@@ -35,6 +35,9 @@ const AdminBaiduTasksPage = lazy(() => import('./pages/AdminBaiduTasksPage'));
 const AdminUsageStatsPage = lazy(() => import('./pages/AdminUsageStatsPage'));
 // 风控模块(2026-10-28):登录风控(被锁账号/被锁 IP + 解锁处置;仅系统管理员,后端 require_system_admin)
 const AdminRiskPage = lazy(() => import('./pages/AdminRiskPage'));
+// MCP 素材服务(2026-10-30):/settings 自助访问令牌 + /admin/mcp-settings 管理后台
+const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const AdminMcpSettingsPage = lazy(() => import('./pages/AdminMcpSettingsPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
 const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
@@ -82,12 +85,16 @@ const RouterRoutes = () => (
       <Route path="/admin/usage" element={<AdminUsageStatsPage />} />
       {/* 风控模块: 登录风控(被锁账号/被锁 IP 视图 + 解锁处置;仅系统管理员,后端 require_system_admin) */}
       <Route path="/admin/risk" element={<AdminRiskPage />} />
+      {/* MCP 素材服务(2026-10-30):管理后台 MCP 通道设置 + 全部用户令牌(仅系统管理员) */}
+      <Route path="/admin/mcp-settings" element={<AdminMcpSettingsPage />} />
       <Route path="/search" element={<SearchPage />} />
       <Route path="/s/:token" element={<ShareLandingPage />} />
       <Route path="/r/:token" element={<RequestLinkLandingPage />} />
       <Route path="/dev-login" element={<DevLoginPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/change-password" element={<ChangePasswordPage />} />
+      {/* 账号设置(MCP 素材服务 D15:Web 端自助创建/吊销个人访问令牌) */}
+      <Route path="/settings" element={<SettingsPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   </Suspense>

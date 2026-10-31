@@ -19,6 +19,8 @@ export const PLATFORM_LABEL: Record<string, string> = {
   android_app: 'Android App',
   ios_app: 'iOS App',
   app_legacy: '旧版 App',
+  // MCP 素材服务(2026-10-30):UA=msmcp/* 的 AI 客户端渠道(后端 _PLATFORM_CASE 新增)
+  mcp: 'MCP / AI 助手',
   unknown: '未知',
 };
 export const NETWORK_LABEL: Record<string, string> = {

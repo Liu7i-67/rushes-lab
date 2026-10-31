@@ -12,6 +12,10 @@
                                               W3 观测面,方案 §3.1①)
   GET  /api/v1/admin/baidu-backup/tasks/{id}    — 任务详情(+调度观测字段/绑定行,§3.1②)
   GET  /api/v1/admin/baidu-backup/tasks/{id}/files — 文件明细(manifest 分页,§3.1③)
+  GET  /api/v1/admin/mcp-settings           — MCP 通道配置 + 实时指标(MCP 包 A3)
+  PUT  /api/v1/admin/mcp-settings           — 写通道配置 + 审计 mcp_settings_changed
+  GET  /api/v1/admin/tokens                 — 全部用户 PAT 列表(带用户名;A3)
+  DELETE /api/v1/admin/tokens/{id}          — 管理员吊销任意 PAT(A3)
 
 #154:飞书诊断 endpoint(/feishu/health、/feishu/test-card)随飞书下线删除(ADR-0007)。
 """
@@ -21,10 +25,10 @@ import csv
 import io
 import logging
 import uuid
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select, update
@@ -41,6 +45,7 @@ from app.db.tables import (
     BaiduBinding,
     Folder,
     Group,
+    PersonalAccessToken,
     Project,
     ProjectFolderTemplate,
     ProjectFolderTemplateEntry,
@@ -63,14 +68,31 @@ from app.models import (
     FolderTemplateEntryOut,
     FolderTemplateIn,
     FolderTemplateOut,
+    McpSettingsIn,
 )
 from app.routers.projects import INITIAL_GRANTS_MAX
 from app.services.audit import AuditService
 from app.services.baidu_backup import ACTIVE_STATUSES, FILE_STATUSES, TERMINAL_STATUSES
 from app.services.default_grants import apply_default_template_grants
+from app.services.mcp_metrics import (
+    BUCKET_REJECTED_POLICY,
+    BUCKET_REJECTED_QUOTA,
+    BUCKET_REQUESTS,
+    infra_rejects_since_start,
+    stats_key,
+    utc_day,
+)
+from app.services.mcp_settings import (
+    McpSettings,
+    McpSettingsService,
+    McpSettingsTableMissing,
+    McpSettingsUnavailable,
+)
 from app.services.org import get_default_organization
 from app.services.permissions import PermissionsService, ProjectRole, fmt_subject
+from app.services.presign import dynamic_signers_cap_hits
 from app.services.subject_names import resolve_subject_names
+from app.services.tokens import revoke_token
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -96,6 +118,10 @@ class AuditOut(BaseModel):
     # → 纯显示名派生列,不入库;查不到/垃圾值的键不进 dict,前端回落裸值
     user_agent: str | None = None
     resolved_names: dict[str, str] = {}
+    # MCP 素材服务(迁移 0020 / D4):认证方式与令牌 id。auth_method 为 NULL 的
+    # 存量行(View 归一为 session;worker/CLI/后台任务同样写 NULL)由前端归一显示。
+    auth_method: str | None = None
+    auth_token_id: uuid.UUID | None = None
     details: dict
 
 
@@ -236,6 +262,7 @@ def _build_audit_query(
     project_id: uuid.UUID | None,
     from_time: datetime | None,
     to_time: datetime | None,
+    auth_method: Literal["all", "session", "pat"] = "all",
 ):
     stmt = select(AuditEvent)
     if event_type:
@@ -251,6 +278,15 @@ def _build_audit_query(
         stmt = stmt.where(AuditEvent.event_time >= from_time)
     if to_time:
         stmt = stmt.where(AuditEvent.event_time <= to_time)
+    # MCP 素材服务(D4):认证方式筛选,NULL 一律归入 session(非令牌操作 = 存量
+    # 行 / worker / CLI);参数类型钉死 Literal(前端「全部」的空串须显式映射 all)
+    if auth_method == "pat":
+        stmt = stmt.where(AuditEvent.auth_method == "pat")
+    elif auth_method == "session":
+        stmt = stmt.where(or_(
+            AuditEvent.auth_method.is_(None),
+            AuditEvent.auth_method == "session",
+        ))
     return stmt
 
 
@@ -262,6 +298,10 @@ async def list_audit(
     project_id: uuid.UUID | None = Query(None),
     from_time: datetime | None = Query(None, alias="from"),
     to_time: datetime | None = Query(None, alias="to"),
+    auth_method: Literal["all", "session", "pat"] = Query(
+        "all",
+        description="认证方式筛选:all/session/pat;NULL(存量行)视为 session",
+    ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -271,6 +311,7 @@ async def list_audit(
     _ = user.id
     stmt = _build_audit_query(
         actor_user_id, actor_open_id, event_type, project_id, from_time, to_time,
+        auth_method,
     ).order_by(AuditEvent.event_time.desc()).limit(limit).offset(offset)
     res = await db.execute(stmt)
     events = res.scalars().all()
@@ -299,6 +340,8 @@ async def list_audit(
             request_ip=e.request_ip,
             user_agent=e.user_agent,
             resolved_names=detail_names.get(e.id, {}),
+            auth_method=e.auth_method,
+            auth_token_id=e.auth_token_id,
             details=e.details or {},
         ))
     return out
@@ -312,13 +355,18 @@ async def export_audit_csv(
     project_id: uuid.UUID | None = Query(None),
     from_time: datetime | None = Query(None, alias="from"),
     to_time: datetime | None = Query(None, alias="to"),
+    auth_method: Literal["all", "session", "pat"] = Query(
+        "all",
+        description="与列表同参:all/session/pat;NULL(存量行)视为 session",
+    ),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),
 ) -> StreamingResponse:
-    """流式 CSV 导出(同 query filter)— UTF-8 BOM 给 Excel 兼容。"""
+    """流式 CSV 导出(同 query filter,与列表同参)— UTF-8 BOM 给 Excel 兼容。"""
     _ = user.id
     stmt = _build_audit_query(
         actor_user_id, actor_open_id, event_type, project_id, from_time, to_time,
+        auth_method,
     ).order_by(AuditEvent.event_time.desc()).limit(50000)
 
     async def gen():
@@ -330,7 +378,7 @@ async def export_audit_csv(
             "time", "event_type", "actor_name", "actor_open_id",
             "target_project_id", "target_project_name",
             "target_asset_id", "target_asset_filename", "target_minio_key",
-            "request_ip", "details_json",
+            "request_ip", "details_json", "auth_method",
         ])
         yield buf.getvalue().encode()
         buf.seek(0); buf.truncate()
@@ -360,6 +408,8 @@ async def export_audit_csv(
                     e.target_minio_key or "",
                     e.request_ip or "",
                     _json.dumps(e.details or {}, ensure_ascii=False),
+                    # NULL 一律写 session(不写空串),与列表筛选口径一致(D4)
+                    e.auth_method or "session",
                 ])
             chunk_out = buf.getvalue().encode()
             if chunk_out:
@@ -1457,3 +1507,315 @@ async def list_admin_baidu_task_files(
         ],
         total=total or 0,
     )
+
+
+# ─── MCP 通道设置与全部令牌(MCP 素材服务包 A3,方案接口 B)───────────────────
+# 门禁一律 require_system_admin。配置读写经 app.state.mcp_settings(A2 在 lifespan
+# 构造的 McpSettingsService);实时指标直读 Redis(键名口径见方案 D11)+ 两个进程
+# 内计数。**指标故障不得拖死设置页**:逐项 try/except,失败字段置 null,配置体
+# 照常返回(方案接口 B 的 GET 契约)。
+
+# 在途并发:与 mcp_gate 判定同口径(ZCOUNT now +inf;勿用 ZCARD —— 已过期未
+# 裁剪的成员会让读数偏大最长 lease+5s,方案 D11/当前有效值表)
+_MCP_CONC_GLOBAL_KEY = "mcp:conc:global"
+# 今日计数三键 → 响应字段(UTC 日口径;使用统计页 daily 是北京时间日,页面文案
+# 分别标注,方案 D11)。键名/日界由 app.services.mcp_metrics 单点提供(A2 契约)
+_MCP_STATS_FIELDS: tuple[tuple[str, str], ...] = (
+    (BUCKET_REQUESTS, "today_success"),
+    (BUCKET_REJECTED_POLICY, "today_rejected_policy"),
+    (BUCKET_REJECTED_QUOTA, "today_rejected_quota"),
+)
+
+
+class McpSettingsOut(BaseModel):
+    """GET/PUT /admin/mcp-settings 响应(扁平;前端 C1 已按此写死)。
+
+    配置五项 + 实时指标六项;指标读取失败(Redis/计数异常)→ 对应字段 null,
+    配置体正常返回(方案接口 B)。
+    """
+
+    enabled: bool
+    max_concurrency: int
+    per_token_concurrency: int
+    per_token_rpm: int
+    per_ip_rpm: int
+    # 实时指标(命名即口径:success / policy-reject / quota-reject 分列)
+    in_flight: int | None = None              # ZCOUNT mcp:conc:global now +inf
+    today_success: int | None = None          # mcp:stats:requests:{UTC yyyyMMdd}
+    today_rejected_policy: int | None = None  # 关闭类 / 策略类拒绝
+    today_rejected_quota: int | None = None   # 配额类拒绝(IP/RPM/并发)
+    rejected_infra_since_start: int | None = None  # 进程内,重启清零
+    dynamic_signers_cap_hits: int | None = None    # presign 打满回落静态次数
+
+
+class AdminTokenOut(BaseModel):
+    """GET /admin/tokens 行 = PAT 字段 + 归属用户展示字段(**永不回 token_hash**)。
+
+    user_name = users.name;username 可空(老账号)。expired 为响应期派生列
+    (expires_at <= now),不落库。
+    """
+
+    id: uuid.UUID
+    user_id: uuid.UUID
+    user_name: str
+    username: str | None = None
+    name: str
+    token_prefix: str
+    created_at: datetime
+    last_used_at: datetime | None = None
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    expired: bool = False
+
+
+def _mcp_settings_service(request: Request) -> McpSettingsService:
+    """取 lifespan 构造的通道配置服务(A2 接线 `app.state.mcp_settings`)。
+
+    兜底:未接线(极端情形/测试替身缺失)时按需构造并回填 state,保证读侧
+    不因接线顺序 500(与 A2 的 lifespan 构造同一实现)。
+    """
+    service = getattr(request.app.state, "mcp_settings", None)
+    if isinstance(service, McpSettingsService):
+        return service
+    log.warning("app.state.mcp_settings 未接线,按需构造 McpSettingsService")
+    service = McpSettingsService(getattr(request.app.state, "redis", None))
+    request.app.state.mcp_settings = service
+    return service
+
+
+async def _mcp_metrics_snapshot(redis: Any) -> dict[str, int | None]:
+    """实时指标快照;逐项容错,失败 = None(不抛,配置体照常返回)。"""
+    out: dict[str, int | None] = {
+        "in_flight": None,
+        "today_success": None,
+        "today_rejected_policy": None,
+        "today_rejected_quota": None,
+        "rejected_infra_since_start": None,
+        "dynamic_signers_cap_hits": None,
+    }
+    try:
+        # 进程内 infra 拒绝计数(A2 写侧唯一口径;单 worker,重启清零)
+        out["rejected_infra_since_start"] = int(infra_rejects_since_start())
+    except Exception as e:
+        log.warning("mcp-settings 指标 rejected_infra_since_start 读取失败: %s", e)
+    try:
+        out["dynamic_signers_cap_hits"] = int(dynamic_signers_cap_hits())
+    except Exception as e:
+        log.warning("mcp-settings 指标 dynamic_signers_cap_hits 读取失败: %s", e)
+
+    if redis is None:
+        return out
+    now = datetime.now(UTC)
+    now_ms = int(now.timestamp() * 1000)
+    try:
+        # 与闸判定同口径:只数 score 未过期的成员(ZCARD 会把过期未裁剪的算进来)
+        out["in_flight"] = int(await redis.zcount(_MCP_CONC_GLOBAL_KEY, now_ms, "+inf"))
+    except Exception as e:
+        log.warning("mcp-settings 指标 in_flight 读取失败(%s): %s", _MCP_CONC_GLOBAL_KEY, e)
+    day = utc_day(now)
+    for bucket, field in _MCP_STATS_FIELDS:
+        key = stats_key(bucket, day)
+        try:
+            raw = await redis.get(key)
+        except Exception as e:
+            log.warning("mcp-settings 指标 %s 读取失败(%s): %s", field, key, e)
+            continue
+        try:
+            out[field] = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            log.warning("mcp-settings 指标 %s 值非法(%r),置 null", field, raw)
+    return out
+
+
+def _mcp_settings_out(value: McpSettings, metrics: dict[str, int | None]) -> McpSettingsOut:
+    """配置体 + 指标 → 扁平响应(配置字段在写入成功/读取成功后一定有值)。"""
+    return McpSettingsOut(
+        enabled=value.enabled,
+        max_concurrency=value.max_concurrency,
+        per_token_concurrency=value.per_token_concurrency,
+        per_token_rpm=value.per_token_rpm,
+        per_ip_rpm=value.per_ip_rpm,
+        in_flight=metrics["in_flight"],
+        today_success=metrics["today_success"],
+        today_rejected_policy=metrics["today_rejected_policy"],
+        today_rejected_quota=metrics["today_rejected_quota"],
+        rejected_infra_since_start=metrics["rejected_infra_since_start"],
+        dynamic_signers_cap_hits=metrics["dynamic_signers_cap_hits"],
+    )
+
+
+@router.get("/mcp-settings", response_model=McpSettingsOut)
+async def get_mcp_settings(
+    request: Request,
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+) -> McpSettingsOut:
+    """读通道配置 + 实时指标(仅 system admin;指标故障字段 null,不 500)。
+
+    配置读取失败(Redis 与 DB 双挂 → McpSettingsUnavailable)时 503:与认证链
+    fail-closed 同口径,前端可重试;行缺失/单侧故障由服务层回落默认值。
+    """
+    _ = user.id
+    try:
+        value = await _mcp_settings_service(request).read()
+    except McpSettingsUnavailable as e:
+        raise HTTPException(
+            503, "MCP 通道配置暂不可用(Redis 与 DB 均读取失败),请稍后重试",
+        ) from e
+    metrics = await _mcp_metrics_snapshot(getattr(request.app.state, "redis", None))
+    return _mcp_settings_out(value, metrics)
+
+
+@router.put("/mcp-settings", response_model=McpSettingsOut)
+async def update_mcp_settings(
+    payload: McpSettingsIn,
+    request: Request,
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> McpSettingsOut:
+    """写通道配置(整体覆盖,最后写赢,不做乐观锁)+ 审计 mcp_settings_changed。
+
+    非法组合由 ``McpSettingsIn`` 产生 422(跨字段校验内建);``McpSettingsService
+    .write`` **自己 commit**(契约如此);表缺失(迁移 0020 未跑)→ 503 引导
+    alembic upgrade head;成功返回与 GET 同形(附实时指标)。
+    """
+    service = _mcp_settings_service(request)
+    try:
+        old: McpSettings | None = await service.read()
+    except McpSettingsUnavailable:
+        # 旧值读不到不阻断写入(DB 正本可 upsert);审计 changes.old 记 null
+        old = None
+
+    value = McpSettings(
+        enabled=payload.enabled,
+        max_concurrency=payload.max_concurrency,
+        per_token_concurrency=payload.per_token_concurrency,
+        per_token_rpm=payload.per_token_rpm,
+        per_ip_rpm=payload.per_ip_rpm,
+    )
+    try:
+        await service.write(db, value)
+    except McpSettingsTableMissing as e:
+        raise HTTPException(
+            503, "system_flags 表不存在:请先执行 alembic upgrade head(迁移 0020)",
+        ) from e
+
+    # 既有 changes 结构(目录/用户变更先例):{"字段": {"old": …, "new": …}}
+    changes: dict[str, dict[str, bool | int | None]] = {
+        "enabled": {"old": old.enabled if old else None, "new": value.enabled},
+        "max_concurrency": {
+            "old": old.max_concurrency if old else None,
+            "new": value.max_concurrency,
+        },
+        "per_token_concurrency": {
+            "old": old.per_token_concurrency if old else None,
+            "new": value.per_token_concurrency,
+        },
+        "per_token_rpm": {
+            "old": old.per_token_rpm if old else None,
+            "new": value.per_token_rpm,
+        },
+        "per_ip_rpm": {"old": old.per_ip_rpm if old else None, "new": value.per_ip_rpm},
+    }
+    await audit.write(
+        event_type="mcp_settings_changed",
+        actor_user_id=user.id,
+        details={"changes": changes},
+        request_ip=ctx.get("request_ip"),
+        user_agent=ctx.get("user_agent"),
+    )
+    log.info(
+        "mcp settings changed by admin=%s enabled=%s max=%d per_token=%d rpm=%d ip_rpm=%d",
+        user.id, value.enabled, value.max_concurrency,
+        value.per_token_concurrency, value.per_token_rpm, value.per_ip_rpm,
+    )
+    metrics = await _mcp_metrics_snapshot(getattr(request.app.state, "redis", None))
+    return _mcp_settings_out(value, metrics)
+
+
+@router.get("/tokens", response_model=list[AdminTokenOut])
+async def list_admin_tokens(
+    user_id: uuid.UUID | None = Query(None, description="按归属用户过滤"),  # noqa: B008
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+) -> list[AdminTokenOut]:
+    """全部用户 PAT 列表(**裸数组**,前端数组/信封两种都兼容)。
+
+    排序 ``created_at DESC, id DESC`` 稳定序;每行带 user_id / user_name /
+    username(users.username 可空);**永不回 token_hash**。
+    """
+    _ = user.id
+    stmt = (
+        select(PersonalAccessToken, User.name, User.username)
+        .join(User, PersonalAccessToken.user_id == User.id)
+    )
+    if user_id is not None:
+        stmt = stmt.where(PersonalAccessToken.user_id == user_id)
+    stmt = (
+        stmt.order_by(
+            PersonalAccessToken.created_at.desc(), PersonalAccessToken.id.desc(),
+        )
+        .limit(limit)
+        .offset(offset)
+    )
+    rows = (await db.execute(stmt)).all()
+    now = datetime.now(UTC)
+    return [
+        AdminTokenOut(
+            id=row[0].id,
+            user_id=row[0].user_id,
+            user_name=row[1],
+            username=row[2],
+            name=row[0].name,
+            token_prefix=row[0].token_prefix,
+            created_at=row[0].created_at,
+            last_used_at=row[0].last_used_at,
+            expires_at=row[0].expires_at,
+            revoked_at=row[0].revoked_at,
+            expired=row[0].expires_at <= now,
+        )
+        for row in rows
+    ]
+
+
+@router.delete("/tokens/{token_id}", status_code=204)
+async def revoke_admin_token(
+    token_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+    audit: AuditService = Depends(get_audit),  # noqa: B008
+    ctx: dict[str, str | None] = Depends(get_request_context),  # noqa: B008
+) -> Response:
+    """管理员吊销任意令牌 → 204(不存在 404;已吊销幂等 204,不重复写审计)。
+
+    首次生效写 ``token_revoked``(details:token_id / token_prefix /
+    reason=admin_revoked / actor=admin + 目标 user_id;方案 D13 —— actor 是操作者,
+    被吊销令牌的 owner 记在 details)。
+    """
+    row = await db.get(PersonalAccessToken, token_id)
+    if row is None:
+        raise HTTPException(404, f"令牌不存在:{token_id}")
+    newly_revoked = await revoke_token(db, token_id=token_id, user_id=row.user_id)
+    await db.commit()
+    if newly_revoked:
+        await audit.write(
+            event_type="token_revoked",
+            actor_user_id=user.id,
+            request_ip=ctx.get("request_ip"),
+            user_agent=ctx.get("user_agent"),
+            details={
+                "token_id": str(token_id),
+                "token_prefix": row.token_prefix,
+                "reason": "admin_revoked",
+                "actor": "admin",
+                "user_id": str(row.user_id),
+            },
+        )
+        log.info(
+            "personal access token revoked by admin=%s owner=%s token_id=%s",
+            user.id, row.user_id, token_id,
+        )
+    return Response(status_code=204)

@@ -9,7 +9,7 @@ import { Badge, Drawer } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
   Bell, ClipboardCheck, CloudDownload, Folder, FolderTree, LayoutTemplate, Menu, Search,
-  ScrollText, ShieldCheck, Users as UsersIcon, UsersRound,
+  ScrollText, ServerCog, Settings, ShieldCheck, Users as UsersIcon, UsersRound,
 } from 'lucide-react';
 import { useMe, useNotificationsUnread } from '../api/hooks';
 import { useKeyboardVisible } from '../lib/use-keyboard-visible';
@@ -45,6 +45,8 @@ export function MobileTabBar() {
   // (is_folder_template_manager ?? is_system_admin,同 AppHeader PC 口径)——
   // 仅持 folder_template_manager flag 的非系统 admin 组员也要能看到,故不并入 admin 数组
   const moreItems = [
+    // 账号设置 / 访问令牌(MCP 素材服务 D15;所有登录用户可见)
+    { to: '/settings', label: '设置', icon: <Settings size={16} strokeWidth={1.8} /> },
     { to: '/my-permissions', label: '我的权限', icon: <ShieldCheck size={16} strokeWidth={1.8} /> },
     ...(me?.is_system_admin ? [
       { to: '/admin/audit', label: '审计', icon: <ScrollText size={16} strokeWidth={1.8} /> },
@@ -52,6 +54,8 @@ export function MobileTabBar() {
       { to: '/admin/groups', label: '用户组管理', icon: <UsersRound size={16} strokeWidth={1.8} /> },
       { to: '/admin/grant-templates', label: '权限模板', icon: <LayoutTemplate size={16} strokeWidth={1.8} /> },
       { to: '/admin/baidu-tasks', label: '备份任务', icon: <CloudDownload size={16} strokeWidth={1.8} /> },
+      // MCP 素材服务(2026-10-30):通道设置 / 全量令牌
+      { to: '/admin/mcp-settings', label: 'MCP 设置', icon: <ServerCog size={16} strokeWidth={1.8} /> },
     ] : []),
     ...((me?.is_folder_template_manager ?? me?.is_system_admin) ? [
       { to: '/admin/folder-templates', label: '目录模板', icon: <FolderTree size={16} strokeWidth={1.8} /> },

@@ -6,9 +6,14 @@
  * - 缺 key 时直接返回 raw token 不报错 — 兼容后端新增 event_type 没同步加 label 的情况
  * - keep mono 字体不变(advisor 决策:跟现有视觉一致性 > 中文渲染纯净)
  *
- * 后端 event_type 写入点全集共 55 种(2026-10-14 核对,全集清单见
- * rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A;
- * 旧口径「grep 全集 22 种 2026-05-18」已过时,勿按它裁剪映射)
+ * 后端 event_type 写入点全集共 64 种(2026-10-30 实数;MCP 素材服务批次 +3:
+ * token_created / token_revoked / mcp_settings_changed)。本映射表 68 键 =
+ * 64 真实 + 4 个历史死键(approval_card_updated / approval_notified /
+ * asset_tag_updated / invite_notified —— 只用于历史行展示、不在过滤下拉,勿删)。
+ * 口径演变:55(2026-10-14 及之前;原算式 22+33)→ 61(2026-10-30 实数),
+ * 本批 +3 = 64。全集清单见 rushes-spec/material-storage/prod-observability-fix-plan.md
+ * 附录 A(W1/W4/W5/W6、风控模块与 MCP 批次随后增补;旧口径「grep 全集 22 种
+ * 2026-05-18」已过时,勿按它裁剪映射)
  */
 
 export const EVENT_TYPE_LABEL: Record<string, string> = {
@@ -85,6 +90,12 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   // ── 风控模块(2026-10-28):单独解 IP 锁写入点(risk.py;AdminAuditPage
   //    EVENT_TYPES 同步)────────────────────────────────────────────────────────
   ip_login_unlocked: '解除 IP 登录锁定',
+  // ── MCP 素材服务(2026-10-30):自助令牌管理(恒 session)与通道设置变更;
+  //    details 新键 token_prefix / token_id / actor 由 AdminAuditPage
+  //    DETAIL_KEY_LABEL 同步(后端契约/CSV 仍用英文原值)────────────────────────
+  token_created: '访问令牌创建',
+  token_revoked: '访问令牌吊销',
+  mcp_settings_changed: 'MCP 通道设置变更',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

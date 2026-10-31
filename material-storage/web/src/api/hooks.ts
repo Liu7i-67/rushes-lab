@@ -8,6 +8,8 @@ import type {
   AdminBaiduTaskDetail,
   AdminBaiduTaskFilesPage,
   AdminBaiduTasksPage,
+  AdminPatToken,
+  AdminPatTokenListResponse,
   Approval,
   ApprovalAction,
   ApprovalTargetType,
@@ -39,8 +41,12 @@ import type {
   FolderUpdateIn,
   GrantEntry,
   GrantTemplate,
+  McpChannelConfig,
+  McpSettingsOut,
   Me,
   NotificationsList,
+  PatTokenCreated,
+  PatTokenListResponse,
   Project,
   ProjectCreated,
   RiskIpUnlockOut,
@@ -1435,5 +1441,110 @@ export const useUnlockIp = () => {
         `/api/v1/admin/risk/locks/ips/${encodeURIComponent(ip.trim())}/unlock`,
       )).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['risk-locks'] }),
+  });
+};
+
+// ─── MCP 素材服务:个人访问令牌(PAT,2026-10-30 方案 A 节)──────────────────
+// 自助三端点(/auth/tokens)对 PAT 一律 403(后端逐路由守卫),只能由 session 发起;
+// 管理端两处(/admin/mcp-settings、/admin/tokens)require_system_admin。
+// token 明文只在 useCreateToken 的响应出现一次(后端 Cache-Control: no-store),
+// 页面用完即丢,不进任何列表缓存。
+
+/** 列表信封归一:方案未钉死 {items} 信封,裸数组与分页信封都兼容。 */
+function unwrapList<T>(data: T[] | { items?: T[] }): T[] {
+  return Array.isArray(data) ? data : (data?.items ?? []);
+}
+
+/** GET /api/v1/auth/tokens — 本人令牌列表(无明文)。默认只回活跃行;
+ *  includeRevoked=true 时带 ?include_revoked=1 含已吊销/已过期历史行。 */
+export const useTokens = (includeRevoked = false) =>
+  useQuery({
+    queryKey: ['pat-tokens', includeRevoked],
+    queryFn: async () =>
+      unwrapList(
+        (await http.get<PatTokenListResponse>('/api/v1/auth/tokens', {
+          params: includeRevoked ? { include_revoked: 1 } : {},
+        })).data,
+      ),
+    // 切换「显示历史」时保留旧列表,避免表格闪空(loading 由 isFetching 指示)
+    placeholderData: keepPreviousData,
+  });
+
+/** POST /api/v1/auth/tokens — 创建令牌(201;token 明文仅此响应一次)。 */
+export const useCreateToken = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { name: string; expires_in_days?: number }) =>
+      (await http.post<PatTokenCreated>('/api/v1/auth/tokens', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['pat-tokens'] }),
+  });
+};
+
+/** DELETE /api/v1/auth/tokens/{id} — 吊销本人令牌(204;非本人/不存在 404;
+ *  重复吊销幂等 204)。 */
+export const useRevokeToken = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (tokenId: string) => {
+      await http.delete(`/api/v1/auth/tokens/${tokenId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['pat-tokens'] }),
+  });
+};
+
+/** 管理端全量令牌分页页大小(后端 limit 上限 500;50 足够一屏且请求轻)。 */
+export const ADMIN_TOKENS_PAGE_SIZE = 50;
+
+/** GET /api/v1/admin/tokens — 全部用户令牌(require_system_admin;limit/offset,
+ *  排序 created_at DESC, id DESC)。params 传 null = 不启用(非管理员不取数)。
+ *  返回 {items,total?};后端若回裸数组则 total 缺失,分页按「满页才可下一页」兜底。 */
+export const useAdminTokens = (
+  params: { limit?: number; offset?: number; user_id?: string } | null = {},
+) =>
+  useQuery({
+    queryKey: ['admin-pat-tokens', params],
+    queryFn: async () => {
+      const raw = (await http.get<AdminPatTokenListResponse>('/api/v1/admin/tokens', {
+        params: params ?? {},
+      })).data;
+      return Array.isArray(raw)
+        ? { items: raw as AdminPatToken[], total: undefined as number | undefined }
+        : { items: raw?.items ?? [], total: raw?.total };
+    },
+    enabled: params !== null,
+    placeholderData: keepPreviousData,
+  });
+
+/** DELETE /api/v1/admin/tokens/{id} — 管理员吊销任意令牌(204;审计
+ *  token_revoked,details.actor="admin")。 */
+export const useAdminRevokeToken = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (tokenId: string) => {
+      await http.delete(`/api/v1/admin/tokens/${tokenId}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['admin-pat-tokens'] }),
+  });
+};
+
+/** GET /api/v1/admin/mcp-settings — 通道配置 + 实时指标(指标读失败字段为 null)。
+ *  enabled=false 时不取数(非管理员 / 未就绪)。 */
+export const useMcpSettings = (enabled = true) =>
+  useQuery({
+    queryKey: ['mcp-settings'],
+    queryFn: async () =>
+      (await http.get<McpSettingsOut>('/api/v1/admin/mcp-settings')).data,
+    enabled,
+  });
+
+/** PUT /api/v1/admin/mcp-settings — 整体覆盖配置(最后写赢,无乐观锁)。
+ *  非法组合 / 跨字段冲突由后端 422,前端表单另有同款校验。成功后失效重取,
+ *  让指标随配置一起刷新。 */
+export const useUpdateMcpSettings = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: McpChannelConfig) =>
+      (await http.put<McpSettingsOut>('/api/v1/admin/mcp-settings', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['mcp-settings'] }),
   });
 };

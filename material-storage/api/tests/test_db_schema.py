@@ -12,6 +12,8 @@ from app.db.tables import (
     BaiduBinding,
     Base,
     Folder,
+    PersonalAccessToken,
+    SystemFlag,
     User,
 )
 
@@ -39,6 +41,9 @@ def test_all_tables_in_metadata() -> None:
         "baidu_bindings",
         "baidu_backup_tasks",
         "baidu_backup_task_files",
+        # 0020:MCP 素材服务(PAT + 系统配置 KV)
+        "personal_access_tokens",
+        "system_flags",
     }
 
 
@@ -71,6 +76,58 @@ def test_audit_event_indices() -> None:
     assert "ix_audit_event_type_time" in indices
     assert "ix_audit_actor_time" in indices
     assert "ix_audit_event_time" in indices
+
+
+# ─── MCP 素材服务(migration 20261031_0020)────────────────────────────────────
+
+
+def test_audit_event_auth_columns() -> None:
+    """D4:audit_events 加 auth_method / auth_token_id 两列(nullable,存量行为 NULL)。
+
+    auth_token_id 的 FK 必须 SET NULL(照审计列惯例:不能 CASCADE/RESTRICT),
+    且首版就建索引(删用户级联删 PAT 时 SET NULL 会全表扫 audit_events)。
+    """
+    cols = AuditEvent.__table__.c
+    assert "auth_method" in cols
+    assert "auth_token_id" in cols
+    assert cols.auth_method.nullable is True
+    assert cols.auth_method.type.length == 16
+    assert cols.auth_token_id.nullable is True
+    fks = {fk.parent.name: fk for fk in AuditEvent.__table__.foreign_keys}
+    assert fks["auth_token_id"].ondelete == "SET NULL"
+    assert fks["auth_token_id"].target_fullname == "personal_access_tokens.id"
+    assert "ix_audit_auth_token_id" in {i.name for i in AuditEvent.__table__.indexes}
+
+
+def test_personal_access_token_schema() -> None:
+    """D2/D3:PAT 表 —— token_hash 唯一(64)、token_prefix 16、user_id 索引 + CASCADE。"""
+    cols = PersonalAccessToken.__table__.c
+    assert cols.token_hash.type.length == 64
+    assert cols.token_hash.nullable is False
+    assert cols.token_prefix.type.length == 16
+    assert cols.name.type.length == 128
+    assert cols.expires_at.nullable is False
+    assert cols.last_used_at.nullable is True
+    assert cols.revoked_at.nullable is True
+    constraints = {c.name for c in PersonalAccessToken.__table__.constraints}
+    assert "uq_pat_token_hash" in constraints
+    assert "ix_personal_access_tokens_user_id" in {
+        i.name for i in PersonalAccessToken.__table__.indexes
+    }
+    fks = {fk.parent.name: fk for fk in PersonalAccessToken.__table__.foreign_keys}
+    assert fks["user_id"].ondelete == "CASCADE"
+
+
+def test_system_flags_schema() -> None:
+    """D5/迁移 0020:system_flags(key PK + JSONB NOT NULL + TimestampMixin)。"""
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    cols = SystemFlag.__table__.c
+    assert cols.key.primary_key is True
+    assert cols.key.type.length == 64
+    assert isinstance(cols.value.type, JSONB)
+    assert cols.value.nullable is False
+    assert {"created_at", "updated_at", "key", "value"} == set(cols.keys())
 
 
 def test_user_open_id_unique() -> None:
