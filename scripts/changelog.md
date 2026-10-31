@@ -1,3 +1,12 @@
+## 2026-10-31
+- **MCP 第三渠道上线:AI 客户端可凭个人访问令牌(PAT)以本人身份搜索 / 看缩略图 / 下载 / 上传素材(`99decab`)**——新增 ms-mcp 薄代理与 `/mcp` 入口(Streamable HTTP),支持 ZCode / Claude 等能配置静态 `Authorization: Bearer` 的客户端;权限与网页一致(仅本人可见范围),不支持仅 OAuth 的托管客户端。
+- **网页新增「设置 → 访问令牌」自助签发 / 吊销(`99decab`)**——令牌以 `mspat_` 开头,明文只显示一次,有效期 1~365 天(默认 90),每账号最多 5 个活跃令牌;改密码自动吊销该账号全部令牌。
+- **管理后台新增「MCP 设置」与全量令牌管理(`99decab`)**——管理员可开启 / 关闭 MCP 通道(默认关闭)、调整并发与限流配额、查看今日成功 / 拒绝 / 在途并发等实时指标,并可吊销任意用户的令牌。
+- **审计新增「认证方式(常规 / 令牌)」筛选与 CSV 列,新增 3 个事件(`99decab`)**——事件为令牌创建 / 令牌吊销 / MCP 通道设置变更(`token_created` / `token_revoked` / `mcp_settings_changed`);审计页、使用统计页与 App 标签同步(统计页新增 mcp 渠道;App 本轮只同步代码、不发版)。
+- **运维:新增 ms-mcp 容器与 `/mcp` 入口,通道默认关闭,需管理员在后台开启(`99decab`)**——dev 已部署(`99decab` + `850cf07` 增量),admin 可在「MCP 设置」查看今日成功 / 拒绝 / 在途并发。
+- **修复:MCP 批次测试自身 6 处缺陷 + ms-mcp 日志脱敏 presigned URL(`850cf07`)**。
+- **prod 部署:待部署(PM 补)**。
+
 ## 2026-10-28
 - **prod 紧急修复:项目获取 500(用户报障,根因=0019 迁移未落 prod)**:症状=prod GET /projects 500,日志实锤 `relation "user_project_pins" does not exist`;根因=**prod alembic 停在 0018**——置顶周期的 0019(user_project_pins 建表)当时只部署 dev 手动跑过迁移,prod 这次一步跨版本上代码(247a124 含 0019 的代码)却没带迁移,**deploy_lan 链路无 alembic 步骤是结构性缺口**(usage-stats 周期就手动补过 0018,本次漏对账)。修复=`docker exec ms-api alembic upgrade head`(0018→0019 建表,幂等 DDL),**~2 分钟内闭环**;复验=projects 列表/详情 200、pin/unpin/repin/收尾 unpin 全 204(置顶端到端可用且恢复原状)、folders/audit/usage/risk 全 200、最近 1 分钟 0 条 500(200×31/204×4)。**流程钉子(必固化):prod 部署前必须对账 `alembic current` vs `head`,落后即先 `upgrade head` 再 restart**
 - **风控模块周期收尾:prod 部署+App 七牛发版 0.1.12+16+push fork(用户指令「部署prod➕安卓apk七牛云发版➕push代码」)**:①**prod 发版窗口预检过**(百度任务 cancelled×1+completed×67,活动任务 0);deploy_lan prod --restart 一发过(**DEPLOYED.md=247a124/0 脏**),SPA 备份 web.bak-20261028-riskctl-prod 后分片替换——部署在 21:45 全部完成并回显验证;**⚠ 部署后 ~3 分钟跳板机 sshd 卡死**(nginx 443/18080 正常应答但反向隧道随 sshd 断,公网入口一度 502;ICMP 通/TCP 通/banner 超时,静默 10 分钟+多轮退避未自愈,疑 sshd 层 MaxStartups/资源问题),**~25 分钟后 sshd 自愈+隧道自动重连,补验全过:三入口指纹一致 index-CDqgB1kX.js(内网 :80/外网 18080/HTTPS)+未登录 locks 401+admin 登录 200+带 cookie GET /locks 200 空态**;②**App 发版 0.1.12+16 一发过**(release.mjs 自动 bump,签名闸 9467fc1b…/包名闸过;arm64 23.73MB,**本地/固定名/版本化三份 SHA256=abe73ce9… 一致**,app_version.json 0.1.12/16+CDN 刷新 200;changelog 文案=管理后台新增「风控」「使用统计」入口);版本记账 **726a176**;③**push fork 完成**(0013d46..726a176,liuqi→fork/liuqi);待办=跳板机恢复后 prod 公网入口补验+真机浏览待 tester

@@ -33,7 +33,7 @@ material-storage/mcp/
 | 变量 | 必填 | 默认(compose) | 说明 |
 |---|---|---|---|
 | `MS_API_BASE_URL` | 是 | `http://ms-api:8000` | api 根地址(容器内)。dev 覆盖为 dev 服务名 |
-| `MS_MCP_ENTRY_ALLOWLIST` | 是 | 见 compose(14 条) | 入口白名单 `host=scheme,host=scheme`;按环境裁剪 |
+| `MS_MCP_ENTRY_ALLOWLIST` | 是 | 见 compose(prod 10 条,无 `:8090`) | 入口白名单 `host=scheme,host=scheme`;按环境裁剪 |
 | `MS_MCP_INTERNAL_BASE_URL` | 是 | `http://192.168.110.221` | 取缩略图字节时的固定 Host(启动校验必须命中白名单且 scheme 一致;dev 用 `:8090`) |
 | `MS_MCP_SESSION_TTL` | 否 | `1800` | 空闲会话 TTL(秒);同时作为 FastMCP `session_idle_timeout` |
 | `MS_MCP_VERIFY_TLS` | 否 | `true` | 两套 httpx 客户端共用的 verify 开关(内网 http 无所谓;公网自签阶段可 `false`) |
@@ -137,11 +137,9 @@ services:
     environment:
       # dev 的 api 服务名/容器名以目标机实测为准(docker network inspect / getent hosts)
       MS_API_BASE_URL: http://ms-api-dev:8000
-      # dev 裁剪版:不得放行 prod Host;内网 8090 + 本机调试
-      MS_MCP_ENTRY_ALLOWLIST: >-
-        ms.local=http,192.168.110.221=http,192.168.110.221:80=http,
-        192.168.110.221:8090=http,localhost=http,localhost:8090=http,
-        127.0.0.1=http,127.0.0.1:8090=http,47.108.196.211:8080=http
+      # dev 裁剪版(与服务器上现有 override 一致,3 条,均 :8090):
+      # 不得放行 prod Host;dev 入口只有内网 8090 与本机 8090 两种拼法。
+      MS_MCP_ENTRY_ALLOWLIST: 192.168.110.221:8090=http,localhost:8090=http,127.0.0.1:8090=http
       MS_MCP_INTERNAL_BASE_URL: http://192.168.110.221:8090
 networks:
   poc-net:

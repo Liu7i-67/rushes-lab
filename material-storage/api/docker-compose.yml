@@ -102,9 +102,9 @@ services:
     environment:
       MS_API_BASE_URL: ${MS_MCP_API_BASE_URL:-http://ms-api:8000}
       # 入口白名单(host=scheme,逗号分隔;按环境裁剪,条目 ≤14,去重 scheme://host ≤16)。
-      # 默认=方案全量示例(prod 入口为主 + localhost/127.0.0.1 调试拼法);dev 必在
-      # override/.env 覆盖为 dev 裁剪版(dev 8090、不得放行 prod Host)。
-      MS_MCP_ENTRY_ALLOWLIST: ${MS_MCP_ENTRY_ALLOWLIST:-ms.local=http,bucket.taoxiplan.com=https,bucket.taoxiplan.com:443=https,47.108.196.211=https,47.108.196.211:443=https,47.108.196.211:18080=http,47.108.196.211:8080=http,192.168.110.221=http,192.168.110.221:80=http,192.168.110.221:8090=http,localhost=http,localhost:8090=http,127.0.0.1=http,127.0.0.1:8090=http}
+      # 默认 = **prod 专用 10 条**(不含任何 dev :8090 拼法);dev 必在 override 覆盖为
+      # dev 裁剪版 3 条(见 ../mcp/README.md)。prod 无 override 时即用本默认值。
+      MS_MCP_ENTRY_ALLOWLIST: ${MS_MCP_ENTRY_ALLOWLIST:-ms.local=http,192.168.110.221=http,192.168.110.221:80=http,47.108.196.211=https,47.108.196.211:443=https,47.108.196.211:18080=http,bucket.taoxiplan.com=https,bucket.taoxiplan.com:443=https,localhost=http,127.0.0.1=http}
       # 取缩略图字节的固定内网入口(必须是上面白名单内的条目,启动时校验)
       MS_MCP_INTERNAL_BASE_URL: ${MS_MCP_INTERNAL_BASE_URL:-http://192.168.110.221}
       # 空闲会话 TTL(秒),同时作为 FastMCP session_idle_timeout 与绑定表淘汰
