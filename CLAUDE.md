@@ -177,6 +177,8 @@ subject 一律是**本地身份**(#148 起,不再用飞书 ID):`user:<users.id U
    Redis 双维限流(per IP + per username,5 次失败锁 15 分钟)。登录名匹配优先级 **username → email(含 @)→ name 兜底**,
    全部忽略大小写;任一维度命中多行则拒绝(防重名锁死)。
 2. 本地 dev:`X-User-Id` header,**仅 `env == "dev"` 生效**,前端在 `/ms-static/web/dev-login` 切换。
+   **prod 机 `.env` 自 2026-10-31 起为 `ENV=production`**(此前误配 `dev`,该头可在内网/公网冒充任意用户,已修);
+   改 `.env` 后须 `docker compose up -d --force-recreate ms-api ms-worker`(`restart` 不重读 env_file)。
 3. OIDC 只保留**一层 provider 配置**(`settings.oidc_provider`,dict,默认空 = 纯本地登录)。hand-rolled httpx,
    **未做 id_token 校验 / PKCE** —— 是"留口",不是"就绪",接真 IdP 前必须补齐。
 

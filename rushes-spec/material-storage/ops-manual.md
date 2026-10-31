@@ -1266,7 +1266,10 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
   负载需另行观测。
 - **使用统计的 mcp 桶低估读流量**:search / thumbnail 不写审计,mcp 桶只反映审计
   可见操作(上传 / 下载签发等);真实流量看 `/admin/mcp-settings` 指标。
-- ⚠ **环境风险(既有配置,本期未改)**:prod 目标机 `.env` 当前为 `ENV=dev`,
-  `X-User-Id` 通道在 prod 可用;MCP 方案假设生产为 session-only,建议运维复核
-  (改 `ENV` 属另一变更,不在本期射程)。
+- ✅ **环境风险已处置(2026-10-31)**:prod 目标机 `.env` 已由 `ENV=dev` 改为
+  `ENV=production`(备份 `.env.bak-envprod-20261031`),`X-User-Id` 通道在 prod 关闭
+  (内网/公网 18080 实测均 401);账号密码登录、cookie 会话、PAT/MCP 链路复验通过。
+  `.env` 改动后必须 `docker compose up -d --force-recreate ms-api ms-worker`
+  (`restart` 不重读 env_file);回滚=改回 `ENV=dev` 再 force-recreate。
+  dev 环境继续 `ENV=dev`(测试依赖 X-User-Id 夹具)。
 
