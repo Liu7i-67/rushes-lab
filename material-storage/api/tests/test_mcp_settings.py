@@ -167,11 +167,25 @@ def test_invalid_combinations_rejected() -> None:
     assert ok.per_ip_rpm == 2 * ok.per_token_rpm
 
 
-# ─── 读:真实 DB(行缺失回落默认值 / seed 默认行)──────────────────────────────
+# ─── 读:真实 DB(行缺失回落默认值 / seed 行 = DB 当前值)─────────────────────
 @pytest.mark.asyncio
-async def test_read_seed_row_returns_defaults() -> None:
-    svc = McpSettingsService(FakeRedis())
-    assert (await svc.read()).as_dict() == DEFAULT_MCP_FLAG
+async def test_read_seed_row_returns_db_value() -> None:
+    """读命中 seed 行时必须返回 **DB 行当前值**(共享 dev 上管理员可能已开启,
+    不得假定等于内置默认,也不为迁就测试去改 dev 的 mcp_channel)。"""
+    from sqlalchemy import select
+
+    from app.db.session import get_sessionmaker
+    from app.db.tables import SystemFlag
+
+    async with get_sessionmaker()() as db:
+        row = (
+            await db.execute(
+                select(SystemFlag.value).where(SystemFlag.key == MCP_FLAG_KEY)
+            )
+        ).first()
+    assert row is not None, "system_flags 缺 mcp_channel seed 行(迁移 0020 未跑?)"
+    expected = dict(row[0])
+    assert (await McpSettingsService(FakeRedis()).read()).as_dict() == expected
 
 
 @pytest.mark.asyncio
@@ -182,6 +196,7 @@ async def test_read_row_missing_returns_default_and_backfills_redis() -> None:
     from app.db.session import get_sessionmaker
     from app.db.tables import SystemFlag
 
+    original = await _read_flag_row()  # 保存用例前的行(共享 dev 可能已开启)
     async with get_sessionmaker()() as db:
         await db.execute(delete(SystemFlag).where(SystemFlag.key == MCP_FLAG_KEY))
         await db.commit()
@@ -192,23 +207,44 @@ async def test_read_row_missing_returns_default_and_backfills_redis() -> None:
         assert MCP_REDIS_KEY in redis.store
         assert redis.set_calls[-1][2] == MCP_FLAG_TTL_SECONDS
     finally:
-        await _restore_default_row()
+        await _restore_flag_row(original)
 
 
-async def _restore_default_row() -> None:
+async def _read_flag_row() -> dict | None:
+    """直读 system_flags 的 mcp_channel 行(None = 行缺失)。"""
+    from sqlalchemy import select
+
+    from app.db.session import get_sessionmaker
+    from app.db.tables import SystemFlag
+
+    async with get_sessionmaker()() as db:
+        row = (
+            await db.execute(
+                select(SystemFlag.value).where(SystemFlag.key == MCP_FLAG_KEY)
+            )
+        ).first()
+    return None if row is None else dict(row[0])
+
+
+async def _restore_flag_row(value: dict | None) -> None:
+    """恢复用例前的 system_flags 行(不写内置默认覆盖管理员配置)。"""
+    from sqlalchemy import delete
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.db.session import get_sessionmaker
     from app.db.tables import SystemFlag
 
     async with get_sessionmaker()() as db:
-        await db.execute(
-            pg_insert(SystemFlag)
-            .values(key=MCP_FLAG_KEY, value=DEFAULT_MCP_FLAG)
-            .on_conflict_do_update(
-                index_elements=[SystemFlag.key], set_={"value": DEFAULT_MCP_FLAG},
+        if value is None:  # 原本无行 → 删回缺失态
+            await db.execute(delete(SystemFlag).where(SystemFlag.key == MCP_FLAG_KEY))
+        else:
+            await db.execute(
+                pg_insert(SystemFlag)
+                .values(key=MCP_FLAG_KEY, value=value)
+                .on_conflict_do_update(
+                    index_elements=[SystemFlag.key], set_={"value": value},
+                )
             )
-        )
         await db.commit()
 
 
@@ -346,12 +382,13 @@ async def test_write_redis_set_and_del_fail_write_through_local_cache() -> None:
 
 @pytest.mark.asyncio
 async def test_write_row_missing_upsert_then_read_back() -> None:
-    """真实 DB:行缺失时 write 可 upsert(管理员自救),读回一致;收尾恢复默认行。"""
+    """真实 DB:行缺失时 write 可 upsert(管理员自救),读回一致;收尾恢复原行。"""
     from sqlalchemy import delete, select
 
     from app.db.session import get_sessionmaker
     from app.db.tables import SystemFlag
 
+    original = await _read_flag_row()  # 保存用例前的行(共享 dev 可能已开启)
     async with get_sessionmaker()() as db:
         await db.execute(delete(SystemFlag).where(SystemFlag.key == MCP_FLAG_KEY))
         await db.commit()
@@ -372,7 +409,7 @@ async def test_write_row_missing_upsert_then_read_back() -> None:
             ).scalar_one()
         assert row == new_value.as_dict()
     finally:
-        await _restore_default_row()
+        await _restore_flag_row(original)
 
 
 # ─── from_dict 防御(Redis/DB 内容非法 → ValueError,由 read 回落)──────────────

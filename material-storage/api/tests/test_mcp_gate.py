@@ -32,6 +32,7 @@ from app.services.mcp_gate import (
     validate_gate_routes,
 )
 from app.services.mcp_limiter import (
+    CONC_GLOBAL_KEY,
     acquire_concurrency,
     conc_token_key,
     in_flight,
@@ -188,10 +189,23 @@ async def test_release_failure_does_not_raise(redis_client: Any) -> None:
             return getattr(redis_client, name)
 
     token_id = uuid.uuid4()
+    # 失败路径:两闸的 ZREM 全部抛 → per-token 键与 global 成员都留下(租约自愈)。
+    # 收尾必须两个都清(只删 per-token 会泄漏 global 成员 600s,占掉 1/8 全局配额
+    # 并污染 in_flight)。req_id 在 gate 内部生成拿不到 → 用「前后差集」定位本用例成员。
+    before_global = set(await redis_client.zrange(CONC_GLOBAL_KEY, 0, -1))
+    leaked: set[str] = set()
     request = make_request(token_id=token_id, redis=_ReleaseFail())
-    agen = await _enter(request)
-    await agen.aclose()  # 不抛
-    await _async_cleanup(redis_client, conc_token_key(token_id))
+    try:
+        agen = await _enter(request)
+        await agen.aclose()  # 不抛
+        leaked = set(await redis_client.zrange(CONC_GLOBAL_KEY, 0, -1)) - before_global
+        assert len(leaked) == 1, "前提:ZREM 失败确实留下 1 个 global 成员(靠租约自愈)"
+    finally:
+        if leaked:
+            await redis_client.zrem(CONC_GLOBAL_KEY, *leaked)
+        await _async_cleanup(redis_client, conc_token_key(token_id))
+    # 跑完全局闸不得残留本用例成员
+    assert not (set(await redis_client.zrange(CONC_GLOBAL_KEY, 0, -1)) - before_global)
 
 
 # ─── 6) 启动自检 ───────────────────────────────────────────────────────────

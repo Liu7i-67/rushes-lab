@@ -195,11 +195,16 @@ async def _first_folder_and_project() -> tuple[uuid.UUID, uuid.UUID]:
     from sqlalchemy import select
 
     from app.db.session import get_sessionmaker
-    from app.db.tables import Folder
+    from app.db.tables import Folder, Project
 
     async with get_sessionmaker()() as db:
+        # folders 表**没有** deleted_at(软删只在 projects):取任意未被软删项目下的
+        # 目录即可,过滤列必须是真实存在的(否则 pytest 直接 AttributeError)。
         row = (await db.execute(
-            select(Folder.id, Folder.project_id).where(Folder.deleted_at.is_(None)).limit(1)
+            select(Folder.id, Folder.project_id)
+            .join(Project, Project.id == Folder.project_id)
+            .where(Project.deleted_at.is_(None))
+            .limit(1)
         )).first()
     if row is None:
         pytest.skip("seed 数据缺失(test_folder)")

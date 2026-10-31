@@ -12,7 +12,9 @@ PAT 连续 100 次 search → 审计表零新增行」。
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -147,6 +149,45 @@ async def _cleanup(dedup_keys: list[str]) -> None:
         await db.commit()
 
 
+async def _create_pat() -> tuple[uuid.UUID, uuid.UUID]:
+    """插入临时 user + personal_access_tokens 行。
+
+    ``audit_events.auth_token_id`` 是**真 FK**(ON DELETE SET NULL),随机 UUID
+    必然违约 → 断言前必须先有真实令牌行。返回 (owner_user_id, token_row_id)。
+    """
+    from app.db.tables import PersonalAccessToken, User
+
+    owner = uuid.uuid4()
+    token_id = uuid.uuid4()
+    async with get_sessionmaker()() as db:
+        db.add(User(
+            id=owner, name=f"audit-auth-{owner.hex[:8]}", email=None, is_active=True,
+            must_change_password=False, password_hash=None,
+        ))
+        await db.flush()
+        db.add(PersonalAccessToken(
+            id=token_id,
+            user_id=owner,
+            name="audit-auth-test",
+            token_hash=hashlib.sha256(f"test:{token_id}".encode()).hexdigest(),
+            token_prefix=("mspat_" + token_id.hex)[:16],
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        ))
+        await db.commit()
+    return owner, token_id
+
+
+async def _delete_pat(owner: uuid.UUID, token_id: uuid.UUID) -> None:
+    from app.db.tables import PersonalAccessToken, User
+
+    async with get_sessionmaker()() as db:
+        await db.execute(delete(PersonalAccessToken).where(
+            PersonalAccessToken.id == token_id
+        ))
+        await db.execute(delete(User).where(User.id == owner))
+        await db.commit()
+
+
 @pytest.mark.parametrize(
     ("auth_method", "expect_method"),
     [("pat", "pat"), ("session", "session")],
@@ -154,11 +195,13 @@ async def _cleanup(dedup_keys: list[str]) -> None:
 async def test_write_persists_auth_method(
     db_ready: None, auth_method: str, expect_method: str,
 ) -> None:
-    token_id = uuid.uuid4()
+    # pat 分支的 auth_token_id 是 FK → 先用真实 PAT 行(随机 UUID 会 FK 违约)
+    owner: uuid.UUID | None = None
+    token_id: uuid.UUID | None = None
+    if auth_method == "pat":
+        owner, token_id = await _create_pat()
     dedup_key = f"test:audit-auth:{uuid.uuid4()}"
-    request = make_request(
-        auth_method=auth_method, token_id=token_id if auth_method == "pat" else None,
-    )
+    request = make_request(auth_method=auth_method, token_id=token_id)
     try:
         async with get_sessionmaker()() as session:
             await AuditService(session, request).write(
@@ -170,10 +213,12 @@ async def test_write_persists_auth_method(
         assert row[1] == (token_id if auth_method == "pat" else None)
     finally:
         await _cleanup([dedup_key])
+        if owner is not None and token_id is not None:
+            await _delete_pat(owner, token_id)
 
 
 async def test_write_without_request_uses_contextvar(db_ready: None) -> None:
-    token_id = uuid.uuid4()
+    owner, token_id = await _create_pat()
     dedup_key = f"test:audit-auth:{uuid.uuid4()}"
     bind_auth_context("pat", token_id)
     try:
@@ -185,6 +230,7 @@ async def test_write_without_request_uses_contextvar(db_ready: None) -> None:
         assert await _read_row(dedup_key) == ("pat", token_id)
     finally:
         await _cleanup([dedup_key])
+        await _delete_pat(owner, token_id)
 
 
 async def test_write_worker_without_context_is_null(db_ready: None) -> None:

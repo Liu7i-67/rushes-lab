@@ -207,6 +207,48 @@ async def test_get_thumbnail_tool_returns_image_content() -> None:
         await _stop(env)
 
 
+async def test_thumbnail_presigned_url_not_logged(caplog: pytest.LogCaptureFixture) -> None:
+    signature = "deadbeef" * 8
+    signed = (
+        "http://192.168.110.221/ms-thumbs/a1.png"
+        f"?X-Amz-Credential=cred%2F20261031&X-Amz-Signature={signature}"
+    )
+    api_mock = MockApi()
+    api_mock.add("GET", "/api/v1/auth/me", json=ME)
+    api_mock.add(
+        "GET", "/api/v1/assets/a1/thumbnail-url",
+        json={"url": signed, "expires_in": 1800, "variant": "small"},
+    )
+    env = await _start(
+        api_mock,
+        bytes_transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, content=b"\x89PNG", headers={"content-type": "image/png"}
+            )
+        ),
+    )
+    try:
+        with caplog.at_level(logging.INFO):
+            resp = await env.client.post(
+                "/mcp", json=INITIALIZE, headers={**ACCEPT, "Authorization": f"Bearer {PAT}"}
+            )
+            session_id = resp.headers["mcp-session-id"]
+            resp = await env.client.post(
+                "/mcp", json=tools_call(2, "get_thumbnail", {"asset_id": "a1", "size": "small"}),
+                headers={**ACCEPT, "mcp-session-id": session_id},
+            )
+        assert resp.status_code == 200, resp.text
+        # 签名 query 不进日志(httpx INFO access log),但 path 仍可排障
+        assert signature not in caplog.text
+        assert "X-Amz-Signature" not in caplog.text
+        assert "http://192.168.110.221/ms-thumbs/a1.png?<redacted>" in caplog.text
+        # PAT / Session-Id 脱敏不回归
+        assert PAT not in caplog.text
+        assert session_id not in caplog.text
+    finally:
+        await _stop(env)
+
+
 async def test_tool_error_is_error_true_without_stack() -> None:
     api_mock = MockApi()
     api_mock.add("GET", "/api/v1/auth/me", json=ME)

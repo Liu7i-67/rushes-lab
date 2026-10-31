@@ -22,7 +22,7 @@ import redis.asyncio as redis_asyncio
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
 
-from app.deps import CurrentUser, get_current_user
+from app.deps import CurrentUser, get_current_user, get_is_system_admin
 from app.main import create_app
 from app.services.mcp_gate import PAT_UPLOAD_FORBIDDEN_DETAIL, upload_owner_key
 from app.services.mcp_settings import McpSettings
@@ -68,12 +68,26 @@ class _FailingRedis:
         raise ConnectionError("redis down(delete)")
 
 
+class _FakePermissions:
+    """complete 端点依赖解析用(本文件不接 OpenFGA/DB;presign 已是假的)。
+
+    path/body 一致性校验在权限判定**之前**,此替身只需让依赖可解析。
+    """
+
+    async def check(self, **kwargs: Any) -> bool:
+        return True
+
+
 @pytest.fixture
 async def client(redis_client: Any):
     app = create_app()
     app.state.redis = redis_client
     app.state.mcp_settings = SimpleNamespace()
     app.state.presign = FakePresign()
+    # create_app() 不跑 lifespan(lifespan 会接 OpenFGA/MinIO/arq);这里补上
+    # complete 端点依赖解析所需的 state —— 否则 get_permissions 直接
+    # AttributeError(500),path/body 不一致的用例测不到真实 400。
+    app.state.permissions = _FakePermissions()
 
     async def _pat_user(request: Request) -> CurrentUser:
         request.state.auth_method = "pat"
@@ -81,7 +95,12 @@ async def client(redis_client: Any):
         request.state.mcp_flag = McpSettings(True, 8, 4, 120, 600)
         return CurrentUser(id=PAT_USER_ID, name="pat-user")
 
+    async def _is_system_admin() -> bool:
+        # 真实实现要查 DB(default org);本文件用假依赖隔离 DB(与 presign 替身同理)
+        return True
+
     app.dependency_overrides[get_current_user] = _pat_user
+    app.dependency_overrides[get_is_system_admin] = _is_system_admin
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
