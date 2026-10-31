@@ -58,6 +58,7 @@ from app.services.permissions import (
     fmt_subject,
     is_already_exists_error,
 )
+from app.services.tokens import revoke_user_tokens
 from app.services.user_provisioning import add_user_to_group_audited, provision_local_user
 
 log = logging.getLogger(__name__)
@@ -390,6 +391,10 @@ async def disable_directory_user(
     n = await permissions.revoke_user_completely(str(user_id))
     target.is_active = False
     target.resigned_at = datetime.now(UTC)
+    # D13 第五处挂钩:禁用 ⇒ 吊销该用户全部活跃 PAT。必须在同一事务 commit 之前
+    # (否则重新启用后旧 PAT 会复活 —— 禁用只拦截认证、不吊销令牌);
+    # 审计在 commit 之后逐条写(actor=admin, reason=user_disabled)。
+    revoked_tokens = await revoke_user_tokens(db, user_id=user_id, reason="user_disabled")
     await db.commit()
 
     await audit.write(
@@ -400,7 +405,22 @@ async def disable_directory_user(
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("user disabled id=%s by admin=%s tuples_revoked=%d", user_id, user.id, n)
+    for ref in revoked_tokens:
+        await audit.write(
+            event_type="token_revoked",
+            actor_user_id=user.id,
+            details={
+                "user_id": str(user_id),
+                "token_id": str(ref.id),
+                "token_prefix": ref.token_prefix,
+                "reason": "user_disabled",
+                "actor": "admin",
+            },
+            request_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    log.info("user disabled id=%s by admin=%s tuples_revoked=%d tokens_revoked=%d",
+             user_id, user.id, n, len(revoked_tokens))
     return {"ok": True, "user_id": str(user_id), "tuples_revoked": n}
 
 
@@ -489,6 +509,9 @@ async def reset_directory_user_password(
     temp_pw = generate_temp_password()
     target.password_hash = hash_password(temp_pw)
     target.must_change_password = True
+    # D13 第二处挂钩:管理员重置密码 ⇒ 吊销该用户全部活跃 PAT(同事务 commit 之前);
+    # 审计在 commit 之后逐条写(actor=admin, reason=password_changed)
+    revoked_tokens = await revoke_user_tokens(db, user_id=user_id, reason="password_changed")
     await db.commit()
 
     cleared = await local_auth.clear_locks(target)
@@ -500,8 +523,22 @@ async def reset_directory_user_password(
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
-    log.info("password reset user=%s by admin=%s locks_cleared=%s",
-             user_id, user.id, cleared.forms)
+    for ref in revoked_tokens:
+        await audit.write(
+            event_type="token_revoked",
+            actor_user_id=user.id,
+            details={
+                "user_id": str(user_id),
+                "token_id": str(ref.id),
+                "token_prefix": ref.token_prefix,
+                "reason": "password_changed",
+                "actor": "admin",
+            },
+            request_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
+    log.info("password reset user=%s by admin=%s locks_cleared=%s tokens_revoked=%d",
+             user_id, user.id, cleared.forms, len(revoked_tokens))
     return UserResetPasswordOut(temporary_password=temp_pw)
 
 

@@ -7,6 +7,8 @@ endpoints:
   POST /api/v1/auth/logout          → 清 session cookie
   POST /api/v1/auth/local/login     → 账号密码登录(限流 + audit;session JWT 复用 #149)
   POST /api/v1/auth/change-password → 修改密码(首登 must_change_password 强制流程 #149)
+  /api/v1/auth/tokens*              → PAT 自助管理三端点(实现在 app/routers/auth_tokens.py,
+                                      此处 include_router 挂载)
 """
 from __future__ import annotations
 
@@ -25,15 +27,22 @@ from app.deps import (
     get_current_user,
     get_local_auth,
     get_request_context,
+    require_session_auth,
 )
 from app.models import ChangePasswordIn, LocalLoginIn
+from app.routers.auth_tokens import router as tokens_router
 from app.services.audit import AuditService
 from app.services.auth import OIDCService
 from app.services.local_auth import LocalAuthService
+from app.services.mcp_gate import mcp_gate
+from app.services.tokens import revoke_user_tokens
 from app.settings import get_settings
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+# PAT 自助管理三端点(/api/v1/auth/tokens...):实现独立在 auth_tokens.py,
+# 最终 URL 与拆分前一致(本 router 由 main.py 以 /api/v1/auth 前缀挂载)
+router.include_router(tokens_router, prefix="/tokens")
 
 
 # 复用 lifespan-wired single service instance
@@ -117,7 +126,7 @@ async def callback(
     return resp
 
 
-@router.get("/me")
+@router.get("/me", dependencies=[Depends(mcp_gate)])
 async def me(
     request: Request,
     cur: CurrentUser = Depends(get_current_user),
@@ -374,7 +383,10 @@ async def local_login(
 @router.post("/change-password")
 async def change_password(
     body: ChangePasswordIn,
-    cur: CurrentUser = Depends(get_current_user),  # noqa: B008  # FastAPI DI,repo 全量同款
+    # D13b:PAT 一律 403「令牌不允许管理令牌/改密」—— 否则持 PAT 者可用旧密码
+    # 自助改密,绕开「改密须由 session 发起」的语义(D11 口径依赖此)。
+    # **逐路由守卫,勿给整个 auth router 挂**(/auth/local/login 会被挡死)。
+    cur: CurrentUser = Depends(require_session_auth),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008
     audit: AuditService = Depends(get_audit),  # noqa: B008
@@ -412,6 +424,11 @@ async def change_password(
 
     user.password_hash = local_auth.hash_password(body.new_password)
     user.must_change_password = False
+    # D13 安全不变量:密码变更 ⇒ 吊销该用户全部活跃 PAT。吊销 UPDATE 必须与
+    # password_hash 写入同事务、同一次 commit 之前(commit 之后再吊销会造出
+    # 「密码已改而 PAT 仍有效」的窗口);审计在 commit 之后逐条写(只写本次
+    # 真正被吊销的行,无活跃令牌则不写),审计失败只 log 不回滚。
+    revoked_tokens = await revoke_user_tokens(db, user_id=user.id, reason="password_changed")
     await db.commit()
 
     await audit.write(
@@ -421,5 +438,19 @@ async def change_password(
         user_agent=ctx.get("user_agent"),
         details={"ok": True},
     )
-    log.info("password changed user_id=%s", user.id)
+    for ref in revoked_tokens:
+        await audit.write(
+            event_type="token_revoked",
+            actor_user_id=user.id,
+            request_ip=ip,
+            user_agent=ctx.get("user_agent"),
+            details={
+                "user_id": str(user.id),
+                "token_id": str(ref.id),
+                "token_prefix": ref.token_prefix,
+                "reason": "password_changed",
+                "actor": "self",
+            },
+        )
+    log.info("password changed user_id=%s tokens_revoked=%d", user.id, len(revoked_tokens))
     return JSONResponse({"status": "ok"})

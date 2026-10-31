@@ -24,15 +24,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # ─── SQL CASE 常量(需求 §2 规则序,逐字遵守;自上而下首中即归)────────────────
 # platform:user_agent 解析。App 标记优先于浏览器 Mobile 标记;一律 ILIKE 免
-# casing 依赖。规则 5「非空」显式排除空串(历史直插的 '' 行落 ELSE unknown
-# 兜底分支,方案 §3.1);规则 6 即 ELSE 兜底(write 侧已把空串归一 None,
-# 新数据不可达,枚举不设、仅 SQL 兜底保留)。
+# casing 依赖。**MCP 渠道(2026-10-30 MCP 素材服务 D11):ms-mcp 转发 UA 为
+# `msmcp/<ver>`,桶值 `mcp`,分支必须排在 web_desktop 之前**。规则 5「非空」
+# 显式排除空串(历史直插的 '' 行落 ELSE unknown 兜底分支,方案 §3.1);规则 6
+# 即 ELSE 兜底(write 侧已把空串归一 None,新数据不可达,枚举不设、仅 SQL 兜底保留)。
+# 口径注:**使用统计依托 audit_events,而 search/thumbnail 零审计,故 mcp 桶只
+# 反映审计可见操作(上传/下载签发/download_denied)的渠道占比,会低估 AI 读流量**
+# (MCP 通道真实流量以 /admin/mcp-settings 的闸实时指标为准,D11)。
 _PLATFORM_CASE = """CASE
     WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%(android)%' THEN 'android_app'
     WHEN user_agent ILIKE '%msapp%' AND user_agent ILIKE '%(ios)%' THEN 'ios_app'
     WHEN user_agent ILIKE '%msapp%' OR user_agent ILIKE '%Dart%' THEN 'app_legacy'
     WHEN user_agent ILIKE '%Android%' OR user_agent ILIKE '%iPhone%'
          OR user_agent ILIKE '%iPad%' OR user_agent ILIKE '%iPod%' THEN 'web_mobile'
+    WHEN user_agent ILIKE '%msmcp%' THEN 'mcp'
     WHEN user_agent IS NOT NULL AND user_agent <> '' THEN 'web_desktop'
     ELSE 'unknown'
 END"""

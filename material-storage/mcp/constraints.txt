@@ -1,0 +1,42 @@
+# ms-mcp 镜像依赖版本约束(pip constraints)—— material-storage/mcp 独立闭包
+#
+# 用途:Dockerfile `pip install -c constraints.txt .`。依赖声明在 pyproject.toml,
+# 本文件把 mcp 官方包的**运行时传递依赖闭包**钉死,防 rebuild 无 lock 随机漂版本。
+# ★ 与 material-storage/api/constraints.txt **互不相干**:两个镜像各自一份闭包,
+#   api 的 egg-info / uv.lock / constraints 都管不到本目录(方案 D14)。
+# ★ dev 组(pytest / ruff)不进镜像,不受本文件约束。
+#
+# 来源:2026-10-31 在干净 Python 3.12 venv 里
+#   `uv pip install "mcp==1.30.0" "httpx>=0.27" "uvicorn>=0.31"` 后 `uv pip freeze`
+#   (pywin32 是 mcp 的 Windows-only 依赖,Linux 镜像不会安装,故不列)。
+# 升级流程:改 pyproject 的 mcp pin → 干净 venv 重装 → 重生成本文件 → build →
+#   本地 `uv run pytest` → dev 容器 initialize 冒烟 → prod。
+annotated-types==0.8.0
+anyio==4.15.1
+attrs==26.1.0
+certifi==2026.10.23
+cffi==2.1.1
+click==8.5.0
+cryptography==50.0.2
+h11==0.16.0
+httpcore==1.0.9
+httpx==0.28.1
+httpx-sse==0.4.3
+idna==3.20
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+mcp==1.30.0
+pycparser==3.12
+pydantic==2.14.2
+pydantic-core==2.50.2
+pydantic-settings==2.16.2
+pyjwt==2.15.1
+python-dotenv==1.2.4
+python-multipart==0.0.32
+referencing==0.37.0
+rpds-py==2026.9.1
+sse-starlette==3.6.0
+starlette==1.10.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+uvicorn==0.54.0

@@ -656,6 +656,11 @@ export interface AuditEvent {
   // C 包(2026-10-19):details 白名单键批量补名(key=details 键名,value=纯显示名,
   // 不带类型后缀;查不到/垃圾值不进 dict)。可选 —— 旧后端无此字段,消费侧回落现行为。
   resolved_names?: Record<string, string>;
+  // MCP 素材服务(2026-10-30):认证方式审计列。auth_method = "session" | "pat",
+  // 存量行 / worker 写入行为 NULL —— 前端一律归一显示为 session(后端筛选与 CSV 同口径)。
+  // auth_token_id 仅详情展示(行内只显示认证方式)。可选 —— 旧后端无此字段。
+  auth_method?: string | null;
+  auth_token_id?: string | null;
 }
 
 // ─── 登录风控(2026-10-28;GET /api/v1/admin/risk/locks,require_system_admin)──
@@ -700,4 +705,70 @@ export interface RiskLocksOut {
 export interface RiskIpUnlockOut {
   ip: string;
   was_locked: boolean;
+}
+
+// ─── MCP 素材服务(2026-10-30 方案 D2/D3/D5/D15;docs/qdev/2026-10-30-mcp-service.md)──
+// 本组只做 Web:个人访问令牌(PAT)自助管理 + 管理后台 MCP 设置。App 本期不发版。
+
+/** 系统 flag `mcp_channel` 的值(DB `system_flags.value` JSONB 结构;PUT 请求体同形)。
+ *  与后端 `McpSettingsIn` 一致:enabled / max_concurrency / per_token_concurrency /
+ *  per_token_rpm / per_ip_rpm。 */
+export interface McpChannelConfig {
+  enabled: boolean;
+  max_concurrency: number;          // 1~8(全局在途上限;受 DB 连接池约束)
+  per_token_concurrency: number;    // 1~8 且 ≤ max_concurrency
+  per_token_rpm: number;            // 1~450
+  per_ip_rpm: number;               // 1~900 且 ≥ 2 × per_token_rpm
+}
+
+/** GET /api/v1/auth/tokens 行(镜像后端 TokenOut;无明文 / token_hash)。 */
+export interface PatToken {
+  id: string;
+  name: string;
+  token_prefix: string;             // `mspat_` + 10 字符,仅用于列表识别
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+  // 默认列表(仅活跃)恒 null;?include_revoked=1 的历史行才有值。
+  revoked_at?: string | null;
+  // 后端响应期派生列(expires_at <= now),不落库。可选 —— 缺失时由
+  // components/settings/token-status.ts 按 expires_at 自行派生。
+  expired?: boolean;
+}
+
+/** POST /api/v1/auth/tokens 响应(镜像后端 TokenCreatedOut):token 明文仅此一次
+ *  返回,后端附 Cache-Control: no-store。**不含 created_at/last_used_at。** */
+export interface PatTokenCreated {
+  id: string;
+  name: string;
+  token: string;
+  token_prefix: string;
+  expires_at: string;
+}
+
+/** GET /api/v1/auth/tokens 响应。方案未钉死信封:裸数组与 {items} 两种都兼容
+ *  (归一化在 hooks.ts 的 unwrapList 内完成)。 */
+export type PatTokenListResponse = PatToken[] | { items: PatToken[] };
+
+/** GET /api/v1/admin/tokens 行:在 PAT 行上补归属用户,后台直接展示姓名/登录名。 */
+export interface AdminPatToken extends PatToken {
+  user_id: string;
+  user_name: string | null;         // users.name
+  username: string | null;          // users.username(username 可空 —— 老账号)
+}
+
+/** GET /api/v1/admin/tokens 响应(limit/offset 分页;total 兼容缺失)。 */
+export type AdminPatTokenListResponse =
+  | AdminPatToken[]
+  | { items: AdminPatToken[]; total?: number; limit?: number; offset?: number };
+
+/** GET/PUT /api/v1/admin/mcp-settings 响应:通道配置 + 实时指标。
+ *  指标读取失败(Redis/计数异常)时字段为 null —— 不得拖死设置页(配置体正常返回)。 */
+export interface McpSettingsOut extends McpChannelConfig {
+  in_flight: number | null;               // ZCOUNT mcp:conc:global now +inf(与闸判定同口径)
+  today_success: number | null;           // mcp:stats:requests:{UTC yyyyMMdd}
+  today_rejected_policy: number | null;   // 关闭类/策略类拒绝
+  today_rejected_quota: number | null;    // 配额类拒绝(IP/RPM/并发)
+  rejected_infra_since_start: number | null; // 进程内,重启清零
+  dynamic_signers_cap_hits: number | null;   // 动态预签名缓存打满回落静态的次数(进程内)
 }

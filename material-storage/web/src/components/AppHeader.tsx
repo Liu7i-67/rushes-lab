@@ -8,7 +8,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AutoComplete, Badge, Empty, Modal, Tag } from 'antd';
-import { Bell, FileText, Search as SearchIcon, Inbox } from 'lucide-react';
+import { Bell, FileText, Search as SearchIcon, Inbox, Settings as SettingsIcon } from 'lucide-react';
 import { TaskCenterDrawer } from './TaskCenterDrawer';
 import { useMe, useNotificationsUnread, useProjects, useSearchAssets } from '../api/hooks';
 import { UserMenu } from './UserMenu';
@@ -117,6 +117,8 @@ export function AppHeader({ me }: Props) {
               <NavChip to="/admin/usage" label="使用统计" navigate={navigate} />
               {/* 风控模块: 登录风控 — 仅系统管理员可见 */}
               <NavChip to="/admin/risk" label="风控" navigate={navigate} />
+              {/* MCP 素材服务(2026-10-30): 通道开关 / 配额 / 全量令牌 — 仅系统管理员可见 */}
+              <NavChip to="/admin/mcp-settings" label="MCP 设置" navigate={navigate} />
             </>
           )}
           {/* 目录模板(folder-templates 方案 §3.3)— org admin / 系统管理员 / 持组 flag 成员可见;
@@ -169,6 +171,11 @@ export function AppHeader({ me }: Props) {
             <Bell size={16} strokeWidth={1.8} />
           </IconButton>
         </Badge>
+
+        {/* 账号设置 / 访问令牌(MCP 素材服务 D15) */}
+        <IconButton title="设置 / 访问令牌" onClick={() => navigate('/settings')}>
+          <SettingsIcon size={16} strokeWidth={1.8} />
+        </IconButton>
 
         <UserMenu me={me} />
       </header>

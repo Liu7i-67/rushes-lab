@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timezone
 from typing import Any, Literal, cast
 from urllib.parse import quote
 
+from botocore.exceptions import ClientError  # type: ignore[import-untyped]
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, and_, func, literal_column, or_, select, true, update
@@ -54,6 +55,7 @@ from app.models import (
 )
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
+from app.services.mcp_gate import UPLOAD_OWNER_TTL_SECONDS, upload_owner_key
 from app.services.org import user_is_org_file_deleter
 from app.services.permissions import PermissionsService, is_already_exists_error
 from app.services.presign import PresignService, request_base_from
@@ -78,11 +80,65 @@ from app.workers.batch_download import (
 router = APIRouter()
 log = logging.getLogger(__name__)
 
+# MinIO 撞已失效会话(complete 之后 upload_id 即死;abort 幂等走此分支)
+_NO_SUCH_UPLOAD = "NoSuchUpload"
+
+
+def _is_no_such_upload(e: BaseException) -> bool:
+    """botocore ClientError 且 Error.Code == NoSuchUpload(照 baidu_storage 同款)。"""
+    return isinstance(e, ClientError) and str(
+        (e.response or {}).get("Error", {}).get("Code", "")
+    ) == _NO_SUCH_UPLOAD
+
+
+def _upload_redis(request: Request) -> Any:
+    return getattr(request.app.state, "redis", None)
+
+
+async def _bind_upload_owner(
+    request: Request, upload_id: str, user_id: uuid.UUID,
+    presign: PresignService, bucket: str, key: str,
+) -> None:
+    """PAT 上传归属绑定(D9):``SET mcp:upload:{upload_id} = user_id NX EX 86400``。
+
+    **必须在端点内做**(gate 在端点执行前进入,拿不到 upload_id)。
+    **写失败 = fail-closed**:中止该 multipart(abort 同样 to_thread)并返回
+    503「上传会话初始化失败,请重试」—— 否则会「create 成功、后续 sign/complete
+    全 403」+ MinIO 孤儿。session 路径不写键、亦不校验(二期一并纳入)。
+    """
+    redis = _upload_redis(request)
+    written = False
+    if redis is not None:
+        try:
+            written = bool(await redis.set(
+                upload_owner_key(upload_id), str(user_id),
+                nx=True, ex=UPLOAD_OWNER_TTL_SECONDS,
+            ))
+        except Exception as e:
+            log.warning("mcp upload: 归属键写入失败 upload_id=%s: %s", upload_id, e)
+    if written:
+        return
+    with contextlib.suppress(Exception):
+        await asyncio.to_thread(presign.abort_multipart_upload, bucket, key, upload_id)
+    raise HTTPException(503, "上传会话初始化失败,请重试")
+
+
+async def _release_upload_owner(request: Request, upload_id: str) -> None:
+    """complete / abort 成功后 ``DEL mcp:upload:{upload_id}``(失败只 log)。"""
+    redis = _upload_redis(request)
+    if redis is None:
+        return
+    try:
+        await redis.delete(upload_owner_key(upload_id))
+    except Exception as e:
+        log.warning("mcp upload: 归属键删除失败 upload_id=%s: %s", upload_id, e)
+
 
 # ─── multipart upload(uppy AwsS3 plugin)─────────────────────────────────────
 @router.post("/uploads", response_model=UploadMultipartCreateOut)
 async def create_upload(
     payload: UploadUrlRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     presign: PresignService = Depends(get_presign),
@@ -141,7 +197,13 @@ async def create_upload(
     key = f"{folder.minio_prefix.rstrip('/')}/{payload.filename}"
     bucket = await _project_bucket(db, folder.project_id)
 
-    upload_id = presign.create_multipart_upload(bucket, key, payload.content_type)
+    # 同步 boto3 按铁律 to_thread(8 并发上传不卡事件循环;同仓 902/1014 先例)
+    upload_id = await asyncio.to_thread(
+        presign.create_multipart_upload, bucket, key, payload.content_type,
+    )
+    if getattr(request.state, "auth_method", None) == "pat":
+        # D9 归属绑定:写键必须在端点内(拿得到 upload_id);失败 fail-closed 503
+        await _bind_upload_owner(request, upload_id, user_id, presign, bucket, key)
     return UploadMultipartCreateOut(upload_id=upload_id, key=key, bucket=bucket)
 
 
@@ -179,6 +241,11 @@ async def complete_upload(
     ctx: dict = Depends(get_request_context),
 ) -> AssetOut:
     user_id = user.id
+    # D9:校验键必须是 path 的 upload_id(payload.upload_id 全仓零引用,端点实际
+    # 用的是 path 参数);两者不一致 → 400 —— 否则「path=受害者、body=自己」可
+    # 绕过 complete 的跨用户面(测试按此断言,不是可选项)。
+    if payload.upload_id != upload_id:
+        raise HTTPException(400, "upload_id 与 URL 路径不一致,请重新上传")
     folder = await db.get(Folder, payload.folder_id)
     if not folder:
         raise HTTPException(404, "folder not found")
@@ -202,16 +269,28 @@ async def complete_upload(
         object_id=str(folder.id),
     )
     if not allowed:
-        # 撤销半成品 multipart
-        presign.abort_multipart_upload(payload.bucket, payload.key, upload_id)
+        # 撤销半成品 multipart(同步 boto3 → to_thread,按铁律)
+        await asyncio.to_thread(
+            presign.abort_multipart_upload, payload.bucket, payload.key, upload_id,
+        )
         raise HTTPException(403, "no permission to complete upload(可能权限被撤销)")
 
-    result = presign.complete_multipart_upload(
-        payload.bucket, payload.key, upload_id, payload.parts  # type: ignore[arg-type]
-    )
+    try:
+        # 同步 boto3 → to_thread(complete 可能秒级;8 并发不能卡死事件循环)
+        result = await asyncio.to_thread(
+            presign.complete_multipart_upload,
+            payload.bucket, payload.key, upload_id, payload.parts,
+        )
+    except ClientError as e:
+        if _is_no_such_upload(e):
+            # 会话已死(重复提交 / 已被 abort / 超期):不能 500
+            raise HTTPException(
+                409, "上传会话已失效或已提交完成,请刷新后确认文件是否已入库",
+            ) from e
+        raise
 
-    # head_object 拿真实 size + content-type(complete 返回不含)
-    head = presign.head_object(payload.bucket, payload.key)
+    # head_object 拿真实 size + content-type(complete 返回不含;同步 boto3 → to_thread)
+    head = await asyncio.to_thread(presign.head_object, payload.bucket, payload.key)
 
     asset = Asset(
         id=uuid.uuid4(),
@@ -245,6 +324,8 @@ async def complete_upload(
             ) from e
         raise HTTPException(409, "上传写入失败(可能重复提交),请刷新后重试") from e
     await db.refresh(asset)
+    # D9:complete 成功后释放归属键(multipart 已消费,后续 abort/complete 走 409/204)
+    await _release_upload_owner(request, upload_id)
 
     await permissions.bootstrap_asset(
         asset_id=str(asset.id),
@@ -293,13 +374,26 @@ async def complete_upload(
 @router.delete("/uploads/{upload_id}", status_code=204)
 async def abort_upload(
     upload_id: str,
+    request: Request,
     bucket: str = Query(...),
     key: str = Query(...),
     presign: PresignService = Depends(get_presign),
     user: CurrentUser = Depends(get_current_user),
 ) -> None:
-    """主动 abort multipart;凡是认证 user 都可 abort 自己 upload。"""
-    presign.abort_multipart_upload(bucket, key, upload_id)
+    """主动 abort multipart;凡是认证 user 都可 abort 自己 upload。
+
+    PAT 的归属校验在 ``mcp_gate``(session 维持现状,二期一并纳入)。
+    会话已死(重复 abort / 已被 complete)→ 幂等 204 而非 500;
+    成功或幂等后 ``DEL mcp:upload:{upload_id}``。
+    """
+    try:
+        await asyncio.to_thread(presign.abort_multipart_upload, bucket, key, upload_id)
+    except ClientError as e:
+        if not _is_no_such_upload(e):
+            raise
+        # 幂等:会话已不存在 = 目标状态已达成
+        log.info("abort_upload: 会话已失效,幂等返回 upload_id=%s", upload_id)
+    await _release_upload_owner(request, upload_id)
 
 
 # ─── list assets ──────────────────────────────────────────────────────────────

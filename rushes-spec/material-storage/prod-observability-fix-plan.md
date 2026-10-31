@@ -11,7 +11,7 @@
 | # | 问题 | 根因 | 性质 |
 |---|------|------|------|
 | 1 | 蕾蕾/图文素材/生活美照 大量 livp 无法预览(含历史数据) | ① prod `ms-worker` 容器缺 `pillow-heif`,HEIC 静态图(iPhone「高效」格式默认)解码抛 `UnidentifiedImageError` → 无缩略图 → `thumbnail-url` 404 → 前端弹「还在生成(或生成失败)」;② 21 个 2026-09-03/04 网页直传的历史 livp 从未入队(livp 分派代码 09-03 才上线),且 `backfill_thumbnails.py` 在 dev/prod 都从未执行过 | 运维修复 |
-| 2 | 审计有「备份文件导入」事件但过滤下拉没有 | 前端硬编码数组 `EVENT_TYPES`(AdminAuditPage.tsx:39-50,24 项)漏 `baidu_file_imported` 等 33 项(后端实际写入 55 种,前端只列了其中 22 种 + 2 个从不写入的死选项);后端 `event_type` 参数是任意字符串精确匹配无白名单,**后端零改动** | 前端小改 |
+| 2 | 审计有「备份文件导入」事件但过滤下拉没有 | 前端硬编码数组 `EVENT_TYPES`(AdminAuditPage.tsx:39-50,24 项)漏 `baidu_file_imported` 等 33 项(后端实际写入 55 种〔当时口径,原算式 22+33〕→ 61(2026-10-30 实数)→ 本批 +3 = 64,前端只列了其中 22 种 + 2 个从不写入的死选项);后端 `event_type` 参数是任意字符串精确匹配无白名单,**后端零改动** | 前端小改 |
 | 3 | 管理员无途径查看全系统备份任务 | 15 条 `/api/v1/baidu/backup/*` 端点全部「仅本人」(`get_current_user` + `_own_task`),无任何 admin 端点;管理后台无对应页面 | 新功能 |
 
 **prod 实测基线(2026-10-14,修复验收对照用)**:
@@ -95,7 +95,7 @@ ssh hh2-prod 'docker logs ms-worker --since 5m 2>&1 | grep -c livp'
 | 文件 | 改动 |
 |------|------|
 | `web/src/pages/AdminAuditPage.tsx:39-50` | `EVENT_TYPES` 数组追加附录 A 的 33 项(含 `baidu_file_imported`);删除 2 个后端从不写入的死选项 `approval_notified`、`invite_notified`(见决策点 D1);顺带修正 :36-38 过时注释(Select 无 tags 模式,「可输自定义值」实际不可用) |
-| `web/src/lib/labels.ts` | 附录 A 全部 33 项的中文映射**已全部备好**(baidu_* 在 :65-75,其余散布 :18-61),实施时抽查核对即可,无需新增;仅修正 :9 过时注释(「共 22 种 2026-05-18」→ 以后端写入点全集 55 种为准),顺带给 :14 `approval_card_updated` 加注释防后人误判(后端同样不产出该键;:25 `asset_tag_updated` 已带注释无需动;两者都不在 EVENT_TYPES 下拉里,不影响本次验收) |
+| `web/src/lib/labels.ts` | 附录 A 全部 33 项的中文映射**已全部备好**(baidu_* 在 :65-75,其余散布 :18-61),实施时抽查核对即可,无需新增;仅修正 :9 过时注释(「共 22 种 2026-05-18」→ 以后端写入点全集为准:55〔当时口径,原算式 22+33〕→ 61(2026-10-30 实数)→ 本批 +3 = 64),顺带给 :14 `approval_card_updated` 加注释防后人误判(后端同样不产出该键;:25 `asset_tag_updated` 已带注释无需动;两者都不在 EVENT_TYPES 下拉里,不影响本次验收) |
 | `AdminAuditPage.tsx:329-337` `eventColor()`(可选) | 为 `baidu_*` 加一个分组色,避免落到默认灰 |
 
 后端不动:`GET /api/v1/admin/audit` 的 `event_type` 是任意字符串精确等值匹配(admin.py:92-93),CSV 导出复用同查询,前端加了选项即两头生效。
@@ -109,7 +109,7 @@ WHERE event_type IN ('approval_notified','invite_notified') GROUP BY 1;
 ### 2.2 验收标准
 
 1. `/admin/audit` 下拉含「备份文件导入」,选中后列表仅剩该类事件,CSV 导出同口径;
-2. 下拉命名选项数 = 后端写入全集 55(既有保留 22 + 附录 A 新增 33),外加「全部」共 56 行;`approval_notified`/`invite_notified` 已不在下拉(单独回归检查:二者不再出现);
+2. 下拉命名选项数 = 后端写入全集 55(当时口径,原算式:既有保留 22 + 附录 A 新增 33)→ 61(2026-10-30 实数)→ 本批 +3 = 64,外加「全部」共 65 行;`approval_notified`/`invite_notified` 已不在下拉(单独回归检查:二者不再出现);
 3. 原有 22 项(24 − 2 死项)过滤行为零回归。
 
 ---
@@ -214,8 +214,9 @@ WHERE event_type IN ('approval_notified','invite_notified') GROUP BY 1;
 - 登录风控(1,2026-10-28 增补):`ip_login_unlocked`(routers/risk.py 单独解 IP 锁写入点;labels.ts 文案「解除 IP 登录锁定」,同 `user_login_unlocked` 同口径计入活跃用户)
 
 删除死选项(2,后端从不写入):`approval_notified` `invite_notified`。
-加全后下拉命名选项 = 后端写入全集 55(既有保留 22 + 新增 33),外加「全部」共 56 行
-(2026-10-14 时点实数;此后 W1/W4/W5/W6/风控模块写入点随包增补,当前实数以
+加全后下拉命名选项 = 后端写入全集 55(当时口径,原算式:既有保留 22 + 新增 33),外加「全部」共 56 行
+(2026-10-14 时点实数;口径更正:55 → 61(2026-10-30 实数)→ 本批 +3 = 64,对外「全部」共 65 行;
+此后 W1/W4/W5/W6、风控模块与 MCP 写入点随包增补,当前实数以
 AdminAuditPage.tsx EVENT_TYPES 计数注释为准)。
 
 ## 附录 B:验收/排查 SQL(prod ms-db,`docker exec -i ms-db psql -U msuser -d material_storage`)

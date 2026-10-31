@@ -42,9 +42,11 @@ from sqlalchemy import func, select
 
 from app.db.session import get_sessionmaker
 from app.db.tables import User
+from app.services.audit import AuditService
 from app.services.org import get_default_organization
 from app.services.passwords import generate_temp_password, hash_password
 from app.services.permissions import create_permissions_service
+from app.services.tokens import revoke_user_tokens
 from app.settings import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s — %(message)s")
@@ -128,8 +130,30 @@ async def main() -> int:
 
         user.password_hash = hash_password(password)
         user.must_change_password = not args.no_force_change
+        # D13 第四处挂钩(可对既有用户改密,是生产重置密码的另一入口):
+        # 吊销该用户全部活跃 PAT —— 与 password_hash 写入同事务、commit 之前
+        revoked_tokens = await revoke_user_tokens(
+            db, user_id=user.id, reason="password_changed",
+        )
         await db.commit()
         user_id = str(user.id)
+
+    # commit 之后用**新 session** 的 AuditService 逐条写 token_revoked
+    # (actor=cli;只写本次真正被吊销的行,无活跃令牌不写;审计失败不回滚密码)
+    if revoked_tokens:
+        async with sm() as audit_session:
+            audit = AuditService(audit_session)
+            for ref in revoked_tokens:
+                await audit.write(
+                    event_type="token_revoked",
+                    details={
+                        "user_id": user_id,
+                        "token_id": str(ref.id),
+                        "token_prefix": ref.token_prefix,
+                        "reason": "password_changed",
+                        "actor": "cli",
+                    },
+                )
 
     if args.grant_org_admin:
         perms = await create_permissions_service(settings)

@@ -1,10 +1,11 @@
 /// 审计展示常量(B8;web AdminAuditPage EVENT_TYPES / labels.ts 映射对齐):
-/// 事件类型筛选全集(62 项含『全部』= 61 个事件类型,后端任意字符串精确匹配
+/// 事件类型筛选全集(65 项含『全部』= 64 个事件类型,后端任意字符串精确匹配
 /// 无白名单——新增写入点须回补)与粗分类配色(details 键中文 label 桌面已有,
 /// 移动端仅挑高频键,缺省回落裸键)。
-/// 计数注释 2026-10-28 风控模块 +1('ip_login_unlocked')时按实数更正:基线
-/// 「56 项」系 W1/W4/W5/W6 批次回填未同步的旧值,web AdminAuditPage.tsx 同批
-/// 已按实数 61 事件+『全部』=62 对齐,两侧集合已核对一致。
+/// 计数注释 2026-10-30 MCP 素材服务批次 +3('token_created'/'token_revoked'/
+/// 'mcp_settings_changed')时按实数更正:web AdminAuditPage.tsx 同为 64 事件+
+/// 『全部』=65;两者映射键数不同(web labels.ts 多 4 个历史死键,App 无),勿互抄。
+/// 前值 2026-10-28 风控模块 +1('ip_login_unlocked')时更正为 61 事件+『全部』=62。
 library;
 
 import 'package:flutter/material.dart';
@@ -45,6 +46,8 @@ const kAuditEventTypes = <String>[
   // 风控模块(2026-10-28 §3.2):解 IP 登录锁审计写入点
   'ip_login_unlocked',
   'folder_renamed', 'folder_moved', 'asset_batch_moved',
+  // MCP 素材服务(2026-10-30):令牌签发/吊销 + 通道设置变更(仅代码,本轮不发版)
+  'token_created', 'token_revoked', 'mcp_settings_changed',
 ];
 
 /// event_type → 中文 label(app-polish F7;web labels.ts EVENT_TYPE_LABEL 同
@@ -115,6 +118,10 @@ const kAuditEventLabels = <String, String>{
   'baidu_file_random_suffix': '备份文件随机后缀导入',
   'baidu_file_imported': '备份文件导入',
   'baidu_task_auto_finalized': '备份任务自动终态',
+  // MCP 素材服务(2026-10-30;web labels.ts 同文案)
+  'token_created': '访问令牌创建',
+  'token_revoked': '访问令牌吊销',
+  'mcp_settings_changed': 'MCP 通道设置变更',
 };
 
 /// event_type → 展示文案(F7 接入点共用):缺 key 回落 raw token。
@@ -148,6 +155,10 @@ const kAuditDetailKeyLabels = <String, String>{
   'fail_reason': '失败原因',
   'email': '邮箱',
   'via': '来源',
+  // MCP 素材服务(2026-10-30):token_created/token_revoked 的 details 快照键
+  'token_prefix': '令牌前缀',
+  'token_id': '令牌 ID',
+  'actor': '操作来源',
 };
 
 /// event_type → 粗分类色(web eventColor 同规则;颜色随主题令牌)。

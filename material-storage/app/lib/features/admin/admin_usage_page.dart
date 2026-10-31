@@ -280,6 +280,8 @@ const _platformLabels = <String, String>{
   'android_app': 'Android App',
   'ios_app': 'iOS App',
   'app_legacy': '旧版 App',
+  // MCP 素材服务(2026-10-30):AI 客户端渠道(web 端同名映射见 usage_shared.tsx)
+  'mcp': 'MCP / AI 助手',
   'unknown': '未知',
 };
 

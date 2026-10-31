@@ -23,9 +23,10 @@ import type { AuditEvent } from '../api/types';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-// event_type 过滤下拉 = 后端写入全集 61 项 + 「全部」,共 62 行。
-// (原注释「55 项/56 行」自 W1/W4/W5/W6 五个事件随包回填起未同步过期;2026-10-28
-// 风控模块 +1(ip_login_unlocked)时按本数组实数更正,后续随包回填须同步本数。)
+// event_type 过滤下拉 = 后端写入全集 64 项 + 「全部」,共 65 行。
+// (原注释「61 项/62 行」是 2026-10-28 风控模块时的实数;2026-10-30 MCP 素材服务
+// 批次 +3:token_created / token_revoked / mcp_settings_changed,按本数组实数同步。
+// 更早的「55 项/56 行」是 2026-10-14 口径,已作废;后续随包回填须同步本数。)
 // 注意:Select 未开 tags 模式,showSearch 只能在既有选项里搜,输不了自定义值 —
 // 后端新增 event_type 写入点时须回来补选项(后端对 event_type 是任意字符串精确匹配,无白名单)。
 // 全集核对依据:rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
@@ -66,7 +67,21 @@ const EVENT_TYPES = [
   'folder_renamed', 'folder_moved', 'asset_batch_moved',
   // 风控模块(2026-10-28):单独解 IP 锁写入点(routers/risk.py;labels.ts 文案同步)
   'ip_login_unlocked',
+  // MCP 素材服务(2026-10-30):令牌签发/吊销(自助三端点恒 session)+ 通道设置变更
+  // (details 用既有 changes 结构;labels.ts EVENT_TYPE_LABEL 两处同步)
+  'token_created', 'token_revoked', 'mcp_settings_changed',
 ];
+
+// MCP 渠道(2026-10-30):认证方式筛选。后端参数类型是 Literal["all","session","pat"],
+// 传空串会 422 —— 既有「全部」的空串必须显式映射为 all(列表请求与 CSV 导出共用同一映射)。
+const AUTH_METHOD_OPTIONS = [
+  { value: 'all', label: '— 全部 —' },
+  { value: 'session', label: '常规(session)' },
+  { value: 'pat', label: '令牌(pat)' },
+];
+
+const authMethodParam = (v: string): 'all' | 'session' | 'pat' =>
+  (v === 'session' || v === 'pat' ? v : 'all');
 
 const PAGE_SIZE = 30;
 
@@ -116,6 +131,11 @@ const DETAIL_KEY_LABEL: Record<string, string> = {
   notes: '备注',
   user_labels: '手工标签',
   baidu_uid: '百度账号',
+  // MCP 素材服务(2026-10-30):token_created / token_revoked 的 details 快照
+  // (同前缀多令牌时靠 token_id 定位被吊销的那一条;actor 取值 self/admin/cli)
+  token_prefix: '令牌前缀',
+  token_id: '令牌 ID',
+  actor: '操作来源',
 };
 
 export default function AdminAuditPage() {
@@ -127,8 +147,9 @@ export default function AdminAuditPage() {
     event_type: string;
     actor_user_id: string;   // users.id UUID(#148 起)
     project_id: string;      // W2b: 按目标项目过滤(后端已支持 project_id 参数,此前前端未暴露)
+    auth_method: string;     // MCP(2026-10-30):'all' | 'session' | 'pat'('' 不再出现)
     range: [Dayjs, Dayjs] | null;
-  }>({ event_type: '', actor_user_id: '', project_id: '', range: null });
+  }>({ event_type: '', actor_user_id: '', project_id: '', auth_method: 'all', range: null });
   const [page, setPage] = useState(1);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -140,6 +161,8 @@ export default function AdminAuditPage() {
     if (filters.event_type) p.event_type = filters.event_type;
     if (filters.actor_user_id) p.actor_user_id = filters.actor_user_id;
     if (filters.project_id) p.project_id = filters.project_id;
+    // MCP(2026-10-30):三种筛选态都显式传值(「全部」= all),空串会被后端 Literal 拒 422
+    p.auth_method = authMethodParam(filters.auth_method);
     if (filters.range) {
       p.from = filters.range[0].toISOString();
       p.to = filters.range[1].toISOString();
@@ -157,6 +180,8 @@ export default function AdminAuditPage() {
     if (filters.event_type) u.set('event_type', filters.event_type);
     if (filters.actor_user_id) u.set('actor_user_id', filters.actor_user_id);
     if (filters.project_id) u.set('project_id', filters.project_id);
+    // MCP(2026-10-30):CSV 与列表同参(同一 authMethodParam 映射,绝不传空串)
+    u.set('auth_method', authMethodParam(filters.auth_method));
     if (filters.range) {
       u.set('from', filters.range[0].toISOString());
       u.set('to', filters.range[1].toISOString());
@@ -179,7 +204,7 @@ export default function AdminAuditPage() {
             color: 'var(--ms-ink)', lineHeight: 1.1,
           }}>审计</h1>
           <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ms-ink-muted)' }}>
-            全量行为日志 / 可按操作者 / 事件类型 / 时间过滤 / CSV 导出
+            全量行为日志 / 可按操作者 / 事件类型 / 认证方式 / 时间过滤 / CSV 导出
           </p>
         </div>
         <Button icon={<Download size={14} strokeWidth={2} />}
@@ -209,6 +234,15 @@ export default function AdminAuditPage() {
             value: t,
             label: t ? tlabel(t, EVENT_TYPE_LABEL) : '— 全部 —',
           }))}
+        />
+        {/* MCP 渠道(2026-10-30):认证方式筛选(全部 / 常规 session / 令牌 pat)。
+            存量行 auth_method 为 NULL,后端按 session 归并(与行内归一显示同口径);
+            列表与 CSV 导出共用 authMethodParam,「全部」显式传 all。 */}
+        <Select
+          value={filters.auth_method}
+          onChange={(v) => { setFilters({ ...filters, auth_method: v }); setPage(1); }}
+          style={{ minWidth: 150 }}
+          options={AUTH_METHOD_OPTIONS}
         />
         {/* W2b: 项目筛选(透传 project_id;CSV 导出同参)。
             注意:该过滤只命中「写入时带了 target_project_id」的行 —— 历史行与非资产事件
@@ -324,6 +358,9 @@ function EventRow({
     ?? (e.target_asset_id ? `${e.target_asset_id.slice(0, 8)}…` : null);
   // C 包:details 结构化键值列表数据源(空对象 → 渲染空态)
   const detailEntries = Object.entries(e.details ?? {});
+  // MCP(2026-10-30):认证方式行内展示 —— 存量行 / worker 行 auth_method 为 NULL,
+  // 前端归一显示「常规(session)」;仅 pat 行才展示 auth_token_id(展开态)。
+  const isPat = e.auth_method === 'pat';
   return (
     <div style={{
       position: 'relative',
@@ -364,6 +401,14 @@ function EventRow({
             <span style={{ color: 'var(--ms-ink-subtle)', fontStyle: 'italic' }}>系统</span>
           )}
         </span>
+        {/* MCP(2026-10-30):auth_method 行内展示(NULL 归一为 session) */}
+        <Tooltip title={isPat ? '个人访问令牌(PAT)操作' : '常规登录(session / 存量 NULL)操作'}>
+          <span style={{
+            fontSize: 10.5, padding: '1px 6px', borderRadius: 3, flexShrink: 0,
+            color: isPat ? 'var(--ms-amber)' : 'var(--ms-ink-subtle)',
+            border: `1px solid ${isPat ? 'var(--ms-amber)' : 'var(--ms-hairline)'}`,
+          }}>{isPat ? '令牌' : '常规'}</span>
+        </Tooltip>
         <div style={{ flex: 1 }} />
         <Tooltip title={dayjs(e.event_time).format('YYYY-MM-DD HH:mm:ss')}>
           <span style={{ fontSize: 11.5, color: 'var(--ms-ink-subtle)',
@@ -398,6 +443,10 @@ function EventRow({
           color: 'var(--ms-ink-muted)',
         }}>
           <div>时间: {dayjs(e.event_time).format('YYYY-MM-DD HH:mm:ss')}</div>
+          {/* MCP(2026-10-30):认证方式原值(存量/worker 行 NULL = session);
+              auth_token_id 只在展开态展示(PAT 行才有值,便于定位被吊销令牌) */}
+          <div>认证方式: {e.auth_method ?? 'session'}</div>
+          {e.auth_token_id && <div>令牌 ID: {e.auth_token_id}</div>}
           {e.actor_user_id && <div>操作者 ID: {e.actor_user_id}</div>}
           {/* actor_open_id 仅历史飞书行非空(#148 起新用户恒 NULL,单独展示易误导) */}
           {e.actor_open_id && (

@@ -31,8 +31,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_sessionmaker
 from app.db.tables import User
+from app.services.audit import AuditService
 from app.services.local_auth import LocalAuthService
 from app.services.passwords import generate_temp_password
+from app.services.tokens import revoke_user_tokens
 from app.settings import get_settings
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s — %(message)s")
@@ -69,7 +71,7 @@ async def list_users() -> None:
     print(f"{'id':<38} {'username':<12} {'name':<20} pw  must_change")
     for u in rows:
         print(
-            f"{str(u.id):<38} {u.username or '-':<12} {u.name:<20} "
+            f"{u.id!s:<38} {u.username or '-':<12} {u.name:<20} "
             f"{'✓' if u.password_hash else '·'}   {'⚠' if u.must_change_password else '·'}"
         )
 
@@ -102,7 +104,29 @@ async def set_password(identifier: str, password: str | None, new_username: str 
         final_password = password or generate_temp_password()
         user.password_hash = local_auth.hash_password(final_password)
         user.must_change_password = must_change
+        # D13 第三处挂钩(CLI 应急重置):吊销该用户全部活跃 PAT —— 必须与
+        # password_hash 写入同事务、同一次 commit 之前(D13 安全不变量)。
+        revoked_tokens = await revoke_user_tokens(
+            session, user_id=user.id, reason="password_changed",
+        )
         await session.commit()
+
+        # commit 之后用**新 session** 的 AuditService 逐条写 token_revoked
+        # (actor=cli;只写本次真正被吊销的行,无活跃令牌则不写)
+        if revoked_tokens:
+            async with sm() as audit_session:
+                audit = AuditService(audit_session)
+                for ref in revoked_tokens:
+                    await audit.write(
+                        event_type="token_revoked",
+                        details={
+                            "user_id": str(user.id),
+                            "token_id": str(ref.id),
+                            "token_prefix": ref.token_prefix,
+                            "reason": "password_changed",
+                            "actor": "cli",
+                        },
+                    )
 
         print("---SET_PASSWORD RESULT---")
         print(f"user_id={user.id}")
