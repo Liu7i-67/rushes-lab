@@ -1027,9 +1027,20 @@ runbook §3,此处不重复;要点三条:
 
 > 方案正本:`docs/qdev/2026-10-30-mcp-service.md`(决策 D5/D9/D12/D14、部署节、「当前有效值」表);
 > 服务实现说明:`material-storage/mcp/README.md`(env / 白名单 / dev override / 重启影响面)。
-> 状态(2026-10-31):**dev 已部署**——hh2 `/home/msdev/ms`,代码 `99decab` + ms-mcp 增量修复
-> `850cf07`,迁移 `0020` 已落,`ms-mcp-dev` healthy;部署记账的 SPA 指纹为 `index-BzFU94_b.js`。
-> **prod 尚未部署**,按 §12.5 执行。ms-mcp 的部署/回滚不套用 §6.6 的「一键 `--restart`」。
+> 状态(2026-10-31):**dev 与 prod 均已部署**。
+> - dev:hh2 `/home/msdev/ms`,代码 `7e377b9`(含 `99decab` 实施 + `850cf07` 修复),
+>   迁移 `0020` 已落,`ms-mcp-dev` healthy;
+> - prod:hh2-prod `/home/huanhua/ms`,代码 `7e377b9`,迁移 `0020` 先落再 restart,
+>   `ms-mcp` healthy;SPA 指纹四入口一致 `index-BzFU94_b.js`;通道按需开启。
+>
+> ★ **单文件 bind-mount inode 陷阱(2026-10-31 实踩)**:`poc/minio/nginx/default.conf` 是
+> 单文件 bind mount。用 tar/scp 覆盖会生成**新 inode**,容器仍持旧 inode —— `nginx -t/-s`
+> 看到的还是旧配置(本次症状:`location ^~ /mcp` 不生效,`/mcp` 落到 MinIO 返回 400)。
+> **处置:`docker compose restart poc-nginx`**(重启时重新解析挂载源);`deploy_lan` 用
+> `rsync --inplace` 就是为规避此坑。同理,任何单文件挂载(而非目录挂载)被替换后都要
+> recreate/restart 容器,reload 不够。
+>
+> ms-mcp 的部署/回滚不套用 §6.6 的「一键 `--restart`」。
 
 ### 12.1 入口与双入口
 
