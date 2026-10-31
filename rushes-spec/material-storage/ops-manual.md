@@ -2,7 +2,7 @@
 
 > 适用范围:PoC server2 部署(8.156.34.238)+ 反代 server1;生产内网单机部署见 §10。
 > 适用对象:系统管理员 / 维护工程师。
-> 最后更新:2026-10-17(新增 §11 W2a:审计真实 IP 落地——实施步骤与验收,配置激活待部署窗口)
+> 最后更新:2026-10-31(新增 §12 MCP 素材服务(ms-mcp)运维;§6.6/§10.3 补交叉引用)
 
 ---
 
@@ -473,6 +473,19 @@ ssh hh2 'grep -A1 "git commit" /home/msdev/ms/DEPLOYED.md | head -2; \
 **待办根修**:`ssh_r()` 加 `-o ServerAliveInterval=15 -o ServerAliveCountMax=3`,
 让建连后的断流在 ~45s 内显式失败并走既有重试,而不是无限挂起(尚未落地)。
 
+**MCP 渠道与 tar 流断流(2026-10-31 补)**:
+
+- MCP(ms-mcp)**不能套用「deploy_lan --restart 一步到位」**:必须 `deploy_lan.sh <env>`
+  (不带 `--restart`)→ `alembic upgrade head` → restart api/worker → `up -d --build ms-mcp`
+  → nginx reload。完整顺序与回滚见 §12.5 / §12.9。
+- deploy_lan 的 **tar 流式同步**在跳板隧道上实测会在 **~800KB 处中途断流**(与本节
+  「回显挂起」不是一回事):先按仓库根 `.agents/skills/deploy-hh2/SKILL.md` §3「坑 B」
+  用远端暂存目录 `du -sk` 两次采样判死,确认死了直接走 §4 的 scp 分片通道
+  (`.agents/skills/deploy-hh2/scripts/chunked-push.sh`,每片 ≤512KB + 远端 md5;
+  prod 按 skill §4 把脚本内 `HOST=hh2` 改为 `hh2-prod`),**不要再重试整脚本**。
+  历史实录见仓库根 `scripts/changelog.md` 2026-10-27(「tar 流又在 ~824KB 断流」)及
+  2026-10-26 / 2026-10-22 同类条目。
+
 ---
 
 ## 7. 数据库 / OpenFGA 重置(灾后或开发期清理)
@@ -665,6 +678,8 @@ compose 默认值均保留本地 dev 行为(named volume / `./data`),**只设了
    docker compose exec api python -m scripts.dev_bootstrap
    # 5) 验证(§10.4)
    ```
+   > MCP 素材服务(ms-mcp)不在上述 bootstrap 内:部署/回滚见 §12(硬顺序 =
+   > 先迁移、后 restart api/worker、再 `up -d --build ms-mcp`、最后 nginx reload)。
 2. 环境变量三处一致性自检(§10.2 P-10):
    `MINIO_ENDPOINT_PUBLIC == MINIO_THUMBNAIL_ENDPOINT_PUBLIC == WEB_APP_BASE_URL 的 host`。
 3. MinIO root 凭据(两个实例)与 `MINIO_ACCESS_KEY / MINIO_SECRET_KEY` **必须一致**:
@@ -1005,4 +1020,242 @@ runbook §3,此处不重复;要点三条:
   裸隧道直通 → 跳板机 `ms-port-proxy.conf` 反代,运维/排障入口随之变化);跳板机
   `ms-port-proxy.conf` 与 `bucket-taoxiplan.conf` 最终版备份到仓库根 `scripts/env/`
   并记 sha256+日期;防火墙 18080/8080 放行规则**保留**(b 方案端口继续对外)。
+
+---
+
+## 12. MCP 素材服务(ms-mcp)运维(2026-10-31)
+
+> 方案正本:`docs/qdev/2026-10-30-mcp-service.md`(决策 D5/D9/D12/D14、部署节、「当前有效值」表);
+> 服务实现说明:`material-storage/mcp/README.md`(env / 白名单 / dev override / 重启影响面)。
+> 状态(2026-10-31):**dev 已部署**——hh2 `/home/msdev/ms`,代码 `99decab` + ms-mcp 增量修复
+> `850cf07`,迁移 `0020` 已落,`ms-mcp-dev` healthy;部署记账的 SPA 指纹为 `index-BzFU94_b.js`。
+> **prod 尚未部署**,按 §12.5 执行。ms-mcp 的部署/回滚不套用 §6.6 的「一键 `--restart`」。
+
+### 12.1 入口与双入口
+
+MCP 客户端地址 = `<入口>/mcp`(Streamable HTTP),请求头必须自带
+`Authorization: Bearer mspat_...`。**不支持仅 OAuth 的托管 MCP 客户端**——本服务没有
+`/.well-known/*` 元数据,OAuth 接入列二期。
+
+| 形态 | 内网直达(主路径) | 公网(跳板机) |
+|---|---|---|
+| prod | `http://192.168.110.221/mcp`(hosts 名 `ms.local` 同理) | `https://bucket.taoxiplan.com/mcp`、`https://47.108.196.211/mcp`、`http://47.108.196.211:18080/mcp` |
+| dev | `http://192.168.110.221:8090/mcp` | `http://47.108.196.211:8080/mcp` |
+
+- 公网 443 / 18080 / 8080 都走跳板机 catch-all vhost → 反向隧道 → hh2 nginx,业务路由全在
+  hh2 的 `poc/minio/nginx/default.conf`;**已核实无需改跳板机 conf**(2026-10-31)。
+- hh2 nginx `location ^~ /mcp` 的要点:**变量 upstream**(`$mcp_upstream=http://ms-mcp:8000`,
+  ms-mcp 未起时 nginx 仍能正常启动,静态写法会 `host not found in upstream` 起不来);
+  `Host $http_host`(保端口)+ `X-Forwarded-Proto $xfp`(透传,勿用 `$scheme` 覆盖)+
+  单值 `X-Forwarded-For $remote_addr`;SSE `proxy_read_timeout/proxy_send_timeout 1800s`;
+  边缘 `limit_req zone=mcp_limit rate=15r/s burst=30`,超限 429。
+- ms-mcp 只加入业务网络 `poc-net`、**不 publish 宿主端口**:只能经 nginx 到达
+  (网内直连者可自带 XFF 伪造审计 IP)。改 nginx conf 必须提交仓库(dev/prod 共享的
+  bind mount 单文件),同步后 `nginx -t` + `nginx -s reload`(见 §12.5 第 5 步)。
+- **令牌**:用户在网页 `/settings` 自助签发 / 吊销(`mspat_` 前缀,明文只显示一次,
+  默认 90 天,每用户 5 个活跃);管理员在 `/admin/mcp-settings` 查看并吊销全量令牌。
+  改密或禁用用户会吊销该用户全部活跃令牌。
+
+### 12.2 入口 Host 白名单(MS_MCP_ENTRY_ALLOWLIST)
+
+格式 `host=scheme`、逗号分隔;请求 `Host` 与条目均 **lower() 后精确比较(端口算在内)**,
+未命中直接 403、**不回落**。命中的 scheme 决定透传给 api 的 `X-Forwarded-Proto`
+(客户端自报值冲突/缺失/非法时一律以条目为准)。
+
+当前值(2026-10-31):
+
+| 环境 | 条目 |
+|---|---|
+| prod(compose 默认值;目标机无 override 时生效) | `ms.local=http`、`192.168.110.221=http`、`192.168.110.221:80=http`、`47.108.196.211=https`、`47.108.196.211:443=https`、`47.108.196.211:18080=http`、`bucket.taoxiplan.com=https`、`bucket.taoxiplan.com:443=https`、`localhost=http`、`127.0.0.1=http`(10 条) |
+| dev(目标机 override,不入库) | `192.168.110.221:8090=http`、`localhost:8090=http`、`127.0.0.1:8090=http`(3 条) |
+
+维护要求:
+
+1. **按实际可用入口全量枚举拼法**:裸 host、`:80`、`:443`、非标准端口
+   (`:18080`/`:8080`/`:8090`)各算一种;**漏一种 = 该形态全量 403**。
+2. **按环境裁剪**:dev 白名单不得放行 prod Host(反之亦然),否则跨环境签名零成本。
+   dev 的 override 在目标机 `/home/msdev/ms/api/docker-compose.override.yml`,
+   **不随 deploy_lan 同步**(deploy_lan 显式排除),改了只在目标机生效。
+3. 条目 ≤14;去重后的 `scheme://host` 全集 ≤16(api 的动态 signer 缓存按
+   `scheme://host` 计键、全进程与 web/app **共享并集**,打满后新入口回落静态
+   `MINIO_ENDPOINT_PUBLIC`)。改完用 `docker compose config` 核对 `ms-mcp.environment`
+   与条目数,再 `docker compose up -d ms-mcp` 重建容器(env 变更 `restart` 不生效)。
+4. `MS_MCP_INTERNAL_BASE_URL` 必须命中白名单且 scheme 一致(ms-mcp 启动时校验):
+   prod `http://192.168.110.221`,dev `http://192.168.110.221:8090`。
+5. 若 `/admin/mcp-settings` 出现 `dynamic_signers_cap_hits > 0`,先核对 prod `.env`
+   的 `MINIO_ENDPOINT_PUBLIC` 是否指向客户端可达入口(打满后新入口回落到它)。
+
+### 12.3 启停、更新与重启影响面
+
+- 容器:prod `ms-mcp`,dev `ms-mcp-dev`(独立 compose service,容器名由 override 覆盖)。
+- **更新代码/依赖必须 build**:`docker compose up -d --build ms-mcp`;
+  `docker compose restart ms-mcp` **不会重建镜像**(独立镜像,不走 api 的 build)。
+- **重启 ms-mcp = 断所有 MCP 会话**:绑定表与 SDK 会话都在进程内存,单副本;
+  会话上限 200、空闲 TTL 1800s。Web/App 无感,客户端重连会自动重新 initialize。
+  运维择时,避开 AI 使用高峰。
+- 启停/状态/日志:
+
+```bash
+# prod(dev 把 hh2-prod→hh2、/home/huanhua/ms→/home/msdev/ms;容器名变 ms-mcp-dev,
+#      但 compose service 仍是 ms-mcp,命令里的服务名不要改)
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose up -d --build ms-mcp && docker ps --filter name=ms-mcp'
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose logs --tail=100 ms-mcp'
+```
+
+- 关停:`docker compose stop ms-mcp`(nginx 变量 upstream 不会因上游缺失而崩,
+  `/mcp` 返回 502,整站其它路径不受影响)。**删除容器**只在回滚时用
+  `docker rm -f ms-mcp`(dev `ms-mcp-dev`);service 已从 compose 文件移除后
+  `docker compose rm` 会报 no such service。
+
+### 12.4 环境变量(ms-mcp 只认这几项)
+
+| 变量 | prod | dev | 说明 |
+|---|---|---|---|
+| `MS_API_BASE_URL` | `http://ms-api:8000` | `http://ms-api-dev:8000`(以 override 实测为准) | 容器内 api 根地址 |
+| `MS_MCP_ENTRY_ALLOWLIST` | 10 条(§12.2) | 3 条 `:8090` | 入口白名单 |
+| `MS_MCP_INTERNAL_BASE_URL` | `http://192.168.110.221` | `http://192.168.110.221:8090` | 取缩略图字节的固定入口(须在白名单内) |
+| `MS_MCP_SESSION_TTL` | `1800` | `1800` | 空闲会话 TTL(秒) |
+| `MS_MCP_VERIFY_TLS` | `true` | `true` | 两套 httpx 客户端共用;公网自签阶段可 `false` 或配 `MS_MCP_CA_BUNDLE` |
+
+可选 `MS_MCP_CA_BUNDLE` / `MS_MCP_LOG_LEVEL` 见 `material-storage/mcp/README.md`。
+
+**红线**:ms-mcp **禁止 `env_file: .env`**,只允许显式 `environment:`;不得出现
+DB / Redis / MinIO 任何凭证(部署前用 `docker compose config` 检查)。会话上限 200
+是编译常量,没有 env 可调。改 env 后 `docker compose up -d ms-mcp`(`restart` 不重读)。
+
+### 12.5 部署/更新顺序(prod 硬约束)
+
+> **顺序不可反**:新代码 + 旧 schema(0019)时,`AuditService.write` 插入 `auth_method`
+> 会 `UndefinedColumn`,upload / download / share 主链路都 await 审计写入
+> → **全站审计 500**,不是仅 MCP 不可用。
+> `deploy_lan.sh` **没有 alembic 步骤**,必须人工先迁移;且**不要带 `--restart`**
+> (带了会立刻加载新代码)。
+
+```bash
+# ──【本地】仓库 material-storage/ 目录 ──
+# 0) 先对账(目标机命令;prod 别名 hh2-prod)
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose exec -T ms-api alembic current && docker compose exec -T ms-api alembic heads'
+# 1) 同步代码,不带 --restart
+bash scripts/deploy_lan.sh prod
+
+# ──【目标机】以下全部在 /home/huanhua/ms/api(dev 用 hh2 / /home/msdev/ms)──
+# 2) 迁移(必须在 restart 之前;0020 纯增量)
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose exec -T ms-api alembic upgrade head'
+# 3) 加载新代码(必须含 worker)
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose restart ms-api ms-worker'
+# 4) ms-mcp 构建并启动(独立镜像,restart 不 build)
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose up -d --build ms-mcp'
+# 5) nginx 校验并热载(conf 已随步骤 1 同步;prod=poc-nginx,dev=poc-nginx-dev)
+ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s reload'
+# 6) SPA 单独替换(deploy_lan 排除 static/web,走既有分片通道)
+```
+
+- 步骤 1→2 之间是危险窗口:ms-api 是 `restart: unless-stopped`,若崩溃/宿主机重启会
+  自动拉起新代码 + 旧 schema。`deploy_lan` 之后应尽快跑迁移;窗口内发生重启,
+  先补 `alembic upgrade head` 再继续。
+- dev 差异:SSH 别名 `hh2`、目录 `/home/msdev/ms`、容器 `ms-api-dev`(compose service
+  仍是 `ms-api`)、nginx `poc-nginx-dev`;SPA 指纹按当次构建核对。
+- **首次上线后必须由管理员在 `/admin/mcp-settings` 把通道置为 `enabled=true`**:
+  默认全关,不开则 MCP 请求全 403。
+
+### 12.6 健康检查
+
+- **ms-mcp 自身**:容器内 `/healthz`(与入口的 `/ms-healthz` 不是一回事)。在目标机
+  api 目录执行:
+
+```bash
+cd /home/huanhua/ms/api   # dev: /home/msdev/ms/api
+docker compose exec ms-mcp python -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:8000/healthz').read())"
+```
+
+- **入口存活**:`/ms-healthz`(反代到 api `/healthz`,同时验证 nginx + api):
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.110.221/ms-healthz    # prod,应 200
+curl -s -o /dev/null -w '%{http_code}\n' http://192.168.110.221:8090/ms-healthz  # dev
+```
+
+- **MCP 入口连通**:对 `.../mcp` 发 `POST`(无令牌)应由 ms-mcp 返回 JSON 401/400;
+  若响应体是 MinIO 的 S3 XML(403/404),说明 nginx `/mcp` location 未同步 / 未 reload,
+  请求落到了默认 location → MinIO(用 `curl -i` 看响应体区分)。
+- ⚠ **`/healthz` 在入口不是健康检查**:hh2 nginx 没有该精确 location,会落到默认
+  `location /` → MinIO S3,返回 403;判断入口健康一律用 `/ms-healthz`。
+
+### 12.7 指标解读
+
+管理后台 `/admin/mcp-settings`(仅系统管理员)读取 `GET /api/v1/admin/mcp-settings`,
+配置体 + 实时指标(指标读失败时字段为 null,配置体正常返回):
+
+| 指标 | 口径 |
+|---|---|
+| `in_flight` | `ZCOUNT mcp:conc:global now +inf`(在途并发;勿用 ZCARD) |
+| `today_success` | `mcp:stats:requests:{yyyyMMdd}`:PAT 请求 2xx |
+| `today_rejected_policy` | `mcp:stats:rejected_policy:*`:通道关闭 / 令牌禁用端点 / 强制改密 |
+| `today_rejected_quota` | `mcp:stats:rejected_quota:*`:IP 桶 / 每令牌 RPM / 并发闸 / batch 超限 |
+| `rejected_infra_since_start` | 进程内:配置读不到(`channel_unavailable`)/ Redis 故障(`redis_down`),**重启清零** |
+| `dynamic_signers_cap_hits` | 进程内:动态 presign 缓存打满回落静态的次数,**重启清零**;>0 时页面标红 |
+
+- **日期口径**:`mcp:stats:*` 按 **UTC 日**(`yyyyMMdd`),与使用统计页的
+  **北京时间日**不同;两个页面的「今日」不是同一个窗口(页面已分别标注)。
+- 拒绝量按 `mcp_reject_reason` 分桶,不按 HTTP 状态码;业务 403 / 401 / 4xx / 5xx
+  不计入。边缘 nginx `limit_req` 的 429 到不了 api,**不计入任何指标**。
+- 进程内计数(`rejected_infra_since_start` / `dynamic_signers_cap_hits`)是
+  api 进程局部值,重启清零;当前 uvicorn 单 worker,若未来加 `--workers` 则各算各的。
+
+### 12.8 常见故障
+
+| 现象 | 原因 / 处置 |
+|---|---|
+| MCP 全 403,文案「MCP 通道当前已由管理员关闭」 | 通道默认全关;管理员在 `/admin/mcp-settings` 开启 `enabled` |
+| 403,拒绝原因 `channel_unavailable` | 配置读不到 / 闸启动自检失败(查 Redis/DB 与 api 日志),**不是**管理员关通道(关闭文案见上一行) |
+| 403,拒绝原因 `forced_change` | 用户处于强制改密态(PAT 分支无豁免);先在网页完成改密再使用 |
+| 某一入口全量 403,文案「入口 Host 不在 MS_MCP_ENTRY_ALLOWLIST 内」 | 该入口 `Host` 拼法不在 `MS_MCP_ENTRY_ALLOWLIST`(带/不带端口、http/https 都要列);补条目 → `docker compose up -d ms-mcp` |
+| 入口 `/healthz` 返回 403 | 正常现象,落到了 MinIO;用 `/ms-healthz`(§12.6) |
+| `/mcp` 返回 403/404 且响应体是 MinIO S3 XML | nginx conf 没有 `/mcp` location(未同步 / 未 reload),请求落到了默认 location;正常应返回 ms-mcp 的 JSON 401 |
+| `/mcp` 返回 502 | `ms-mcp` 未起 / 容器名解析失败;`docker ps`、`docker compose logs ms-mcp` |
+| initialize 后马上 401 | PAT 无效/过期/已吊销/用户被禁用/密码已变更(改密即吊销全部 PAT);重新在 `/settings` 签发。同一 Session-Id 换 PAT 也返回 401,须重新 initialize |
+| 429 + `Retry-After` | 配额类:IP 桶 600/min、每令牌 RPM 120/min、全局并发 8、每令牌并发 4(默认值);也可能是边缘 `15r/s` 限流(无 JSON 文案、不入指标) |
+| 503 | Redis 故障(fail-closed)或上传会话初始化失败;500 多为 DB 故障 |
+| 会话约 30 分钟不用就断 | SSE 空闲上限 hh2 1800s(跳板机 3600s);客户端重连 initialize 即可 |
+| 某些操作 PAT 403「令牌不支持该操作」 | 方案刻意排除的七类端点(batch-prefix、彻底删除、审计导出、admin 批量等)与 batch-move >200 项;用 Web 会话完成 |
+
+### 12.9 回滚
+
+```bash
+# 1) 先在 /admin/mcp-settings 关通道(enabled=false):MCP 全 403,Web/App 不受影响
+# 2) 在旧 commit 的 checkout 里(material-storage/ 目录)跑 deploy_lan 同步代码,再重启 api + worker
+bash scripts/deploy_lan.sh <env>
+ssh hh2-prod 'cd /home/huanhua/ms/api && docker compose restart ms-api ms-worker'
+# 3) 删 ms-mcp 容器(prod ms-mcp / dev ms-mcp-dev)
+ssh hh2-prod 'docker rm -f ms-mcp'
+# 4) 若 nginx conf 也回滚:同步后 nginx -t && nginx -s reload
+ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s reload'
+```
+
+- **DB 无须 downgrade**:0020 是纯增量迁移(可空列 + 独立新表),旧代码与新 schema
+  兼容共存。仅当迁移本身有错才 `alembic downgrade 20261028_0019`(或 `-1`;
+  `0019` 只是后缀,不是唯一前缀)。
+- 必须同时重启 **ms-worker**:worker 也挂 bind mount,只重启 api 会让 worker
+  继续跑新逻辑。
+- dev 执行时把 `hh2-prod`→`hh2`、`/home/huanhua/ms`→`/home/msdev/ms`、
+  `docker rm -f ms-mcp`→`docker rm -f ms-mcp-dev`。
+- SPA 回滚按既有备份(`web.bak-*`)替换;dev/prod 各自的备份名见 changelog。
+
+### 12.10 已知限制(方案已登记)
+
+- **session cookie 旁路**:MCP 闸只作用于 PAT;把登录 cookie 交给 AI 直调业务端点
+  不受任何 MCP 限流约束,本期不解决(二期候选「非浏览器客户端必须 PAT」)。
+- **admin PAT 的破坏面**:PAT = 全账号身份,管理员 PAT 可调未排除的 admin 写端点
+  (如重置他人密码);非提权,但 AI 误触可造成破坏。
+- **孤儿 multipart 无 cron 清扫**:上传失败靠 `abort_upload` 工具;MinIO 侧
+  lifecycle abort 曾被拒,存量缺口,列二期候选。
+- **ms-mcp 单副本**:会话绑定在进程内存;水平扩展需 sticky 或 Redis session store,
+  列二期。
+- **worker / 队列不在闸的约束面**:闸只管请求期,缩略图 / 派生 / livp 等 worker
+  负载需另行观测。
+- **使用统计的 mcp 桶低估读流量**:search / thumbnail 不写审计,mcp 桶只反映审计
+  可见操作(上传 / 下载签发等);真实流量看 `/admin/mcp-settings` 指标。
+- ⚠ **环境风险(既有配置,本期未改)**:prod 目标机 `.env` 当前为 `ENV=dev`,
+  `X-User-Id` 通道在 prod 可用;MCP 方案假设生产为 session-only,建议运维复核
+  (改 `ENV` 属另一变更,不在本期射程)。
 

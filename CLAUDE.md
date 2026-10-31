@@ -188,6 +188,14 @@ subject 一律是**本地身份**(#148 起,不再用飞书 ID):`user:<users.id U
 - **强制改密后端拦截**(review F15):`must_change_password` 且已设密码时,除 `me`/`change_password`/`logout` 外一律 403。
 两者当初是两次查询,已合并成一次(review R3),别再拆回去。
 
+### MCP 渠道:ms-mcp 薄代理 + PAT(2026-10-30 起)
+
+- **PAT 认证链顺序钉死**(`get_current_user` 内):通道闸 → 前置 IP 桶(600/min) → token 查表 → 用户态 → 每令牌 RPM(120/min);第六步两级并发闸在独立 `mcp_gate`(router 级 yield 依赖),**严禁挂 app 级**(会锁死 `/healthz` 与登录)。PAT = 用户本人全权限,排除清单见方案 C 节。
+- 迁移 **0020**:新表 `personal_access_tokens` / `system_flags`,`audit_events` 加 `auth_method` / `auth_token_id` 两列;纯增量,旧代码与新 schema 兼容,回滚无须 downgrade。
+- **ms-mcp**(`material-storage/mcp/`)独立镜像、单副本薄代理:不直连 DB/Redis/MinIO、不持任何存储凭证(**禁 `env_file`**)、不 publish 宿主端口,只经 nginx `/mcp` 可达。更新必须 `docker compose up -d --build ms-mcp`(restart 不 build);重启断全部 MCP 会话。
+- **prod 部署顺序不可反**:`deploy_lan.sh <env>`(不带 `--restart`)→ `alembic upgrade head` → `restart ms-api ms-worker` → `up -d --build ms-mcp` → nginx -t/reload → SPA 单独替换。新代码打旧 schema 会让全站审计写入 500。
+- 审计新增 3 事件(`token_created`/`token_revoked`/`mcp_settings_changed`),计数基线已同步:web 过滤 64 项+全部=65 行 / labels 68 键;App 65 项(64 真实)/64 键;`auth_method` NULL 一律归 session。运维正本:`rushes-spec/material-storage/ops-manual.md` §12;方案:`docs/qdev/2026-10-30-mcp-service.md`。
+
 ### 前端由后端发布,路径有内外之分
 
 `pnpm build` → `api/app/static/web/` → ms-api 用 StaticFiles mount 在 `/static/web`;nginx rewrite `/ms-static/(.*)` → `/static/$1`,浏览器看到的是 `/ms-static/web/`,与 `BrowserRouter basename` 一致。
