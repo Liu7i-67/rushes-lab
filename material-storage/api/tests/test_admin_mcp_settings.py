@@ -18,7 +18,9 @@ OpenFGA 已 push、env=dev(允许 X-User-Id header 模拟身份)、迁移 0020 �
 配置服务取 A2 在 lifespan 构造的 `app.state.mcp_settings`;本文件通过替换该
 state(及 `app.state.redis`)注入故障,收尾由 _restore_state 恢复。
 
-清理惯例:每个用例结束把通道恢复默认值(默认关闭),避免污染后续用例。
+清理惯例:**保存‑恢复**用例前的通道配置(不得假定原值 = 内置默认:共享 dev 上
+管理员可能已开启)。teardown 写回用例前的 DB 行(原本无行则删回缺失态),并刷新
+``mcp:flag`` / 进程内缓存,避免污染后续用例与共享环境。
 """
 from __future__ import annotations
 
@@ -60,19 +62,51 @@ async def client(app_with_lifespan):
 
 
 @pytest.fixture(autouse=True)
-async def _restore_state(app_with_lifespan, client):
-    """用例后恢复 app.state 的 mcp_settings/redis,并把通道配置写回默认值。"""
+async def _restore_state(app_with_lifespan):
+    """用例后恢复 app.state 的 mcp_settings/redis,并**保存‑恢复**通道配置。
+
+    原值可能是管理员已开启的配置(共享 dev),teardown 必须写回用例前的 DB 行,
+    不能无条件写内置默认(那会把线上通道关掉)。原本无行 → 删回「行缺失」。
+    恢复走服务层直写(不经过 admin PUT):避免为清理额外制造
+    ``mcp_settings_changed`` 审计行、干扰本文件自己的审计断言。
+    """
     state = app_with_lifespan.state
     prev_service = getattr(state, "mcp_settings", None)
     prev_redis = getattr(state, "redis", None)
+    original = await _db_flag_value()  # None = 用例前就没有行
     try:
         yield
     finally:
         state.redis = prev_redis
         state.mcp_settings = prev_service
-        if isinstance(prev_service, McpSettingsService):
-            prev_service.reset_local_cache()
-        await client.put(URL, json=DEFAULT_MCP_FLAG, headers=_h(EVAN_ID))
+        await _restore_channel(prev_service, prev_redis, original)
+
+
+async def _restore_channel(service: object, redis: object, original: object) -> None:
+    """把通道配置写回用例前的状态(行存在 → upsert + 刷缓存;行缺失 → 删回缺失)。"""
+    if not isinstance(service, McpSettingsService):
+        # lifespan 之外的 app(_TableMissingService 等)没有可用的正本写入口
+        return
+    service.reset_local_cache()
+    if isinstance(original, dict):
+        from app.db.session import get_sessionmaker
+
+        async with get_sessionmaker()() as db:
+            # write = upsert + commit + publish(刷 mcp:flag EX 60 与本进程缓存)
+            await service.write(db, McpSettings.from_dict(original))
+    else:
+        from sqlalchemy import delete
+
+        from app.db.session import get_sessionmaker
+        from app.db.tables import SystemFlag
+
+        async with get_sessionmaker()() as db:
+            await db.execute(delete(SystemFlag).where(SystemFlag.key == MCP_FLAG_KEY))
+            await db.commit()
+        # 行缺失:Redis 缓存也要清(否则残留测试写入的值)
+        if redis is not None:
+            await redis.delete(MCP_REDIS_KEY)  # type: ignore[attr-defined]
+    service.reset_local_cache()  # 让后续用例回源 DB/Redis
 
 
 def _h(user_id: str) -> dict[str, str]:
