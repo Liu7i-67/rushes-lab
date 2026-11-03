@@ -1,5 +1,5 @@
 ## 2026-11-03
-- **安卓实况图(Motion Photo)双向适配开发完成(`a417352`+`d5932d2`,feat/android-motion-photo 分支,未合并未发版)**——支持实况图的安卓机(小米/OPPO/vivo 等白名单,SDK≥31):拍摄的实况图上传后自动转为 livp 存入系统(后端自动出缩略图与实况预览),下载 livp 时自动合成 Motion Photo 存入相册(长按可播放);不支持的机型与任何失败场景均保持原行为(普通图片上传/解包双落盘)。本轮仅代码交付:analyze 0+全量 1253 测试绿,后端/网页/iOS 零改动;待真机验收(§8 清单:白名单机上传下载/iOS 来源 livp/大样本内存)+iOS 构建机冒烟+合并发版均待指令。
+- **安卓实况图(Motion Photo)双向适配开发完成(`a417352`+`d5932d2`,feat/android-motion-photo 分支,未合并未发版)**——支持实况图的安卓机(小米/OPPO/vivo 等白名单,SDK≥31):拍摄的实况图上传后自动转为 livp 存入系统(后端自动出缩略图与实况预览),下载 livp 时自动合成 Motion Photo 存入相册(长按可播放);不支持的机型与任何失败场景均保持原行为(普通图片上传/解包双落盘)。analyze 0+全量 1253 测试绿,后端/网页/iOS 零改动。**已合并 liuqi(ecafdb2,no-ff)并部署 dev**(SPA 指纹 `index-BD2cuJ8V.js` 不变——web 无增量;ms-api-dev/ms-worker-dev 已重启,auth/me 401 正常;worktree 与 qplan/feat 分支已清)。待办=iOS 构建机冒烟(SPM 宿主+pod-only flm)+真机验收(§8:白名单机上传下载/iOS 来源 livp/大样本内存)+发版待指令。
 
 ## 2026-10-31
 - **MCP 第三渠道上线:AI 客户端可凭个人访问令牌(PAT)以本人身份搜索 / 看缩略图 / 下载 / 上传素材(`99decab`)**——新增 ms-mcp 薄代理与 `/mcp` 入口(Streamable HTTP),支持 ZCode / Claude 等能配置静态 `Authorization: Bearer` 的客户端;权限与网页一致(仅本人可见范围),不支持仅 OAuth 的托管客户端。
