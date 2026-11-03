@@ -30,6 +30,7 @@ import 'features/baidu/baidu_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/baidu/task_detail_page.dart';
 import 'features/error_report/error_report_page.dart';
+import 'features/me/about_page.dart';
 import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
@@ -120,6 +121,9 @@ class _MsAppState extends State<MsApp> {
               return MaterialPageRoute(builder: (_) => const LoginPage());
             case '/home':
               return MaterialPageRoute(builder: (_) => const HomeShell());
+            case '/about':
+              // feat/app-about-icp §2.2:关于我们(logo/版本/备案号展示)
+              return MaterialPageRoute(builder: (_) => const AboutPage());
             case '/change-password':
               // arguments=true 强制流(must_change_password;无返回,成功进 HomeShell)
               final forced = (s.arguments as bool?) ?? false;
