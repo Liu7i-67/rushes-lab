@@ -341,6 +341,49 @@ export interface AssetBatchPrefixResult {
   };
 }
 
+// ─── AI 自动打标 + 视频智能分段(2026-11-03 ai-tagging-slicing §2.6 契约)────
+/** 素材级 AI 打标结果(GET /api/v1/assets/{id}/ai 的 annotation;无行时为 null)。*/
+export interface AssetAiAnnotation {
+  /** 打标时快照的 项目名/目录链/文件名(worker 从 DB 拼,非模型输出)。*/
+  context_path: string;
+  tags_zh: string[];
+  tags_en: string[];
+  /** 呈现用描述(P1 展示英文原描述,P2 精标中文直出);可能为 null。*/
+  description: string | null;
+  description_en: string | null;
+  /** coarse / refined(P3 精标预留)。*/
+  tier: string;
+  model_version: string;
+  /** 降级标记(partial 等)。*/
+  meta: Record<string, unknown>;
+  updated_at: string;
+}
+
+/** 视频虚拟切片段(GET /api/v1/assets/{id}/ai 的 segments 元素)。*/
+export interface AssetVideoSegment {
+  idx: number;
+  start_ms: number;
+  end_ms: number;
+  tags_zh: string[];
+  tags_en: string[];
+  description: string | null;
+  /** describe_failed(该段描述失败)/ segmented_by=interval(兜底按时长分段)等。*/
+  meta: Record<string, unknown>;
+  keyframe_count: number;
+}
+
+/** GET /api/v1/assets/{id}/ai 响应体(annotation/segments 均可为 null = 无该类数据)。*/
+export interface AssetAiInfo {
+  annotation: AssetAiAnnotation | null;
+  segments: AssetVideoSegment[] | null;
+  model_version_active: string;
+}
+
+/** POST /api/v1/assets/{id}/ai/keyframe-urls 响应体(键为段 idx 字符串)。*/
+export interface AssetAiKeyframeUrlsOut {
+  urls: Record<string, string[]>;
+}
+
 // ─── W6 一期:文件批量移动(六项优化 2026-10-17;POST /api/v1/assets/batch-move)──
 /** 单条跳过明细(reason 键固定 ASCII:duplicate_location / duplicate_filename,前端中文映射)。*/
 export interface AssetBatchMoveSkipped {

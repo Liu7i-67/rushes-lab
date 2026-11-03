@@ -20,6 +20,12 @@ import { FolderGrantsPanel } from './FolderGrantsPanel';
 import { AssetPreviewModal, isPreviewable } from './AssetPreviewModal';
 import { RequestAccessModal } from './RequestAccessModal';
 import { AssetTagEditor } from './AssetTagEditor';
+// AI 自动打标 + 视频智能分段(ai-tagging-slicing 工作包 J):分区组件化接入
+import { AiInfoSection } from './AiInfoSection';
+import { SegmentSection } from './SegmentSection';
+import { isAiTaggableAsset, isVideoAsset } from '../lib/asset-kind';
+// 分区标题拆为共享组件(拆出前为本文件局部函数,样式逐字节一致)
+import { SectionLabel } from './SectionLabel';
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -55,6 +61,9 @@ export function AssetSummaryPanel({
   const downloads = useDownloads();
   // 无下载权限时:下载/预览会被后端 403;「申请下载」把审批入口显式摆出来
   const canDownload = folder?.my_can_download !== false;
+  // AI 区「采纳为人工标签」按钮闸:PATCH /assets/{id}/meta 要求父夹 can_upload
+  // (系统 admin 直通;与 FolderDetailPage 上传按钮同款判定),无权限前端隐藏
+  const canEditLabels = folder?.my_can_upload === true;
 
   // D iter3:0 选 + sensitive folder + me → FolderInvitePanel
   if (selected.length === 0 && folder && folder.is_sensitive && me) {
@@ -89,6 +98,9 @@ export function AssetSummaryPanel({
   // ─── 单选 ─────────────────────────────────────────────────────────────────
   if (selected.length === 1) {
     const a = selected[0];
+    // AI 区挂载条件(图片/视频分别条件渲染;livp 算图片族挂 AI 区,不挂分段区)
+    const isAiTaggable = isAiTaggableAsset(a);
+    const isVideo = isVideoAsset(a);
 
     // 下载 403/失败处理 —「下载」「下载源文件」共用同一分支:
     // 403 无权限 → 自动弹申请(与 FolderDetail / ProjectDetail 同款流程);其余通用报错
@@ -213,12 +225,23 @@ export function AssetSummaryPanel({
                        }} />
         </div>
 
+        {/* 智能分段(ai-tagging-slicing P2):仅视频类型挂载,segments 非空才渲染
+            (组件内自取 AI 数据,与 AI 识别区共用同一 query);紧邻预览/下载区 ——
+            点段行即经预览 modal 的 <video> 定位播放 */}
+        {isVideo && (
+          <SegmentSection asset={a} onRequestPreview={() => setPreviewOpen(true)} />
+        )}
+
         {/* #151: 标签 + 备注 — 盲搜的入参,行内编辑 */}
         <div style={{ padding: '14px 20px' }}>
           <SectionLabel>标签 / 备注(可被盲搜命中)</SectionLabel>
           <AssetTagEditor asset={a} stopPropagation={false} />
           <NotesEditor asset={a} />
         </div>
+
+        {/* AI 识别(ai-tagging-slicing P1):人工标签区之后的独立分区,视觉隔离;
+            图片/视频族挂载,client 层 404 静默 → 空态,不影响其余分区 */}
+        {isAiTaggable && <AiInfoSection asset={a} canEdit={canEditLabels} />}
 
         {/* Meta list */}
         <div style={{ padding: '14px 20px' }}>
@@ -417,16 +440,6 @@ function QuickAction({
       <span style={{ color: 'var(--ms-ink-muted)' }}>{icon}</span>
       <span>{label}</span>
     </button>
-  );
-}
-
-function SectionLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <div style={{
-      fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
-      color: 'var(--ms-ink-subtle)', fontFamily: 'var(--ms-font-mono)',
-      fontWeight: 500, marginBottom: 10,
-    }}>{children}</div>
   );
 }
 

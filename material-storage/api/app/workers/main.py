@@ -194,6 +194,11 @@ async def generate_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
         removes=("thumbnail_failed", "thumbnail_skipped"),
     )
 
+    # 5b) AI 链式挂载(ai-tagging-slicing 方案 §8.1):1024 产物与 thumbnail_key
+    #     tags 已落 → 行先行 + enqueue annotate(打标输入就是本缩略图);失败仅
+    #     log 不影响主链路(skip/failed 路径不进本收尾,天然不进 AI)
+    await _chain_ai(ctx, sm, aid, "annotate")
+
     # 6) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant ——
     #    1024 主产物与 thumbnail_key tags 已落,small 段异常不影响本 job 结果)
     await _derive_small_variant(asset_id, thumbnail_bytes)
@@ -342,6 +347,44 @@ async def _derive_small_variant(asset_id: str, source: bytes) -> None:
         log.warning("small thumbnail derive fail asset=%s err=%s", asset_id, e)
 
 
+async def _chain_ai(ctx: dict, sm: Any, aid: uuid.UUID, kind: str) -> None:
+    """缩略图成功收尾 → AI 链式触发(ai-tagging-slicing 方案 §8.1)。
+
+    两步:① ensure_ai_job 行先行(INSERT ON CONFLICT DO NOTHING)—— ai_jobs 表
+    无条件成为事实源,enqueue 丢了也由 sweeper 10-25min 补派;② enqueue 到独立
+    ai 队列,参数拼装经 arq_pool.enqueue_ai_job_raw(与 enqueue_ai_* / sweeper
+    单一来源:确定性 _job_id + _expires 按类 + _queue_name="ai",P2-2)。worker
+    侧无独立 arq pool,接力入队沿 baidu_backup 接力 / ai_main sweeper 先例直接
+    用 arq job ctx 自带的 ctx["redis"](ArqRedis,接口同 pool)。model_version 用
+    write_model_version(与 pipeline 认领 / sweeper 重派同一写入版本,行才可被
+    认领)。ai_enabled=false 急停语义:零行为(不写行不 enqueue)。全段
+    try/except 仅 log —— 不得影响缩略图主链路返回值(skip/failed 路径根本不进
+    本 helper)。
+    """
+    try:
+        from app.services import ai_jobs
+        from app.services.ai_pipeline import write_model_version
+        from app.services.arq_pool import enqueue_ai_job_raw
+
+        settings = get_settings()
+        if not settings.ai_enabled:
+            return
+        if kind not in (ai_jobs.KIND_ANNOTATE, ai_jobs.KIND_SLICE):
+            return  # refresh 不由缩略图链派发;未知 kind 防御
+        mv = write_model_version(settings)
+        await ai_jobs.ensure_ai_job(sm, aid, kind, mv)
+        pool = ctx.get("redis") if ctx else None
+        if pool is None:
+            # 行已先行,sweeper 会补派;只缺本次派发,记 warning 供排查
+            log.warning("chain ai no redis(行已落,sweeper 补派)asset=%s kind=%s", aid, kind)
+            return
+        job = await enqueue_ai_job_raw(pool, kind, str(aid), mv)
+        if job is None:
+            log.warning("chain ai 静默去重(墓碑/结果键盲窗?)asset=%s kind=%s", aid, kind)
+    except Exception as e:
+        log.warning("chain ai fail asset=%s kind=%s err=%s", aid, kind, e)
+
+
 def _transcode_live_video(in_path: Path, out_path: Path, timeout: int) -> bool:
     """实况短片 → H.264 MP4(浏览器兼容;原片多为 HEVC,Chrome 常放不了)。
 
@@ -462,6 +505,11 @@ async def generate_livp_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
             },
             removes=("thumbnail_failed", "thumbnail_skipped"),
         )
+
+        # 2a) AI 链式挂载(ai-tagging-slicing 方案 §8.1):静态图 thumbnail_key tags
+        #     已落即触发 annotate —— 故意挂在实况短片转码之前,转码失败不影响链式
+        #     派发(livp 视频轨本期不打标不切片,§8.4)
+        await _chain_ai(ctx, sm, aid, "annotate")
 
         # 2b) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant
         #     —— 1024 主产物与 thumbnail_key tags 已落,small 段异常不影响实况转码)
@@ -1060,6 +1108,11 @@ async def generate_video_thumbnail(ctx: dict, asset_id: str) -> dict[str, Any]:
         },
         removes=("thumbnail_failed", "thumbnail_skipped"),
     )
+
+    # 4b) AI 链式挂载(ai-tagging-slicing 方案 §8.1):thumbnail_key tags 已落 →
+    #     行先行 + enqueue slice(切片自带 ffprobe→场景检测→关键帧→打标全流程,
+    #     不依赖本缩略图);失败仅 log 不影响主链路(skip/failed 路径不进本收尾)
+    await _chain_ai(ctx, sm, aid, "slice")
 
     # 5) small(240px) 变体派生(方案 §3.4/§4 B1;失败隔离见 _derive_small_variant ——
     #    1024 主产物与 thumbnail_key tags 已落,small 段异常不影响本 job 结果)

@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.db.session import get_db
-from app.db.tables import Asset, Folder, Project
+from app.db.tables import Asset, AssetAiAnnotation, Folder, Project
 from app.deps import (
     CurrentUser,
     get_audit,
@@ -52,6 +52,11 @@ from app.models import (
     UploadMultipartCreateOut,
     UploadPartUrlOut,
     UploadUrlRequest,
+)
+from app.routers.ai_assets import (
+    enqueue_ai_refresh,
+    enqueue_ai_refresh_for_assets,
+    restore_restock_ai,
 )
 from app.services.asset_cleanup import purge_asset_storage
 from app.services.audit import AuditService, mint_trace_id
@@ -544,6 +549,7 @@ async def list_trash(
 @router.post("/{asset_id}/restore", status_code=204)
 async def restore_asset(
     asset_id: uuid.UUID,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
@@ -627,6 +633,13 @@ async def restore_asset(
         **ctx,
     )
 
+    # AI 恢复出口钩子(ai-tagging-slicing 方案 §8.6):删软删期落下的
+    # skipped(asset_gone) 行 + 按被删行原 kind 补 pending 行重派(无 annotation
+    # 再补 annotate)—— ai_jobs 无条件事实源,只 DELETE 不补行会让恢复的资产静默
+    # 漏标。fail-open:ai_enabled=false 零行为,异常仅 log,不影响恢复主流程。
+    # pool 用 getattr 兜底(测试桩/极早生命周期无 arq_pool 时跳过,batch_move 同款)。
+    await restore_restock_ai(db, getattr(request.app.state, "arq_pool", None), asset_id)
+
 
 # ─── 盲搜(标签 + 跨 folder,#151)────────────────────────────────────────────
 @router.get("/search", response_model=list[SearchResultOut])
@@ -658,6 +671,15 @@ async def search_assets(
       拼串匹配是精确元素匹配的超集(标签是拼串的子串),所以不再单独留
       `q = ANY(user_labels)` 分支 —— 它既冗余又不走 GIN array_ops,留着只会
       让 planner 对整个 OR 放弃索引。
+
+    第四路(ai-tagging-slicing 方案 §11,ai_enabled=true 时):AI 打标结果
+    searchable_text 命中面,定稿为**两臂独立查询 + 应用层合并** —— 禁止把
+    EXISTS 臂 OR 进既有三路(planner 退出 BitmapOr 全表 filter)也禁止 DB 层
+    UNION(union 后 Row 丢 ORM 实体映射,下方解析依赖 AssetOut.model_validate)。
+    两臂同 folder_filter(权限先行,sensitive 零泄露语义不变)、同排序键
+    (created_at DESC + id tiebreak)、各取前 offset+limit 行,应用层按 asset.id
+    去重(臂 A 优先)后同键重排、内存切片 [offset:offset+limit]。ai_enabled=false
+    时只跑既有三路,SQL 与线上逐字节一致(下方早退分支零改动)。
     """
     q = q.strip()
     if not q:
@@ -694,34 +716,109 @@ async def search_assets(
     # (ms_labels_text 是 migration 0011 建的 IMMUTABLE 包装,见 docstring)
     label_match = func.ms_labels_text(Asset.user_labels).ilike(pattern, escape="\\")
 
-    stmt = (
-        select(Asset, Folder.name, Project.id, Project.name)
-        .join(Folder, Asset.folder_id == Folder.id)
-        .join(Project, Folder.project_id == Project.id)
-        .where(
-            Asset.deleted_at.is_(None),
-            folder_filter,
-            or_(
-                Asset.filename.ilike(pattern, escape="\\"),
-                Asset.notes.ilike(pattern, escape="\\"),
-                label_match,
-            ),
+    if not get_settings().ai_enabled:
+        # off 态(硬验收):与现状逐字节一致 —— 同一 stmt 对象路径,不拼臂 B
+        stmt = (
+            select(Asset, Folder.name, Project.id, Project.name)
+            .join(Folder, Asset.folder_id == Folder.id)
+            .join(Project, Folder.project_id == Project.id)
+            .where(
+                Asset.deleted_at.is_(None),
+                folder_filter,
+                or_(
+                    Asset.filename.ilike(pattern, escape="\\"),
+                    Asset.notes.ilike(pattern, escape="\\"),
+                    label_match,
+                ),
+            )
+            .order_by(Asset.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
-        .order_by(Asset.created_at.desc())
-        .limit(limit)
-        .offset(offset)
-    )
-    res = await db.execute(stmt)
-    out: list[SearchResultOut] = []
-    for asset, folder_name, project_id, project_name in res.all():
-        data = AssetOut.model_validate(asset).model_dump()
+        res = await db.execute(stmt)
+        out: list[SearchResultOut] = []
+        for asset, folder_name, project_id, project_name in res.all():
+            data = AssetOut.model_validate(asset).model_dump()
+            data.update(
+                folder_name=folder_name,
+                project_id=project_id,
+                project_name=project_name,
+            )
+            out.append(SearchResultOut(**data))
+        return out
+
+    # ── 第四路 on 态(方案 §11):两臂独立查询 + 应用层合并 ────────────────────
+    active_version = get_settings().ai_active_version
+    offset_plus_limit = offset + limit
+    # 臂 A = 现三路查询 + id tiebreak(批量上传 created_at 全并列翻页漂移,
+    # list_assets :446-465 先例);SQL 层不带 OFFSET,取前 offset+limit 行
+    arm_a_rows = (
+        await db.execute(
+            select(Asset, Folder.name, Project.id, Project.name)
+            .join(Folder, Asset.folder_id == Folder.id)
+            .join(Project, Folder.project_id == Project.id)
+            .where(
+                Asset.deleted_at.is_(None),
+                folder_filter,
+                or_(
+                    Asset.filename.ilike(pattern, escape="\\"),
+                    Asset.notes.ilike(pattern, escape="\\"),
+                    label_match,
+                ),
+            )
+            .order_by(Asset.created_at.desc(), Asset.id.desc())
+            .limit(offset_plus_limit)
+        )
+    ).all()
+    # 臂 B = AI 命中面(searchable_text 自带 trgm GIN,独立索引扫描不退化为
+    # filter);JOIN assets 带同一 folder_filter,同键同 tiebreak 同 LIMIT
+    arm_b_ids: list[uuid.UUID] = [
+        r[0]
+        for r in (
+            await db.execute(
+                select(AssetAiAnnotation.asset_id)
+                .join(Asset, Asset.id == AssetAiAnnotation.asset_id)
+                .where(
+                    AssetAiAnnotation.model_version == active_version,
+                    AssetAiAnnotation.searchable_text.ilike(pattern, escape="\\"),
+                    Asset.deleted_at.is_(None),
+                    folder_filter,
+                )
+                .order_by(Asset.created_at.desc(), Asset.id.desc())
+                .limit(offset_plus_limit)
+            )
+        ).all()
+    ]
+    arm_b_rows: list[Any] = []
+    if arm_b_ids:
+        arm_b_rows = list(
+            (
+                await db.execute(
+                    select(Asset, Folder.name, Project.id, Project.name)
+                    .join(Folder, Asset.folder_id == Folder.id)
+                    .join(Project, Folder.project_id == Project.id)
+                    .where(Asset.id.in_(arm_b_ids), folder_filter)
+                )
+            ).all()
+        )
+
+    # 合并分页:按 asset.id 去重(臂 A 先到先得)→ 同键 (created_at, id) desc
+    # 重排 → 内存切片(与 SQL LIMIT+OFFSET 等价;limit ≤200 量级零压力)
+    merged: dict[uuid.UUID, tuple[Any, SearchResultOut]] = {}
+    for row in [*arm_a_rows, *arm_b_rows]:
+        asset_obj, folder_name, project_id, project_name = row
+        data = AssetOut.model_validate(asset_obj).model_dump()
         data.update(
             folder_name=folder_name,
             project_id=project_id,
             project_name=project_name,
         )
-        out.append(SearchResultOut(**data))
-    return out
+        merged.setdefault(asset_obj.id, (asset_obj, SearchResultOut(**data)))
+    ranked = sorted(
+        merged.values(), key=lambda pair: (pair[0].created_at, pair[0].id),
+        reverse=True,
+    )
+    return [item for _asset, item in ranked[offset:offset + limit]]
 
 
 # ─── 打标 / 改标(#151)────────────────────────────────────────────────────────
@@ -828,6 +925,7 @@ class AssetBatchPrefixOut(BaseModel):
 @router.post("/batch-prefix", response_model=AssetBatchPrefixOut)
 async def batch_prefix(
     payload: AssetBatchPrefixIn,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     presign: PresignService = Depends(get_presign),  # noqa: B008  # FastAPI DI,repo 全量同款
@@ -1135,6 +1233,13 @@ async def batch_prefix(
         },
         **ctx,
     )
+    # AI 上下文刷新钩子(ai-tagging-slicing 方案 §8.6):改名影响 annotation 的
+    # context_path(文件名是 context_path 尾段),fire-and-forget —— ai_enabled=false
+    # 零行为,失败仅 log,丢失由 backfill --refresh-context 对账兜底。pool 用
+    # getattr 兜底(batch_move 同款)。
+    if renamed_ids:
+        await enqueue_ai_refresh_for_assets(
+            getattr(request.app.state, "arq_pool", None), renamed_ids)
     return AssetBatchPrefixOut(
         renamed=len(renamed_ids),
         skipped=skipped_total,
@@ -1171,6 +1276,7 @@ async def _assert_target_not_sensitive_descendant(db: AsyncSession, target: Fold
 @router.post("/batch-move", response_model=AssetBatchMoveOut)
 async def batch_move_assets(
     payload: AssetBatchMoveIn,
+    request: Request,
     db: AsyncSession = Depends(get_db),  # noqa: B008  # FastAPI DI,repo 全量同款
     permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  # FastAPI DI,repo 全量同款
     audit: AuditService = Depends(get_audit),  # noqa: B008  # FastAPI DI,repo 全量同款
@@ -1482,6 +1588,16 @@ async def batch_move_assets(
         },
         **ctx,
     )
+    # AI 上下文刷新钩子(ai-tagging-slicing 方案 §8.6):移动后 context_path 的
+    # 目录链已变,fire-and-forget —— ≤500 直传 asset_ids,>500 取目标夹子树模式
+    # (refresh BFS 覆盖全部移动资产),ai_enabled=false 零行为,失败仅 log。
+    if moved_ids:
+        pool = getattr(request.app.state, "arq_pool", None)
+        if len(moved_ids) <= 500:
+            await enqueue_ai_refresh(pool, asset_ids=moved_ids)
+        else:
+            await enqueue_ai_refresh(pool, folder_id=payload.target_folder_id)
+
     return AssetBatchMoveOut(
         moved_count=len(moved_ids),
         skipped=skipped,

@@ -5,6 +5,18 @@
 #   2. cp .env.example .env  并填实际值
 #   3. docker compose up -d
 #   4. docker compose exec api alembic upgrade head    # Phase B-2 后有 migration
+#
+# ─── AI 打标/切片两服务(ms-ai-worker / ms-ml,profile "ai")─────────────────
+# 两者都挂 profiles: ["ai"],**默认不起**:未启用环境 docker compose up -d / restart /
+# ps 完全不感知它们(与 settings ai_enabled=false 构成双保险,方案
+# rushes-spec/material-storage/ai-tagging-slicing-plan.md §13)。显式启用:
+#   export COMPOSE_PROFILES=ai          # 之后照常 up -d / logs ms-ml 等
+# 或单次:COMPOSE_PROFILES=ai docker compose up -d ms-ai-worker ms-ml
+# 首次/更新镜像须 COMPOSE_PROFILES=ai docker compose build(restart 不 build;
+# 代码热更走 ./app、./ml bind mount,与既有服务同款)。
+# deploy_lan.sh --restart 已做 profile 未启用降级(ms-ai-worker 不存在时只重启两件)。
+# ★ MS_ML_MODEL_VERSION 必须与 .env 的 AI_MODEL_VERSION 同值(词表升级时两者同步改),
+#   否则 api 健康闸血缘断言(§8.3-3)错位判死 → sweeper 无限重派。
 
 services:
   ms-db:
@@ -43,6 +55,8 @@ services:
       args:
         APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    # 显式命名镜像供 ms-ai-worker 引用:同一 build 只落一份镜像,不双份(方案 §13)
+    image: ms-api-image
     container_name: ms-api
     restart: unless-stopped
     env_file: .env
@@ -69,6 +83,8 @@ services:
       args:
         APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
         PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    # 与 ms-api 同一命名镜像(build 声明保留作兜底,up 时镜像已在则不重 build)
+    image: ms-api-image
     container_name: ms-worker
     restart: unless-stopped
     command: arq app.workers.main.WorkerSettings
@@ -120,6 +136,74 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    networks:
+      - poc-net
+
+  # ─── AI 打标/切片 worker(方案 ai-tagging-slicing-plan.md §13;包 B 实现 app/workers/ai_main.py)──
+  # 与 ms-api/ms-worker 共用 ms-api-image(image 命名共享,不双镜像);代码热更走
+  # ./app bind mount(与 ms-worker 同款,restart 即生效)。
+  # ★ profile "ai":默认不起,启用方式见文件顶部注释(COMPOSE_PROFILES=ai)。
+  # ★ mem 2g:容器内跑 2 路并发 ffmpeg 子进程(settings ai_slice_max_concurrent),
+  #   cgroup 计入容器内存,1g 偏紧(ms-worker 跑 ffmpeg 未设限,2g 居中,§13)。
+  ms-ai-worker:
+    build:
+      context: .
+      args:
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    image: ms-api-image
+    container_name: ms-ai-worker
+    restart: unless-stopped
+    command: arq app.workers.ai_main.AIWorkerSettings
+    env_file: .env
+    depends_on:
+      ms-redis:
+        condition: service_started
+    volumes:
+      - ./app:/app/app:ro
+      - ./scripts:/app/scripts:ro
+    mem_limit: 2g
+    profiles: ["ai"]
+    networks:
+      - poc-net
+
+  # ─── ms-ml 推理服务(SmolVLM2-256M;包 F 实现 api/ml/)────────────────────────
+  # stub / stub-fault / real 三模式由 MS_ML_MODE 切换(real 需权重一次性手动导入
+  # ./ml-models —— deploy_lan.sh 已排除该目录,勿随部署同步,§13)。
+  # ★ 禁止 env_file:那会把 DB/Redis/MinIO 凭证灌进本服务(ms-mcp 同款架构红线);
+  #   只透传下列两个显式 environment(值可空,宿主侧 MS_ML_* 覆盖)。
+  # ★ 不 publish 宿主端口:仅 poc-net 内可达(api/worker 经 http://ms-ml:8000 访问)。
+  # ★ mem 20g 是 real 模式口径:8 进程 ×(权重+基线)贴 16g 下限,写 16g 会 OOM
+  #   一次杀全部推理进程反复震荡(§7.3/§13);stub 模式下不实际占用。
+  ms-ml:
+    build:
+      context: .
+      dockerfile: ml/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR:-mirrors.tuna.tsinghua.edu.cn}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}
+    container_name: ms-ml
+    restart: unless-stopped
+    environment:
+      MS_ML_MODE: ${MS_ML_MODE:-stub}
+      # 默认值与 app/settings.py 的 ai_model_version 逐字一致(词表升级时同步改;
+      # 留空会使 stub 上报 stub@p0 ≠ api 侧默认 → 健康闸判死无限重派,文件头注释)
+      MS_ML_MODEL_VERSION: ${MS_ML_MODEL_VERSION:-smolvlm2-256m@p1+lm1}
+    volumes:
+      # 权重只读挂载(手动导入);代码 bind mount 热更,沿 ./app 同款(§13)
+      - ./ml-models:/models/smolvlm2-256m:ro
+      - ./ml:/app/ml:ro
+    mem_limit: 20g
+    cpus: 16.0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # start_period 90s:real 模式权重(~0.5-1GB)冷加载远超 20s,20s 会在加载期
+      # 连打 unhealthy 触发 restart 震荡(stub 秒起,不受影响)
+      start_period: 90s
+    profiles: ["ai"]
     networks:
       - poc-net
 

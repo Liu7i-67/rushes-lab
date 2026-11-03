@@ -18,6 +18,7 @@ from app import __version__
 from app.middleware.mcp_stats import MCPStatsMiddleware
 from app.routers import (
     admin,
+    ai_assets,
     approvals,
     assets,
     auth,
@@ -152,6 +153,9 @@ def create_app() -> FastAPI:
     app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"], dependencies=gate)
     app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"], dependencies=gate)
     app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"], dependencies=gate)
+    # AI 打标/切片读取端点(GET /{id}/ai + keyframe-urls;ai-tagging-slicing 方案
+    # §12):与 assets 同 prefix 同 gate —— 必须紧随 assets 挂载,路径才不歧义
+    app.include_router(ai_assets.router, prefix="/api/v1/assets", tags=["assets"], dependencies=gate)
     app.include_router(
         approvals.router, prefix="/api/v1/approvals", tags=["approvals"], dependencies=gate,
     )

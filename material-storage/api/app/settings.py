@@ -1,4 +1,5 @@
 """Pydantic Settings — env-driven config(12-factor)。"""
+import logging
 from typing import Any
 
 from pydantic import Field, PostgresDsn, RedisDsn
@@ -223,6 +224,79 @@ class Settings(BaseSettings):
             f"{self.baidu_max_active_tasks_per_binding} 必须 ≥ 1"
             "(配 0/负值会静默砖死创建与复活、恒 409 且无启动报错,见并发方案 §3.2)"
         )
+
+    # ─── AI 自动打标 + 视频切片(方案 rushes-spec/material-storage/ai-tagging-slicing-plan.md)──
+    # 消费方两处:ms-api(搜索第四路 / GET /ai 端点 / 缩略图链挂载闸)与
+    # ms-ai-worker(推理管线全部参数);ms-ml 不读本文件(只吃 compose 透传的
+    # MS_ML_MODE 等,不 env_file —— 见 docker-compose ms-ml 注释红线)。
+    # ⚠ 调 .env 后 docker compose restart 不重读 env_file(baidu 段同款),须按消费方
+    #   up -d --force-recreate:AI_* 涉及 ms-api 与 ms-ai-worker 两个(ms-ai-worker 挂
+    #   profiles ["ai"],未启用该 profile 的环境只 recreate ms-api)。
+    # 总开关急停(§13):False 时缩略图链不写 ai_jobs 不 enqueue、搜索只跑段 A、
+    # GET /assets/{id}/ai 404 —— baidu_backup_enabled 同款急停语义;回滚 = 关开关,
+    # 落库数据不删
+    ai_enabled: bool = False
+    # ms-ml 服务内网地址(compose poc-net DNS 名;本机调试可指 localhost 映射端口)
+    ai_ml_base_url: str = "http://ms-ml:8000"
+    # 写入版本:新打标/回填落库用它;形如 权重指纹+提示词版本+词表版本(§8.1),
+    # 换版 = 新版本行、旧行保留。灰度 runbook:改写入版本 → backfill 全量 → 翻转 active
+    ai_model_version: str = "smolvlm2-256m@p1+lm1"
+    # 读取版本:搜索第四路与展示只认它(§8.1);None = 回落 ai_model_version(常态单版本)
+    ai_active_model_version: str | None = Field(
+        None, description="None = 回落 ai_model_version;灰度窗口允许与写入版本短暂不一致",
+    )
+    # ── 切片/推理参数(ms-ai-worker 消费;改了须 recreate ms-ai-worker)──
+    ai_scene_threshold: float = 0.30     # ffmpeg 场景检测切点阈值(调低=切更碎,调高=更粗)
+    ai_max_segments: int = 60            # 单视频段数硬上限(固定间隔兜底路径同样受限)
+    ai_max_frames: int = 60              # 单视频 describe 帧数硬上限(自适应取帧在此封顶)
+    ai_slice_max_concurrent: int = 2     # 行认领层并发闸(§8.2);ms-ai-worker mem 2g 按此测算
+    ai_ml_timeout_s: int = 30            # ms-ml 单次 HTTP 超时;重试语义在调用侧(annotate ×2 / 帧级不重试)
+    ai_worker_max_jobs: int = 8          # AIWorkerSettings.max_jobs;ai 队列独立,不受 worker_max_jobs 影响
+
+    @property
+    def ai_active_version(self) -> str:
+        """读取版本(active 显式配置优先,否则回落写入版本);搜索/端点统一取这里。"""
+        return self.ai_active_model_version or self.ai_model_version
+
+    def validate_ai_settings(self) -> None:
+        """AI 配置的启动校验(方案 §13)——**只 warning 不 assert**,与 baidu 段风格刻意区分。
+
+        为什么这里不炸:active ≠ 写入版本是灰度换版 runbook(§13)的合法中间态
+        (改写入版本 → backfill 全量 → 才翻转 active),启动 assert 会把灰度窗口
+        误伤成事故;且 active 指错版本的代价是「搜索第四路静默空结果」而非写坏
+        数据,打 warning 让运维可感知即可。api lifespan 与 ms-ai-worker on_startup
+        均调用本方法。
+        """
+        if (
+            self.ai_active_model_version is not None
+            and self.ai_active_version != self.ai_model_version
+        ):
+            logging.getLogger(__name__).warning(
+                "ai_active_model_version=%s != ai_model_version=%s:灰度窗口或配错 —— "
+                "搜索/展示只命中 active 版本,确认非手滑(方案 §13 runbook)",
+                self.ai_active_model_version, self.ai_model_version,
+            )
+        # 词表版本同步闸(P1-1):ai_model_version 字面量的 lm 后缀 ≠ 当前词表版本
+        # (ai_label_map.map_version_suffix)→ 写入版本(write_model_version)与配置
+        # 字面量漂移 —— ms-ml 的 MS_ML_MODEL_VERSION / .env 的 AI_MODEL_VERSION 须随
+        # 词表升级同步改,否则血缘口径错位;只提示不炸。import 延迟到函数体(防环:
+        # ai_label_map 所在 services 层反向引用 settings 链)。
+        import re
+
+        try:
+            from app.services.ai_label_map import map_version_suffix
+        except ImportError:  # pragma: no cover —— 词表包未落地的兜底(lm0),无从比对
+            return
+        m = re.search(r"\+lm\d+$", self.ai_model_version)
+        configured_lm = m.group(0)[1:] if m else None
+        current_lm = map_version_suffix()
+        if configured_lm != current_lm:
+            logging.getLogger(__name__).warning(
+                "ai_model_version=%s 的词表后缀(%s)与当前词表版本(%s)不一致 —— "
+                "词表升级时须同步改 .env 的 AI_MODEL_VERSION 与 ms-ml 的 "
+                "MS_ML_MODEL_VERSION(方案 §6/§13)",
+                self.ai_model_version, configured_lm, current_lm,
+            )
 
 
 # 单例(import 时 lazy 创建)

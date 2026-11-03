@@ -5,7 +5,10 @@
 """
 
 from app.db.tables import (
+    AiJob,
     Asset,
+    AssetAiAnnotation,
+    AssetVideoSegment,
     AuditEvent,
     BaiduBackupTask,
     BaiduBackupTaskFile,
@@ -44,6 +47,10 @@ def test_all_tables_in_metadata() -> None:
         # 0020:MCP 素材服务(PAT + 系统配置 KV)
         "personal_access_tokens",
         "system_flags",
+        # 0021:AI 打标 + 视频切片(任务行 / 打标结果 / 虚拟切片段)
+        "ai_jobs",
+        "asset_ai_annotations",
+        "asset_video_segments",
     }
 
 
@@ -128,6 +135,80 @@ def test_system_flags_schema() -> None:
     assert isinstance(cols.value.type, JSONB)
     assert cols.value.nullable is False
     assert {"created_at", "updated_at", "key", "value"} == set(cols.keys())
+
+
+# ─── AI 打标 + 视频切片三表(需求 §2.1,migration 20261103_0021)────────────────
+
+
+def test_ai_job_schema() -> None:
+    """ai_jobs:行认领 CAS/心跳载体 —— uq_ai_job 唯一 + sweeper 扫描索引 + FK CASCADE。
+
+    claim_token / heartbeat_at nullable(「创建后未派发」「派发后未认领」窗口为
+    NULL);last_error 为受控 token 集(varchar(128),不落自由文本)。
+    """
+    cols = AiJob.__table__.c
+    assert cols.kind.type.length == 16
+    assert cols.status.type.length == 16
+    assert cols.status.nullable is False
+    assert cols.attempts.nullable is False
+    assert cols.claim_token.nullable is True
+    assert cols.heartbeat_at.nullable is True
+    assert cols.last_error.type.length == 128
+    assert cols.last_error.nullable is True
+    assert cols.model_version.type.length == 64
+    constraints = {c.name for c in AiJob.__table__.constraints}
+    assert "uq_ai_job" in constraints
+    assert "ix_ai_jobs_status_updated" in {i.name for i in AiJob.__table__.indexes}
+    fks = {fk.parent.name: fk for fk in AiJob.__table__.foreign_keys}
+    assert fks["asset_id"].ondelete == "CASCADE"
+    assert fks["asset_id"].target_fullname == "assets.id"
+
+
+def test_asset_ai_annotation_schema() -> None:
+    """asset_ai_annotations:PK (asset_id, model_version) —— 换模型/换词表 = 新版本行。
+
+    searchable_text 为搜索第四路唯一命中面,须有 GIN trgm 索引(pg_trgm 迁移 0006 已建)。
+    """
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    cols = AssetAiAnnotation.__table__.c
+    pk_cols = [c.name for c in AssetAiAnnotation.__table__.primary_key.columns]
+    assert pk_cols == ["asset_id", "model_version"]
+    assert cols.tier.type.length == 8
+    assert cols.context_path.type.length == 600
+    assert cols.context_path.nullable is False
+    assert cols.searchable_text.nullable is False
+    for name in ("tags_zh", "tags_en", "meta"):
+        assert isinstance(cols[name].type, JSONB), f"{name} 列类型应为 JSONB,实际 {cols[name].type}"
+        assert cols[name].nullable is False
+    fks = {fk.parent.name: fk for fk in AssetAiAnnotation.__table__.foreign_keys}
+    assert fks["asset_id"].ondelete == "CASCADE"
+    indices = {i.name: i for i in AssetAiAnnotation.__table__.indexes}
+    idx = indices.get("ix_ai_annotation_trgm")
+    assert idx is not None, "缺 ix_ai_annotation_trgm(搜索第四路命中面索引)"
+    assert idx.dialect_options["postgresql"]["using"] == "gin"
+    assert idx.dialect_options["postgresql"]["ops"] == {"searchable_text": "gin_trgm_ops"}
+
+
+def test_asset_video_segment_schema() -> None:
+    """asset_video_segments:虚拟切片段 —— uq_ai_segment UNIQUE (asset_id, idx) 刻意
+    不含 model_version(重跑 = 删旧段重写,防多版本段无限堆积);毫秒边界显式
+    BigInteger(对齐 size_bytes 惯例);段只整批重写,无 updated_at。"""
+    from sqlalchemy import BigInteger
+    from sqlalchemy.dialects.postgresql import JSONB
+
+    cols = AssetVideoSegment.__table__.c
+    assert isinstance(cols.start_ms.type, BigInteger), f"start_ms 应为 BIGINT,实际 {cols.start_ms.type}"
+    assert isinstance(cols.end_ms.type, BigInteger), f"end_ms 应为 BIGINT,实际 {cols.end_ms.type}"
+    assert isinstance(cols.keyframe_keys.type, JSONB)
+    constraints = {c.name for c in AssetVideoSegment.__table__.constraints}
+    assert "uq_ai_segment" in constraints
+    fks = {fk.parent.name: fk for fk in AssetVideoSegment.__table__.foreign_keys}
+    assert fks["asset_id"].ondelete == "CASCADE"
+    assert "updated_at" not in cols
+    # 唯一键刻意不含 model_version(正本 §6)
+    uq = next(c for c in AssetVideoSegment.__table__.constraints if c.name == "uq_ai_segment")
+    assert [col.name for col in uq.columns] == ["asset_id", "idx"]
 
 
 def test_user_open_id_unique() -> None:

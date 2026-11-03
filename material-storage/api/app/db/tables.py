@@ -735,3 +735,115 @@ class SystemFlag(Base, TimestampMixin):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class AiJob(Base, TimestampMixin):
+    """AI 打标/切片任务行(方案 §6/§8,迁移 0021)— arq 派发前先落 DB 行。
+
+    行认领/心跳/终态 CAS 载体:claim_token 认领时生成(CAS 凭据),heartbeat_at
+    只被心跳刷新(判活/接管依据),终态回写 WHERE claim_token(防接管后旧 worker
+    复写终态)。status 取值域 pending|running|done|failed|skipped —— failed=瞬时
+    失败待 sweeper 重试(attempts<5),skipped=永久终态不重试(minio_missing /
+    decode_failed / asset_gone 类)。last_error 为受控 token 集(ml_error /
+    minio_missing / minio_transient / decode_failed / asset_gone / poison / partial,
+    无 ffmpeg_timeout 写入方),不落自由文本(沿 thumbnail_failed「不落敏感信息」
+    哲学,且按 token 精确 DELETE/筛选)。
+
+    读写一律经 app/services/ai_jobs.py(行认领 INSERT ON CONFLICT + CAS UPDATE)。
+    """
+    __tablename__ = "ai_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    # annotate | slice | refresh(应用层 Literal 校验,按仓库惯例不引入 DB enum/CHECK)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), default="pending", server_default="pending", nullable=False
+    )
+    attempts: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    claim_token: Mapped[uuid.UUID | None]  # NULL = 从未认领
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(128))
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    __table_args__ = (
+        # 显式命名供 test_db_schema 断言(迁移 0021 同名约束)
+        UniqueConstraint("asset_id", "kind", "model_version", name="uq_ai_job"),
+        # sweeper 扫描索引(每 10min 按 status + updated_at 挑任务,方案 §8.5)
+        Index("ix_ai_jobs_status_updated", "status", "updated_at"),
+    )
+
+
+class AssetAiAnnotation(Base, TimestampMixin):
+    """素材 AI 打标结果(方案 §6/§9,迁移 0021)— 搜索第四路唯一命中面。
+
+    PK (asset_id, model_version):换模型/换词表 = 新版本行,旧行保留作历史;
+    active 版本由 settings.ai_active_model_version(回落 ai_model_version)指定,
+    搜索只命中 active。searchable_text = context_path + tags_zh/en +
+    description(_en)+ 各段描述聚合(切片 job 完成时聚合进该列,搜索自然命中到
+    asset 级)。tier=refined 为 P2 精标预留(refined = 新 model_version 新行),
+    读取语义 P2 前再定稿,勿提前实现双读。
+    """
+    __tablename__ = "asset_ai_annotations"
+
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    model_version: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # coarse | refined(refined 为 P2 精标预留)
+    tier: Mapped[str] = mapped_column(
+        String(8), default="coarse", server_default="coarse", nullable=False
+    )
+    # 打标时的 项目名/目录链/文件名 快照(移动/改名后由 ai_refresh_context 刷新)
+    context_path: Mapped[str] = mapped_column(String(600), nullable=False)
+    tags_zh: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    tags_en: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)      # 呈现用(中文)
+    description_en: Mapped[str | None] = mapped_column(Text)   # 原始(英文)
+    searchable_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 降级标记(partial 等 —— 软预算止损的落点)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+
+    __table_args__ = (
+        # 搜索第四路 ILIKE 命中面(pg_trgm 扩展迁移 0006 已建;schema 以迁移 0021 为准)
+        Index("ix_ai_annotation_trgm", "searchable_text", postgresql_using="gin",
+              postgresql_ops={"searchable_text": "gin_trgm_ops"}),
+    )
+
+
+class AssetVideoSegment(Base):
+    """视频虚拟切片段(方案 §6/§10,决策 D1,迁移 0021)— 物理文件不动。
+
+    段结构由场景检测参数决定(与打标模型弱相关)→ UNIQUE (asset_id, idx) 刻意
+    不含 model_version:重跑/换版本 = DELETE 该 asset 全部旧段后重写,防多版本段
+    无限堆积(model_version 仅记录)。keyframe_keys 为该段关键帧对象 key 数组
+    (前缀 keyframes/{asset_id}/,presigned URL 按需签发)。段只整批重写、
+    不原地更新,故只有 created_at(无 updated_at)。
+    """
+    __tablename__ = "asset_video_segments"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("assets.id", ondelete="CASCADE"), nullable=False
+    )
+    idx: Mapped[int]  # 段序,0 起
+    # 显式 BigInteger(对齐 size_bytes 惯例):裸 Mapped[int] 会推导为 Integer
+    start_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    end_ms: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    keyframe_keys: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    tags_zh: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    tags_en: Mapped[list[str]] = mapped_column(JSONB, default=list, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    # 降级标记:segmented_by(interval/scene)/describe_failed 等(验收 #5 判定落点)
+    meta: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # 显式命名供 test_db_schema 断言(迁移 0021 同名约束)
+        UniqueConstraint("asset_id", "idx", name="uq_ai_segment"),
+    )

@@ -25,7 +25,7 @@ import logging
 import uuid
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,6 +181,7 @@ async def create_folder(
 async def update_folder(
     folder_id: uuid.UUID,
     payload: FolderUpdateIn,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
@@ -511,6 +512,15 @@ async def update_folder(
         "folder updated id=%s renamed=%s moved=%s prefix %s -> %s fga=%s",
         folder_id, renamed, moved, old_prefix, new_source_prefix, fga_status,
     )
+
+    # AI 上下文刷新钩子(ai-tagging-slicing 方案 §8.6):改名/reparent 都影响
+    # 子树 annotation 的 context_path,统一按 folder 子树模式派发(folder_id 交
+    # refresh BFS)—— fire-and-forget,ai_enabled=false 零行为,失败仅 log。
+    # pool 用 getattr 兜底(测试桩/极早生命周期无 arq_pool 时跳过,batch_move 同款)。
+    from app.routers.ai_assets import enqueue_ai_refresh
+
+    pool = getattr(request.app.state, "arq_pool", None)
+    await enqueue_ai_refresh(pool, folder_id=folder.id)
 
     await db.refresh(folder)
     return FolderOut.model_validate(folder)

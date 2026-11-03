@@ -55,12 +55,15 @@ echo "═══ 同步 $ENVNAME ($GIT_COMMIT on $GIT_BRANCH) ═══"
 # ⚠ 排除项一律用**不带 ./** 的裸名:tar/rsync 的 './xxx' 是锚定根路径的,
 #    拦不住 poc/minio/data 这类深层同名目录(Windows Git Bash tar 兜底分支
 #    实测把本地 MinIO 数据打进了包;裸名在任何层级都匹配)。
+# ml-models = AI 权重目录(~0.5-1GB),走一次性手动导入,勿随部署全量同步
+# (方案 rushes-spec/material-storage/ai-tagging-slicing-plan.md §13)。
 if command -v rsync >/dev/null 2>&1; then
   rsync -a --inplace \
     --exclude '.git' --exclude '.env' --exclude 'node_modules' --exclude 'uv.lock' \
     --exclude '__pycache__' --exclude '*.pyc' --exclude '.venv' --exclude 'static/web' \
     --exclude 'data' --exclude 'data-dev' --exclude 'data-thumbs' --exclude 'backup-mirror' \
     --exclude 'poc/minio/data' --exclude 'poc/minio/data-dev' --exclude 'poc/minio/data-thumbs' \
+    --exclude 'ml-models' \
     --exclude 'docker-compose.override.yml' \
     --exclude 'app/build' --exclude 'app/.dart_tool' \
     ./ "$HOST:/tmp/ms-sync-$ENVNAME/"
@@ -71,6 +74,7 @@ else
     --exclude='__pycache__' --exclude='*.pyc' --exclude='.venv' --exclude='static/web' \
     --exclude='data' --exclude='data-dev' --exclude='data-thumbs' --exclude='backup-mirror' \
     --exclude='poc/minio/data' --exclude='poc/minio/data-dev' --exclude='poc/minio/data-thumbs' \
+    --exclude='ml-models' \
     --exclude='docker-compose.override.yml' \
     --exclude='app/build' --exclude='app/.dart_tool' \
     . | ssh_r "mkdir -p /tmp/ms-sync-$ENVNAME && tar -xpf - -C /tmp/ms-sync-$ENVNAME/"
@@ -135,7 +139,13 @@ if [[ "$RESTART" == "--restart" ]]; then
   echo "═══ 重启 api / worker ═══"
   # 两个环境都不用 sudo:huanhua 免 sudo 直管 docker(2026-09-10 实测),
   # 且 sudo 在无 TTY 的 ssh 里撞密码会直接挂死
-  ssh_r "cd $REMOTE_DIR/api && docker compose restart ms-api ms-worker"
+  # ms-ai-worker 挂 profiles ["ai"](默认不起):未启用该 profile 的环境
+  # restart 会报 no such service,故 `2>/dev/null ||` 降级为只重启两件,
+  # 不让脚本因此中断(方案 ai-tagging-slicing-plan.md §13;ms-ml 无状态,
+  # 随 settings/权重变更手动重启,不进本列表)。
+  ssh_r "cd $REMOTE_DIR/api && \
+    docker compose restart ms-api ms-worker ms-ai-worker 2>/dev/null || \
+    docker compose restart ms-api ms-worker"
   echo "✓ 已重启"
 fi
 
