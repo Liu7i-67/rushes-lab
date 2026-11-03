@@ -238,6 +238,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "6.0.0"
+  flutter_live_motion:
+    dependency: "direct main"
+    description:
+      name: flutter_live_motion
+      sha256: "71d40663a03f10ce43438b1732cb4b34487db8e0191d795f3f14a1e49063e403"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "0.1.0"
   flutter_local_notifications:
     dependency: "direct main"
     description:

@@ -1,5 +1,7 @@
+import 'dart:io';
 import 'dart:math';
 
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/services/livp.dart';
 
@@ -74,4 +76,110 @@ void main() {
       expect(() => LivpService.decode(bad), throwsFormatException);
     });
   });
+
+  group('LivpService.unpackToFiles 恶意条目名 basename 净化(遗留项 10)', () {
+    /// 构造含单个恶意名图片条目的 zip → 解包:断言产物落在 tmpDir 内、
+    /// 文件名不含分隔符、字节原样。
+    Future<void> roundtrip(String entryName) async {
+      final arc = Archive()
+        ..addFile(ArchiveFile(entryName, 4, const <int>[1, 2, 3, 4]));
+      final livp = ZipEncoder().encode(arc)!;
+      final tmp = await Directory.systemTemp.createTemp('livp_evil');
+      try {
+        final parts = await LivpService.unpackToFiles(livp, tmp);
+        expect(parts.video, isNull, reason: '无视频条目');
+        final img = parts.image;
+        expect(
+          img.parent.path,
+          tmp.path,
+          reason: '$entryName 净化后产物必须落在 tmpDir 内(不得穿越)',
+        );
+        expect(
+          img.path.replaceAll('\\', '/').split('/').last,
+          'evil.jpg',
+          reason: '$entryName 取路径分隔后的末段,文件名不含分隔符',
+        );
+        expect(await img.readAsBytes(), const <int>[1, 2, 3, 4]);
+      } finally {
+        try {
+          await tmp.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+
+    test('相对路径穿越条目名(../../evil.jpg)取末段落盘', () async {
+      await roundtrip('../../evil.jpg');
+    });
+
+    test('反斜杠分隔条目名(..\\evil.jpg,Windows 变体)取末段落盘', () async {
+      await roundtrip('..\\evil.jpg');
+    });
+  });
+
+  group(
+    'LivpService.pack stored 开关(archive 3.6.1 per-entry compress=false)',
+    () {
+      /// 顺序解析 zip 本地文件头(PK\x03\x04;method 在偏移 8 的 2 字节 LE,
+      /// 跳条目用 nameLen@26 + extraLen@28 + compressedSize@18)。
+      /// 返回第 [index] 个条目的 compression method(0=STORED,8=DEFLATE)。
+      int methodOf(List<int> zip, int index) {
+        var pos = 0;
+        for (var i = 0; i < index; i++) {
+          final nameLen = zip[pos + 26] | (zip[pos + 27] << 8);
+          final extraLen = zip[pos + 28] | (zip[pos + 29] << 8);
+          final compSize =
+              zip[pos + 18] |
+              (zip[pos + 19] << 8) |
+              (zip[pos + 20] << 16) |
+              (zip[pos + 21] << 24);
+          pos += 30 + nameLen + extraLen + compSize;
+        }
+        expect(zip[pos + 0], 0x50);
+        expect(zip[pos + 1], 0x4B);
+        expect(zip[pos + 2], 0x03);
+        expect(zip[pos + 3], 0x04); // local file header signature
+        return zip[pos + 8] | (zip[pos + 9] << 8);
+      }
+
+      List<int> imgBytes() => List<int>.generate(2048, (i) => i & 0x7F);
+      List<int> vidBytes() => List<int>.generate(1024, (i) => 0x41 + (i % 26));
+
+      test('stored=true:两条目压缩方式均为 STORED(0),解包内容逐字节一致', () {
+        final img = imgBytes();
+        final vid = vidBytes();
+        final livp = LivpService.pack(
+          imageBytes: img,
+          imageExt: 'jpg',
+          videoBytes: vid,
+          videoExt: 'mp4',
+          baseName: 'MVIMG_0001',
+          stored: true,
+        );
+        expect(methodOf(livp, 0), 0);
+        expect(methodOf(livp, 1), 0);
+        final parts = LivpService.decode(livp);
+        expect(parts.image.name, 'MVIMG_0001.jpg');
+        expect(parts.video!.name, 'MVIMG_0001.mp4');
+        expect(parts.image.content, img);
+        expect(parts.video!.content, vid);
+      });
+
+      test('缺省 stored=false:两条目压缩方式均为 DEFLATE(8),既有行为零回归', () {
+        final img = imgBytes();
+        final vid = vidBytes();
+        final livp = LivpService.pack(
+          imageBytes: img,
+          imageExt: 'jpg',
+          videoBytes: vid,
+          videoExt: 'mp4',
+          baseName: 'MVIMG_0001',
+        );
+        expect(methodOf(livp, 0), 8);
+        expect(methodOf(livp, 1), 8);
+        final parts = LivpService.decode(livp);
+        expect(parts.image.content, img);
+        expect(parts.video!.content, vid);
+      });
+    },
+  );
 }

@@ -63,6 +63,7 @@ class _ProbePreviewAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async => 'http://presigned/$assetId';
 
   @override

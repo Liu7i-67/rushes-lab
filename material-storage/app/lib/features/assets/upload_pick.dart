@@ -18,6 +18,7 @@ import '../../services/app_log.dart';
 import '../../services/livp.dart';
 import '../../widgets/toast.dart';
 import 'album_upload_name.dart';
+import 'android_motion_upload.dart';
 import 'upload_sheet.dart';
 import 'upload_source_sheet.dart';
 
@@ -231,6 +232,10 @@ Future<void> _enqueueAlbumAsset(
     throw StateError('读取原文件失败 asset=${e.id}');
   }
   final r = await resolveAlbumUploadName(e, originPath: f.path);
+  // Android motion photo(§5.3):命中转 livp 入队;未命中/超限落普通轨原样。
+  if (await tryAndroidMotionPhoto(e, folderId, where, f.path, r.filename)) {
+    return;
+  }
   await enqueueLocalUpload(
     folderId: folderId,
     where: where,

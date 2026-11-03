@@ -51,6 +51,7 @@ dependencies:
   package_info_plus: ^9.0.1
   # open_filex — F2-6 APK 下载完成后调系统安装器(type=application/vnd.android.package-archive)
   open_filex: ^5.0.0
+  flutter_live_motion: ^0.1.0
 
 dev_dependencies:
   flutter_test:

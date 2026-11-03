@@ -65,6 +65,7 @@ class _G2AssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     downloadLinkCalls.add(assetId);
     final staged = downloadLinkStaged;

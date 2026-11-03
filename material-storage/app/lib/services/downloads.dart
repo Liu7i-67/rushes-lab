@@ -4,7 +4,13 @@
 /// media_store_plus / share_plus)封装在 download_savers.dart,经
 /// [DownloadIo] 注入束接入;PC 单测注入假件零平台通道、零网络。
 ///
-/// 重试语义=重新下载+重新落盘(决策 #3:不查重已落盘,平台重名自动加后缀)。
+/// 安卓实况图适配(2026-11-02 方案 §5.4):android+livp 且机型 capable 时
+/// 顶部能力分流进 [runMotionPhotoDownload](motion_photo_save.dart 编排);
+/// 其余行为零改动——现状主体收编至 legacy_download.dart 的
+/// runLegacyDownloadJob(D1 回落直调它,不回调本文件防 capable 机重入)。
+///
+/// 重试语义=重新下载+重新落盘(决策 #3:不查重已落盘;相册/Downloads 落地
+/// 同名为「先删后插覆盖替换」,见 download_savers.dart 钉子,非自动加后缀)。
 library;
 
 import 'dart:io';
@@ -15,15 +21,16 @@ import 'package:flutter/material.dart' show ScaffoldMessenger, SnackBar, Text;
 import 'package:path_provider/path_provider.dart';
 
 import '../core/api/ms_api.dart' show ApiException;
-import '../core/fmt.dart' show fmtBytes;
 import '../core/session.dart';
 import '../core/transfers/transfer_queue.dart';
 import '../core/transfers/transfer_task.dart';
 import '../models/models.dart';
 import 'app_log.dart';
 import 'download_savers.dart';
+import 'legacy_download.dart' show runLegacyDownloadJob;
 import 'media_save.dart';
-import 'notifier.dart';
+import 'motion_photo_capability.dart' show motionPhotoCapable;
+import 'motion_photo_save.dart' show runMotionPhotoDownload;
 
 export 'download_savers.dart'
     show
@@ -34,6 +41,7 @@ export 'download_savers.dart'
         kAppDownloadDir,
         processFreeBytes,
         shareSaver;
+export 'legacy_download.dart' show finishDownloadSave, runLegacyDownloadJob;
 export 'media_save.dart'
     show
         GalleryAction,
@@ -61,16 +69,21 @@ class DownloadIo {
   });
 
   /// download-link 签发(403 无权由后端 detail 透传,最终裁决)。
-  final Future<String> Function(Asset asset) link;
+  /// [variant]='unpacked' 请求 livp 解包档(实况图补抓;缺省不带该键——
+  /// 后端 Literal 非 None 可选,带 null 必 422,见 assets_api.downloadLink)。
+  final Future<String> Function(Asset asset, {String? variant}) link;
 
-  /// 下载 presigned URL 到 [savePath](进度按字节上报)。
+  /// 下载 presigned URL 到 [savePath]。onProgress 透传 (已收字节,
+  /// contentLength)——contentLength 未知为 null(实况图补抓段的空间复检
+  /// 取数;折算口径见 legacy_download._legacyProgress)。
   final Future<File> Function({
     required String url,
     required String savePath,
     required int totalBytes,
-    required void Function(int doneBytes) onProgress,
+    required void Function(int doneBytes, int? contentLength) onProgress,
     required CancelToken token,
-  }) fetch;
+  })
+  fetch;
 
   /// 目录可用字节;null=未知(预检放行)。
   final Future<int?> Function(String dirPath) freeBytes;
@@ -85,21 +98,31 @@ class DownloadIo {
 }
 
 /// 真实 IO 束(session API + download_savers 平台件;toast 走根 navigator)。
+/// fetch 直用 presignedHttp.download 透传 dio (c,t) 的 t——绕开
+/// assets_api.downloadTo(其 onProgress 只回 frac,t 未外露,补抓段空间复检
+/// 无处取数);t<=0(content-length 未知)归一为 null。
 DownloadIo defaultDownloadIo() {
   Future<File> fetch({
     required String url,
     required String savePath,
     required int totalBytes,
-    required void Function(int doneBytes) onProgress,
+    required void Function(int doneBytes, int? contentLength) onProgress,
     required CancelToken token,
-  }) =>
-      session.api!.assets.downloadTo(url, savePath, cancelToken: token,
-          onProgress: (frac) => onProgress((frac * totalBytes).round()));
+  }) async {
+    await session.api!.presignedHttp.download(
+      url,
+      savePath,
+      onReceiveProgress: (c, t) => onProgress(c, t > 0 ? t : null),
+      cancelToken: token,
+    );
+    return File(savePath);
+  }
+
   return DownloadIo(
-    link: (a) async {
+    link: (a, {variant}) async {
       final api = session.api;
       if (api == null) throw ApiException(null, '会话已失效');
-      return api.assets.downloadLink(a.id);
+      return api.assets.downloadLink(a.id, variant: variant);
     },
     fetch: fetch,
     freeBytes: processFreeBytes,
@@ -126,67 +149,42 @@ void toastViaSession(String msg) {
 }
 
 /// 下载单个资产的编排(B4 功能点 2,TransferQueue worker 本体):
-/// ① 空间预检(下载前;不足中止不半途写坏;未知放行)→ ② download-link →
-/// dio 落 app cache(进度回传入队;presigned 日志只记 host+path 由 MsApi
-/// 拦截器保证)→ ③ 按矩阵落盘(D1 双路共用本次下载)→ ④ 任一路成功删临时;
-/// 全败保留临时供取证并抛错(重试=重新下载+重新落盘);下载完成即发现已取消
-/// → 不落盘且删临时(P2-2)。
+/// 顶部能力分流——android+livp 且机型白名单 capable(motionPhotoCapable,
+/// 注入束可覆盖)→ runMotionPhotoDownload(实况图合成链);其余/不 capable
+/// → 现状 D1 主体 runLegacyDownloadJob(空间预检 → download-link → dio 落
+/// app cache → 按矩阵落盘 → 任一路成功删临时;全败保留临时供取证并抛错;
+/// 下载完成即发现已取消 → 不落盘且删临时 P2-2)。
 Future<void> runDownloadJob({
   required Asset asset,
   required void Function(int doneBytes) onProgress,
   required CancelToken token,
   SavePlatform? platform,
   DownloadIo? io,
+  Future<bool> Function()? motionCapable,
 }) async {
   final channel = io ?? defaultDownloadIo();
   final plat = platform ?? defaultSavePlatform();
   final kind = classifyAssetKind(
-      filename: asset.filename, contentType: asset.contentType);
-  final plan = planSaveRoutes(platform: plat, kind: kind);
-  final total = asset.sizeBytes.toInt();
-
-  final root = await channel.tempRoot();
-  final required = estimateRequiredBytes(total, plan);
-  final free = await channel.freeBytes(root.path);
-  if (checkSpace(free, required) == SpaceVerdict.insufficient) {
-    throw SaveAbortException(
-        '空间不足:预计需 ${fmtBytes(required)},该目录仅剩 ${fmtBytes(free!)},已中止下载');
+    filename: asset.filename,
+    contentType: asset.contentType,
+  );
+  if (plat == SavePlatform.android &&
+      kind == SaveAssetKind.livp &&
+      await (motionCapable ?? motionPhotoCapable)()) {
+    return runMotionPhotoDownload(
+      asset: asset,
+      onProgress: onProgress,
+      token: token,
+      io: channel,
+    );
   }
-
-  final url = await channel.link(asset);
-  final stamp = DateTime.now().microsecondsSinceEpoch;
-  final temp = await channel.fetch(
-    url: url,
-    savePath: '${root.path}/dl_${stamp}_${baseNameOf(asset.filename)}',
-    totalBytes: total,
+  return runLegacyDownloadJob(
+    asset: asset,
     onProgress: onProgress,
     token: token,
+    io: channel,
+    platform: plat,
   );
-
-  if (token.isCancelled) {
-    // 取消竞态:下载完才发现已取消 → 不再落盘;已下载临时一并清掉(P2-2,
-    // 不留垃圾;删除失败忽略——临时目录本就随系统回收)
-    try {
-      await temp.delete();
-    } catch (_) {}
-    return;
-  }
-  final outcomes =
-      await runSavePlan(file: temp, plan: plan, savers: channel.savers);
-  if (!outcomes.any((o) => o.isOk)) {
-    AppLog.error('download', '全部落盘路失败,临时文件保留:${temp.path}');
-    throw SaveAbortException('下载完成但保存失败:${saveSummary(outcomes)}');
-  }
-  temp.delete().ignore(); // 落盘成功后删临时(D1 双落盘共用一次下载)
-  AppLog.info('download', '✓ ${asset.filename} → ${saveSummary(outcomes)}');
-  channel.toast?.call('${asset.filename}:${saveSummary(outcomes)}');
-  // P8(mobile-ux-polish):后台时系统通知「下载完成」(保存摘要进正文;
-  // 前台维持 toast 现状,通知侧 gate 丢弃;同窗多任务由 Notifier 聚合)
-  Notifier.I.taskFinished(
-      kind: TransferKind.download,
-      ok: true,
-      filename: asset.filename,
-      detail: saveSummary(outcomes));
 }
 
 /// 入队一个下载任务(预览页/宫格批量共用;重试=同 worker 从头来)。
@@ -196,20 +194,24 @@ String enqueueDownload({
   SavePlatform? platform,
   TransferQueue? queue,
   DownloadIo? io,
+  Future<bool> Function()? motionCapable,
 }) {
-  return (queue ?? TransferQueue.I).enqueue(TransferRequest(
-    kind: TransferKind.download,
-    filename: asset.filename,
-    where: where,
-    totalBytes: asset.sizeBytes.toInt(),
-    worker: (onProgress, token) => runDownloadJob(
-      asset: asset,
-      onProgress: onProgress,
-      token: token,
-      platform: platform,
-      io: io,
+  return (queue ?? TransferQueue.I).enqueue(
+    TransferRequest(
+      kind: TransferKind.download,
+      filename: asset.filename,
+      where: where,
+      totalBytes: asset.sizeBytes.toInt(),
+      worker: (onProgress, token) => runDownloadJob(
+        asset: asset,
+        onProgress: onProgress,
+        token: token,
+        platform: platform,
+        io: io,
+        motionCapable: motionCapable,
+      ),
     ),
-  ));
+  );
 }
 
 /// 批量逐文件入队(宫格操作栏「下载」键;单点失败不中断整批,口径同上传
@@ -220,13 +222,20 @@ Future<(int, int)> enqueueDownloads(
   SavePlatform? platform,
   TransferQueue? queue,
   DownloadIo? io,
+  Future<bool> Function()? motionCapable,
 }) async {
   var enqueued = 0;
   var skipped = 0;
   for (final a in assets) {
     try {
       enqueueDownload(
-          asset: a, where: where, platform: platform, queue: queue, io: io);
+        asset: a,
+        where: where,
+        platform: platform,
+        queue: queue,
+        io: io,
+        motionCapable: motionCapable,
+      );
       enqueued += 1;
     } catch (e) {
       skipped += 1;

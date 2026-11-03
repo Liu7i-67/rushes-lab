@@ -174,13 +174,19 @@ class AssetsApi {
     );
   }
 
+  /// 下载 presigned URL;[variant]='unpacked' 请求 livp 解包档(条目恒
+  /// {基名}.jpg + {基名}.mp4,web 端同款)。缺省不带 variant 键(行为不变)。
+  /// 认知锚点:后端 `variant: Literal["original","unpacked"] = "original"`
+  /// (assets.py,非 None 可选)——请求体带 `"variant": null` 必被 pydantic
+  /// 判 422,故仅非空才向 body 添加该键,勿改成恒携带。
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     final r = await _api.http.post(
       '/api/v1/assets/$assetId/download-link',
-      data: {'as_attachment': asAttachment},
+      data: {'as_attachment': asAttachment, 'variant': ?variant},
     );
     if (r.statusCode != 200) throw _api.err(r, '获取下载链接失败');
     return (r.data as Map<String, dynamic>)['url'] as String;
