@@ -187,9 +187,13 @@ class FakeIo {
           }
           final bytes = (isRefetch ? refetchBytes : originalBytes) ?? const [1];
           await f.writeAsBytes(bytes);
-          // 完成事件:contentLength 透传真实字节长(dio 语义取响应 Content-Length,
+          // 多帧进度(25%/60%/100% 的 doneBytes 序列,复刻 dio onReceiveProgress
+          // 真实多拍——单帧序列会让「无任何时刻 >0.95 且无回跳」断言近乎恒真);
+          // contentLength 透传真实字节长(dio 语义取响应 Content-Length,
           // 与资产 sizeBytes 可不同——补抓段空间复检即按此取数)
-          onProgress(bytes.length, bytes.length);
+          for (final frac in const [0.25, 0.6, 1.0]) {
+            onProgress((bytes.length * frac).round(), bytes.length);
+          }
           if (cancelAfterFetch) token.cancel('用户取消');
           return f;
         },
@@ -308,6 +312,11 @@ void main() {
     test('进度映射:整链 [0,0.95]——首段完成报 0.95,无任何时刻 >0.95 且无回跳', () async {
       await run();
       expect(
+        progress.length,
+        greaterThan(1),
+        reason: 'fake 多帧序列(25%/60%/100%),断言在真实多拍上生效',
+      );
+      expect(
         progress,
         everyElement(lessThanOrEqualTo(950)),
         reason: 'sizeBytes=1000 → 0.95 上界=950',
@@ -324,6 +333,18 @@ void main() {
 
     test('输入条目校验不过(image 非 SOI / video 非 ftyp)→ D1,不进合成', () async {
       io.originalBytes = _zip({'IMG.jpg': _heic, 'IMG.mp4': _mp4}); // 改名 HEIC
+      await run();
+      expect(generate.calls, isEmpty);
+      expect(savers.galleryCalls, [GalleryAction.saveLivpPair]);
+      expect(savers.downloadsCalls, hasLength(1));
+    });
+
+    test('快路径 image SOI 合法但 video 非 ftyp(假 mp4 条目)→ D1,不进合成', () async {
+      // 对照上例反侧:image 门过、video 门拦(外部异构 livp 的假 mp4 条目)
+      io.originalBytes = _zip({
+        'IMG.jpg': _jpg, // FF D8 SOI 合法
+        'IMG.mp4': <int>[0, 0, 0, 24, 0x6D, 0x64, 0x61, 0x74], // 'mdat' 非 ftyp
+      });
       await run();
       expect(generate.calls, isEmpty);
       expect(savers.galleryCalls, [GalleryAction.saveLivpPair]);
@@ -414,8 +435,15 @@ void main() {
       expect(saved.single.$2, 'IMG_0001.jpg');
       expect(
         progress,
+        everyElement(lessThanOrEqualTo(950)),
+        reason: '整链上界 0.95(size=1000;首段 fake 多帧 25%/60%/100% 映射)',
+      );
+      final firstFull = progress.indexOf(950);
+      expect(firstFull, greaterThan(0), reason: '首段仅在完成帧才报满 0.95');
+      expect(
+        progress.skip(firstFull),
         everyElement(equals(950)),
-        reason: 'heic 输入:首段映射至 0.95 后,补抓段每拍恒报 0.95(size=1000)',
+        reason: 'heic 输入:首段完成报 0.95 后,补抓段每拍恒报 0.95 无回跳',
       );
     });
 
@@ -466,6 +494,24 @@ void main() {
       io.linkError = ApiException(403, '无权下载');
       await expectLater(run(), throwsA(isA<ApiException>()));
       expect(savers.galleryCalls, isEmpty);
+    });
+
+    test('补抓 5xx(badResponse 500)→ 任务失败外溢(残缺临时不进 D1)', () async {
+      io.refetchFetchError = DioException(
+        type: DioExceptionType.badResponse,
+        requestOptions: RequestOptions(path: '/x'),
+        response: Response(
+          requestOptions: RequestOptions(path: '/x'),
+          statusCode: 500,
+        ),
+      );
+      await expectLater(
+        run(),
+        throwsA(isA<DioException>()),
+        reason: '仅 404 走 D1;5xx 与 403/超时同义=任务失败外溢',
+      );
+      expect(savers.galleryCalls, isEmpty, reason: '外溢路径不进 D1 收尾');
+      expect(savers.downloadsCalls, isEmpty);
     });
 
     test('补抓解包失败(zip 损坏)→ D1', () async {

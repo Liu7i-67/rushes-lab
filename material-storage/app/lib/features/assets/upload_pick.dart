@@ -233,7 +233,6 @@ Future<void> _enqueueAlbumAsset(
   }
   final r = await resolveAlbumUploadName(e, originPath: f.path);
   // Android motion photo(§5.3):命中转 livp 入队;未命中/超限落普通轨原样。
-  // ignore: invalid_use_of_visible_for_testing_member — §5.3 注入缝拆件,唯一生产调用点。
   if (await tryAndroidMotionPhoto(e, folderId, where, f.path, r.filename)) {
     return;
   }

@@ -1,6 +1,10 @@
-/// Motion Photo 下载侧定点读自校验 + 字节级定点读内核(安卓实况图适配,
-/// 方案 §5.4 步骤 4b 拆件——motion_photo_save.dart 超 300 行硬顶,按
-/// 编排/自校验 拆件,§5.4 步骤号即拆分边界)。
+/// Motion Photo 下载侧定点读自校验 + 字节级定点读内核 + 编排侧收口束(安卓
+/// 实况图适配,方案 §5.4 步骤 4b 拆件——motion_photo_save.dart 超 300 行硬顶,
+/// 按 编排/自校验 拆件,§5.4 步骤号即拆分边界)。
+///
+/// §5.5 二次拆件:save.dart 的「快路径输入门」与「产物自校验输入侧+调用侧」
+/// 两段收口束([guardFastPathInputs] / [verifyMotionProductWithInputs])同宿
+/// 下沉至此,reason 文案与 D1 收口语义逐字保留。
 ///
 /// flm 合成产物入相册前的**输出自校验**(flm §3.2 缺陷 1:对整张主图搜首个
 /// `ftyp`,高熵 JPEG 数据随机命中会静默产出截断损坏文件且不抛异常)的唯一
@@ -107,6 +111,48 @@ bool bytesEqual(List<int> a, List<int> b) {
     if (a[i] != b[i]) return false;
   }
   return true;
+}
+
+// ── 编排侧收口束(§5.5 二次拆件自 motion_photo_save.dart 下沉;失败一律返回
+// reason 交编排层走 D1,null=过,不让异常外溢成任务失败)──────────────────
+
+/// 快路径输入门(§5.4 步骤 3 快路径分支):定点读 image SOI + video ftyp,
+/// 拦外部异构 livp 的改名 HEIC/假 mp4 条目(防「合成仅静图语义产物且自校验
+/// 通过」的静默降级);定点读 IO 异常与产物侧 [verifyMotionPhotoProduct] 同款
+/// 收口=按「守卫不过」走 D1。
+Future<String?> guardFastPathInputs(File image, File video) async {
+  try {
+    final soiOk = await hasJpegSoi(image);
+    final ftypOk = soiOk && await hasMp4FtypHeader(video);
+    if (!soiOk || !ftypOk) {
+      return '输入条目校验不过(${!soiOk ? 'image 非 JPEG SOI' : 'video 非 mp4 ftyp'})';
+    }
+  } catch (e) {
+    return '输入条目校验不过(定点读异常:$e)';
+  }
+  return null;
+}
+
+/// 产物自校验收口束(§5.4 步骤 4b 合成后的自校验调用侧):产物内核内部全兜
+/// (任何异常→false);输入侧定点读(尾段/头段/长度)在此同款收口——IO 异常
+/// 按「校验失败」走 D1。
+Future<String?> verifyMotionProductWithInputs({
+  required File product,
+  required File composeImage,
+  required File composeVideo,
+}) async {
+  try {
+    final ok = await verifyMotionPhotoProduct(
+      product,
+      imageTail: await fileTailBytes(composeImage, 32),
+      videoHead: await fileHeadBytes(composeVideo, 8),
+      videoLength: await composeVideo.length(),
+    );
+    if (!ok) return '合成产物自校验失败(ftyp 误命中静默损坏兜底)';
+  } catch (e) {
+    return '自校验输入定点读异常,按校验失败处理:$e';
+  }
+  return null;
 }
 
 /// 幂等静默删除(下载链产物均在 app cache/系统临时目录,失败无害——系统可

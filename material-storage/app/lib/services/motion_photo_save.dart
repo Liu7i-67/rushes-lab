@@ -220,13 +220,10 @@ Future<void> runMotionPhotoDownload({
   File composeImage;
   File composeVideo;
   if ((imgExt == '.jpg' || imgExt == '.jpeg') && vidExt == '.mp4') {
-    // 快路径(安卓来源):定点读 image SOI + video ftyp,拦外部异构 livp 的改名 HEIC/假 mp4 条目(防「合成仅静图语义产物且自校验通过」的静默降级)
-    final soiOk = await hasJpegSoi(parts.image);
-    final ftypOk = soiOk && await hasMp4FtypHeader(parts.video!);
-    if (!soiOk || !ftypOk) {
-      return d1(
-        '输入条目校验不过(${!soiOk ? 'image 非 JPEG SOI' : 'video 非 mp4 ftyp'})',
-      );
+    // 快路径(安卓来源)输入门(下沉件 guardFastPathInputs):守卫不过 → D1
+    final gateFailReason = await guardFastPathInputs(parts.image, parts.video!);
+    if (gateFailReason != null) {
+      return d1(gateFailReason);
     }
     composeImage = parts.image;
     composeVideo = parts.video!;
@@ -263,13 +260,14 @@ Future<void> runMotionPhotoDownload({
   }
   final product = File(productPath);
   flmProduct = product;
-  if (!await verifyMotionPhotoProduct(
-    product,
-    imageTail: await fileTailBytes(composeImage, 32),
-    videoHead: await fileHeadBytes(composeVideo, 8),
-    videoLength: await composeVideo.length(),
-  )) {
-    return d1('合成产物自校验失败(ftyp 误命中静默损坏兜底)');
+  // 自校验(下沉件 verifyMotionProductWithInputs):校验不过 → D1
+  final verifyFailReason = await verifyMotionProductWithInputs(
+    product: product,
+    composeImage: composeImage,
+    composeVideo: composeVideo,
+  );
+  if (verifyFailReason != null) {
+    return d1(verifyFailReason);
   }
   // 入相册:title 基名必须 .jpg 结尾(MIME 推断),DISPLAY_NAME/MIME 取自 title,产物随机名不影响落地名;不传 relativePath(缺省=MediaStore Images 默认
   // Pictures/ 根,同 D1 静图路落点);同名系统自动加后缀(刻意不用 media_store_plus:其同名=先删后插覆盖替换,跨夹同名先后下载会静默丢旧文件)

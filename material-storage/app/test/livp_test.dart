@@ -1,5 +1,7 @@
+import 'dart:io';
 import 'dart:math';
 
+import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/services/livp.dart';
 
@@ -72,6 +74,45 @@ void main() {
         videoExt: 'bin',
       );
       expect(() => LivpService.decode(bad), throwsFormatException);
+    });
+  });
+
+  group('LivpService.unpackToFiles 恶意条目名 basename 净化(遗留项 10)', () {
+    /// 构造含单个恶意名图片条目的 zip → 解包:断言产物落在 tmpDir 内、
+    /// 文件名不含分隔符、字节原样。
+    Future<void> roundtrip(String entryName) async {
+      final arc = Archive()
+        ..addFile(ArchiveFile(entryName, 4, const <int>[1, 2, 3, 4]));
+      final livp = ZipEncoder().encode(arc)!;
+      final tmp = await Directory.systemTemp.createTemp('livp_evil');
+      try {
+        final parts = await LivpService.unpackToFiles(livp, tmp);
+        expect(parts.video, isNull, reason: '无视频条目');
+        final img = parts.image;
+        expect(
+          img.parent.path,
+          tmp.path,
+          reason: '$entryName 净化后产物必须落在 tmpDir 内(不得穿越)',
+        );
+        expect(
+          img.path.replaceAll('\\', '/').split('/').last,
+          'evil.jpg',
+          reason: '$entryName 取路径分隔后的末段,文件名不含分隔符',
+        );
+        expect(await img.readAsBytes(), const <int>[1, 2, 3, 4]);
+      } finally {
+        try {
+          await tmp.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+
+    test('相对路径穿越条目名(../../evil.jpg)取末段落盘', () async {
+      await roundtrip('../../evil.jpg');
+    });
+
+    test('反斜杠分隔条目名(..\\evil.jpg,Windows 变体)取末段落盘', () async {
+      await roundtrip('..\\evil.jpg');
     });
   });
 

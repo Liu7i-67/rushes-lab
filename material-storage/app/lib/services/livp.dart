@@ -103,20 +103,32 @@ class LivpService {
       pick(ZipDecoder().decodeBytes(livpBytes));
 
   /// 解包到临时目录,产出 (imageFile, videoFile?);供存相册用。
+  /// 条目名经 [_entryBaseName] basename 净化后落盘(防恶意条目名路径穿越)。
   static Future<({File image, File? video})> unpackToFiles(
     List<int> livpBytes,
     Directory tmpDir,
   ) async {
     final parts = decode(livpBytes);
     await tmpDir.create(recursive: true);
-    final img = File('${tmpDir.path}/${parts.image.name}');
+    final img = File('${tmpDir.path}/${_entryBaseName(parts.image.name)}');
     await img.writeAsBytes(parts.image.content as List<int>);
     File? vid;
     final v = parts.video;
     if (v != null) {
-      vid = File('${tmpDir.path}/${v.name}');
+      vid = File('${tmpDir.path}/${_entryBaseName(v.name)}');
       await vid.writeAsBytes(v.content as List<int>);
     }
     return (image: img, video: vid);
+  }
+
+  /// 条目名落盘前的 basename 净化(方案遗留项 10 顺手项):zip 条目名可携带
+  /// 路径分隔(`../../evil.jpg`、`a/b/c.jpg`、反斜杠变体),直接拼 tmpDir 会
+  /// 写出临时目录(路径穿越)。取分隔后的末段落盘;正常条目名(无分隔符)
+  /// 原样不变。净化后为空(条目名恰为分隔符)→ 落盘必败,由调用方按解包
+  /// 失败兜底(D1/matrix 既有 catch 面)。
+  static String _entryBaseName(String name) {
+    final norm = name.replaceAll('\\', '/');
+    final i = norm.lastIndexOf('/');
+    return i < 0 ? name : norm.substring(i + 1);
   }
 }

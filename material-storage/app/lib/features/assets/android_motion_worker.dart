@@ -9,7 +9,7 @@
 ///    16MB 流式轨 → ④ 终态(成功/失败/取消)一律删临时(retry 从头重打包);
 /// ⑤ 上传进度按复验后实际 size 归一并 clamp 到入队 totalBytes(§5.3);
 /// ⑥ 降级与失败分支 AppLog 区分打点(复验超限/复验 null/文件不存在/打包失败)。
-/// 注入缝:[MotionPhotoWorkerIo] 全假件可注入(@visibleForTesting,零平台通道)。
+/// 注入缝:[MotionPhotoWorkerIo] 全假件可注入(普通公开,零平台通道)。
 library;
 
 import 'dart:io';
@@ -55,7 +55,7 @@ typedef MotionPhotoUpload = Future<void> Function({
 typedef MotionPhotoDeleteTemp = Future<void> Function(String path);
 
 /// worker 注入束(§5.3 测试铁律):缺省=生产实现;测试注入假件零平台通道。
-@visibleForTesting
+/// 普通公开成员(生产 worker 闭包直接构造;非 @visibleForTesting,生产/测试同用)。
 class MotionPhotoWorkerIo {
   MotionPhotoWorkerIo({
     MotionPhotoProbe? probe,
@@ -82,7 +82,7 @@ class MotionPhotoWorkerIo {
 /// motion 上传 worker(队列 TransferWorker 同形;§5.3 全流程见头注释)。
 /// [enqueuePlan] 为入队时预筛所得,复验命中即弃(参数保留以钉「弃入队 plan」
 /// 语义并供单测断言);抛异常=任务失败外溢到队列(retry 同描述从头重跑)。
-@visibleForTesting
+/// 普通公开生产入口(队列 worker 闭包直调;测试经 [MotionPhotoWorkerIo] 注入假件)。
 Future<void> runMotionPhotoWorker(
   void Function(int doneBytes) onProgress,
   CancelToken token, {

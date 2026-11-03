@@ -16,12 +16,12 @@
 /// 打点不静默);大小闸门(File.length)与入队异常照常外溢 → 外层
 /// enqueueBatchNamed 逐项捕获计跳过(与 iOS 轨同语义)。
 /// 注入缝(§5.3 测试铁律):isAndroid/sizeOf/probe/enqueue 全可注入,
-/// @visibleForTesting,零平台通道可测。
+/// 零平台通道可测。
 library;
 
 import 'dart:io';
 
-import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:wechat_assets_picker/wechat_assets_picker.dart'
     show AssetEntity;
 
@@ -33,15 +33,10 @@ import '../../services/app_log.dart';
 import '../../services/livp.dart' show LivpService;
 import '../../services/motion_photo.dart'
     show MotionPhotoPlan, probeMotionPhotoFileGuarded;
-// worker 拆件宿主(§5.3 注入缝钉 @visibleForTesting),本件是其唯一生产
-// 调用方,非测试误用;拆件为兑现 300 行硬顶,跨库生产引用需就地豁免。
-import 'android_motion_worker.dart' show kMotionPhotoMaxBytes;
-// worker 拆件宿主(§5.3 注入缝钉 @visibleForTesting),本件是其唯一生产
-// 调用方,非测试误用;拆件为兑现 300 行硬顶,跨库生产引用需就地豁免。
-// ignore: invalid_use_of_visible_for_testing_member
-import 'android_motion_worker.dart' show MotionPhotoWorkerIo;
-// ignore: invalid_use_of_visible_for_testing_member
-import 'android_motion_worker.dart' show runMotionPhotoWorker;
+// worker 拆件宿主(§5.3),本件是其唯一生产调用方;worker 侧生产入口均为
+// 普通公开成员,跨库引用无需就地豁免。
+import 'android_motion_worker.dart'
+    show kMotionPhotoMaxBytes, MotionPhotoWorkerIo, runMotionPhotoWorker;
 
 /// 入队分支编排(upload_pick `_enqueueAlbumAsset` 普通轨前极简一行调用;
 /// 插入点=r 取得之后、普通轨 enqueueLocalUpload 之前,勿上提到 iOS 门之上:
@@ -49,7 +44,7 @@ import 'android_motion_worker.dart' show runMotionPhotoWorker;
 /// [e] 相册资产(仅取 id 拼兜底基名)/ [folderId] [where] 目标夹与归属路径 /
 /// [srcPath] originFile 本地路径 / [filename] resolveAlbumUploadName 解析名。
 /// 返回 true=已接管(motion 任务已入队,调用方 return);false=落普通轨。
-@visibleForTesting
+/// 普通公开生产入口(upload_pick 唯一生产调用点;测试直打同款注入参,零平台通道)。
 Future<bool> tryAndroidMotionPhoto(
   AssetEntity e,
   String folderId,
@@ -112,8 +107,7 @@ String enqueueMotionPhotoUpload({
   required String srcPath,
   required MotionPhotoPlan plan,
   required int srcBytes,
-  // 同 import 处豁免:worker 注入束跨库生产透传(唯一生产调用方)。
-  // ignore: invalid_use_of_visible_for_testing_member
+  // worker 注入束透传(测试假件由此进入,生产缺省=MotionPhotoWorkerIo() 生产实现)。
   MotionPhotoWorkerIo? io,
 }) => TransferQueue.I.enqueue(
   TransferRequest(
@@ -121,7 +115,6 @@ String enqueueMotionPhotoUpload({
     filename: '$base.livp',
     where: where,
     totalBytes: srcBytes,
-    // ignore: invalid_use_of_visible_for_testing_member
     worker: (onProgress, token) => runMotionPhotoWorker(
       onProgress,
       token,
