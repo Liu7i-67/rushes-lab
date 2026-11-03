@@ -48,8 +48,10 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
         // finally 必清(P2-3:子存任一失败不再泄漏 livp_unpack 目录)
         return await saveLivpPairToGallery(
           file,
-          saveImage: (f) => PhotoManager.editor
-              .saveImageWithPath(f.path, title: baseNameOf(f.path)),
+          saveImage: (f) => PhotoManager.editor.saveImageWithPath(
+            f.path,
+            title: baseNameOf(f.path),
+          ),
           saveVideo: (f) =>
               PhotoManager.editor.saveVideo(f, title: baseNameOf(f.path)),
         );
@@ -58,12 +60,16 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
         await AlbumService.saveLivpToAlbum(await file.readAsBytes());
         return const SinkOutcome.ok('已存入相册(实况照片)');
       case GalleryAction.saveImage:
-        final e = await PhotoManager.editor
-            .saveImageWithPath(file.path, title: baseNameOf(file.path));
+        final e = await PhotoManager.editor.saveImageWithPath(
+          file.path,
+          title: baseNameOf(file.path),
+        );
         return SinkOutcome.ok(_assetLoc(e, '已存入相册'));
       case GalleryAction.saveVideo:
-        final e = await PhotoManager.editor
-            .saveVideo(file, title: baseNameOf(file.path));
+        final e = await PhotoManager.editor.saveVideo(
+          file,
+          title: baseNameOf(file.path),
+        );
         return SinkOutcome.ok(_assetLoc(e, '已存入相册'));
     }
   } catch (e) {
@@ -82,11 +88,14 @@ Future<SinkOutcome> saveLivpPairToGallery(
   required Future<AssetEntity?> Function(File video) saveVideo,
   Directory? unpackParent,
 }) async {
-  final tmp =
-      await (unpackParent ?? Directory.systemTemp).createTemp('livp_unpack');
+  final tmp = await (unpackParent ?? Directory.systemTemp).createTemp(
+    'livp_unpack',
+  );
   try {
-    final parts =
-        await LivpService.unpackToFiles(await file.readAsBytes(), tmp);
+    final parts = await LivpService.unpackToFiles(
+      await file.readAsBytes(),
+      tmp,
+    );
     return await livpPairOutcome(
       image: parts.image,
       video: parts.video,
@@ -133,28 +142,28 @@ Future<SinkOutcome> livpPairOutcome({
     return SinkOutcome.ok(loc.isEmpty ? '已存入相册' : loc);
   }
   final facts = <String>[
-    if (imgErr != null)
-      '静态图失败:$imgErr'
-    else
-      '静态图已入库(${_assetLoc(img, '静态图')})',
+    if (imgErr != null) '静态图失败:$imgErr' else '静态图已入库(${_assetLoc(img, '静态图')})',
     if (video != null)
-      vidErr != null
-          ? '实况短片失败:$vidErr'
-          : '实况短片已入库(${_assetLoc(vid, '实况短片')})',
+      vidErr != null ? '实况短片失败:$vidErr' : '实况短片已入库(${_assetLoc(vid, '实况短片')})',
   ];
   return SinkOutcome.fail(facts.join(';'));
 }
 
 /// saveFile 返回值 → 结果(纯函数;B0 用例沿用,单测锁死「null 亦成功」语义):
 /// info 非 null → detail=路径+saveStatus+uri;null → 按成功提交处理。
+/// 文案钉子:同名落地=insert 前先按 DISPLAY_NAME+RELATIVE_PATH 删除同名列
+/// 再插入,**先删后插覆盖替换**(§2.4,非自动加后缀——0.1.3 行为实证纠正)。
 SinkOutcome downloadsOutcome(SaveInfo? info) {
   if (info == null) {
-    return const SinkOutcome.ok('Download/$kAppDownloadDir/(此版本 saveFile '
-        '成功亦返回 null,未带回文件信息;重名自动加后缀)');
+    return const SinkOutcome.ok(
+      'Download/$kAppDownloadDir/(此版本 saveFile '
+      '成功亦返回 null,未带回文件信息;同名先删后插覆盖)',
+    );
   }
   return SinkOutcome.ok(
-      'Download/$kAppDownloadDir/${info.name}(重复名自动加后缀:'
-      '${info.saveStatus.name}) uri=${info.uri}');
+    'Download/$kAppDownloadDir/${info.name}(同名先删后插覆盖:'
+    '${info.saveStatus.name}) uri=${info.uri}',
+  );
 }
 
 /// Downloads 路(media_store_plus):Downloads/浣花视界/,免权限(API 29+),
@@ -189,10 +198,10 @@ Future<SinkOutcome> shareSaver(File file) async {
 
 /// 平台执行件默认束(生产;测试注入假束覆盖)。
 PlatformSavers defaultSavers() => PlatformSavers(
-      gallery: gallerySaver,
-      downloads: downloadsSaver,
-      share: shareSaver,
-    );
+  gallery: gallerySaver,
+  downloads: downloadsSaver,
+  share: shareSaver,
+);
 
 /// 可用空间探测(df -k;Android toybox 可用;iOS 沙盒无 df → null 放行)。
 /// dart:io 无可用空间直接 API 且本批不新增包,故取系统 df;解析失败一律

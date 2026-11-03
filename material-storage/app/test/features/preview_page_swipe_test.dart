@@ -37,6 +37,7 @@ class _SwipeAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async => 'http://presigned/$assetId';
 
   /// 永挂起:G2 后仅 hasThumbnail 资产才会请求;本文件资产均无 thumbnail_key。

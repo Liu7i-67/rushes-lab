@@ -49,6 +49,7 @@ class _ProbeAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     downloadLinkCalls.add(assetId);
     final hang = linkHang;

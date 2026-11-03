@@ -34,8 +34,8 @@ class LivpService {
   /// 点文件条目,后端 pathlib 判不出扩展名(2026-10-20 iOS 真机实锤)。
   static String baseNameOf(String? title, String fallback) {
     final t = (title ?? '').trim();
-    var base =
-        (t.contains('.') ? t.substring(0, t.lastIndexOf('.')) : t).trim();
+    var base = (t.contains('.') ? t.substring(0, t.lastIndexOf('.')) : t)
+        .trim();
     // 去扩展名后只剩点号('.')也视为无主名
     if (base.replaceAll('.', '').trim().isEmpty) base = fallback.trim();
     // 分隔符净化:iOS PHAsset localIdentifier 形如 "UUID/L0/001",兜底名直接
@@ -45,18 +45,32 @@ class LivpService {
 
   /// 打包:静态帧 + 实况短片 → .livp 字节。
   /// [baseName] 不含扩展名,习惯用相册原始资源名(如 IMG_1234)。
+  /// [stored] 为 true 时条目按 ZIP_STORED 写入(archive 3.6.1 per-entry 实现
+  /// = `ArchiveFile.compress = false`;jpg/mp4 已压缩,deflate 近零收益白烧
+  /// CPU,motion photo 轨专用)。缺省 false,保持既有 deflate 行为零回归。
   static List<int> pack({
     required List<int> imageBytes,
     required String imageExt,
     required List<int> videoBytes,
     required String videoExt,
     String baseName = 'IMG_LIVP',
+    bool stored = false,
   }) {
     final arc = Archive()
-      ..addFile(ArchiveFile(
-          '$baseName.${imageExt.toLowerCase()}', imageBytes.length, imageBytes))
-      ..addFile(ArchiveFile(
-          '$baseName.${videoExt.toLowerCase()}', videoBytes.length, videoBytes));
+      ..addFile(
+        ArchiveFile(
+          '$baseName.${imageExt.toLowerCase()}',
+          imageBytes.length,
+          imageBytes,
+        )..compress = !stored,
+      )
+      ..addFile(
+        ArchiveFile(
+          '$baseName.${videoExt.toLowerCase()}',
+          videoBytes.length,
+          videoBytes,
+        )..compress = !stored,
+      );
     return ZipEncoder().encode(arc)!;
   }
 

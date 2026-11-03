@@ -52,6 +52,7 @@ class _FallbackAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     linkCalls.add(assetId);
     throw ApiException(403, '无下载权限(测试桩)');

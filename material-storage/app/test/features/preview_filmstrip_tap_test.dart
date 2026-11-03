@@ -26,6 +26,7 @@ class _FilmAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async => 'http://presigned/$assetId';
 
   /// 永挂起:胶片条 FutureBuilder 停在 spinner 占位。

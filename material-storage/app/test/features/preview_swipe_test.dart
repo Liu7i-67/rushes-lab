@@ -29,6 +29,7 @@ class SwipeFakeAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     downloadLinkCalls.add(assetId);
     return 'http://preview.test/$assetId';

@@ -97,7 +97,7 @@ List<String> _gridOrder(WidgetTester tester) => tester
     .toList();
 
 DownloadIo _io() => DownloadIo(
-  link: (a) async => 'http://presigned/${a.filename}',
+  link: (a, {variant}) async => 'http://presigned/${a.filename}',
   fetch:
       ({
         required url,
@@ -108,7 +108,7 @@ DownloadIo _io() => DownloadIo(
       }) async {
         final f = File(savePath);
         await f.writeAsBytes(const [1]);
-        onProgress(totalBytes);
+        onProgress(totalBytes, totalBytes);
         return f;
       },
   freeBytes: (_) async => 1 << 40,

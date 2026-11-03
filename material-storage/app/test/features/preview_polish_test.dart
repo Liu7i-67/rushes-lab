@@ -51,6 +51,7 @@ class _PreviewAssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     final t = linkThrows;
     if (t is Exception) throw t;
@@ -98,6 +99,7 @@ class _G2AssetsApi extends FakeAssetsApi {
   Future<String> downloadLink(
     String assetId, {
     bool asAttachment = true,
+    String? variant,
   }) async {
     linkCalls.add((id: assetId, asAttachment: asAttachment));
     final s = linkStaged;
