@@ -138,8 +138,19 @@ class MePage extends StatelessWidget {
                   ),
                 ],
               ),
-              // 关于:版本号全平台展示;「检查更新」仅 Android(D6)
-              const MeGroup(title: '关于', children: [UpdateCheckTile()]),
+              // 关于:版本号全平台展示;「检查更新」仅 Android(D6);
+              // feat/app-about-icp §2.1:「关于我们」入口(分组内第一项)
+              MeGroup(
+                title: '关于',
+                children: [
+                  AppRow(
+                    leading: const Icon(Icons.info_outline),
+                    title: '关于我们',
+                    onTap: () => Navigator.of(context).pushNamed('/about'),
+                  ),
+                  const UpdateCheckTile(),
+                ],
+              ),
             ],
           ),
         );
