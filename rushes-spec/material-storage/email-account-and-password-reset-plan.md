@@ -160,7 +160,7 @@ down_revision = "20261031_0020"
    > 归一化是**单向**的：downgrade 不会恢复原大小写/首尾空白。需要原始值对账的，迁移前先 `backup_prod.sh` 或单独导出 `id,email` 留档。
 3. **重复/冲突检测**（全部用 `text()`，不 import User 模型）：
    - 重复邮箱：`SELECT lower(email), array_agg(id::text) FROM users WHERE email IS NOT NULL GROUP BY 1 HAVING count(*) > 1`；
-   - 跨列冲突：`SELECT a.id, b.id FROM users a JOIN users b ON lower(a.username)=lower(b.email) AND a.id<>b.id`（否则重置成功却登不进去）。
+   - 跨列冲突：`SELECT a.id, b.id FROM users a JOIN users b ON lower(btrim(a.username, E' \t\n\r\f\v'))=lower(btrim(b.email, E' \t\n\r\f\v')) AND a.id<>b.id`（btrim 口径与 §4.4 预检 #2 一致；否则重置成功却登不进去）。
    - 有输出 → `raise RuntimeError("duplicate/conflicting emails, resolve before migration: <用户 id 列表>")`（只打印用户 id，不打印邮箱）。
 4. `ADD COLUMN email_verified_at TIMESTAMPTZ NULL`（不回填）。
 5. `ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0`。
@@ -205,7 +205,7 @@ FROM users a JOIN users b
 
 | 新文件 | 职责 |
 | --- | --- |
-| `api/app/services/mailer.py` | 统一 SMTP 发送：`send_mail(settings, to, subject, body, timeout)`；`MailSendError`；脱敏日志；`formataddr` 防头注入 |
+| `api/app/services/mailer.py` | 统一 SMTP 发送：`send_mail(settings, *, to, subject, body, timeout)`（keyword-only，§5.6.1）；`MailSendError(definite)`；脱敏日志；`Address` 构造防头注入 |
 | `api/app/services/email_verification.py` | 验证码生成/校验（Redis）、密码校验失败锁、邮箱规范化/占用检查、绑定/换绑/解绑的业务逻辑 |
 | `api/app/services/password_reset.py` | 重置 token 签发/校验/原子消费、重置密码、会话版本自增、PAT 吊销 |
 | `api/app/routers/account_security.py` | 7 个新端点（含 `public-config`），挂 `/api/v1/auth` 前缀（`main.py` 增加 `app.include_router(account_security.router, prefix="/api/v1/auth", tags=["auth"])`） |
@@ -226,6 +226,8 @@ FROM users a JOIN users b
   "password_min_length": 8
 }
 ```
+
+`password_min_length` 返回 `settings.auth_password_min_length`（既有可配置项，默认 8），不要新造配置。
 
 - 先定义**有效开关** `mail_ready = settings.email_auth_enabled and settings.smtp_enabled`，并在 **lifespan 计算一次挂到 `app.state.mail_ready`**（配置不合法时降级为 false）；端点通过 `request.app.state.mail_ready` 读取。**不要**每次请求重算（非法配置会每请求刷 ERROR），也**不要**往 `Settings` 上挂临时属性（pydantic v2 会拒绝未声明字段）。
 - `email_auth_enabled = mail_ready`（前端据此显隐「设置 → 账号安全」邮箱区）。
@@ -257,12 +259,12 @@ FROM users a JOIN users b
 
 1. `require_session_auth`（PAT 一律 403，与改密同口径）。**强制改密期间（`must_change_password=true`）这些端点会被 `deps.py:77` 的 403 拦下**（白名单只有 me/change_password/logout），这是预期行为：用户必须先改密才能进设置页；不要把邮箱端点加进白名单。
 2. 有效开关 `mail_ready`（D11）否则 503「邮箱功能未启用」。
-3. 密码失败锁检查（`email:chg:lock:user:{id}`）→ 429；**每用户 code 请求预算（`email:code:req:user:{id}:{epoch_hour}`）在密码校验通过后再 `incr_with_ttl`**（>30 → 429）——不要把预算放在密码校验前：连续输错密码会把预算烧到 1 小时后，用户即使改对也回 429，自锁。
+3. 密码失败锁检查（`email:chg:lock:user:{id}`）→ 429。
 4. 校验当前密码：
    - `password_hash is None` → 400「该账号尚未设置本地密码，请先联系管理员初始化」。
    - 错误 → INCR `email:chg:fail:user:{id}`（首次才 EXPIRE 900s），≥5 写锁 900s；审计 `email_verification_requested`（`ok=false, reason=wrong_password`）；返回 400「账号密码不正确」。
-   - 正确 → DEL 失败计数。
-5. 规范化邮箱：`strip().lower()`，长度 ≤254；**统一走 `strict_validate_email`（Pydantic `field_validator`，422）**。不做「宽松地址验证」兼容分支——过不了严格正则的存量地址本身大概率无法收信，应通过「更换邮箱」改成合法地址（§13.12）。
+   - 正确 → DEL 失败计数；**随后才 `incr_with_ttl` 每用户 code 请求预算**（`email:code:req:user:{id}:{epoch_hour}`，>30 → 429）——预算必须放在密码校验通过**之后**（连续输错密码不能烧预算，否则用户改对密码也 429，自锁 1 小时）。
+5. 规范化邮箱：`strip().lower()`，长度 ≤254；**统一走 `strict_validate_email`（Pydantic `field_validator`，422）**——它实际在**请求解析期**执行（先于本流程第 1 步），格式错 422 的请求根本进不了处理流程，**不消耗第 4 步的请求预算**（409 占用尝试计数是有意的，422 不计）。不做「宽松地址验证」兼容分支——过不了严格正则的存量地址本身大概率无法收信，应通过「更换邮箱」改成合法地址（§13.12）。
 6. 判定 `purpose`：
    - 当前邮箱为空 → `bind`
    - 目标 == 当前邮箱 → `verify`（若 `email_verified_at` 非空 → 400「该邮箱已验证，无需重复验证」）
@@ -273,13 +275,13 @@ FROM users a JOIN users b
    - 两个 409 分支都写审计 `email_verification_requested`（`ok=false, reason=email_taken|username_taken, purpose, email_masked`），让安全人员能看到登录用户的占用枚举（受每用户 30/h 预算约束）。
 8. IP 验证码配额：读 `email:code:ip:{ip}:{epoch_hour}`，≥200 → 429「操作过于频繁，请稍后再试」；**发送成功后**才 INCR（首次 EXPIRE 3600s）。先读后加允许极小并发超限，可接受。200/h 是按「同 NAT 全公司首日集中验证」留的余量（每用户还有 10/天 + 30/h 请求预算）。
 9. 日配额：读 `email:code:quota:{id}:{yyyymmdd}`，≥10 → 429「今日验证码发送次数已达上限」；**发送成功后**才 INCR（首次 EXPIRE 到当日 24:00）。**先查日配额再占冷却**：否则第 11 次会先占 60s 冷却、再报日配额，用户看到的倒计时语义混乱。
-10. 冷却（**原子占位**）：`SET email:code:cooldown:{id} 1 NX EX 60`；返回 false → 429「发送过于频繁，请 N 秒后再试」。占位成功即视为本次请求的发送窗口，避免双击并发各自发一封。
+10. 冷却（**原子占位，只此一次**）：`SET email:code:cooldown:{id} 1 NX EX 60`；返回 false → 429「发送过于频繁，请 N 秒后再试」。占位成功即视为本次请求的发送窗口，避免双击并发各自发一封。**冷却从占位时刻起算 60s，第 13 步所有分支（成功/失败/未知）都不再触碰冷却键、不续期**——续期会让「冷却窗口」随发送时长漂移，语义不统一。
 11. 生成 6 位数字码（`secrets.randbelow(1_000_000):06d`）与 `code_hash`；**先不写 Redis**（见第 13 步）。`current_email_hash = sha256(email_fingerprint(user.email))`，确认时用它兜住「发码后管理员改了邮箱/解绑」的窗口。
-12. **发信前结束 DB 事务**：`/email/code` 前面只做了读，`get_db` 的 session 会一直持有连接；在校验完密码/占用后 `await db.commit()`（或改用短 session 读完即关），再进入 20s 的 SMTP 发送。否则 20 个并发请求就能占满连接池（`pool_size=10 + max_overflow=20`）。
+12. **发信前结束 DB 事务**：`/email/code` 前面只做了读，`get_db` 的 session 会一直持有连接；在校验完密码/占用后 `await db.commit()`（或改用短 session 读完即关），再进入 20s 的 SMTP 发送。否则每个在途请求都把一条连接占满 20s，30+ 个并发就能耗尽连接池（`pool_size=10 + max_overflow=20`）。
 13. 同步发送邮件（§5.6）：
-    - 成功 → **用单条 Lua 写 `email:code:{id}`**：`{code_hash, email, purpose, current_email_hash, attempts:0}` + `EXPIRE 600s`；写冷却 60s；INCR 第 8/9 步配额（第 10 步是冷却，不是配额）。**若 Redis 写失败**（邮件已发出）：log.error + 审计 `email_verification_requested`（`ok=false, reason=store_failed`），返回 503「邮件已发送但系统繁忙，请稍后重新获取」——不要返回 200 让用户拿一个服务端无法验证的码。
-    - **结果未知**（wait_for 超时）→ **同样写入哈希**（邮件可能已送达，验证码必须可用）；写冷却 60s；审计 `email_verification_requested`（`ok:false, reason:"smtp_timeout"`）；返回 502「发送结果未知，请稍后检查邮箱；若未收到可重新获取」；不消耗配额。
-    - **确定失败**（未发出）→ **不写 Redis**（若有旧码，旧码继续有效，不会被这次失败覆盖掉）；写冷却 60s、审计 `email_verification_requested`（`details={"ok":false,"purpose","email_masked","reason":"smtp_failed"}`）、返回 502「验证码发送失败，请稍后重试」；不消耗配额。
+    - 成功 → **用单条 Lua 写 `email:code:{id}`**：`{code_hash, email, purpose, current_email_hash, attempts:0}` + `EXPIRE 600s`；INCR 第 8/9 步配额（第 10 步冷却已在占位时定档，此处不动）。**若 Redis 写失败**（邮件已发出）：log.error + 审计 `email_verification_requested`（`ok=false, reason=store_failed`），返回 503「邮件已发送但系统繁忙，请稍后重新获取」——不要返回 200 让用户拿一个服务端无法验证的码。
+    - **结果未知**（wait_for 超时）→ **同样写入哈希**（邮件可能已送达，验证码必须可用）；审计 `email_verification_requested`（`ok:false, reason:"smtp_timeout"`）；返回 502「发送结果未知，请稍后检查邮箱；若未收到可重新获取」；不消耗配额。
+    - **确定失败**（未发出）→ **不写 Redis**（若有旧码，旧码继续有效，不会被这次失败覆盖掉）；审计 `email_verification_requested`（`details={"ok":false,"purpose","email_masked","reason":"smtp_failed"}`）、返回 502「验证码发送失败，请稍后重试」；不消耗配额。
     > 不能「先覆盖旧码再发信」：发信失败会把用户手里原本可用的旧验证码一并作废（重置 token 那边已经避免了这个坑）。
 14. 审计 `email_verification_requested`（`details={"ok":true,"purpose","email_masked"}`；不含验证码）。
 15. 返回 `{status:"sent", masked_email:"n***@example.com", expires_in:600}`。
@@ -293,16 +295,16 @@ FROM users a JOIN users b
 1. 有效开关 `mail_ready` 检查。
 2. 读 `email:code:{id}`；不存在 → 400「请先获取验证码」。
 3. `attempts >= 5` → 删 key + 400「验证码错误次数过多，请重新获取」。
-4. `hmac_sha256(settings.session_jwt_secret, f"{user_id}:{code}")` 与 `code_hash` 用 `hmac.compare_digest` 比较；**先检查 `code_hash` 字段存在**（Lua 自增若在 key 过期后造出只含 attempts 的 hash，缺字段按「请先获取验证码」400，而不是「验证码错误」）；不等 → `HINCRBY attempts 1` + 400「验证码错误或已失效」；达到 5 次立即删 key。**`HINCRBY` 与 `EXPIRE` 用 Lua 原子执行**：若 key 在读取与自增之间恰好过期，裸 `HINCRBY` 会造出一个只含 `attempts` 的永久 hash。用密钥 HMAC（而不是裸 SHA-256），Redis 泄露时 6 位码不能离线穷举；**建议用 HKDF 从 `session_jwt_secret` 派生 `info="email-code"` 的专用 key**（可选，不是阻塞项）。
+4. `hmac_sha256(settings.session_jwt_secret, f"{user_id}:{code}")` 与 `code_hash` 用 `hmac.compare_digest` 比较；**先检查 `code_hash` 字段存在**（Lua 自增若在 key 过期后造出只含 attempts 的 hash，缺字段按「请先获取验证码」400，而不是「验证码错误」）；不等 → `HINCRBY attempts 1` + 400「验证码错误或已失效」；达到 5 次立即删 key。**`HINCRBY` 与 `EXPIRE` 用 Lua 原子执行**：若 key 在读取与自增之间恰好过期，裸 `HINCRBY` 会造出一个只含 `attempts` 的永久 hash。Lua 里 key 不存在时返回「missing」（按「请先获取验证码」400，不要再造 key）；**`EXPIRE 600` 仅在 `TTL < 0` 时补**（与 `rate_limit.incr_with_ttl` 同型）——错误尝试**不续期**，否则有效期会从「签发起 10 分钟」漂成「最后一次错误起 10 分钟」，与 §5.7.1 键表和 §5.6.2 邮件文案的 `{ttl//60}` 口径冲突。用密钥 HMAC（而不是裸 SHA-256），Redis 泄露时 6 位码不能离线穷举；**建议用 HKDF 从 `session_jwt_secret` 派生 `info="email-code"` 的专用 key**（可选，不是阻塞项）。
 5. 取出 Redis 里的 `email`/`purpose`/`current_email_hash`：
    - `current_email_hash != sha256(email_fingerprint(user.email))` → 删 key + 400「邮箱已变更，请重新获取验证码」（兜住「发码后管理员改邮箱/解绑」的窗口）。
-   - **仅 `purpose in ("bind","change")`** 再次查占用（并发窗口，排除本人 `id<>:me`）：邮箱被他人占用，或与某个 `lower(username)` 冲突 → 删 key + 409。`purpose=verify` 不查（见 5.3.2 第 7 步）。
+   - **仅 `purpose in ("bind","change")`** 再次查占用（并发窗口，排除本人 `id<>:me`）：邮箱被他人占用，或与某个 `lower(username)` 冲突 → 删 key + 409，**并写审计 `email_verification_requested`（`ok=false, reason=email_taken|username_taken, purpose`，与 §5.3.2 第 7 步同口径）**——这是唯一能观测「并发抢占」的窗口，不写就只能靠 DB 反推。`purpose=verify` 不查（见 5.3.2 第 7 步）。
 6. 写库（单事务）。**先保存 `old_email = user.email` / `old_verified = email_verified_at is not None` 快照**（第 8/9 步的告知与审计要用；不能先赋值再读）：
    - `user.email = target`
    - `user.email_verified_at = now()`
-   - **仅 `purpose in ("bind","change")` 且邮箱值确实变化时**，作废该用户全部**未用**重置 token（`DELETE FROM password_reset_tokens WHERE user_id=:id AND used_at IS NULL`）；`purpose=verify` 不改邮箱，保留用户手里已有的重置链接。
+   - **仅 `purpose in ("bind","change")` 且邮箱值确实变化时**（变化判定与第 8 步同口径：`(old_email or '').strip().lower() != target`；大小写-only 归一化不算变化，`email_hash` 也不变，无需作废用户手里的重置链接），作废该用户全部**未用**重置 token（`DELETE FROM password_reset_tokens WHERE user_id=:id AND used_at IS NULL`）；`purpose=verify` 不改邮箱，保留用户手里已有的重置链接。
    - commit
-   - **`try/except IntegrityError`**：并发场景下「预检查通过、写库时被另一账号抢先」会命中唯一索引；`await db.rollback()`、删 Redis key、返回 409。不能让它冒成 500。
+   - **`try/except IntegrityError`**：并发场景下「预检查通过、写库时被另一账号抢先」会命中唯一索引；`await db.rollback()`、删 Redis key、写审计 `email_verification_requested`（`ok=false, reason=email_taken`）、返回 409。不能让它冒成 500。
 7. 删除 Redis key。
 8. 若 **`purpose == "change"`** 且用户原来有**已验证**旧邮箱且 `(old_email or '').strip().lower() != target.lower()`：把告知邮件注册为 `BackgroundTasks`（`mailer.send_mail`），失败只 log，不影响已成功的响应。`verify` 不改邮箱值，不发告知；大小写-only 的归一化不发告知。
 9. 审计：
@@ -320,7 +322,7 @@ FROM users a JOIN users b
 1. **不依赖 `mail_ready`**：解绑只需密码 + DB，SMTP 关闭时仍可用；告知邮件 best-effort（SMTP 关闭则跳过）。前端在有邮箱时即使邮箱功能关闭也显示「解除绑定」入口（§6.4/§7.3）。
 2. 密码失败锁 / 校验（同 5.3.2 第 3-4 步，共用 `email:chg:fail:user` 计数）。
 3. `user.email is None` → 400「当前未绑定邮箱」。
-4. **没有当前可用的非邮箱登录方式 → 400**「当前账号没有独立登录名，解除邮箱后将无法登录；请联系管理员先设置登录名」。判定统一用 `has_non_email_login(user, settings)`：`username` 非空（空串与 NULL 同等对待），**或** `OIDCService.enabled`（OIDC 四个字段齐备）且 `user.oidc_sub` 非空。**注意 `oidc_sub` 非空 ≠ 能登录**：生产当前是纯本地登录，存量飞书用户即使有 `oidc_sub` 也不能走 IdP；只看 `oidc_sub` 会把这些账号的邮箱解绑掉、锁死账号。姓名兜底不可靠（同名多命中会被拒绝登录，`local_auth.py:264-267`）。本批不开放管理员改 username，故直接拒绝（§13.9）。
+4. **没有当前可用的非邮箱登录方式 → 400**「当前账号没有独立登录名，解除邮箱后将无法登录；请联系管理员先设置登录名」。判定统一用 `has_non_email_login(user, oidc_enabled: bool)`：`username` 非空（空串与 NULL 同等对待），**或** `oidc_enabled` 且 `user.oidc_sub` 非空。`oidc_enabled` **由 router 注入 `request.app.state.auth`（OIDCService 实例）的 `.enabled` 属性**（它读构造时缓存的 `settings.oidc_provider` 四字段，`services/auth.py`）；不要在函数内从 settings 重算一份（会出现第三份 OIDC 判定逻辑）。**注意 `oidc_sub` 非空 ≠ 能登录**：生产当前是纯本地登录，存量飞书用户即使有 `oidc_sub` 也不能走 IdP；只看 `oidc_sub` 会把这些账号的邮箱解绑掉、锁死账号。姓名兜底不可靠（同名多命中会被拒绝登录，`local_auth.py:264-267`）。本批不开放管理员改 username，故直接拒绝（§13.9）。
 5. **先保存 `old_email`（用于告知与审计快照）**，再清空 `email`、`email_verified_at`；作废该用户全部**未用**重置 token（`used_at IS NULL`）；**`DEL email:code:{id}`**（残留验证码不能把邮箱重新绑上）；commit。
 6. 告知邮件（仅旧邮箱已验证时）：注册为 `BackgroundTasks`，best-effort。
 7. 审计 `email_unbound`（`details={"old_masked"}`）。
@@ -333,7 +335,7 @@ FROM users a JOIN users b
   - 正则：`^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$`（比现有宽松规则更严，禁止 `<`, `>`, `,`, `;`, 引号、空白，杜绝邮件头注入）。
   - 过不了严格正则的存量地址不允许自助验证/找回，用户需先「更换邮箱」；见 §13.12。
 - **统一入口 `normalize_email(value) -> str | None`**（strip + lower + 空串→None）：OIDC 新建/同步、`set_initial_admin --email`、seed、管理员建号/编辑全部走它，避免 `''` / 空白写进 `users.email`（SQLite 唯一索引会把 `''` 当重复）。
-- 管理员侧（建号/编辑）：**新增/变更的 email 值也走 `strict_validate_email`**（避免管理员继续制造「用户永远无法自助验证」的地址）；只读/未变更的存量值不回溯校验。**严格校验、`email_verified_at` 清理、删未用 token、`DEL email:code`、`username` 守卫全部放在既有 `if "email" in payload.model_fields_set and payload.email != target.email:` 块内（`directory.py:314`）**；**不要**写成只判断 `payload.email != target.email`（`PATCH {}` 时缺省 None 会恒真，把邮箱清空），也不要放进 `UserUpdateIn` 的 field_validator（Pydantic 在路由前无条件执行，只改姓名/组也会 422）。`UserCreateIn`（无存量值）可以严格。前端 `AdminUsersPage` 未改邮箱时不要发送该键。写入前 `strip().lower()`；**任何 email 值变化都 `email_verified_at=NULL` + 删除该用户未用重置 token + `DEL email:code:{user_id}`**（防止发码后管理员改邮箱、用户又用旧码改回去）；**清空 email 且 `is_active=true` 且 `not has_non_email_login(target, settings)` → 400（在职账号没有任何可用登录标识）**；停用/离职账号允许清空（回收邮箱给新员工的常规场景）。先预检占用（含与 `lower(username)` 的跨列冲突，排除本人），写库再捕获唯一索引 `IntegrityError` → 409（`provision_local_user` 与 `update_directory_user` 两处都要做，并 `rollback`）。
+- 管理员侧（建号/编辑）：**新增/变更的 email 值也走 `strict_validate_email`**（避免管理员继续制造「用户永远无法自助验证」的地址）；只读/未变更的存量值不回溯校验。**严格校验、`email_verified_at` 清理、删未用 token、`DEL email:code`、`username` 守卫全部放在既有 `if "email" in payload.model_fields_set and payload.email != target.email:` 块内（`directory.py:314`）**；**不要**写成只判断 `payload.email != target.email`（`PATCH {}` 时缺省 None 会恒真，把邮箱清空），也不要放进 `UserUpdateIn` 的 field_validator——Pydantic v2 的 field_validator 对**提供了 email 键**的请求在路由前无条件执行：管理页若把未变更的存量非法邮箱原样回显提交，会被严格校验 422（只改姓名/组、不带 email 键的请求不受影响，风险在「键存在」而非「任何 PATCH」）。`UserCreateIn`（无存量值）可以严格。前端 `AdminUsersPage` 未改邮箱时不要发送该键。写入前 `strip().lower()`；**任何 email 值变化都 `email_verified_at=NULL` + 删除该用户未用重置 token + `DEL email:code:{user_id}`**（防止发码后管理员改邮箱、用户又用旧码改回去）；**清空 email 且 `is_active=true` 且 `not has_non_email_login(target, oidc_enabled)` → 400（在职账号没有任何可用登录标识；`oidc_enabled` 同样取 `request.app.state.auth.enabled`）**；停用/离职账号允许清空（回收邮箱给新员工的常规场景）。先预检占用（含与 `lower(username)` 的跨列冲突，排除本人），写库再捕获唯一索引 `IntegrityError` → 409（`provision_local_user` 与 `update_directory_user` 两处都要做，并 `rollback`）。
 - OIDC 登录（`services/auth.py:158-198`）：
   - **新建用户分支**（`:170-185`）与同步分支（`:196-198`）都先 `strip().lower()`；
   - **新建/同步前查占用**：`lower(email)` 已属他人 **和** `lower(username)` 跨列冲突都要查；冲突时跳过写入（新建走 `email=None`，已有用户保留旧邮箱），不 500；
@@ -380,14 +382,14 @@ FROM users a JOIN users b
    - **未验证邮箱照常发送重置链接**：链接发到该邮箱，点击即证明控制权；重置成功后置 `email_verified_at=now()`（D4）。「未验证」不是失败，不计 IP 失败、也不返回错误。
 7. IP 发信配额：读 `pwreset:send:ip:{ip}:{epoch_hour}`，≥60 → 审计 `password_reset_failed`（`reason=send_quota_ip`）+ 429「操作过于频繁，请稍后再试」；**发送成功后**才 INCR（首次 EXPIRE 3600s）。
 8. 用户配额：读 `pwreset:send:user:{id}:{epoch_hour}`，≥5 → 审计 `password_reset_failed`（`reason=send_quota_user`）+ 429「该账号重置邮件发送过于频繁（每小时 5 次），请稍后再试」；**发送成功后**才 INCR（首次 EXPIRE 3600s）。
-9. 冷却（**原子占位，必须在签发之前**）：`SET pwreset:cooldown:user:{id} 1 NX EX 60`；返回 false → 429「发送过于频繁，请 N 秒后再试」。占位成功后即使 SMTP 失败也保留 60s 冷却（防连击），因此同一用户 60s 内不可能有第二个 token 插入——这是消除「并发申请互相删光」竞态的关键。
+9. 冷却（**原子占位，必须在签发之前，只此一次**）：`SET pwreset:cooldown:user:{id} 1 NX EX 60`；返回 false → 429「发送过于频繁，请 N 秒后再试」。占位成功后即使 SMTP 失败也保留 60s 冷却（防连击），因此同一用户 60s 内不可能有第二个 token 插入——这是消除「并发申请互相删光」竞态的关键。**冷却从占位时刻起算，第 13 步所有分支不再触碰冷却键、不续期。**
 10. 生成 token：`secrets.token_urlsafe(32)`（43 字符）；`token_hash=sha256(token)`。
 11. 事务级 advisory lock（`pg_advisory_xact_lock(hashtext('pwreset:user:<uid>'))`，与 `tokens.py` 同款）→ 插入新行（`expires_at=now+1800s`，写 `email_hash=sha256(email_fingerprint(user.email))` / `request_ip` / `user_agent[:512]`）→ commit。**先不删旧行**（见第 13 步）。
 12. 构造链接：`base = settings.email_link_base_url`（D15，**必填、不回落到 `web_app_base_url`**）；`f"{base.rstrip('/')}/reset-password#token={token}"`。
 13. 同步发信（§5.6）：
-    - 成功 → **删除该用户其它未用 token（保留本次新行）**（冷却 `SET NX` 已保证 60s 内无并发插入，直接用 `id<>:new_id AND used_at IS NULL`，不要依赖进程时钟比较 `created_at`）；DEL `pwreset:fail:ip`（成功即清零失败链）；写冷却 60s（已在第 9 步占位，这里续到 60s）；INCR 第 7/8 步配额；审计 `password_reset_requested`（`details={"ok":true,"user_id":str(user.id),"email_masked":...}`）；返回 200 `{status:"sent"}`。**删除旧行失败只 log + metric，不改 200**（新 token 已可用，旧行 30 分钟自然过期）。
-    - **确定失败**（连接/认证失败，未发出）→ 只删除**本次新行**（旧行保留，用户之前的链接仍可用）；写冷却 60s；审计 `password_reset_requested`（`details={"ok":false,"user_id":...,"email_masked":...,"reason":"smtp_failed"}`）；502「邮件发送失败，请稍后重试」。
-    - **结果未知**（`asyncio.wait_for` 超时，线程可能已发出）→ **保留本次新行 + 最近一条旧行**（按 `ORDER BY created_at DESC, id DESC` 取，同微秒用 id 兜底），删除更早的未用行（仍 ≤2 条；新链接可能已送达，旧链接也还可用）；写冷却 60s；审计 `details={"ok":false,"user_id":...,"email_masked":...,"reason":"smtp_timeout"}`；502「邮件发送结果未知，请稍后检查邮箱；若未收到可重新申请」。
+    - 成功 → **删除该用户其它未用 token（保留本次新行）**（冷却 `SET NX` 已保证 60s 内无并发插入，直接用 `id<>:new_id AND used_at IS NULL`，不要依赖进程时钟比较 `created_at`）；DEL `pwreset:fail:ip`（成功即清零失败链）；INCR 第 7/8 步配额（冷却已在第 9 步占位时定档，此处不动）；审计 `password_reset_requested`（`details={"ok":true,"user_id":str(user.id),"email_masked":...}`）；返回 200 `{status:"sent"}`。**删除旧行失败只 log + metric，不改 200**（新 token 已可用，旧行 30 分钟自然过期）。
+    - **确定失败**（连接/认证失败，未发出）→ 只删除**本次新行**（旧行保留，用户之前的链接仍可用）；审计 `password_reset_requested`（`details={"ok":false,"user_id":...,"email_masked":...,"reason":"smtp_failed"}`）；502「邮件发送失败，请稍后重试」。
+    - **结果未知**（`asyncio.wait_for` 超时，线程可能已发出）→ **保留本次新行 + 最近一条旧行**（按 `ORDER BY created_at DESC, id DESC` 取，同微秒用 id 兜底），删除更早的未用行（仍 ≤2 条；新链接可能已送达，旧链接也还可用）；审计 `details={"ok":false,"user_id":...,"email_masked":...,"reason":"smtp_timeout"}`；502「邮件发送结果未知，请稍后检查邮箱；若未收到可重新申请」。
 14. 响应**不返回 token**，也不返回剩余次数；429 响应带 `Retry-After` 头（§5.7.4）。
 
 > 注意：**不把 5 次失败锁做成全局**，只锁该 IP 的 `password-reset/request`；不影响登录、也不影响已登录用户的邮箱绑定。
@@ -534,9 +536,27 @@ async def send_mail(
 
 - 交互路径（验证码、重置申请）：同步发送，20s 总预算；失败明确报错。客户端超时（Web 30s）后仍可能收到邮件，以最新一封为准（旧 token 已被新申请作废）。
 - **并发上限（两段预算，不能合并）**：在 lifespan 创建 `app.state.mail_semaphore = asyncio.Semaphore(4)`。
-  1. **拿槽**：`asyncio.timeout(2)` 只包 `semaphore.acquire()`；拿不到 → 429/503（带 `Retry-After`）且**确定未发送**（不写码/不保留新 token）。
-  2. **发送**：拿到槽后 `asyncio.wait_for(send_mail(...), 20)`；超时 → `definite=False`（可能已发），按 §5.6.1 走「保留 token/码 + 结果未知」。
-  3. **释放**：把发送放进独立 task，`task.add_done_callback(lambda _: sem.release())`；**线程真正结束后才释放槽**（`wait_for` 取消 future 不会终止底层线程，提前释放会让 Semaphore 失去并发上限作用）。
+  1. **拿槽**：`asyncio.timeout(2)` 只包 `semaphore.acquire()`；拿不到 → 429/503（带 `Retry-After`）且**确定未发送**（不写码/不保留新 token）。**拿槽位置钉死在冷却占位之前**（§5.3.2 第 9/10 步之间、§5.4.2 第 8/9 步之间）：拿不到槽直接返回，不占冷却、不插 token、不消耗任何配额。acquire 成功后立刻置 `acquired=True`，后续（链接构造等）若抛异常按标志 `release()` + 从强引用集合移除，防边界泄漏。
+  2. **发送**：拿到槽后把发送放进**独立 task** 并 `await asyncio.wait_for(asyncio.shield(send_task), 20)`；超时 → `definite=False`（可能已发），按 §5.6.1 走「保留 token/码 + 结果未知」。**必须 `shield`**：裸 `wait_for(send_mail(...))` 在超时会 cancel 掉 task 本身——task 立刻以 cancelled 完成、触发 done_callback 提前放槽，而底层 SMTP 线程仍在跑，Semaphore 就失去并发上限作用。
+  3. **释放**：`send_task.add_done_callback(...)`；shield 保证超时路径 send_task 不被 cancel，**线程真正结束后才释放槽**。事件循环对 task 只持弱引用，超时后 handler 返回、send_task 成为孤儿——必须保强引用，否则 task 被 GC 时 done_callback 不会跑、槽位永久泄漏：
+     ```python
+     async with asyncio.timeout(2):
+         await sem.acquire()
+     send_task = asyncio.create_task(send_mail(...))
+     request.app.state.mail_tasks.add(send_task)          # 强引用集合
+     def _release(t: asyncio.Task) -> None:
+         request.app.state.mail_tasks.discard(t)
+         if not t.cancelled() and t.exception() is not None:   # 超时路径异常无人取回
+             log.warning("mail send failed after timeout: %r", t.exception())
+         sem.release()
+     send_task.add_done_callback(_release)
+     try:
+         await asyncio.wait_for(asyncio.shield(send_task),
+                                settings.smtp_total_timeout_seconds)
+     except TimeoutError:   # definite=False：send_task 仍在运行
+         ...
+     ```
+     lifespan 里 `app.state.mail_tasks: set[asyncio.Task] = set()`（与 semaphore 一起建）。
   配额是小时窗口，**不是**并发上限。
 - 告知邮件（换绑/解绑）：注册为 FastAPI `BackgroundTasks`（仓库既有惯例，`notifications.py:259-318`），best-effort；不要用 `asyncio.create_task`（无强引用，进程退出即丢）。
 - 站内通知邮件：保持现有 BackgroundTask + best-effort。
@@ -551,7 +571,7 @@ async def send_mail(
 | `email:code:{user_id}` (hash) | 600s | `code_hash` / `email` / `purpose` / `attempts` |
 | `email:code:cooldown:{user_id}` | `EMAIL_CODE_RESEND_SECONDS`（默认 60s） | 验证码重发冷却 |
 | `email:code:quota:{user_id}:{yyyymmdd}` | 到当日 24:00（UTC+8） | 每用户每日 10 条验证码 |
-| `email:code:req:user:{user_id}:{epoch_hour}` | 3600s | 每用户每小时 30 次验证码请求预算（查库前 INCR） |
+| `email:code:req:user:{user_id}:{epoch_hour}` | 3600s | 每用户每小时 30 次验证码请求预算（**密码校验通过后、占用查询前** INCR；勿放密码校验前，见 §5.3.2 第 4 步「正确」分支） |
 | `email:code:ip:{ip}:{epoch_hour}` | 3600s | 每 IP 每小时 200 条验证码（共享 NAT 余量；防批量骚扰） |
 | `email:chg:fail:user:{user_id}` | `EMAIL_CHANGE_PASSWORD_LOCK_SECONDS` | 邮箱操作密码错误计数 |
 | `email:chg:lock:user:{user_id}` | `EMAIL_CHANGE_PASSWORD_LOCK_SECONDS` | 邮箱操作密码错误锁（5 次） |
@@ -679,7 +699,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
 | env | 默认 | 说明 |
 | --- | --- | --- |
 | `EMAIL_AUTH_ENABLED` | `false` | 邮箱绑定/找回密码总开关（只影响邮箱功能，不影响站内通知邮件） |
-| `NOTIFY_EMAIL_ENABLED` | `false` | 站内通知邮件独立开关（审批/邀请）；填 SMTP **不会**自动打开它 |
+| `NOTIFY_EMAIL_ENABLED` | `false` | 站内通知邮件独立开关（审批/邀请）；填 SMTP **不会**自动打开它。**仅管站内通知**——换绑/解绑的安全告知邮件不受此开关约束（只要 SMTP 可用即 best-effort 发送），`mail_ready=false` 时跳过 |
 | `EMAIL_LINK_BASE_URL` | 无（功能开启时**必填**） | 邮件链接的公网 SPA 基址（含 `/ms-static/web/`）；**不回落** `WEB_APP_BASE_URL` |
 | `EMAIL_LINK_BASE_URL_LAN` | `None` | 可选内网 SPA 基址；非空时邮件同时给内网链接（内部 SMTP 中继/公网不可用场景），允许私网 host |
 | `SMTP_FROM_NAME` | `None` | 发件人显示名（可选） |
@@ -740,7 +760,9 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
   - 400 → 直接显示后端文案（「该邮箱未绑定任何账号」）。
   - 429 → 显示封控/冷却文案，按钮倒计时。
   - 502 → 「邮件发送失败，请稍后重试」。
+  - 503 → 「邮箱找回密码功能暂未开启，请联系管理员」（与 §6.3 重置页 503 文案统一）。
 - 成功后 60 秒内禁用提交按钮（本地倒计时，服务端仍有冷却兜底）。
+- 文案里的「30 分钟」按默认 `PASSWORD_RESET_TOKEN_TTL_SECONDS=1800` 书写；**若运维改了 TTL，Web/App 两处文案同步改**（邮件正文是动态 `{ttl//60}`，不受影响）。不为此扩 `public-config` 契约。
 - 底部链接「返回登录」。
 
 ### 6.3 重置密码页（新 `web/src/pages/ResetPasswordPage.tsx`）
@@ -751,9 +773,10 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
   - **StrictMode 安全**：用 `useState(() => 从 window.location.hash 捕获 token)` 在渲染期一次性拿到内存副本，再在 `useEffect` 里 `replaceState`；不要“先清 hash 再 setState”，开发态 effect 双执行会读到空值。
   - 若地址栏没有 fragment（用户手工复制/邮件客户端截断）：显示「粘贴重置链接或 token」输入框，token 只留在组件内存，不写回 URL。
 - 挂载时 `POST /auth/password-reset/verify`：
-  - 表单的最小长度/提示用 `public-config.password_min_length`；**抽 `web/src/lib/password-policy.ts`（`buildPasswordRe(minLength)` + 提示文案），改密页与重置页共用**（`ChangePasswordPage.tsx:17` 的 `PW_RE` 未导出且硬编码 8，不能直接复用）。「含字母 + 含数字」规则与后端保持一致。
-  - 成功 → 显示「正在为 a\*\*\*@example.com 重置密码」+ 新密码/确认密码表单（复用改密页的 `PW_RE` 与校验文案）。
+  - 表单的最小长度/提示用 `public-config.password_min_length`（**拉取失败/unknown 时回落 8**——仅默认值，后端实际可配）；**抽 `web/src/lib/password-policy.ts`（`buildPasswordRe(minLength)` + 提示文案），改密页与重置页共用**（`ChangePasswordPage.tsx:17` 的 `PW_RE` 未导出且硬编码 8，不能直接复用）。「含字母 + 含数字」规则与后端保持一致。
+  - 成功 → 显示「正在为 a\*\*\*@example.com 重置密码」+ 新密码/确认密码表单（用上文抽出的 `password-policy.ts` 的 `buildPasswordRe(minLength)` 与校验文案；改密页后续也迁移到同一份）。
   - 400 → 失效面板：「链接已失效或已被使用」+「重新申请」按钮 → `/forgot-password`。
+  - 429 → 显示频控/冷却文案（有 `Retry-After` 时倒计时）。
   - **503 → 独立文案「邮箱找回密码功能暂未开启，请联系管理员」**，不要伪装成「链接失效」。
 - 提交 `POST /auth/password-reset/confirm`：
   - 200 → **在本页展示成功面板**：「密码已重置，请用新密码登录」+「去登录」按钮 → `/login`。成功后先 `queryClient.clear()`（或 `removeQueries({queryKey:['me']})`），否则旧 `me` 缓存还在，已登录浏览器点「去登录」会先被 AppShell 弹回首页再被 401 踢回登录。
@@ -822,7 +845,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
 ### 7.2 忘记密码页（新 `lib/features/auth/forgot_password_page.dart`）
 
 - 输入邮箱 → 提交 → 成功/失败卡片式反馈（复用登录页的暖色错误卡风格）。
-- 成功文案必须写明：「重置链接已发送。请在**浏览器**中打开邮件里的链接完成重置；链接 30 分钟内有效。」
+- 成功文案必须写明：「重置链接已发送。请在**浏览器**中打开邮件里的链接完成重置；链接 30 分钟内有效。」（「30 分钟」按默认 TTL 书写，改 TTL 时与 Web 同步改，见 §6.2。）
 - 提供「返回登录」。
 
 ### 7.3 「我的 → 账号与安全 → 邮箱」
@@ -837,6 +860,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
   - 绑定/换绑：底部弹层或二级页（照 `change_password_page.dart` 的表单风格）：新邮箱 + 当前密码 → 发送验证码 → 6 位验证码 → 确认；发送成功后 60s 倒计时。
   - 解绑：密码 + 确认对话框。
 - `Me` 模型增加 `email`、`emailVerified`、`passwordSet`；`Me.fromJson` 用 `?? ''` / `?? false` 兼容旧后端。`passwordSet=false` 时邮箱入口禁用并提示「需管理员先初始化密码」（与 Web 同口径）。
+- `Session` 增加 `emailAuthEnabled` / `passwordResetEnabled`（`bool?`，null=unknown）：由登录页 `_onReady` 的 public-config 拉取（§7.1）写入；§7.1/§7.3 的显隐判定都读这两个字段（`null/true` 显示、仅明确 `false` 隐藏）。
 - API：`lib/core/api/auth_api.dart` 增加 `sendEmailCode` / `confirmEmailCode` / `unbindEmail` / `requestPasswordReset` / `verifyResetToken` / `resetPassword` / `publicConfig`。
 - **429 倒计时**：`ApiException` 增加 `retryAfterSeconds`（`MsApi.err` 从 `r.headers.value('retry-after')` 填）；页面优先用它，中文文案解析兜底。现有 `ApiException` 只有 `status/message/raw/method/path`（`ms_api.dart:38-55`），不扩就兑现不了 §5.7.4。
 - **绑定/换绑/解绑成功后刷新 `Session.me`**（`await session.restore()` 或 `session.me = await api.auth.me()`），否则「我的」页/邮箱页仍显示旧状态。
@@ -862,7 +886,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
 
 ### 7.6 发版
 
-- `pubspec.yaml` 由 `tool/release.mjs` 自动 bump（0.1.12+16 → 0.1.13+17）。
+- 当前 `pubspec.yaml` 已是 **0.1.13+17**（2026-11-03 随「安卓实况图适配」发版）；本批版本由 `tool/release.mjs` 自动 bump（预期 0.1.14+18），**以脚本输出为准**，勿手动预 bump。
 - 发版后验证线上固定名/版本化 APK SHA256 三份一致（沿用既有流程）。
 
 ## 8. 安全分析与取舍
@@ -915,7 +939,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
 | 回滚代码但保留唯一索引 | 老代码不捕获 IntegrityError，管理员改重邮箱会 500 | 回滚时同步 drop 索引或保留新代码（§9.4） |
 | 回滚再前滚 | 旧代码签发的 JWT 无 `ver`，前滚后按 0 校验；已自增版本的用户会 401 一次 | 用户重登即可；不要在回滚期间把所有 `session_version` 归零（会削弱旧代码期间的安全性） |
 | 邮件头注入 | 存量宽松地址/OIDC/notifications 可能带 `,;<>` | `send_mail` 自校验 + `Address` 构造；不安全地址拒绝发送（§5.6.1） |
-| 重置后仍被登录锁挡住 | 用户试错 5 次后即使重置成功也可能 429 | 重置成功清 **user 维度**锁；IP 维度不清（否则匿名重置成为 IP 锁后门），按 15 分钟自然过期或 ops `redis-cli DEL pwreset:lock:ip:*` 应急（本批无风控页入口，§13.13） |
+| 重置后仍被登录锁挡住 | 用户试错 5 次后即使重置成功也可能 429 | 重置成功清 **user 维度**锁；IP 维度不清（否则匿名重置成为 IP 锁后门），按 15 分钟自然过期，应急用 `redis-cli DEL pwreset:lock:ip:<具体IP>` + `DEL pwreset:fail:ip:<具体IP>`（**带具体 IP，勿写 `pwreset:lock:ip:*`——`DEL` 不支持 glob 会静默无效**，见 §9.4；本批无风控页入口，§13.13）。另：重置只清 user 维度，某共享 IP 的 fail 计数若已达 4，重置后该 IP 首次口误会立即再锁 15 分钟（双维计数固有语义） |
 | 重置链接“发送结果未知” | `wait_for` 超时后线程仍可能发出 | 超时保留 token、提示检查邮箱；用户重试会作废旧 token（§5.4.2 第 13 步） |
 | 共享 NAT 小时配额 | 全公司同 IP 首日集中验证/重置可能撞 200/120/60 的每小时上限 | 值按 NAT 余量配置且可调（§5.10）；上线首日分批验证；真正的封控是 5 次失败锁（§5.7.3） |
 | 枚举者用有效邮箱穿插成功请求 | 「成功清零 IP 失败链」会让 5 次锁失效 | 请求预算 120/h + 审计监控；R7 显式报错的必然代价（§8.1） |
@@ -926,7 +950,7 @@ class PasswordResetConfirmIn(PasswordResetTokenIn):
 
 ### 9.1 SMTP 前置（阻断项）
 
-> **开工前书面确认（硬前置）**：产品/运维确认 ① SMTP 服务商与发件地址；② hh2 → 465/587 出口实测；③ 公网 HTTPS 入口与证书（非自签）；④ SPF/DKIM/DMARC；⑤ 站内通知邮件是否同期上线（`NOTIFY_EMAIL_ENABLED`，默认 false）。未确认前不启动 R3/R4/R6/R7/R8 的开发与验收；若无法确认，本批范围降级为「仅邮箱绑定/解绑」（R1/R2/R9/R10），找回密码另立期。
+> **开工前书面确认（硬前置）**：产品/运维确认 ① SMTP 服务商与发件地址；② hh2 → 465/587 出口实测；③ 公网 HTTPS 入口与证书（非自签）；④ SPF/DKIM/DMARC；⑤ 站内通知邮件是否同期上线（`NOTIFY_EMAIL_ENABLED`，默认 false）；⑥ 入口链路真实 IP 复验（W2a，ops-manual §11：三入口各打一条失败请求，确认审计/Redis 里 IP 是真实客户端 IP——R8 的 IP 封控以此为基础，未激活时 IP 维度退化为共享桶连坐）。未确认前不启动 R3/R4/R6/R7/R8 的开发与验收；若无法确认，本批范围降级为「仅邮箱绑定/解绑」（R1/R2/R9/R10），找回密码另立期。
 >
 > **产品前置确认**：本功能要求一个**收件人可达的 HTTPS 入口**（当前是公网 `bucket.taoxiplan.com`）；纯离线/无公网入口部署**不支持**，上线前由产品确认接受。LAN 链接只是双入口兜底，不能替代。
 
@@ -1008,7 +1032,7 @@ SMTP_FROM_NAME=素材库
     - **逐条标记**（仅当已线下核对归属）：
       `docker exec -i ms-api python -m scripts.mark_email_verified --username <u>`
       执行后在 stdin 输入完整邮箱确认（避免进 shell history）；比较按 `strip().lower()`；每次只处理一个账号；脚本写 `email_verified` 审计，`details={"source":"ops","verified_by":...,"email_masked":...}`。**不提供**按日期/通配批量档（D16）。
-11. App 发版（0.1.13+17）。旧版 App 仍可登录/使用；改密后会被强制回登录页（§7.4），不能承诺「无感」。
+11. App 发版（本批版本，预期 0.1.14+18，以 `release.mjs` 输出为准）。旧版 App 仍可登录/使用；改密后会被强制回登录页（§7.4），不能承诺「无感」。
 
 ### 9.4 回滚
 
@@ -1112,7 +1136,7 @@ DELETE FROM password_reset_tokens
 - `scripts/set_password.py` / `set_initial_admin.py` 改密后目标旧 cookie 401。
 - dev `X-User-Id` 通道不受版本影响。
 - `GET /auth/me` 返回 `email_verified`，绑定/换绑/解绑/管理员改邮箱后值正确。
-- 既有测试同步（§5.5.1 第 7 步）：`test_local_auth_integration.py` 改密后 `/me` 断言与 `test_forced_change_blocks_other_endpoints`、`test_mcp_auth_chain.py` monkeypatch 签名、`test_directory.py` transient User、`test_oidc_service.py` 的 FakeSession 查询顺序。
+- 既有测试同步（§5.5.1 第 8 步）：`test_local_auth_integration.py` 改密后 `/me` 断言与 `test_forced_change_blocks_other_endpoints`、`test_mcp_auth_chain.py` monkeypatch 签名、`test_directory.py` transient User、`test_oidc_service.py` 的 FakeSession 查询顺序。
 
 **Schema**
 - `test_db_schema.py` 表名集合加入 `password_reset_tokens`；断言 `users.session_version/email_verified_at` 与 `uq_users_email_lower` 存在（metadata 级）。
@@ -1126,7 +1150,7 @@ DELETE FROM password_reset_tokens
 - `EMAIL_LINK_BASE_URL_LAN` 配置后邮件正文含两条链接；非法 `resolve_mail_ready` 配置 → `mail_ready=false` + 原因。
 - `change-password` / 管理员重置后 `email:chg:fail/lock` 被清、`email:code` 被删。
 - 254 字符邮箱的 `mask_email` 不超 255。
-- `mail_semaphore` 占满后第 5 个请求 → 20s 内 429/503，FakeMailer 未被调用（不补发）。
+- `mail_semaphore` 占满后第 5 个请求 → 20s 内 429/503，FakeMailer 未被调用（不补发）；**发送超时后槽不提前释放**：用阻塞 FakeMailer 让 4 个在途发送超时，第 5 个请求立刻 429/503，直到 FakeMailer 线程真正结束、槽释放后才放行（验证 shield + done_callback 语义）。
 - 新端点 Redis 故障 → 503（`RateLimitUnavailable`），不是 500/静默放行。
 - 每账号每小时第 6 条重置邮件 → 429（`send_quota_user`）；锁/计数 TTL 到期后恢复。
 - `set_password.py --username-only`：只改登录名，密码/PAT/`session_version` 不变。
@@ -1184,7 +1208,7 @@ DELETE FROM password_reset_tokens
 - 审计页（Web + App）能看到 7 个新事件，筛选正常，CSV 导出正常；计数注释与新实数一致。
 - 本批新增日志/审计无完整邮箱、无验证码、无 token（既有本地登录日志里的 username 输入不在本批范围；OIDC 告警日志本批一并脱敏）。
 - `NOTIFY_EMAIL_ENABLED=false` 时**不发送**站内通知邮件（审批/邀请）；置 true 后才发。开启前确认收件地址可信。
-- **真实 IP 验收**：三入口（内网 / 公网 HTTPS / 跳板机端口）各产生一条 `local_login_failed`，审计 `request_ip` 是真实客户端 IP，不是容器/网关 IP。R8 的 IP 封控完全建立在这个前提上（W2a 已激活，但每次入口变更都要复验）。
+- **真实 IP 验收**：三入口（内网 / 公网 HTTPS / 跳板机端口）各产生一条 `local_login_failed`，审计 `request_ip` 是真实客户端 IP，不是容器/网关 IP。R8 的 IP 封控完全建立在这个前提上（W2a 已于 2026-10-19 激活并过 §11.6 四条验收，状态正本=ops-manual §11；**每次入口链路变更（反代/隧道/端口）后必须复验**，上线前置见 §9.1 ⑥；未激活时 IP 维度退化为共享桶连坐，见 §8.6）。
 
 ## 11. 实施顺序（建议拆 6 包）
 
@@ -1192,8 +1216,8 @@ DELETE FROM password_reset_tokens
 | --- | --- | --- |
 | B1 基建 | settings + `mailer.py` + `notifications.py` 改造 + 迁移 0021 + 模型 + `test_db_schema` + **最小写入守卫（管理员/OIDC 的 `lower()` + `IntegrityError→409`）** | 无。**B1 不可单独发布**：只上唯一索引而没有守卫，会让旧/新代码的管理员改重邮箱 500 |
 | B2 邮箱绑定 | `email_utils.py` + `email_verification.py` + 3 个 session 端点 + 测试 | B1 |
-| B3 找回密码 | `password_reset.py` + 3 个公开端点 + `session_version`（deps/auth/directory 改造）+ 测试 | B1 |
-| B4 Web | 登录页/忘记页/重置页/设置页 + 路由豁免 + hooks/types + 改密行为 | B2/B3 |
+| B3 找回密码 | `password_reset.py` + 3 个公开端点 + `session_version`（deps/auth/directory 改造 + **`set_password.py`/`set_initial_admin.py` 两脚本的自增+删 token 改造**）+ 测试 | B1 |
+| B4 Web | 登录页/忘记页/重置页/设置页 + 路由豁免 + hooks/types + 改密行为 + **AdminUsersPage `email_verified` Tag（含「未改邮箱不发送 `email` 键」与 types.ts `email_verified` 标可选，§5.3.5/§6.4）** | B2/B3 |
 | B5 App | 登录页入口 + 忘记页 + 邮箱页 + Me 模型 + 改密行为 + 测试/发版 | B2/B3 |
 | B6 运维 | 三个脚本 + ops-manual §13 + `.env.*` 模板 + changelog + 部署验收 | B1-B5 |
 
@@ -1217,7 +1241,7 @@ DELETE FROM password_reset_tokens
 14. **换绑通知旧邮箱只在旧邮箱已验证时发**：避免把告知邮件发给管理员录错/未验证的地址。
 15. **`email_link_base_url` 必须公网可达**：App 走内网入口时请求 Host 不可用于拼链接；链接固定用配置值。
 16. **回滚与唯一索引**：老代码不捕获 `IntegrityError`，回滚代码但保留索引会让管理员改重邮箱 500；按 §9.4 处理。
-17. **同步 SMTP 的线程池**：两段预算——拿槽 `timeout(2)`（拿不到=确定未发，429/503）、发送 `wait_for(20)`（超时=结果未知，保留 token）；槽在线程真正结束后释放（`add_done_callback`）。`app.state.mail_semaphore = Semaphore(4)`；不要把它改成无界重试。配额是小时窗口，不能当并发上限。
+17. **同步 SMTP 的线程池**：两段预算——拿槽 `timeout(2)`（拿不到=确定未发，429/503）、发送 `wait_for(asyncio.shield(send_task), 20)`（超时=结果未知，保留 token；**裸 wait_for 会 cancel 掉发送 task → done_callback 提前放槽**，见 §5.6.3）；槽在发送线程真正结束后释放（`add_done_callback`）；**发送 task 进 `app.state.mail_tasks` 强引用集合**（事件循环对 task 只持弱引用，孤儿 task 被 GC 会永久泄漏槽位）。`app.state.mail_semaphore = Semaphore(4)`；不要把它改成无界重试。配额是小时窗口，不能当并发上限。
 18. **存量非法格式邮箱**：上线后仍可能有少量管理员录入的非法地址（严格正则不过）无法自助验证/找回；提前准备公告与管理员换绑话术（未验证/未格式化不再阻塞合法邮箱的找回，D4）。
 19. **配置不合法要降级，不要拖垮全站**：`mail_ready=false` + ERROR 日志 + 入口隐藏，登录保持可用；`raise` 会让一个链接拼写错误把全站打进容器重启循环。runbook 用 `resolve_mail_ready()` 预检。
 20. **Lua 原子计数**：裸 `INCR` 后再 `EXPIRE` 会留永不过期的孤儿键（进程中途死），累积到阈值即永久封 IP；统一走 `rate_limit.incr_with_ttl`。
@@ -1234,7 +1258,7 @@ DELETE FROM password_reset_tokens
 31. **`.env` 路径**：prod `/home/huanhua/ms/api/.env`、dev `/home/msdev/ms/api/.env`；不要照旧路径 `/root/...` 操作。
 32. **`password_hash IS NULL`**：允许邮箱重置首次设密；不要直接拿 `None` 去 argon2 verify（会抛非预期异常变 500）。
 33. **transient 对象的 `session_version`**：`scripts/set_initial_admin.py` 的 `User(...)` 未 flush 时是 `None`；统一 `(or 0) + 1`。
-34. **验证码 hash 的 TTL**：`HINCRBY attempts` 后若 key 恰好过期会造出只含 attempts 的永久 hash；用 Lua 把 `HSET/HINCRBY` 与 `EXPIRE` 原子化。
+34. **验证码 hash 的 TTL**：`HINCRBY attempts` 后若 key 恰好过期会造出只含 attempts 的永久 hash；用 Lua 把 `HSET/HINCRBY` 与 `EXPIRE` 原子化，且 **EXPIRE 仅在 TTL<0 时补 600s、错误尝试不续期**（key 不存在返回 missing，不造新 key）。
 35. **重置页无壳**：`/forgot-password`、`/reset-password` 要在 `AppShell` 无条件放行，不能只在 `!me` 时放行；否则已登录浏览器点邮件链接会看到顶栏。
 36. **配置请求失败不要藏入口**：只有明确 `false` 才隐藏，`unknown` 保留链接，避免登录页唯一恢复入口因一次网络抖动消失。
 37. **App 5xx 不跳全局报错页**：新 AuthApi 方法（含 public-config）必须 `Options(extra: {'noErrorReport': true})`，否则 502/503 会整页跳 `/error-report`，页面失败卡片永远不出现。
