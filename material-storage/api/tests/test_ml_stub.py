@@ -236,7 +236,7 @@ def test_model_runner_json_extraction() -> None:
 
 
 def test_model_runner_version_derivation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """model_version = 目录名@权重指纹8+p1;权重内容变 → 指纹变;目录缺失可派生。"""
+    """model_version = 目录名@权重指纹8+p3;权重内容变 → 指纹变;目录缺失可派生。"""
     model_dir = tmp_path / "smolvlm2-256m"
     model_dir.mkdir()
     (model_dir / "config.json").write_text("{}", encoding="utf-8")
@@ -245,7 +245,7 @@ def test_model_runner_version_derivation(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     version = RUNNER_MOD.model_version()
     assert version.startswith("smolvlm2-256m@")
-    assert version.endswith("+p1")
+    assert version.endswith("+p4")
     hash8 = version.split("@")[1].split("+")[0]
     assert len(hash8) == 8
     assert all(c in "0123456789abcdef" for c in hash8)
@@ -258,7 +258,7 @@ def test_model_runner_version_derivation(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv("MS_ML_MODEL_DIR", str(tmp_path / "missing"))
     missing_version = RUNNER_MOD.model_version()
     assert missing_version.startswith("missing@")
-    assert missing_version.endswith("+p1")
+    assert missing_version.endswith("+p4")
 
 
 # ---------------------------------------------------------------- real 模式
@@ -296,7 +296,7 @@ def test_real_mode_startup_smoke_when_weights_present(monkeypatch: pytest.Monkey
         body = client.get("/healthz").json()
         assert body["status"] == "ok"
         assert body["loaded"] is True
-        assert body["model_version"].endswith("+p1")
+        assert body["model_version"].endswith("+p4")
 
         from PIL import Image
 

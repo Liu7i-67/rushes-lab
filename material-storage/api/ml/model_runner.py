@@ -29,17 +29,23 @@ from typing import Any
 
 # ---- 常量与配置(env 读取全部延迟到调用时,便于测试 monkeypatch)----
 
-_PROMPT_VERSION = "p1"
+_PROMPT_VERSION = "p4"
 _MAX_NEW_TOKENS = 96
 _TAG_CAP = 8  # 契约上限:tags_en 恒 ≤8(需求 §2.5)
 _DESC_MAX_WORDS = 30  # prompt 约束 ≤30 words,出参侧兜底截断
 
 _PROMPT = (
-    "You are tagging an image for a media asset library. "
-    "Look at the image and answer with STRICT JSON only (no markdown fence, "
-    "no commentary, no trailing text) in exactly this shape: "
-    '{"description": "<=30 words English description of the image", '
-    '"tags": ["<=8 short lowercase English tags"]}'
+    "Answer in exactly this format:\n"
+    "Tags: up to 8 short English tags separated by commas\n"
+    "Description: one short sentence about the image"
+)
+# p4 起拆两轮单任务(256M 小模型对「双任务一格式」跟随差:dev 实测只回
+# 描述句不回标签;单任务指令各自质量均验证可靠,2026-11-04):
+#   轮 1 描述、轮 2 标签 —— 时长 ×2(~6-18s/图)换标签产出,回填口径见方案 §7.3
+_PROMPT_DESC = "Describe this image in one short sentence."
+_PROMPT_TAGS = (
+    "List up to 8 short English keywords about this image, "
+    "separated by commas. Answer with the keywords only."
 )
 
 
@@ -126,27 +132,57 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def describe(image_bytes: bytes, max_tags: int = 8) -> dict[str, Any]:
-    """单帧推理,阻塞返回 {"tags_en": [...≤min(max_tags,8)], "description_en": str}。
+def _parse_freeform(text: str) -> dict[str, Any] | None:
+    """自然语言输出解析(p3 主路径 + 自由格式回退)。
 
-    输出无法解析为契约 JSON → MlContentError(内容层失败分级)。
+    p3 指令要求 "Tags: a, b" / "Description: ..." 前缀行——按前缀(大小写不敏感)
+    提取;模型未按格式时回退:首行按逗号切开且片段 ≤8 个视为标签行,否则视为
+    描述行。**tags 与 description 任一非空即成功**(256M 小模型常只完成其一,
+    缺失项置空由上游降级,不判内容层失败)。
     """
-    from PIL import Image  # lazy:最小依赖面
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return None
+    desc = ""
+    tags: list[str] = []
 
-    if not _STATE["loaded"]:
-        load_model()
+    def _split_tags(raw: str) -> list[str]:
+        out: list[str] = []
+        for part in raw.replace(";", ",").replace("、", ",").split(","):
+            tag = part.strip(" .-*#-—\t")
+            if tag and tag.lower() not in ("tags", "tag") and tag not in out:
+                out.append(tag)
+        return out
+
+    for ln in lines:
+        low = ln.lower()
+        if low.startswith("tags:"):
+            tags = _split_tags(ln[5:])
+        elif low.startswith("tag:"):
+            tags = _split_tags(ln[4:])
+        elif low.startswith("description:"):
+            desc = ln[12:].strip(" .-—\t")
+    if not tags and not desc:
+        # 自由格式回退:首行像标签串(逗号分段且段数 ≤8)当标签,否则当描述
+        first = lines[0].rstrip(".,;")
+        parts = _split_tags(first)
+        if len(parts) > 1 and len(parts) <= _TAG_CAP:
+            tags = parts
+        else:
+            desc = first
+    return {"description": desc, "tags": tags}
+
+
+def _generate(image: Any, prompt: str) -> str:
+    """单轮推理,返回解码文本(阻塞;调用方持有 processor/model)。"""
     processor: Any = _STATE["processor"]
     model: Any = _STATE["model"]
-
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    # SmolVLM2 模型卡形态:apply_chat_template(tokenize=True, return_dict=True);
-    # image 直接传 PIL 对象(最小依赖,免 data URI 往返),processor 自带缩放
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
-                {"type": "text", "text": _PROMPT},
+                {"type": "text", "text": prompt},
             ],
         }
     ]
@@ -159,26 +195,41 @@ def describe(image_bytes: bytes, max_tags: int = 8) -> dict[str, Any]:
     )
     output = model.generate(**inputs, max_new_tokens=_MAX_NEW_TOKENS, do_sample=False)
     generated = output[:, inputs["input_ids"].shape[1] :]
-    text = processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
+    return processor.batch_decode(generated, skip_special_tokens=True)[0].strip()
 
-    parsed = _extract_json(text)
-    if parsed is None:
-        raise MlContentError("model output is not parseable as contract JSON")
 
-    raw_description = parsed.get("description")
-    raw_tags = parsed.get("tags")
-    if (
-        not isinstance(raw_description, str)
-        or not raw_description.strip()
-        or not isinstance(raw_tags, list)
-    ):
-        raise MlContentError("model JSON missing description/tags fields")
+def describe(image_bytes: bytes, max_tags: int = 8) -> dict[str, Any]:
+    """单帧推理(p4 两轮单任务),阻塞返回 {"tags_en": [...], "description_en": str}。
+
+    轮 1 描述(_PROMPT_DESC)、轮 2 标签(_PROMPT_TAGS);任一轮产出有效即
+    降级保留,两轮皆空 → MlContentError(内容层失败分级,由 pipeline 重试)。
+    """
+    from PIL import Image  # lazy:最小依赖面
+
+    if not _STATE["loaded"]:
+        load_model()
+
+    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+
+    desc_text = _generate(image, _PROMPT_DESC)
+    tags_text = _generate(image, _PROMPT_TAGS)
+
+    description = " ".join(desc_text.split()[:_DESC_MAX_WORDS]).strip(" .-—\t")
 
     tags: list[str] = []
-    for tag in raw_tags:
-        normalized = str(tag).strip()
-        if normalized and normalized not in tags:
-            tags.append(normalized)
+    for part in tags_text.replace(";", ",").replace("、", ",").split(","):
+        tag = part.strip(" .-*#-—\t\n0123456789)")
+        low = tag.lower()
+        if (
+            tag
+            and low not in ("tags:", "tag:", "keywords:", "keywords", "tags", "tag",
+                            "answer", "none", "n/a")
+            and not tag.isdigit()
+            and low not in tags  # 去重比较用归一小写(原始大小写交错时 tag not in tags 会漏)
+        ):
+            tags.append(low)
     limit = max(1, min(max_tags, _TAG_CAP))
-    words = raw_description.split()[:_DESC_MAX_WORDS]
-    return {"tags_en": tags[:limit], "description_en": " ".join(words)}
+
+    if not tags and not description:
+        raise MlContentError("model produced neither description nor tags")
+    return {"tags_en": tags[:limit], "description_en": description}

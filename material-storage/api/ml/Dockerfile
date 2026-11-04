@@ -21,10 +21,12 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 # 先只 COPY constraints(依赖层缓存:改代码不重装 torch)
 COPY ml/constraints.txt /app/ml/constraints.txt
-# torch 单独一步走 pytorch CPU index(其余步骤走 PIP_INDEX_URL);
+# torch+torchvision 单独一步走 pytorch CPU index(其余步骤走 PIP_INDEX_URL);
 # -c 只钉版本号,CPU 轮子在该 index 提供(见 constraints.txt 头注)
+# ⚠ torchvision 是 transformers 4.57 SmolVLMProcessor(video_processing_smolvlm)
+#   的硬依赖,缺它 real 模式加载即 ModuleNotFoundError(2026-11-04 dev 实锤)
 RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-      -c ml/constraints.txt torch
+      -c ml/constraints.txt torch torchvision
 
 # 其余依赖统一受 constraints 钉版(transformers/num2words/pillow/fastapi/uvicorn/pydantic)
 RUN pip install --no-cache-dir -c ml/constraints.txt \

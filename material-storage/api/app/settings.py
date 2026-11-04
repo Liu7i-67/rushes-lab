@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     ai_ml_base_url: str = "http://ms-ml:8000"
     # 写入版本:新打标/回填落库用它;形如 权重指纹+提示词版本+词表版本(§8.1),
     # 换版 = 新版本行、旧行保留。灰度 runbook:改写入版本 → backfill 全量 → 翻转 active
-    ai_model_version: str = "smolvlm2-256m@p1+lm1"
+    ai_model_version: str = "smolvlm2-256m@p4+lm1"
     # 读取版本:搜索第四路与展示只认它(§8.1);None = 回落 ai_model_version(常态单版本)
     ai_active_model_version: str | None = Field(
         None, description="None = 回落 ai_model_version;灰度窗口允许与写入版本短暂不一致",

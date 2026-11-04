@@ -17,7 +17,8 @@
 # from_pretrained 冒烟为准。传递依赖(tokenizers/safetensors/huggingface-hub 等)
 # 暂不钉,首次构建后 pip freeze 回填本文件(与 api constraints 同款收敛流程)。
 # python:3.12-slim / linux x86_64 闭包。
-torch==2.13.0
+torch==2.15.0            # CPU 轮子(与 torchvision 配对;升级须两者同源同步)
+torchvision==0.29.2         # transformers SmolVLMProcessor 硬依赖(dev 实锤 2026-11-04)
 transformers==4.57.6
 num2words==0.5.14
 pillow==12.3.0
