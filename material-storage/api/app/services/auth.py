@@ -41,6 +41,7 @@ from urllib.parse import urlencode
 import httpx
 from jose import JWTError, jwt
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.tables import User
@@ -140,6 +141,19 @@ class OIDCService:
             return min(matches, key=lambda u: u.created_at)
         return matches[0] if matches else None
 
+    async def _email_taken_by_other(
+        self, db: AsyncSession, email: str, *, exclude_id: uuid.UUID | None = None,
+    ) -> bool:
+        """lower(email) 占用预检(邮箱账号方案 §5.3.5 OIDC 段,B1 最小守卫)。
+
+        exclude_id 排除本人(同步分支比对自身邮箱不算占用)。命中多条时
+        limit(1) 即可 —— 只回答「是否被占」,归属排查走管理后台。
+        """
+        stmt = select(User.id).where(func.lower(User.email) == email).limit(1)
+        if exclude_id is not None:
+            stmt = stmt.where(User.id != exclude_id)
+        return (await db.execute(stmt)).first() is not None
+
     async def upsert_user_from_userinfo(
         self, db: AsyncSession, userinfo: dict[str, Any]
     ) -> User:
@@ -170,15 +184,37 @@ class OIDCService:
         if user is None:
             default_org = self._settings.default_organization_id
             org_uuid = uuid.UUID(default_org) if default_org else None
+            new_name = userinfo.get(self._claim("name")) or userinfo.get("name") or "unknown"
+            # B1 最小写入守卫(方案 §5.3.5 OIDC 段):email 已 lower(见上);被
+            # 其他账号占用时跳过写入(建号不带 email),不因唯一索引 500。
+            new_email = email or None
+            if new_email and await self._email_taken_by_other(db, new_email):
+                log.warning("OIDC email occupied by other account, create without email: sub=%s", sub)
+                new_email = None
             user = User(
                 oidc_sub=sub,
-                name=userinfo.get(self._claim("name")) or userinfo.get("name") or "unknown",
-                email=userinfo.get(self._claim("email")) or userinfo.get("email"),
+                name=new_name,
+                email=new_email,
                 is_active=True,
                 organization_id=org_uuid,
             )
             db.add(user)
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                # 占用预检与 commit 之间的竞态撞 lower(email) 唯一索引(迁移
+                # 0021):回滚后去 email 重建(sub 绑定必须落库)
+                await db.rollback()
+                log.warning("OIDC create user hit email unique index, retry without email: sub=%s", sub)
+                user = User(
+                    oidc_sub=sub,
+                    name=new_name,
+                    email=None,
+                    is_active=True,
+                    organization_id=org_uuid,
+                )
+                db.add(user)
+                await db.commit()
             await db.refresh(user)
             log.info("created user from OIDC sub=%s name=%s org=%s",
                      sub, user.name, org_uuid)
@@ -193,16 +229,36 @@ class OIDCService:
         if new_name and user.name != new_name:
             user.name = new_name
             changed = True
-        new_email = userinfo.get(self._claim("email")) or userinfo.get("email")
-        if new_email and user.email != new_email:
-            user.email = new_email
-            changed = True
+        # B1 最小写入守卫(方案 §5.3.5 OIDC 段):email lower 后比对;被他人
+        # 占用(排除本人)→ 跳过写入保留旧邮箱,不 500。
+        if email and email != (user.email or "").strip().lower():
+            if await self._email_taken_by_other(db, email, exclude_id=user.id):
+                log.warning("OIDC email occupied by other account, keep old email: sub=%s user=%s", sub, user.id)
+            else:
+                user.email = email
+                changed = True
         # backfill organization_id(老 user 没绑 org)
         if user.organization_id is None and self._settings.default_organization_id:
             user.organization_id = uuid.UUID(self._settings.default_organization_id)
             changed = True
         if changed:
-            await db.commit()
+            try:
+                await db.commit()
+            except IntegrityError:
+                # email 撞唯一索引(与占用预检的竞态窗口):回滚后保留旧邮箱,
+                # 重放其余字段同步(sub 绑定不能因邮箱冲突丢失),不 500。
+                # ⚠️ rollback 会把实例属性过期:AsyncSession 下直接读属性触发
+                # 同步懒加载 → MissingGreenlet,必须先 refresh 回到库内当前态。
+                await db.rollback()
+                await db.refresh(user)
+                log.warning("OIDC sync hit email unique index, keep old email: sub=%s user=%s", sub, user.id)
+                if user.oidc_sub != sub:
+                    user.oidc_sub = sub
+                if new_name and user.name != new_name:
+                    user.name = new_name
+                if user.organization_id is None and self._settings.default_organization_id:
+                    user.organization_id = uuid.UUID(self._settings.default_organization_id)
+                await db.commit()
             await db.refresh(user)
 
         return user

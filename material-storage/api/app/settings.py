@@ -1,8 +1,15 @@
 """Pydantic Settings — env-driven config(12-factor)。"""
-from typing import Any
+import ipaddress
+import logging
+from typing import Any, Literal, overload
+from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from app.services.email_utils import is_header_safe_addr
+
+log = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -118,6 +125,52 @@ class Settings(BaseSettings):
         """host + from_email 齐备才算启用;其余字段缺省不影响发送(匿名中继场景)。"""
         return bool(self.smtp_host and self.smtp_from_email)
 
+    # ─── 邮箱绑定/找回密码(方案 email-account-and-password-reset-plan.md §5.10)──
+    # 代码默认整体关闭(EMAIL_AUTH_ENABLED=false);部署/启用须等 §9.1 硬前置确认。
+    # 功能总开关:只影响邮箱绑定/找回;**不影响**站内通知邮件(那个看 NOTIFY_EMAIL_ENABLED)
+    email_auth_enabled: bool = Field(
+        False, description="邮箱绑定/找回密码总开关;false 时 mail_ready=false、入口隐藏",
+    )
+    # 站内通知邮件(审批/邀请)独立开关:填 SMTP 不会自动打开它 —— 否则审批/邀请
+    # 会立刻发给管理员手填的(可能未验证/录错的)地址(方案 §5.1/§8.6)
+    notify_email_enabled: bool = Field(
+        False, description="站内通知邮件开关;需与 SMTP 同时开启才发(默认 false)",
+    )
+    email_link_base_url: str | None = Field(
+        None,
+        description="邮件链接公网 SPA 基址(含 /ms-static/web/);功能开启时必填,"
+                    "不回落 WEB_APP_BASE_URL(生产 WEB_APP_BASE_URL 是内网地址)",
+    )
+    email_link_base_url_lan: str | None = Field(
+        None,
+        description="可选内网 SPA 基址;配置后邮件正文同时给内网链接(允许私网 host)",
+    )
+    smtp_from_name: str | None = Field(
+        None, description="发件人显示名(可选;不得含 CR/LF,启动校验检查)",
+    )
+    smtp_timeout_seconds: int = Field(15, description="单次 socket 操作超时(与既有行为一致)")
+    smtp_total_timeout_seconds: int = Field(
+        20, description="交互式发信总预算(asyncio.wait_for;< 前端 30s)",
+    )
+    # ── 验证码(B2 域,配置一并收口)──
+    email_code_ttl_seconds: int = 600          # 验证码有效期
+    email_code_max_attempts: int = 5           # 单码最多错误次数
+    email_code_resend_seconds: int = 60        # 重发冷却
+    email_code_daily_per_user: int = 10        # 每用户每日验证码上限
+    email_code_hourly_per_ip: int = 200        # 每 IP 每小时验证码(共享 NAT 余量)
+    email_code_request_per_user: int = 30      # 每用户每小时请求预算(含 409 占用尝试)
+    email_change_max_password_failures: int = 5    # 邮箱操作密码错误上限
+    email_change_password_lock_seconds: int = 900  # 密码错误锁时长
+    # ── 找回密码(B3 域,配置一并收口)──
+    password_reset_token_ttl_seconds: int = 1800   # 重置链接有效期
+    password_reset_max_failures: int = 5           # R8:IP 失败上限
+    password_reset_lock_seconds: int = 900         # R8:IP 封控时长(可调 3600)
+    password_reset_cooldown_seconds: int = 60      # 重置邮件冷却
+    password_reset_hourly_per_user: int = 5        # 每账号每小时重置邮件
+    password_reset_hourly_per_ip: int = 60         # 每 IP 每小时重置邮件(共享 NAT 余量)
+    password_reset_hourly_confirm_per_ip: int = 150    # 每 IP 每小时 verify/confirm(>=2x 发信)
+    password_reset_hourly_request_per_ip: int = 120    # 每 IP 每小时格式合法的重置申请预算
+
     # ─── 百度网盘备份导入(方案 rushes-spec/material-storage/baidu-netdisk-backup-plan.md)──
     # 功能总开关(方案 §5.2):默认 false,未启用时 /api/v1/baidu/* 统一 404,
     # 前端菜单显隐读 /auth/me 的 baidu_backup_enabled;回滚急停也走此开关
@@ -221,8 +274,113 @@ class Settings(BaseSettings):
         assert self.baidu_max_active_tasks_per_binding >= 1, (
             f"BAIDU_MAX_ACTIVE_TASKS_PER_BINDING="
             f"{self.baidu_max_active_tasks_per_binding} 必须 ≥ 1"
-            "(配 0/负值会静默砖死创建与复活、恒 409 且无启动报错,见并发方案 §3.2)"
+            "(配 0/负值会静默砖死创建与复活,恒 409 且无启动报错,见并发方案 §3.2)"
         )
+
+    # ─── 邮箱绑定/找回密码:启动校验与降级(方案 §5.10)────────────────────────
+    @overload
+    def resolve_mail_ready(self, *, detail: Literal[True]) -> tuple[bool, str]: ...
+
+    @overload
+    def resolve_mail_ready(self, *, detail: Literal[False] = ...) -> bool: ...
+
+    def resolve_mail_ready(
+        self, *, detail: bool = False,
+    ) -> bool | tuple[bool, str]:
+        """计算邮箱功能有效开关 mail_ready(方案 §5.2 D11 / §5.10)。
+
+        - EMAIL_AUTH_ENABLED=false → 直接 false,跳过全部校验(默认态,不打 ERROR)。
+        - 开启时校验 SMTP 全套 + EMAIL_LINK_BASE_URL(生产拒私网/环回/非 https);
+          **不合法不抛异常、不拖垮登录**:log.error("email auth disabled: invalid
+          config: <原因>") + 返回 false —— 邮箱找回是非核心功能,一个链接基址
+          拼写错误不应该让全站进入容器重启循环。
+        - lifespan 启动时调一次挂 app.state.mail_ready(不要每请求重算,非法配置
+          会每请求刷 ERROR);``detail=True`` 返回 (bool, 原因) 供 runbook 预检
+          (§9.3 第 6 步)打印原因。
+        """
+        ok, reason = self._check_mail_ready()
+        if not ok and self.email_auth_enabled:
+            log.error("email auth disabled: invalid config: %s", reason)
+        if detail:
+            return ok, reason
+        return ok
+
+    def _check_mail_ready(self) -> tuple[bool, str]:
+        """纯校验(不打日志);返回 (ok, 原因),ok=True 时 reason 为 "ok"。"""
+        if not self.email_auth_enabled:
+            return False, "EMAIL_AUTH_ENABLED=false"
+        if not self.smtp_enabled:
+            return False, "SMTP 未配置齐(SMTP_HOST 与 SMTP_FROM_EMAIL 需同时非空)"
+        if bool(self.smtp_username) != bool(self.smtp_password):
+            return False, "SMTP_USERNAME 与 SMTP_PASSWORD 必须同时有或同时无"
+        if self.smtp_use_ssl and self.smtp_use_tls:
+            return False, "SMTP_USE_SSL 与 SMTP_USE_TLS 互斥"
+        if self.smtp_port == 465 and not (self.smtp_use_ssl and not self.smtp_use_tls):
+            return False, "SMTP_PORT=465 必须 SMTP_USE_SSL=true 且 SMTP_USE_TLS=false"
+        if self.smtp_port == 587 and not (self.smtp_use_tls and not self.smtp_use_ssl):
+            return False, "SMTP_PORT=587 必须 SMTP_USE_TLS=true 且 SMTP_USE_SSL=false"
+        if not is_header_safe_addr(self.smtp_from_email):
+            return False, "SMTP_FROM_EMAIL 含头部危险字符(, ; < > \" 空白/控制字符)或为空"
+        if self.smtp_from_name and ("\r" in self.smtp_from_name or "\n" in self.smtp_from_name):
+            return False, "SMTP_FROM_NAME 不得含 CR/LF"
+        reason = _check_spa_base_url(self.email_link_base_url, "EMAIL_LINK_BASE_URL",
+                                     prod_strict=self.env == "production")
+        if reason is not None:
+            return False, reason
+        if self.email_link_base_url_lan:
+            # LAN 可选:合法 http(s) SPA 基址即可(允许私网 host / http;公网要求
+            # 不适用 —— 它只是双入口兜底,不能单独让 mail_ready 变 true,§5.6.2)
+            reason = _check_spa_base_url(self.email_link_base_url_lan,
+                                         "EMAIL_LINK_BASE_URL_LAN", prod_strict=False)
+            if reason is not None:
+                return False, reason
+        return True, "ok"
+
+
+def _check_spa_base_url(url: str | None, name: str, *, prod_strict: bool) -> str | None:
+    """校验邮件链接 SPA 基址;通过返回 None,否则返回失败原因(方案 §5.10/D15)。
+
+    - 非空、http(s):// 开头、路径以 /ms-static/web/ 结尾(容忍无尾斜杠);
+    - urlsplit 后 username/password/query/fragment 必须为空
+      (防把凭据/查询串写进邮件正文);
+    - prod_strict=True(生产的 EMAIL_LINK_BASE_URL):必须 https、host 含 ``.``
+      且不以 ``.local`` 结尾;可解析为 IP(含 IPv6)时拒绝
+      is_private/is_loopback/is_link_local/is_unspecified(覆盖 169.254.*、
+      0.0.0.0、::1、IPv6 ULA);同时拒绝字面 localhost / 10.* / 192.168.* /
+      172.16-31.*(非 IP 字面量时按前缀判,见分支)。
+    """
+    if not url or not url.strip():
+        return f"{name} 未配置(邮箱功能开启时必填,不回落 WEB_APP_BASE_URL)"
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https"):
+        return f"{name} 必须以 http(s):// 开头"
+    if parts.username or parts.password or parts.query or parts.fragment:
+        return f"{name} 不得包含凭据/查询串/fragment"
+    if not parts.path.rstrip("/").endswith("/ms-static/web"):
+        return f"{name} 路径必须以 /ms-static/web/ 结尾"
+    host = parts.hostname
+    if not host:
+        return f"{name} 缺少 host"
+    if not prod_strict:
+        return None
+    # ── 生产专属:公网 https 入口(D15)──
+    if parts.scheme != "https":
+        return f"{name} 生产环境必须 https"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_unspecified:
+            return f"{name} 生产环境不得指向私网/环回/链路本地地址"
+        return None
+    # 非字面 IP 的 host:字面 localhost / *.local / 无点单标签(内部主机名)
+    # 都不可用作公网入口;10.*/192.168.*/172.16-31.* 这类字面 IP 已在上面
+    # 被 ipaddress 分支按 is_private 拒绝
+    if host == "localhost" or host.endswith(".local") or "." not in host:
+        return f"{name} 生产环境必须是公网域名(非 localhost/.local/内部主机名)"
+    return None
+
 
 
 # 单例(import 时 lazy 创建)

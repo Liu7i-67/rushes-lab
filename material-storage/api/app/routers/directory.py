@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
@@ -306,14 +307,29 @@ async def update_directory_user(
         want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
 
     # name / email:email 显式 null=清空(D6),以 model_fields_set 区分「未传」
+    # B1 最小写入守卫(邮箱账号方案 §5.3.5 管理员侧):email 写入前
+    # strip().lower() 归一、空串归 NULL;大小写-only 的归一化不算变化不写库。
+    # 严格校验 / verified_at 清理 / 删重置 token 等完整守卫由 B2 落地。
     changes: dict[str, object] = {}
     if payload.name is not None and payload.name != target.name:
         changes["name"] = {"old": target.name, "new": payload.name}
         target.name = payload.name
-    if "email" in payload.model_fields_set and payload.email != target.email:
-        changes["email"] = {"old": target.email, "new": payload.email}
-        target.email = payload.email
-    await db.commit()
+    email_written = False
+    if "email" in payload.model_fields_set:
+        new_email = (payload.email or "").strip().lower() or None
+        if new_email != ((target.email or "").strip().lower() or None):
+            changes["email"] = {"old": target.email, "new": new_email}
+            target.email = new_email
+            email_written = True
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        # lower(email) 唯一索引(迁移 0021)兜底:预检未做(最小口径),并发/
+        # 大小写变体撞索引在这里收敛为 409,不 500
+        await db.rollback()
+        if not email_written:
+            raise
+        raise HTTPException(409, "该邮箱已被其他账号使用") from e
 
     # D3 全量同步:以 group_memberships 现状为基线 diff(added 按入参序)
     groups_added: list[dict[str, str]] = []

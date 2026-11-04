@@ -6,6 +6,7 @@
 生产:
   uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 """
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -17,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.middleware.mcp_stats import MCPStatsMiddleware
 from app.routers import (
+    account_security,
     admin,
     approvals,
     assets,
@@ -45,6 +47,16 @@ log = structlog.get_logger()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     log.info("starting material-storage-api", env=settings.env, version=__version__)
+
+    # 邮箱绑定/找回密码(方案 §5.2/§5.6.3/§5.10):启动时计算一次有效开关
+    # mail_ready(配置不合法 → resolve_mail_ready 内部 log.error + 降级 false,
+    # 不拖垮登录;不要每请求重算,非法配置会每请求刷 ERROR);
+    # 交互式发信的进程级并发闸 + 发送 task 强引用集合(防孤儿 task 被 GC 后
+    # done_callback 不跑、槽位永久泄漏,方案 §12-17)
+    app.state.mail_ready = settings.resolve_mail_ready()
+    app.state.mail_semaphore = asyncio.Semaphore(4)
+    mail_tasks: set[asyncio.Task[None]] = set()
+    app.state.mail_tasks = mail_tasks
 
     # Phase B-2:wire 服务到 app.state
     from app.services.arq_pool import create_arq_pool
@@ -149,6 +161,9 @@ def create_app() -> FastAPI:
     #   「不过并发闸的 PAT 通道」。
     gate = [Depends(mcp_gate)]
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    # 账号安全(邮箱绑定/找回密码,B1a 起):public-config 公开端点 + B2/B3 端点;
+    # 不挂 gate(公开端点不走 MCP 并发闸,与 auth router 同口径)
+    app.include_router(account_security.router, prefix="/api/v1/auth", tags=["auth"])
     app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"], dependencies=gate)
     app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"], dependencies=gate)
     app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"], dependencies=gate)

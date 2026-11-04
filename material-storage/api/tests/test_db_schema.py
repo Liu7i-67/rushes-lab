@@ -12,6 +12,7 @@ from app.db.tables import (
     BaiduBinding,
     Base,
     Folder,
+    PasswordResetToken,
     PersonalAccessToken,
     SystemFlag,
     User,
@@ -44,6 +45,8 @@ def test_all_tables_in_metadata() -> None:
         # 0020:MCP 素材服务(PAT + 系统配置 KV)
         "personal_access_tokens",
         "system_flags",
+        # 0021:邮箱绑定/找回密码(重置 token 表)
+        "password_reset_tokens",
     }
 
 
@@ -151,6 +154,68 @@ def test_user_username_column() -> None:
     assert col.unique is True
     assert col.nullable is True
     assert {i.name for i in User.__table__.indexes} >= {"ix_users_username"}
+
+
+# ─── 邮箱绑定/找回密码(方案 §4,迁移 20261031_0021)──────────────────────────
+
+
+def test_user_email_account_columns() -> None:
+    """§4.1:users 加 email_verified_at / session_version 两列。
+
+    email_verified_at 可空不回填(D3 存量未验证);session_version 非空默认 0
+    (D6:存量 JWT 无 ver 按 0,迁移后不掉线)。
+    """
+    cols = User.__table__.c
+    assert "email_verified_at" in cols
+    assert "session_version" in cols
+    assert cols.email_verified_at.nullable is True
+    assert cols.session_version.nullable is False
+    assert cols.session_version.server_default is not None
+    assert cols.session_version.server_default.arg == "0"
+
+
+def test_user_email_lower_partial_unique_index() -> None:
+    """R9/D2:lower(email) 部分唯一索引(一个邮箱只属一个账号)。
+
+    断言口径 = 模型元数据(迁移 0021 同名索引);谓词排除 NULL/空串,
+    SQLite 测试库忽略 postgresql_where 会把空串纳入唯一索引 —— 所有写入
+    路径必须把空串归 NULL(方案 §4.1/§10.1 Schema 段)。
+    """
+    indices = {i.name: i for i in User.__table__.indexes}
+    idx = indices.get("uq_users_email_lower")
+    assert idx is not None, "缺 uq_users_email_lower(R9 唯一性兜底)"
+    assert idx.unique is True
+    where_sql = str(idx.dialect_options["postgresql"]["where"])
+    assert "email IS NOT NULL" in where_sql
+    assert "email <>" in where_sql
+    # 表达式索引:lower(email)(idx.columns 会归一到裸列,用 expressions 断言)
+    exprs = [str(e) for e in idx.expressions]
+    assert len(exprs) == 1 and exprs[0].replace("users.", "") == "lower(email)"
+
+
+def test_password_reset_token_schema() -> None:
+    """§4.2:password_reset_tokens —— 只存哈希、单次消费、过期索引、级联删。"""
+    cols = PasswordResetToken.__table__.c
+    assert {"id", "user_id", "token_hash", "expires_at", "used_at",
+            "email_hash", "request_ip", "user_agent", "created_at"} == set(cols.keys())
+    assert cols.token_hash.type.length == 64
+    assert cols.token_hash.nullable is False
+    assert cols.email_hash.type.length == 64
+    assert cols.email_hash.nullable is True
+    assert cols.request_ip.type.length == 64
+    assert cols.user_agent.type.length == 512
+    assert cols.expires_at.nullable is False
+    assert cols.used_at.nullable is True
+    constraints = {c.name for c in PasswordResetToken.__table__.constraints}
+    assert "uq_password_reset_tokens_token_hash" in constraints
+    assert "ix_password_reset_tokens_expires_at" in {
+        i.name for i in PasswordResetToken.__table__.indexes
+    }
+    fks = {fk.parent.name: fk for fk in PasswordResetToken.__table__.foreign_keys}
+    assert fks["user_id"].ondelete == "CASCADE"
+    assert "ix_password_reset_tokens_user_id" in {
+        i.name for i in PasswordResetToken.__table__.indexes
+    }
 
 
 # ─── 百度网盘备份三表(方案 §4,migration 20261008_0013)────────────────────────

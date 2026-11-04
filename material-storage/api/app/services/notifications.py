@@ -12,21 +12,23 @@
 设计:
 - 轮询即可(不做 WebSocket);SMTP 留空 = no-op 零报错(验收硬项)
 - 全部 best-effort:失败仅 log,不影响调用方主流程 / IM 卡片
+- 站内通知邮件走独立开关 NOTIFY_EMAIL_ENABLED(默认 false,方案 §5.1):
+  填 SMTP 不会自动发通知邮件;实际发送统一走 services/mailer.send_mail
 - 服务实例走参数注入(db session / permissions / audit),不搞模块级单例
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import smtplib
 import uuid
-from email.message import EmailMessage
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.tables import ApprovalRequest, Folder, Notification, Project, User
+from app.services import mailer
 from app.services.audit import AuditService
+from app.services.email_utils import mask_email
+from app.services.mailer import MailSendError
 from app.services.permissions import PermissionsService
 from app.services.target_resolve import resolve_target_name_and_project
 from app.settings import Settings, get_settings
@@ -53,7 +55,7 @@ async def create_notification(
     body: str | None = None,
     link: str | None = None,
 ) -> None:
-    """写一条应用内通知;SMTP 配置后同步给该用户发一封邮件。best-effort。"""
+    """写一条应用内通知;SMTP + NOTIFY_EMAIL_ENABLED 开启后同步发邮件。best-effort。"""
     if kind not in VALID_KINDS:
         log.warning("create_notification: unknown kind=%s (skipped)", kind)
         return
@@ -65,7 +67,9 @@ async def create_notification(
         return
 
     settings = get_settings()
-    if not settings.smtp_enabled:
+    # 站内通知邮件独立开关(方案 §5.1):填 SMTP 不会自动打开它 —— 审批/邀请
+    # 收件人是管理员手填的(可能未验证/录错的)地址,须产品确认后才开启
+    if not (settings.notify_email_enabled and settings.smtp_enabled):
         return
     user = await db.get(User, user_id)
     if user is None or not user.email:
@@ -78,40 +82,16 @@ async def create_notification(
 async def _maybe_send_email(
     settings: Settings, *, to_email: str, title: str, body: str | None, link: str | None,
 ) -> None:
-    """SMTP 发送(smtplib 是同步库 → to_thread,不阻塞事件循环)。失败仅 log。"""
+    """经 services/mailer.send_mail 发送(to_thread 在 mailer 内)。失败仅脱敏 log。"""
     if not settings.smtp_enabled:
         return
     text = "\n\n".join(part for part in (title, body or "", link or "") if part)
     try:
-        await asyncio.to_thread(_smtp_send_sync, settings, to_email, title, text)
-    except Exception:
-        log.exception("smtp send fail to=%s title=%r", to_email, title[:80])
-
-
-def _smtp_send_sync(settings: Settings, to_email: str, subject: str, text: str) -> None:
-    """同步 smtplib 发送 — 纯逻辑,单测可直接 mock。"""
-    msg = EmailMessage()
-    msg["From"] = settings.smtp_from_email
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.set_content(text)
-    host = settings.smtp_host or ""
-    if settings.smtp_use_ssl:
-        with smtplib.SMTP_SSL(host, settings.smtp_port, timeout=15) as server:
-            _login_and_send(server, settings, to_email, msg)
-    else:
-        with smtplib.SMTP(host, settings.smtp_port, timeout=15) as server:
-            if settings.smtp_use_tls:
-                server.starttls()
-            _login_and_send(server, settings, to_email, msg)
-
-
-def _login_and_send(
-    server: smtplib.SMTP, settings: Settings, to_email: str, msg: EmailMessage,
-) -> None:
-    if settings.smtp_username:
-        server.login(settings.smtp_username, settings.smtp_password or "")
-    server.send_message(msg)
+        await mailer.send_mail(settings, to=to_email, subject=title, body=text)
+    except MailSendError as exc:
+        # best-effort:不影响主流程;日志只出现脱敏收件人(方案 §5.6.1/§12-10)
+        log.warning("notification email not sent (definite=%s) to=%s title=%r err=%s",
+                    exc.definite, mask_email(to_email), title[:80], exc)
 
 
 # ─── 审批:待办(给 target admin)──────────────────────────────────────────────

@@ -35,6 +35,7 @@ from botocore.client import Config
 from botocore.exceptions import ClientError
 from PIL import Image, ImageDraw, ImageFont
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_sessionmaker
 from app.db.tables import Asset, Folder, Organization, Project, User
@@ -56,6 +57,14 @@ DEMO_FOLDER_ID = uuid.uuid5(PROJECT_ID, "02-示例素材")
 SENSITIVE_FOLDER_ID = uuid.uuid5(PROJECT_ID, "03-敏感示例")
 
 ASSETS_DIR = pathlib.Path(__file__).parent / "seed_assets"
+
+# 固定 dev 种子邮箱(写入前 strip().lower() 归一,空串归 NULL;邮箱账号方案
+# §5.3.5 seed 段 —— lower(email) 唯一索引上线后大写/空串写入会撞索引)
+ALICE_EMAIL = "alice@dev.local"
+
+
+def _norm_email(v: str | None) -> str | None:
+    return (v or "").strip().lower() or None
 
 
 def _placeholder_png(label: str, color: tuple[int, int, int]) -> bytes:
@@ -118,19 +127,27 @@ async def main() -> None:
             .values(id=ORG_ID, name="dev-clinic", feishu_tenant_key=None)
             .on_conflict_do_nothing(index_elements=["id"])
         )
-        # alice — 同样 minimal upsert(dev_bootstrap 跑过则 no-op)
-        await session.execute(
-            insert(User)
-            .values(
-                id=ADMIN_USER_ID,
-                feishu_open_id=ADMIN_OPEN_ID,
-                name="alice (admin)",
-                email="alice@dev.local",
-                is_active=True,
-                organization_id=ORG_ID,
+        # alice — 同样 minimal upsert(dev_bootstrap 跑过则 no-op);email 写入前
+        # 归一,撞 lower(email) 唯一索引(迁移 0021)给可读错误退出(方案 §5.3.5)
+        try:
+            await session.execute(
+                insert(User)
+                .values(
+                    id=ADMIN_USER_ID,
+                    feishu_open_id=ADMIN_OPEN_ID,
+                    name="alice (admin)",
+                    email=_norm_email(ALICE_EMAIL),
+                    is_active=True,
+                    organization_id=ORG_ID,
+                )
+                .on_conflict_do_nothing(index_elements=["id"])
             )
-            .on_conflict_do_nothing(index_elements=["id"])
-        )
+        except IntegrityError as e:
+            await session.rollback()
+            raise SystemExit(
+                f"seed_onboarding:alice 的 email({ALICE_EMAIL})已被其他账号占用,"
+                f"请先在管理后台清空占用账号的邮箱后重跑(幂等)。原始错误:{e.orig}"
+            ) from e
         # project
         await session.execute(
             insert(Project)

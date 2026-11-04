@@ -3,10 +3,14 @@
 策略:本机无 docker/容器运行时,不连真 DB / OpenFGA / SMTP;
 用 stub db + monkeypatch 覆盖纯逻辑与写入口 fan-out 行为。
 容器内全链路 e2e(申请→admin 通知→审批→结果通知)在 tests/test_notifications_e2e.py,PR 标注待 docker 环境。
+
+SMTP 发送本体(TLS/SSL/login 分支、头注入、确定失败 vs 结果未知)已随 B1a
+迁移到 services/mailer.py,对应单测在 tests/test_mailer.py;本文件只测
+notifications 侧的开关(NOTIFY_EMAIL_ENABLED)与 best-effort/脱敏行为。
 """
 from __future__ import annotations
 
-import smtplib
+import logging
 import uuid
 from types import SimpleNamespace
 
@@ -14,6 +18,7 @@ import pytest
 
 from app.db.tables import ApprovalRequest, Folder, Project, User
 from app.services import notifications as ns
+from app.services.mailer import MailSendError
 from app.settings import Settings
 
 
@@ -141,10 +146,12 @@ async def test_create_notification_unknown_kind_skipped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_notification_emails_when_smtp_on_and_user_has_email(
+async def test_create_notification_emails_when_notify_and_smtp_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com")
+    """NOTIFY_EMAIL_ENABLED + SMTP 同时开启才发(方案 §5.1 独立开关)。"""
+    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com",
+                           notify_email_enabled=True)
     monkeypatch.setattr(ns, "get_settings", lambda: settings)
     sent: list[tuple[str, str, str | None, str | None]] = []
 
@@ -159,6 +166,24 @@ async def test_create_notification_emails_when_smtp_on_and_user_has_email(
     await ns.create_notification(db, user_id=uid, kind=ns.KIND_APPROVAL_PENDING, title="t")
 
     assert len(sent) == 1 and sent[0][0] == "a@b.com"
+
+
+@pytest.mark.asyncio
+async def test_create_notification_no_email_when_notify_switch_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SMTP 已配但 NOTIFY_EMAIL_ENABLED=false(默认)→ 不发(新数据暴露面收口)。"""
+    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com")  # notify 默认 False
+    monkeypatch.setattr(ns, "get_settings", lambda: settings)
+    sent: list[str] = []
+    monkeypatch.setattr(ns, "_maybe_send_email",
+                        lambda s, **kw: sent.append(kw["to_email"]))  # type: ignore[arg-type]
+    db = StubDB()
+    uid = uuid.uuid4()
+    db.objects[(User, uid)] = (
+        fake_user(uid, email="a@b.com"))
+    await ns.create_notification(db, user_id=uid, kind=ns.KIND_APPROVAL_PENDING, title="t")
+    assert sent == []
 
 
 @pytest.mark.asyncio
@@ -177,68 +202,56 @@ async def test_create_notification_no_email_when_smtp_off_or_user_no_email(
     assert sent == []
 
 
-# ─── _smtp_send_sync:纯同步发送逻辑 ─────────────────────────────────────────
-def test_smtp_send_sync_tls_with_login(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: dict[str, object] = {}
+# ─── _maybe_send_email:经 mailer.send_mail 的 best-effort/脱敏 ──────────────
+@pytest.mark.asyncio
+async def test_maybe_send_email_calls_mailer_with_joined_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com")
+    captured: list[dict[str, str]] = []
 
-    class FakeSMTP:
-        def __init__(self, host: str, port: int, timeout: int) -> None:
-            calls["ctor"] = (host, port, timeout)
+    async def fake_send(s: Settings, **kw: str) -> None:
+        captured.append(kw)
 
-        def __enter__(self) -> FakeSMTP:
-            return self
+    monkeypatch.setattr(ns.mailer, "send_mail", fake_send)
+    await ns._maybe_send_email(settings, to_email="a@b.com", title="标题",
+                               body="正文", link="http://x")
+    assert len(captured) == 1
+    assert captured[0] == {"to": "a@b.com", "subject": "标题", "body": "标题\n\n正文\n\nhttp://x"}
 
-        def __exit__(self, *a: object) -> bool:
-            return False
 
-        def starttls(self) -> None:
-            calls["starttls"] = True
-
-        def login(self, u: str, p: str) -> None:
-            calls["login"] = (u, p)
-
-        def send_message(self, msg: object) -> None:
-            calls["msg"] = msg
-
-    monkeypatch.setattr(smtplib, "SMTP", FakeSMTP)
+@pytest.mark.asyncio
+async def test_maybe_send_email_unsafe_address_skips_with_masked_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """存量不安全地址(notifications 的 user.email 可能带 ,;<>):跳过 + 脱敏 log,
+    不影响主流程(方案 §10.1「邮件」段);真实 SMTP 不被触碰。"""
     settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com",
-                           smtp_username="u", smtp_password="p",
-                           smtp_use_tls=True, smtp_use_ssl=False)
-    ns._smtp_send_sync(settings, "to@x.com", "subject", "body")
-
-    assert calls["ctor"] == ("h", 587, 15)
-    assert calls["starttls"] is True
-    assert calls["login"] == ("u", "p")
-    assert calls["msg"]["To"] == "to@x.com"  # type: ignore[index]
-    assert calls["msg"]["From"] == "f@x.com"  # type: ignore[index]
+                           notify_email_enabled=True)
+    caplog.set_level(logging.INFO, logger="app.services.notifications")
+    await ns._maybe_send_email(settings, to_email="a,b@c.com", title="t",
+                               body=None, link=None)
+    assert "a***@c.com" in caplog.text
+    assert "a,b@c.com" not in caplog.text
 
 
-def test_smtp_send_sync_ssl_anonymous(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: dict[str, object] = {}
+@pytest.mark.asyncio
+async def test_maybe_send_email_smtp_failure_best_effort(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """mailer 抛 MailSendError → 只 log 不冒泡(应用内通知已落库,邮件可失败)。"""
+    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com")
 
-    class FakeSMTPSSL:
-        def __init__(self, host: str, port: int, timeout: int) -> None:
-            calls["ctor"] = (host, port, timeout)
+    async def fail_send(s: Settings, **kw: str) -> None:
+        raise MailSendError("smtp down", definite=True)
 
-        def __enter__(self) -> FakeSMTPSSL:
-            return self
-
-        def __exit__(self, *a: object) -> bool:
-            return False
-
-        def login(self, u: str, p: str) -> None:  # 不应被调用
-            calls["login"] = (u, p)
-
-        def send_message(self, msg: object) -> None:
-            calls["msg"] = msg
-
-    monkeypatch.setattr(smtplib, "SMTP_SSL", FakeSMTPSSL)
-    settings = mk_settings(smtp_host="h", smtp_from_email="f@x.com",
-                           smtp_port=465, smtp_use_tls=False, smtp_use_ssl=True)
-    ns._smtp_send_sync(settings, "to@x.com", "s", "b")
-
-    assert calls["ctor"] == ("h", 465, 15)
-    assert "login" not in calls  # 未配 username → 匿名发送
+    monkeypatch.setattr(ns.mailer, "send_mail", fail_send)
+    caplog.set_level(logging.INFO, logger="app.services.notifications")
+    # 不应抛异常
+    await ns._maybe_send_email(settings, to_email="victim@example.com", title="t",
+                               body=None, link=None)
+    assert "v***@example.com" in caplog.text
+    assert "victim@example.com" not in caplog.text
 
 
 # ─── 写入口:审批待办 → admin fan-out ────────────────────────────────────────

@@ -21,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     SmallInteger,
     String,
     Text,
@@ -69,6 +70,15 @@ class User(Base, TimestampMixin):
     username: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255))
+    # 邮箱绑定/找回密码(迁移 0021,方案 §4.1):绑定邮箱的验证时刻;NULL = 未验证
+    # (D3:存量邮箱一律未验证,不回填);重置链接本身即邮箱控制权证明,重置成功
+    # 即置已验证(D4)。
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # 会话版本(D6):改密 / 管理员重置 / 邮箱重置都自增 → 该用户全部旧 JWT(带
+    # ver claim)失效;存量 JWT 无 ver 按 0,迁移后不会全站掉线。邮箱变更不自增。
+    session_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     # 本地账号密码登录(ADR-0007,P1 #149 启用);password_hash NULL = 未设密码
     password_hash: Mapped[str | None] = mapped_column(String(255))
     must_change_password: Mapped[bool] = mapped_column(
@@ -79,6 +89,19 @@ class User(Base, TimestampMixin):
 
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="SET NULL")
+    )
+
+    __table_args__ = (
+        # R9/D2:一个邮箱只属一个账号 —— lower(email) 部分唯一索引(应用层预检给
+        # 友好 409,索引兜底并发)。谓词排除 NULL/空串;写入侧一律 strip().lower()
+        # 归一、空串归 NULL(方案 §5.3.5)。⚠️ SQLite 忽略 postgresql_where,会把
+        # 空串纳入唯一索引 —— 所有写入路径不得落空串(方案 §4.1/§10.1 Schema 段)。
+        Index(
+            "uq_users_email_lower",
+            func.lower(email),
+            unique=True,
+            postgresql_where=text("email IS NOT NULL AND email <> ''"),
+        ),
     )
 
 
@@ -722,6 +745,42 @@ class PersonalAccessToken(Base):
     __table_args__ = (
         # 显式命名供 test_db_schema 断言(迁移 0020 同名约束)
         UniqueConstraint("token_hash", name="uq_pat_token_hash"),
+    )
+
+
+class PasswordResetToken(Base):
+    """邮箱找回密码的重置 token(方案 §4.2,迁移 0021)。
+
+    - 只存 SHA-256 hex(token_hash,64 字符);明文 token 仅出现在邮件正文,
+      不落库、不写日志(D8);
+    - 单次消费:B3 的 confirm 用 ``UPDATE ... WHERE used_at IS NULL`` 原子收口;
+      30 分钟过期(expires_at 建索引,签发前顺带清理 used/过期旧行);
+    - email_hash = 签发时 ``sha256(lower(email))`` 快照:confirm 与当前邮箱指纹
+      比对,兜住「签发后换绑/解绑」的并发窗口(不复制完整邮箱,PII 最小化);
+    - request_ip / user_agent 写库前截断(UA ``[:512]``,与 audit 列宽一致),
+      仅供风控排查(脱敏展示)。
+    """
+    __tablename__ = "password_reset_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    email_hash: Mapped[str | None] = mapped_column(String(64))
+    request_ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # token 单值定位 + 防重;显式命名供 test_db_schema 断言(照 PAT 惯例)
+        UniqueConstraint("token_hash", name="uq_password_reset_tokens_token_hash"),
+        # 签发前按用户清理旧行 / 过期行(方案 §4.2 清理口径)
+        Index("ix_password_reset_tokens_expires_at", "expires_at"),
     )
 
 

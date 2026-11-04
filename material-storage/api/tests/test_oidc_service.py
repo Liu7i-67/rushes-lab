@@ -52,7 +52,7 @@ def make_settings(**overrides: Any) -> Settings:
 
 class FakeResult:
     """scripted execute() 返回值:第一路查询用 scalar_one_or_none,
-    第二路(email)用 scalars().all()。"""
+    第二路(email)用 scalars().all(),占用预检用 first()。"""
 
     def __init__(self, rows: list[User | None]) -> None:
         self._rows = rows
@@ -66,15 +66,20 @@ class FakeResult:
     def all(self) -> list[User | None]:
         return self._rows
 
+    def first(self) -> User | None:
+        return self._rows[0] if self._rows else None
+
 
 class FakeSession:
-    """只实现 upsert_user_from_userinfo 用到的 execute/commit/refresh/add。"""
+    """只实现 upsert_user_from_userinfo 用到的 execute/commit/refresh/add/rollback
+    (rollback:service 捕获 IntegrityError 的竞态分支用,方案 §5.3.5 OIDC 段)。"""
 
     def __init__(self, scripted: list[FakeResult]) -> None:
         self._scripted = list(scripted)
         self.executes = 0
         self.commits = 0
         self.refreshes = 0
+        self.rollbacks = 0
         self.added: list[User] = []
 
     async def execute(self, _stmt: Any) -> FakeResult:
@@ -86,6 +91,9 @@ class FakeSession:
 
     async def refresh(self, _obj: Any) -> None:
         self.refreshes += 1
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
 
     def add(self, obj: User) -> None:
         self.added.append(obj)
@@ -142,8 +150,8 @@ class TestUpsertUserFromUserinfo:
         assert db.commits == 1
 
     async def test_email_miss_creates_new_user(self) -> None:
-        """sub + email 都 miss → 新建用户。"""
-        db = FakeSession([FakeResult([]), FakeResult([])])
+        """sub + email 都 miss → 新建用户(第 3 路 = 邮箱占用预检,无人占用)。"""
+        db = FakeSession([FakeResult([]), FakeResult([]), FakeResult([])])
         svc = OIDCService(make_settings())
         try:
             user = await svc.upsert_user_from_userinfo(
@@ -159,9 +167,10 @@ class TestUpsertUserFromUserinfo:
         assert user.is_active is True
 
     async def test_email_taken_by_other_oidc_sub_not_stolen(self) -> None:
-        """email 命中但已绑其它 oidc_sub → 不抢账号,按新用户建号。"""
+        """email 命中但已绑其它 oidc_sub → 不抢账号,按新用户建号;占用者持有
+        该邮箱,新账号不能再写同一邮箱(B1 最小守卫:占用预检命中 → email=None)。"""
         other = make_local_user(oidc_sub="oidc-sub-other")
-        db = FakeSession([FakeResult([]), FakeResult([other])])
+        db = FakeSession([FakeResult([]), FakeResult([other]), FakeResult([other])])
         svc = OIDCService(make_settings())
         try:
             user = await svc.upsert_user_from_userinfo(
@@ -173,4 +182,5 @@ class TestUpsertUserFromUserinfo:
         assert user is not other
         assert other.oidc_sub == "oidc-sub-other", "已有身份不能被覆盖"
         assert user.oidc_sub == SUB
+        assert user.email is None, "被占用的邮箱不能写进新账号"
         assert db.added == [user], "应新建独立账号"

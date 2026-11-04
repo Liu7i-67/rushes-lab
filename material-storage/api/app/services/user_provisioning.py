@@ -29,6 +29,7 @@ import uuid
 
 from fastapi import HTTPException
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.tables import Group, GroupMembership, User
@@ -115,6 +116,10 @@ async def provision_local_user(
       (local_auth.find_user_by_username),防「case 变体建号成功 → 两账号登录互锁」。
       命中 → 409 `登录名已存在:{username}`(services 层首例 HTTPException,见模块
       docstring);作为竞态兜底,admin 链路壳内另有前置预检(双查无害)。
+    - email 最小写入守卫(邮箱账号方案 §5.3.5 管理员侧,B1 口径):写入前
+      strip().lower() 归一、空串归 NULL;commit 撞 lower(email) 唯一索引
+      (迁移 0021)→ rollback + 409「该邮箱已被其他账号使用」。严格校验 /
+      verified_at 清理 / 删重置 token 等完整守卫由 B2 落地。
     - source 落 user_created details.source;membership_source 落逐组
       group_member_added details.source(语义见模块 docstring)。
     - commit 后 db.refresh(new_user) 保留:created_at 依赖 server_default 回填,
@@ -122,6 +127,9 @@ async def provision_local_user(
 
     返回 (new_user, temp_password);临时密码只回显一次,不落 audit / log。
     """
+    # B1 最小守卫:email 归一(strip + lower,空串归 NULL —— SQLite 测试库会把
+    # 空串纳入唯一索引,方案 §5.3.5)
+    email = (email or "").strip().lower() or None
     dup = (
         await db.execute(
             select(User)
@@ -141,14 +149,23 @@ async def provision_local_user(
     new_user = User(
         username=username,
         name=name,
-        email=email or None,
+        email=email,
         password_hash=hash_password(temp_pw),
         must_change_password=True,
         is_active=True,
         organization_id=org_id,
     )
     db.add(new_user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as e:
+        # lower(email) 唯一索引兜底(占用预检的竞态窗口);本请求未写任何
+        # 其它行,rollback 后直接 409。username 竞态(未带 email 时)保持
+        # 原异常行为,不冒充邮箱冲突。
+        await db.rollback()
+        if email is None:
+            raise
+        raise HTTPException(409, "该邮箱已被其他账号使用") from e
     await db.refresh(new_user)
 
     if org:

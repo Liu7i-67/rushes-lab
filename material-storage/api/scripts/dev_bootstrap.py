@@ -31,6 +31,7 @@ import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_sessionmaker
 from app.db.tables import Folder, Organization, Project, User
@@ -55,6 +56,35 @@ BUCKET = "ms-dev"
 TENANT_KEY = "dev_tenant_001"
 
 
+def _norm_email(v: str | None) -> str | None:
+    """邮箱归一(strip + lower + 空串归 NULL;邮箱账号方案 §5.3.5 seed 段)。
+
+    lower(email) 部分唯一索引(迁移 0021)上线后,空串/大写写入会撞索引;
+    SQLite 测试库更会把空串纳入唯一索引,一律归 NULL。
+    """
+    return (v or "").strip().lower() or None
+
+
+async def _insert_user_or_die(session, values: dict) -> None:  # type: ignore[type-arg]
+    """users 幂等插入:email 撞 lower(email) 唯一索引 → 可读错误退出。
+
+    on_conflict_do_nothing 只消化 id 冲突;email 被其它账号占用时(迁移 0021
+    的唯一索引)直接抛 IntegrityError —— 不静默跳过 seed 账号,让运维先在管理
+    后台清空占用账号的邮箱再重跑(方案 §5.3.5 seed 段「可读错误」口径)。
+    """
+    try:
+        await session.execute(
+            insert(User).values(**values).on_conflict_do_nothing(index_elements=["id"])
+        )
+    except IntegrityError as e:
+        await session.rollback()
+        raise SystemExit(
+            f"dev_bootstrap:种子账号 {values['username']} 的 email "
+            f"({values.get('email')}) 已被其他账号占用,请先在管理后台清空占用"
+            f"账号的邮箱后重跑(幂等)。原始错误:{e.orig}"
+        ) from e
+
+
 async def main() -> None:
     settings = get_settings()
     sm = get_sessionmaker()
@@ -70,32 +100,30 @@ async def main() -> None:
                 set_={"feishu_tenant_key": TENANT_KEY, "name": "dev-clinic"},
             )
         )
-        # users
-        await session.execute(
-            insert(User)
-            .values(
+        # users(email 写入前归一,§5.3.5 seed 段)
+        await _insert_user_or_die(
+            session,
+            dict(
                 id=ADMIN_USER_ID,
                 username="alice",
                 feishu_open_id="dev_admin_open_id",
                 name="alice (admin)",
-                email="alice@dev.local",
+                email=_norm_email("alice@dev.local"),
                 is_active=True,
                 organization_id=ORG_ID,
-            )
-            .on_conflict_do_nothing(index_elements=["id"])
+            ),
         )
-        await session.execute(
-            insert(User)
-            .values(
+        await _insert_user_or_die(
+            session,
+            dict(
                 id=MEMBER_USER_ID,
                 username="bob",
                 feishu_open_id="dev_member_open_id",
                 name="bob (member)",
-                email="bob@dev.local",
+                email=_norm_email("bob@dev.local"),
                 is_active=True,
                 organization_id=ORG_ID,
-            )
-            .on_conflict_do_nothing(index_elements=["id"])
+            ),
         )
         # project
         await session.execute(

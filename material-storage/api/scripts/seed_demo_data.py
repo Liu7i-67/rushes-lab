@@ -28,6 +28,7 @@ from botocore.client import Config
 from botocore.exceptions import ClientError
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_sessionmaker
 from app.db.tables import Asset, Folder, Organization, Project, User
@@ -186,17 +187,45 @@ async def main() -> None:
         # 幂等:on_conflict_do_update 按 id upsert;重跑时 Evan(ou_evan_local)会被
         # 上面"真 user"查询捞到,走下方同一升级流程。
         if not real_users:
-            await session.execute(
-                insert(User).values(
-                    id=LOCAL_ADMIN_ID, name="Evan", email="evan@dev.local",
-                    username="evan", feishu_open_id="ou_evan_local", is_active=True,
-                ).on_conflict_do_update(
-                    index_elements=["id"],
-                    set_={"name": "Evan", "email": "evan@dev.local",
-                          "username": "evan", "feishu_open_id": "ou_evan_local",
-                          "is_active": True},
+            # 邮箱账号方案 §5.3.5 seed 段:email 归一后写入;set_ 只在 lower(email)
+            # 实际变化时才含 email(值没变不动,重跑不触碰邮箱相关状态);撞
+            # lower(email) 唯一索引(迁移 0021)时跳过 email 写入给可读提示。
+            evan_email = "evan@dev.local"
+            current = (
+                await session.execute(select(User.email).where(User.id == LOCAL_ADMIN_ID))
+            ).first()
+            evan_set: dict[str, object] = {
+                "name": "Evan", "username": "evan",
+                "feishu_open_id": "ou_evan_local", "is_active": True,
+            }
+            if current is None or current[0] is None or current[0].strip().lower() != evan_email:
+                evan_set["email"] = evan_email
+            try:
+                await session.execute(
+                    insert(User).values(
+                        id=LOCAL_ADMIN_ID, name="Evan", email=evan_email,
+                        username="evan", feishu_open_id="ou_evan_local", is_active=True,
+                    ).on_conflict_do_update(
+                        index_elements=["id"],
+                        set_=evan_set,
+                    )
                 )
-            )
+            except IntegrityError:
+                await session.rollback()
+                log.warning(
+                    "Evan 的 email(%s)已被其他账号占用,跳过 email 写入"
+                    "(其余字段照常 upsert);如需恢复请在管理后台清空占用账号邮箱后重跑",
+                    evan_email,
+                )
+                await session.execute(
+                    insert(User).values(
+                        id=LOCAL_ADMIN_ID, name="Evan", email=evan_email,
+                        username="evan", feishu_open_id="ou_evan_local", is_active=True,
+                    ).on_conflict_do_update(
+                        index_elements=["id"],
+                        set_={k: v for k, v in evan_set.items() if k != "email"},
+                    )
+                )
             # outsider:只建用户行,不写任何 OpenFGA 权限 tuple(测试契约:无权限普通用户)
             await session.execute(
                 insert(User).values(
