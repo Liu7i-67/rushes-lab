@@ -188,10 +188,10 @@ services:
       MS_ML_MODE: ${MS_ML_MODE:-stub}
       # 默认值与 app/settings.py 的 ai_model_version 逐字一致(词表升级时同步改;
       # 留空会使 stub 上报 stub@p0 ≠ api 侧默认 → 健康闸判死无限重派,文件头注释)
-      MS_ML_MODEL_VERSION: ${MS_ML_MODEL_VERSION:-smolvlm2-256m@p4+lm1}
+      MS_ML_MODEL_VERSION: ${MS_ML_MODEL_VERSION:-smolvlm2-256m@p5+lm2}
     volumes:
       # 权重只读挂载(手动导入);代码 bind mount 热更,沿 ./app 同款(§13)
-      - ./ml-models:/models/smolvlm2-256m:ro
+      - ./ml-models:/models:ro   # 挂父目录:含 smolvlm2-256m/ 与 translate/(p5 翻译模型)
       - ./ml:/app/ml:ro
     mem_limit: 20g
     cpus: 16.0

@@ -29,7 +29,7 @@ from typing import Any
 
 # ---- 常量与配置(env 读取全部延迟到调用时,便于测试 monkeypatch)----
 
-_PROMPT_VERSION = "p4"
+_PROMPT_VERSION = "p5"
 _MAX_NEW_TOKENS = 96
 _TAG_CAP = 8  # 契约上限:tags_en 恒 ≤8(需求 §2.5)
 _DESC_MAX_WORDS = 30  # prompt 约束 ≤30 words,出参侧兜底截断
@@ -92,7 +92,11 @@ def is_loaded() -> bool:
 
 
 def load_model() -> None:
-    """lazy 加载 processor + 模型(仅 real 路径触达;阻塞,秒级)。"""
+    """lazy 加载 processor + 模型(仅 real 路径触达;阻塞,秒级)。
+
+    翻译模型(opus-mt-en-zh,p5 起)独立 best-effort 加载:目录缺失/加载失败
+    只禁用翻译(description_zh=None),不阻塞打标主链。
+    """
     if _STATE["loaded"]:
         return
 
@@ -111,6 +115,51 @@ def load_model() -> None:
     _STATE["processor"] = processor
     _STATE["model"] = model
     _STATE["loaded"] = True
+    _load_translator()
+
+
+def _load_translator() -> bool:
+    """lazy 加载 en→zh 翻译模型(MarianMT;~300MB,CPU 单句亚秒)。
+
+    环境变量 MS_ML_TRANSLATE_DIR(默认 /models/translate);目录不存在或
+    加载异常 → 翻译禁用,打标主链不受影响(描述保留英文呈现)。
+    """
+    if _STATE.get("translator") is not None:
+        return True
+    directory = os.environ.get("MS_ML_TRANSLATE_DIR", "/models/translate")
+    if not os.path.isdir(directory) or not any(os.scandir(directory)):
+        _STATE["translate_failed"] = "no weights dir"
+        return False
+    try:
+        import torch
+        from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+
+        tok = AutoTokenizer.from_pretrained(directory, local_files_only=True)
+        m = AutoModelForSeq2SeqLM.from_pretrained(directory, local_files_only=True)
+        m.eval()
+        _STATE["translate_tokenizer"] = tok
+        _STATE["translator"] = m
+        return True
+    except Exception as e:  # noqa: BLE001 — best-effort:翻译不可用不拖垮主链
+        _STATE["translate_failed"] = f"{type(e).__name__}"
+        return False
+
+
+def translate_en_zh(text: str) -> str | None:
+    """英文短句 → 中文(阻塞,CPU 亚秒);翻译不可用返回 None。"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    if _STATE.get("translator") is None and not _load_translator():
+        return None
+    import torch
+
+    tok = _STATE["translate_tokenizer"]
+    model = _STATE["translator"]
+    with torch.no_grad():
+        batch = tok([text], return_tensors="pt", truncation=True, max_length=256)
+        out = model.generate(**batch, max_length=192, num_beams=1, do_sample=False)
+    return tok.decode(out[0], skip_special_tokens=True).strip() or None
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -232,4 +281,11 @@ def describe(image_bytes: bytes, max_tags: int = 8) -> dict[str, Any]:
 
     if not tags and not description:
         raise MlContentError("model produced neither description nor tags")
-    return {"tags_en": tags[:limit], "description_en": description}
+
+    # p5:描述补一轮 en→zh(opus-mt,best-effort——不可用时 None,上游呈现英文)
+    description_zh = translate_en_zh(description) if description else None
+    return {
+        "tags_en": tags[:limit],
+        "description_en": description,
+        "description_zh": description_zh,
+    }

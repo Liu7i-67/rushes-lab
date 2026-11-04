@@ -30,7 +30,7 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 
 # 其余依赖统一受 constraints 钉版(transformers/num2words/pillow/fastapi/uvicorn/pydantic)
 RUN pip install --no-cache-dir -c ml/constraints.txt \
-      transformers num2words pillow fastapi "uvicorn[standard]" pydantic
+      transformers num2words pillow fastapi "uvicorn[standard]" pydantic sentencepiece sacremoses
 
 COPY ml /app/ml
 

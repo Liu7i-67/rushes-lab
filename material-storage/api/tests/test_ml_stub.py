@@ -51,7 +51,8 @@ def _load_module(name: str, path: Path) -> Any:
 APP_MOD = _load_module("ms_ml_app_under_test", APP_PY)
 RUNNER_MOD = _load_module("ms_ml_model_runner_under_test", RUNNER_PY)
 
-_STUB_BODY = {"tags_en": ["demo", "stub"], "description_en": "stub description"}
+_STUB_BODY = {"tags_en": ["demo", "stub"], "description_en": "stub description",
+               "description_zh": "存根描述(p5 翻译演示)"}
 
 
 def _describe(client: TestClient, **overrides: Any) -> Any:
@@ -245,7 +246,7 @@ def test_model_runner_version_derivation(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
     version = RUNNER_MOD.model_version()
     assert version.startswith("smolvlm2-256m@")
-    assert version.endswith("+p4")
+    assert version.endswith("+p5")
     hash8 = version.split("@")[1].split("+")[0]
     assert len(hash8) == 8
     assert all(c in "0123456789abcdef" for c in hash8)
@@ -258,7 +259,7 @@ def test_model_runner_version_derivation(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv("MS_ML_MODEL_DIR", str(tmp_path / "missing"))
     missing_version = RUNNER_MOD.model_version()
     assert missing_version.startswith("missing@")
-    assert missing_version.endswith("+p4")
+    assert missing_version.endswith("+p5")
 
 
 # ---------------------------------------------------------------- real 模式
@@ -296,7 +297,7 @@ def test_real_mode_startup_smoke_when_weights_present(monkeypatch: pytest.Monkey
         body = client.get("/healthz").json()
         assert body["status"] == "ok"
         assert body["loaded"] is True
-        assert body["model_version"].endswith("+p4")
+        assert body["model_version"].endswith("+p5")
 
         from PIL import Image
 

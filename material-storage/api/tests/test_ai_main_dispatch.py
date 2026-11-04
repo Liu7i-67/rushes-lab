@@ -211,7 +211,7 @@ class TestWorkerSettingsContract:
         assert set(by_name) == {"ai_annotate_asset", "ai_slice_video",
                                 "ai_refresh_context"}
         ann = by_name["ai_annotate_asset"]
-        assert ann.timeout_s == 120 and ann.max_tries == 2 and ann.keep_result_s == 0
+        assert ann.timeout_s == 720 and ann.max_tries == 2 and ann.keep_result_s == 0
         slc = by_name["ai_slice_video"]
         assert slc.timeout_s == 5400 and slc.max_tries == 1 and slc.keep_result_s == 0
         rfr = by_name["ai_refresh_context"]

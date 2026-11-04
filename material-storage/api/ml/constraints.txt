@@ -31,3 +31,5 @@ uvloop==0.23.0
 watchfiles==1.3.0
 websockets==17.2
 pydantic==2.14.1
+sentencepiece==0.2.0         # opus-mt(MarianTokenizer)硬依赖,p5 翻译轮
+sacremoses==0.1.1         # MarianTokenizer 推荐(消 warning,提升分词一致性)

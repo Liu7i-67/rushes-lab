@@ -68,8 +68,8 @@ def test_translate_tags_none_and_non_str() -> None:
 
 
 def test_map_version_suffix_stable() -> None:
-    """版本后缀稳定(词表 v1 = lm1),供 model_version 并入(正本 §6)。"""
-    assert map_version_suffix() == "lm1"
+    """版本后缀稳定(词表 v2 = lm2),供 model_version 并入(正本 §6)。"""
+    assert map_version_suffix() == "lm2"
 
 
 @pytest.mark.parametrize(

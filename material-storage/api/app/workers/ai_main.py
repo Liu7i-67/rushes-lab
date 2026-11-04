@@ -144,7 +144,7 @@ class AIWorkerSettings:
     # §8.2:凡 ai 队列 job 必须逐个出现在 functions(漏注册 = arq 取出即判
     # JobExecutionFailed 静默丢弃);cron 归 cron_jobs,勿混进 functions
     functions: ClassVar[list[Any]] = [
-        func(ai_annotate_asset, timeout=120, max_tries=2, keep_result=0),
+        func(ai_annotate_asset, timeout=720, max_tries=2, keep_result=0),
         func(ai_slice_video, timeout=5400, max_tries=1, keep_result=0),
         func(ai_refresh_context, timeout=300, max_tries=2, keep_result=0),
     ]

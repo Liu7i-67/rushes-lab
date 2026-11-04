@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     ai_ml_base_url: str = "http://ms-ml:8000"
     # 写入版本:新打标/回填落库用它;形如 权重指纹+提示词版本+词表版本(§8.1),
     # 换版 = 新版本行、旧行保留。灰度 runbook:改写入版本 → backfill 全量 → 翻转 active
-    ai_model_version: str = "smolvlm2-256m@p4+lm1"
+    ai_model_version: str = "smolvlm2-256m@p5+lm2"
     # 读取版本:搜索第四路与展示只认它(§8.1);None = 回落 ai_model_version(常态单版本)
     ai_active_model_version: str | None = Field(
         None, description="None = 回落 ai_model_version;灰度窗口允许与写入版本短暂不一致",
@@ -250,7 +250,7 @@ class Settings(BaseSettings):
     ai_max_segments: int = 60            # 单视频段数硬上限(固定间隔兜底路径同样受限)
     ai_max_frames: int = 60              # 单视频 describe 帧数硬上限(自适应取帧在此封顶)
     ai_slice_max_concurrent: int = 2     # 行认领层并发闸(§8.2);ms-ai-worker mem 2g 按此测算
-    ai_ml_timeout_s: int = 30            # ms-ml 单次 HTTP 超时;重试语义在调用侧(annotate ×2 / 帧级不重试)
+    ai_ml_timeout_s: int = 240            # ms-ml 单次 HTTP 超时;重试语义在调用侧(annotate ×2 / 帧级不重试)
     ai_worker_max_jobs: int = 8          # AIWorkerSettings.max_jobs;ai 队列独立,不受 worker_max_jobs 影响
 
     @property

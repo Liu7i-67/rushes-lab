@@ -68,8 +68,9 @@ async def check_health(base_url: str, timeout_s: float = 16,
 
 
 async def describe_image(base_url: str, image_bytes: bytes, timeout_s: float,
-                         *, max_tags: int = _MAX_TAGS_CAP) -> tuple[list[str], str]:
-    """POST /v1/describe → (tags_en, description_en)。
+                         *, max_tags: int = _MAX_TAGS_CAP) -> tuple[list[str], str, str | None]:
+    """POST /v1/describe → (tags_en, description_en, description_zh|None)。
+    description_zh:ms-ml 侧 en→zh 机器翻译(p5 起,best-effort 不可用为 None)。
 
     - 传输层(httpx.TransportError 族,含 ConnectError/ConnectTimeout/ReadTimeout):
       **原类型上抛**,由调用方二级分级(§8.3-5 annotate x2 / §8.4-6 slice 帧级);
@@ -106,4 +107,7 @@ async def describe_image(base_url: str, image_bytes: bytes, timeout_s: float,
         raise MlContentError("ml describe tags_en missing")
     if not isinstance(desc, str):
         raise MlContentError("ml describe description_en missing")
-    return tags[:max_tags], desc
+    desc_zh = data.get("description_zh")
+    if not isinstance(desc_zh, str):
+        desc_zh = None
+    return tags[:max_tags], desc, desc_zh or None

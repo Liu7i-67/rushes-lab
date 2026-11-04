@@ -52,7 +52,7 @@ log = logging.getLogger("worker.ai")
 
 # ─── 常量(§8.2/§8.3/§8.4 算术锚点)───────────────────────────────────────────
 HEARTBEAT_INTERVAL_S = 300        # 心跳周期(§8.3-1;35min 过期余量充足)
-HEALTH_PROBE_TIMEOUT_S = 16       # ≥2x 最坏单请求阻塞 8s(§7.2,1s 超时必误判)
+HEALTH_PROBE_TIMEOUT_S = 60       # ≥2x 最坏满载应答(~30s,dev 实测 8 并发下 healthz 排队超 16s 误判;§7.2)
 HEALTH_PROBE_COUNT = 2            # 连续 2 次失败才判死(§8.3-3)
 SLICE_URL_TTL_S = 7200            # > slice timeout 5400 + 余量(§8.4-2)
 MIN_SLICE_VIDEO_S, MAX_SLICE_VIDEO_S = 10.0, 1800.0   # <10s / >30min → interval 兜底
@@ -125,7 +125,7 @@ async def _ml_alive(settings: Any) -> bool:
 
 
 async def _describe_annotate(base_url: str, image_bytes: bytes,
-                             timeout_s: float) -> tuple[list[str], str] | None:
+                             timeout_s: float) -> tuple[list[str], str, str | None] | None:
     """annotate 档 describe(§8.3-5):传输层 x2 次;内容层一次修复重试。None=ml_error。"""
     transport_budget, content_budget = 2, 1
     while True:
@@ -218,16 +218,17 @@ async def run_annotate(asset_id: str | uuid.UUID, *, settings: Any = None,
             st = await ai_jobs.finish_ai_job(sm, token, "failed", last_error="ml_error",
                                              count_attempt=True)
             return {"status": st or "ml_error", "asset_id": str(aid)}
-        tags_en, desc_en = result
+        tags_en, desc_en, desc_zh = result
         tags_zh = translate_tags(tags_en)
-        # searchable = context_path + tags_zh/en + description_en,空段过滤(§9)
-        searchable = ai_jobs.build_searchable_text(ctx, *tags_zh, *tags_en, desc_en)
+        # 呈现描述 = 中文优先(p5 机器翻译;不可用回落英文);searchable 双语
+        desc_show = desc_zh or desc_en
+        searchable = ai_jobs.build_searchable_text(
+            ctx, *tags_zh, *tags_en, desc_zh or "", desc_en)
         async with sm() as db:
             await _upsert_annotation_db(db, {
                 "asset_id": aid, "model_version": mv, "tier": "coarse",
                 "context_path": ctx, "tags_zh": tags_zh, "tags_en": tags_en,
-                # P1 呈现 = 英文原描述(§9;P2 精标中文覆盖 description)
-                "description": desc_en, "description_en": desc_en,
+                "description": desc_show, "description_en": desc_en,
                 "searchable_text": searchable, "meta": {}, "created_at": _now()})
             await db.commit()
         await ai_jobs.finish_ai_job(sm, token, "done")
@@ -380,7 +381,7 @@ async def _slice_frames_and_store(
                 partial = True
                 break
             try:
-                tags_en, desc_en = await describe_image(
+                tags_en, desc_en, desc_zh = await describe_image(
                     settings.ai_ml_base_url, jpg, settings.ai_ml_timeout_s)
             except MlContentError:
                 continue  # 内容层 → 帧级容错(§8.4-6 ①)
@@ -396,8 +397,10 @@ async def _slice_frames_and_store(
             transport_streak = 0
             state["ok_frames"] += 1
             state["tags"] = _merge_unique(state["tags"], tags_en)
-            if state["desc"] is None:    # 段 desc = 首个成功帧描述
-                state["desc"] = desc_en
+            if state["desc"] is None:    # 段 desc = 首个成功帧描述(中文优先)
+                state["desc"] = (desc_zh or desc_en)
+            if not state.get("desc_en") and desc_en:
+                state["desc_en"] = desc_en
         if partial:
             break
     # 段级降级标记统一判定:全段抽帧失败 / 全部帧 describe 失败 / 软预算跳过段
@@ -408,11 +411,14 @@ async def _slice_frames_and_store(
     # 段聚合 → 整体 = 段级并集摘要,忽略失败段(§8.4-6)
     overall_tags = _merge_unique([], [t for s in seg_state for t in s["tags"]])
     overall_tags = overall_tags[:OVERALL_TAGS_CAP]
+    # 段/整体描述中文优先(帧级 p5 翻译);英文串单列保 searchable 英文命中
     overall_desc = " / ".join(
         s["desc"] for s in seg_state if s["desc"])[:OVERALL_DESC_CAP]
+    overall_desc_en = " / ".join(
+        s.get("desc_en") or "" for s in seg_state if s["desc"])[:OVERALL_DESC_CAP]
     tags_zh = translate_tags(overall_tags)
     searchable = ai_jobs.build_searchable_text(
-        ctx, *tags_zh, *overall_tags, overall_desc,
+        ctx, *tags_zh, *overall_tags, overall_desc, overall_desc_en,
         *(s["desc"] for s in seg_state if s["desc"]))
     now, meta = _now(), {"segmented_by": segmented_by, "segments": len(segments)}
     if partial:
@@ -439,7 +445,7 @@ async def _slice_frames_and_store(
         await _upsert_annotation_db(db, {
             "asset_id": aid, "model_version": mv, "tier": "coarse",
             "context_path": ctx, "tags_zh": tags_zh, "tags_en": overall_tags,
-            "description": overall_desc, "description_en": overall_desc,
+            "description": overall_desc, "description_en": overall_desc_en,
             "searchable_text": searchable, "meta": meta, "created_at": now,
         })
         await db.commit()

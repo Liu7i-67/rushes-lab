@@ -214,11 +214,13 @@ def patch_ml(monkeypatch: pytest.MonkeyPatch, *, healthy: bool = True,
     async def _describe(base_url: str, image_bytes: bytes, timeout_s: float,
                         *, max_tags: int = 8) -> Any:
         calls.append(image_bytes)
-        results = describe_results or [(["stage"], "outdoor stage")]
+        results = describe_results or [(["stage"], "outdoor stage", "户外舞台")]
         idx = min(len(calls) - 1, len(results) - 1)
         item = results[idx]
         if isinstance(item, Exception):
             raise item
+        if isinstance(item, tuple) and len(item) == 2:  # 旧式 2 元组桩 → 补 zh=None
+            return (*item, None)
         return item
 
     monkeypatch.setattr(pl, "check_health", _health)

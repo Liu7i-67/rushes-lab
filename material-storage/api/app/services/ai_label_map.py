@@ -18,7 +18,7 @@ from __future__ import annotations
 __all__ = ["map_version_suffix", "translate_tags", "unmapped_ratio"]
 
 # 词表版本:扩词表 / 调映射时手改此常量,由调用方并入 model_version(如 smolvlm2-256m@<sha>+p1+lm1)
-_LABEL_MAP_VERSION = "lm1"
+_LABEL_MAP_VERSION = "lm2"
 
 # v1 受控词表(~270 高频英文词 → 中文),按语义分组;键一律小写,值非空。
 _LABEL_MAP: dict[str, str] = {
@@ -174,6 +174,33 @@ def unmapped_ratio(tags_en: list[str]) -> float:
         total += 1
         unmapped += 0 if hit else 1
     return unmapped / total if total else 0.0
+
+
+
+# ── v2(lm2,2026-11-04 dev 用户实测反馈:logoxhs.png 的 image/icon/colorful/
+#    arrow/red/background 等设计高频词未命中)——设计/UI/颜色/形状/方向组 ──
+_LABEL_MAP.update({
+    "image": "图像", "icon": "图标", "logo": "标识", "graphic": "图形",
+    "design": "设计", "illustration": "插画", "pattern": "图案",
+    "banner": "横幅", "button": "按钮", "screenshot": "截图", "photo": "照片",
+    "picture": "图片", "collage": "拼贴", "poster": "海报", "avatar": "头像",
+    "emoji": "表情", "cover": "封面", "thumbnail": "缩略图", "text": "文字",
+    "word": "词语", "letter": "字母", "font": "字体", "ui": "界面",
+    "page": "页面", "menu": "菜单", "card": "卡片", "grid": "网格",
+    "frame": "边框", "border": "边框", "shape": "形状", "symbol": "符号",
+    "sign": "标志", "colorful": "多彩", "red": "红色", "orange": "橙色",
+    "yellow": "黄色", "green": "绿色", "blue": "蓝色", "purple": "紫色",
+    "pink": "粉色", "brown": "棕色", "gray": "灰色", "grey": "灰色",
+    "white": "白色", "black": "黑色", "gold": "金色", "silver": "银色",
+    "gradient": "渐变", "arrow": "箭头", "downward": "向下", "down": "向下",
+    "upward": "向上", "up": "向上", "left": "左", "right": "右",
+    "circle": "圆形", "square": "正方形", "triangle": "三角形",
+    "line": "线条", "dot": "圆点", "star": "星星", "heart": "心形",
+    "bright": "明亮", "dark": "黑暗", "soft": "柔和", "warm": "暖色",
+    "cool": "冷色", "shadow": "阴影", "sun": "太阳",
+    "background": "背景", "wallpaper": "壁纸", "illustrated": "插画",
+    "vector": "矢量", "flat": "扁平", "minimal": "极简", "cartoon": "卡通",
+})
 
 
 def map_version_suffix() -> str:

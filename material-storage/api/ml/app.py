@@ -70,10 +70,12 @@ class DescribeRequest(BaseModel):
 
 
 class DescribeResponse(BaseModel):
-    """POST /v1/describe 出参:tags_en ≤ max_tags(且恒 ≤8),description_en 单条英文。"""
+    """POST /v1/describe 出参:tags_en ≤ max_tags(且恒 ≤8);description_en 英文
+    原文 + description_zh 机器翻译(p5 起,opus-mt best-effort,不可用时 None)。"""
 
     tags_en: list[str]
     description_en: str
+    description_zh: str | None = None
 
 
 def _env_mode() -> str:
@@ -107,6 +109,7 @@ def _stub_result(max_tags: int) -> DescribeResponse:
     return DescribeResponse(
         tags_en=_STUB_TAGS[:max_tags],
         description_en=_STUB_DESCRIPTION,
+        description_zh="存根描述(p5 翻译演示)",
     )
 
 
