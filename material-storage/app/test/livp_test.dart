@@ -184,6 +184,7 @@ void main() {
   );
 
   group('内容嗅探 sniffImageExtFromBytes / sniffVideoExtFromBytes(T1)', () {
+    // 黑盒契约主份:test/livp_ext_normalize_test.dart(T1/T2);契约变更以彼为准
     /// 构造 16 字节 ISOBMFF ftyp 头:size(4) + 'ftyp'(4) + brand(4,不足补空格)
     /// + padding(4)。
     List<int> ftyp(String brand) => <int>[
@@ -262,6 +263,7 @@ void main() {
   });
 
   group('LivpService.unpackToFiles 落盘扩展名规范化(C2/T2)', () {
+    // 黑盒契约主份:test/livp_ext_normalize_test.dart(T1/T2);契约变更以彼为准
     /// 嗅探 fixture:16 字节 ftyp 头 + 填充到 [total] 字节(条目可被 pick 挑出)。
     List<int> ftypBytes(String brand, {int total = 2048}) {
       final head = <int>[

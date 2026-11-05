@@ -92,6 +92,13 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
   }
 }
 
+/// Live Photo 已知错误模式串(image/video 两路,En=英文原串,Zh=中文映射句;
+/// zhError 与 zhifyComposite 共用同一对,收敛为文件级常量防双处副本漂移)。
+const _lpMetaFailImageEn = 'Failed to write Live Photo metadata to image file';
+const _lpMetaFailVideoEn = 'Failed to write Live Photo metadata to video file';
+const _lpMetaFailImageZh = '系统无法为静态帧写入实况标识';
+const _lpMetaFailVideoZh = '系统无法为视频写入实况标识';
+
 /// 已知 Live Photo 错误模式中文映射(F6/C4):photo_manager darwin
 /// saveLivePhoto 按扩展名判 UTI 建 ImageIO 写入目标,注入 Live Photo 配对
 /// 标识失败时抛的 PlatformException message 含固定短语,直透英文对用户无意义
@@ -99,11 +106,11 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
 /// 统一过此映射,不向用户直透英文异常。
 String zhError(Object e) {
   final s = '$e';
-  if (s.contains('Failed to write Live Photo metadata to image file')) {
-    return '系统无法为静态帧写入实况标识';
+  if (s.contains(_lpMetaFailImageEn)) {
+    return _lpMetaFailImageZh;
   }
-  if (s.contains('Failed to write Live Photo metadata to video file')) {
-    return '系统无法为视频写入实况标识';
+  if (s.contains(_lpMetaFailVideoEn)) {
+    return _lpMetaFailVideoZh;
   }
   return s;
 }
@@ -115,14 +122,8 @@ String zhError(Object e) {
 /// 那会把「静态图已入库」等分记一并吞掉。
 String zhifyComposite(String text) {
   return text
-      .replaceAll(
-        'Failed to write Live Photo metadata to image file',
-        '系统无法为静态帧写入实况标识',
-      )
-      .replaceAll(
-        'Failed to write Live Photo metadata to video file',
-        '系统无法为视频写入实况标识',
-      );
+      .replaceAll(_lpMetaFailImageEn, _lpMetaFailImageZh)
+      .replaceAll(_lpMetaFailVideoEn, _lpMetaFailVideoZh);
 }
 
 /// 实况保存+降级编排(C3,纯函数注入闭包可单测):主路 [saveLivePhoto]
@@ -131,7 +132,8 @@ String zhifyComposite(String text) {
 /// ——双成 → ok(okOverride 注明「非实况」,saveSummary 成功展示优先取它,
 /// detail 仍保留降级落点);半成/全败 → fail(文案经 [zhifyComposite] 净化
 /// 已知英文模式,**复合分记结构保留**——已入库的一半仍如实分记,iOS 矩阵
-/// share 兜底路照常由 runSavePlan 触发)。
+/// share 兜底路照常由 runSavePlan 触发)。fallbackPair 自身抛错 → 同样
+/// 收口 fail(日志与文案均可回溯),不外溢到 gallerySaver 外层 catch。
 Future<SinkOutcome> saveLivePhotoWithFallback(
   File file, {
   required Future<void> Function() saveLivePhoto,
@@ -141,8 +143,17 @@ Future<SinkOutcome> saveLivePhotoWithFallback(
     await saveLivePhoto();
     return const SinkOutcome.ok('已存入相册(实况照片)');
   } catch (e) {
+    // 主路根因仅进 AppLog 不进用户文案(避免 toast 冗长);排查入口 =
+    // AppLog 'download' '实况恢复失败,降级为静态图+视频分别存相册'
     AppLog.error('download', '实况恢复失败,降级为静态图+视频分别存相册', e);
-    final fb = await fallbackPair(file);
+    final SinkOutcome fb;
+    try {
+      fb = await fallbackPair(file);
+    } catch (fe) {
+      AppLog.error('download', '降级路也失败', fe);
+      // zhError 先整句映射已知模式(未命中回落原文),zhifyComposite 再子串兜底
+      return SinkOutcome.fail(zhifyComposite(zhError(fe)));
+    }
     if (fb.isOk) {
       return SinkOutcome.ok(fb.detail, okOverride: '已存入相册(静态图与视频分别保存,非实况)');
     }

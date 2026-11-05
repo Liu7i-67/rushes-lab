@@ -189,6 +189,7 @@ void main() {
     });
   });
 
+  // 实现单元伴生用例;黑盒契约主份在 test/services/livephoto_fallback_test.dart,文案/契约变更以彼为准
   group('saveLivePhotoWithFallback(T3:主路失败自动降级「双存」)', () {
     test('主路成功 → ok「已存入相册(实况照片)」,降级件零调用', () async {
       var fallbackCalls = 0;
@@ -285,6 +286,29 @@ void main() {
         out.detail,
         isNot(contains('Failed to write Live Photo metadata')),
       );
+    });
+
+    test('fallbackPair 自身抛 FormatException → 收口 fail 不外溢,detail 经 zhError 回落原文含原错(#3)', () async {
+      final out = await saveLivePhotoWithFallback(
+        File('IMG_T.livp'),
+        saveLivePhoto: () async => throw StateError('boom'),
+        fallbackPair: (f) async => throw const FormatException('corrupt livp'),
+      );
+      expect(out.isOk, isFalse);
+      expect(out.detail, contains('corrupt livp'));
+    });
+
+    test('fallbackPair 自身抛已知 video 模式 PlatformException → fail detail 为中文整句(#3)', () async {
+      final out = await saveLivePhotoWithFallback(
+        File('IMG_T.livp'),
+        saveLivePhoto: () async => throw StateError('boom'),
+        fallbackPair: (f) async => throw PlatformException(
+          code: 'PMManager (-1)',
+          message: 'Failed to write Live Photo metadata to video file',
+        ),
+      );
+      expect(out.isOk, isFalse);
+      expect(out.detail, '系统无法为视频写入实况标识');
     });
   });
 

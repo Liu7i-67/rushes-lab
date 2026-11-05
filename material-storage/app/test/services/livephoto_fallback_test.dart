@@ -6,6 +6,10 @@
 ///   (fail 如实分记)/ 降级全败(fail,英文原始错误过中文映射)(T3);
 /// - zhError(文案映射,C4):image/video 两模式中文、未知异常回落原文(T4);
 /// - saveSummary:SinkOutcome.okOverride 优先、缺省回落 route.okText(C5/T5)。
+///
+/// 分工钉明:本文件为 T3/T4/T5 **黑盒契约主份**;download_savers_test.dart
+/// (实现单元伴生)与 media_save_test.dart(saveSummary 单元)为伴生份;
+/// 契约/文案变更以本文件为准。
 library;
 
 import 'dart:io';

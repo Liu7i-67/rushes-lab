@@ -321,6 +321,7 @@ void main() {
       expect(saveSummary(const []), '未保存');
     });
 
+    // 黑盒契约主份:test/services/livephoto_fallback_test.dart(T5);契约变更以彼为准
     test('okOverride 优先:成功展示文案用它覆盖 okText;无则沿用 route.okText(T5)', () {
       final p = planSaveRoutes(
           platform: SavePlatform.ios, kind: SaveAssetKind.livp);

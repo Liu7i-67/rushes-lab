@@ -158,6 +158,7 @@ class LivpService {
     final base = _entryBaseName(name);
     if (ext == null) return base;
     final dot = base.lastIndexOf('.');
+    // 防御保留:pick 只挑带已知扩展名条目,dot<0 经公开 API 不可达;留此兜底防嗅探口径未来放宽
     if (dot < 0) return '$base.$ext';
     if (base.substring(dot + 1).toLowerCase() == ext) return base;
     return '${base.substring(0, dot + 1)}$ext';
