@@ -321,6 +321,35 @@ void main() {
       expect(saveSummary(const []), '未保存');
     });
 
+    test('okOverride 优先:成功展示文案用它覆盖 okText;无则沿用 route.okText(T5)', () {
+      final p = planSaveRoutes(
+          platform: SavePlatform.ios, kind: SaveAssetKind.livp);
+      final withOverride = [
+        RouteOutcome(
+            route: p.routes[0],
+            outcome: const SinkOutcome.ok('Pictures/IMG_T.jpg',
+                okOverride: '已存入相册(静态图与视频分别保存,非实况)')),
+      ];
+      expect(saveSummary(withOverride), '已存入相册(静态图与视频分别保存,非实况)');
+      final withoutOverride = [
+        RouteOutcome(
+            route: p.routes[0], outcome: const SinkOutcome.ok('Pictures/x')),
+      ];
+      expect(saveSummary(withoutOverride), '已存入相册',
+          reason: '无 okOverride → route.okText,与既有断言口径一致');
+      final mixed = [
+        RouteOutcome(
+            route: p.routes[0],
+            outcome: const SinkOutcome.ok('x',
+                okOverride: '已存入相册(静态图与视频分别保存,非实况)')),
+        RouteOutcome(
+            route: p.routes[1], outcome: const SinkOutcome.fail('disk full')),
+      ];
+      expect(saveSummary(mixed),
+          '已存入相册(静态图与视频分别保存,非实况);失败:disk full',
+          reason: 'fail 路只看 detail,成功路 override 照常生效');
+    });
+
     test('估算:Android livp D1=4×(临时+双路+解包);image=3×;iOS livp=4×',
         () {
       expect(

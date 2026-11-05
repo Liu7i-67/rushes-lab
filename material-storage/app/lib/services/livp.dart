@@ -4,6 +4,14 @@
 /// 后端 workers/main.py `_pick_livp_entries` 按「最大静态图条目 + 最大视频条目」
 /// 挑选(不挑文件名)→ 本打包器保 iOS 相册导出的命名习惯即可,
 /// 解包端用同一口径挑选,与后端语义一致。
+///
+/// 解包落盘前按**内容魔数**嗅探并规范化条目扩展名(C1/C2):外部工具导出的
+/// livp 存在「真 heic 内容、.heif 错名」条目(2026-11-05 实锤
+/// `IMG_0129.JPEG.heif`),iOS photo_manager darwin.saveLivePhoto 按**文件扩展名**
+/// 判 UTI(`.heif` → public.heif),错名会把 heic 内容重写进 heif 容器,
+/// 注入 Live Photo 配对标识时 CGImageDestinationFinalize 失败 → 存相册落分享兜底。
+/// 落盘名按嗅探结果替换条目基名**最后一段**扩展名,嗅探失败/一致则原名(零回归)。
+/// 详见 docs/qdev/2026-11-05-livp-unpack-ext-normalize.md。
 library;
 
 import 'dart:io';
@@ -103,19 +111,24 @@ class LivpService {
       pick(ZipDecoder().decodeBytes(livpBytes));
 
   /// 解包到临时目录,产出 (imageFile, videoFile?);供存相册用。
-  /// 条目名经 [_entryBaseName] basename 净化后落盘(防恶意条目名路径穿越)。
+  /// 条目名经 [_entryBaseName] basename 净化后落盘(防恶意条目名路径穿越),
+  /// 再按内容嗅探规范化最后一段扩展名([_normalizedEntryName],C2)。
   static Future<({File image, File? video})> unpackToFiles(
     List<int> livpBytes,
     Directory tmpDir,
   ) async {
     final parts = decode(livpBytes);
     await tmpDir.create(recursive: true);
-    final img = File('${tmpDir.path}/${_entryBaseName(parts.image.name)}');
+    final img = File(
+      '${tmpDir.path}/${_normalizedEntryName(parts.image.name, parts.image.content as List<int>, sniffImageExtFromBytes)}',
+    );
     await img.writeAsBytes(parts.image.content as List<int>);
     File? vid;
     final v = parts.video;
     if (v != null) {
-      vid = File('${tmpDir.path}/${_entryBaseName(v.name)}');
+      vid = File(
+        '${tmpDir.path}/${_normalizedEntryName(v.name, v.content as List<int>, sniffVideoExtFromBytes)}',
+      );
       await vid.writeAsBytes(v.content as List<int>);
     }
     return (image: img, video: vid);
@@ -131,4 +144,58 @@ class LivpService {
     final i = norm.lastIndexOf('/');
     return i < 0 ? name : norm.substring(i + 1);
   }
+
+  /// 落盘名规范化(C2):按内容嗅探结果替换条目基名**最后一段**扩展名。
+  /// 嗅探 null 或与现扩展名相同(小写比较)→ 原名落盘(零回归);双重基名
+  /// `IMG_0129.JPEG.heif`(heic 内容)只动末段 → `IMG_0129.JPEG.heic`,
+  /// 基名段不损。条目名先经 [_entryBaseName] 净化再规范(与落盘口径一致)。
+  static String _normalizedEntryName(
+    String name,
+    List<int> bytes,
+    String? Function(List<int> head) sniff,
+  ) {
+    final ext = sniff(bytes.take(16).toList());
+    final base = _entryBaseName(name);
+    if (ext == null) return base;
+    final dot = base.lastIndexOf('.');
+    if (dot < 0) return '$base.$ext';
+    if (base.substring(dot + 1).toLowerCase() == ext) return base;
+    return '${base.substring(0, dot + 1)}$ext';
+  }
+}
+
+/// bytes[from..to) 的 ASCII 解码(嗅探 ISOBMFF `ftyp` box 用)。
+String _ascii(List<int> b, int from, int to) =>
+    String.fromCharCodes(b.sublist(from, to));
+
+/// 图片字节头(建议 zip 条目前 16 字节)→ 规范扩展名(小写无点);无法识别 → null。
+/// 规则:bytes[4..8]=='ftyp' 且 brand(bytes[8..12]):
+///   heic/heix/hevc → 'heic';mif1/msf1 → 'heif';其他 brand(avif 等)→ null;
+/// FF D8 FF → 'jpeg';89 50 4E 47 → 'png';不足 12 字节/其他 → null。
+String? sniffImageExtFromBytes(List<int> head) {
+  if (head.length < 12) return null;
+  if (_ascii(head, 4, 8) == 'ftyp') {
+    final brand = _ascii(head, 8, 12);
+    if (brand == 'heic' || brand == 'heix' || brand == 'hevc') return 'heic';
+    if (brand == 'mif1' || brand == 'msf1') return 'heif';
+    return null;
+  }
+  if (head[0] == 0xFF && head[1] == 0xD8 && head[2] == 0xFF) return 'jpeg';
+  if (head[0] == 0x89 &&
+      head[1] == 0x50 &&
+      head[2] == 0x4E &&
+      head[3] == 0x47) {
+    return 'png';
+  }
+  return null;
+}
+
+/// 视频字节头 → 规范扩展名;仅 ftyp brand=='qt  '(末尾两空格)→ 'mov';
+/// 其余(含 isom/mp42,PhotoKit 本就拒绝 mp4 容器,改名无益)→ null,原名如实保留。
+String? sniffVideoExtFromBytes(List<int> head) {
+  if (head.length < 12) return null;
+  if (_ascii(head, 4, 8) == 'ftyp' && _ascii(head, 8, 12) == 'qt  ') {
+    return 'mov';
+  }
+  return null;
 }

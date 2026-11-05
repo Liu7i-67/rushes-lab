@@ -182,4 +182,239 @@ void main() {
       });
     },
   );
+
+  group('内容嗅探 sniffImageExtFromBytes / sniffVideoExtFromBytes(T1)', () {
+    /// 构造 16 字节 ISOBMFF ftyp 头:size(4) + 'ftyp'(4) + brand(4,不足补空格)
+    /// + padding(4)。
+    List<int> ftyp(String brand) => <int>[
+      ...[0x00, 0x00, 0x00, 0x18],
+      ...'ftyp'.codeUnits,
+      ...brand.padRight(4).codeUnits,
+      0x00,
+      0x00,
+      0x00,
+      0x00,
+    ];
+
+    // 表驱动:图片 brand 映射(文档接口定义逐条;决策 3 从保守清单)
+    const imageBrands = <String, String?>{
+      'heic': 'heic',
+      'heix': 'heic',
+      'hevc': 'heic',
+      'mif1': 'heif',
+      'msf1': 'heif',
+      'avif': null, // 其他 brand 一律不动(F3)
+      'isom': null,
+      'mp42': null,
+    };
+    imageBrands.forEach((brand, expected) {
+      test('ftyp brand=$brand → ${expected ?? 'null'}', () {
+        expect(sniffImageExtFromBytes(ftyp(brand)), expected);
+      });
+    });
+
+    test('JPEG 魔数 FF D8 FF → jpeg', () {
+      expect(
+        sniffImageExtFromBytes([0xFF, 0xD8, 0xFF, 0xE1, ...List.filled(12, 0)]),
+        'jpeg',
+      );
+    });
+
+    test('PNG 魔数 89 50 4E 47 → png', () {
+      expect(
+        sniffImageExtFromBytes([
+          0x89,
+          0x50,
+          0x4E,
+          0x47,
+          0x0D,
+          0x0A,
+          0x1A,
+          0x0A,
+          ...List.filled(8, 0),
+        ]),
+        'png',
+      );
+    });
+
+    test('短字节(<12)→ null:含 3 字节 JPEG 短头与截断 ftyp', () {
+      expect(sniffImageExtFromBytes(const <int>[]), isNull);
+      expect(sniffImageExtFromBytes([0xFF, 0xD8, 0xFF]), isNull);
+      expect(sniffImageExtFromBytes(ftyp('heic').sublist(0, 11)), isNull);
+      expect(sniffVideoExtFromBytes(ftyp('qt  ').sublist(0, 11)), isNull);
+    });
+
+    test('全零内容 → null', () {
+      expect(sniffImageExtFromBytes(List.filled(16, 0)), isNull);
+      expect(sniffVideoExtFromBytes(List.filled(16, 0)), isNull);
+    });
+
+    test('视频:仅 brand="qt  " → mov;isom/mp42/非 ftyp → null(F2/决策 4)', () {
+      expect(sniffVideoExtFromBytes(ftyp('qt  ')), 'mov');
+      expect(sniffVideoExtFromBytes(ftyp('isom')), isNull);
+      expect(sniffVideoExtFromBytes(ftyp('mp42')), isNull);
+      expect(sniffVideoExtFromBytes(ftyp('heic')), isNull);
+      expect(
+        sniffVideoExtFromBytes([0xFF, 0xD8, 0xFF, ...List.filled(13, 0)]),
+        isNull,
+      );
+    });
+  });
+
+  group('LivpService.unpackToFiles 落盘扩展名规范化(C2/T2)', () {
+    /// 嗅探 fixture:16 字节 ftyp 头 + 填充到 [total] 字节(条目可被 pick 挑出)。
+    List<int> ftypBytes(String brand, {int total = 2048}) {
+      final head = <int>[
+        0x00,
+        0x00,
+        0x00,
+        0x18,
+        ...'ftyp'.codeUnits,
+        ...brand.padRight(4).codeUnits,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+      ];
+      return [...head, ...List.filled(total - head.length, 0x11)];
+    }
+
+    List<int> jpegBytes({int total = 2048}) => [
+      0xFF,
+      0xD8,
+      0xFF,
+      0xE1,
+      ...List.filled(total - 4, 0x22),
+    ];
+
+    /// 名→字节 map → 内存 zip 构造 livp → unpackToFiles(纯 Dart,不触平台通道)。
+    Future<({File image, File? video})> unpack(
+      Map<String, List<int>> entries,
+      Directory tmp,
+    ) {
+      final arc = Archive();
+      entries.forEach(
+        (name, bytes) => arc.addFile(ArchiveFile(name, bytes.length, bytes)),
+      );
+      return LivpService.unpackToFiles(ZipEncoder().encode(arc)!, tmp);
+    }
+
+    String fileName(File f) => f.path.replaceAll('\\', '/').split('/').last;
+
+    Future<T> inTmp<T>(Future<T> Function(Directory tmp) body) async {
+      final tmp = await Directory.systemTemp.createTemp('livp_norm');
+      try {
+        return await body(tmp);
+      } finally {
+        try {
+          await tmp.delete(recursive: true);
+        } catch (_) {}
+      }
+    }
+
+    test('heic 内容 .heif 错名 → 落盘 .heic;双重基名 IMG_0129.JPEG 不损(F1 实锤)', () async {
+      await inTmp((tmp) async {
+        final content = ftypBytes('heic');
+        final parts = await unpack({'IMG_0129.JPEG.heif': content}, tmp);
+        expect(fileName(parts.image), 'IMG_0129.JPEG.heic');
+        expect(parts.video, isNull, reason: '无视频 livp:video null 不炸(T2)');
+        expect(await parts.image.readAsBytes(), content, reason: '字节原样,仅改名');
+      });
+    });
+
+    test('命名正确幂等不变:heic 内容 .heic / JPEG 内容 .JPG.jpeg / qt 内容 .mov', () async {
+      await inTmp((tmp) async {
+        expect(
+          fileName(
+            (await unpack({'IMG_4921.heic': ftypBytes('heic')}, tmp)).image,
+          ),
+          'IMG_4921.heic',
+        );
+        expect(
+          fileName(
+            (await unpack({'IMG_0531.JPG.jpeg': jpegBytes()}, tmp)).image,
+          ),
+          'IMG_0531.JPG.jpeg',
+        );
+        final movParts = await unpack({
+          'IMG_0531.mov': ftypBytes('qt  '),
+          'IMG_0531.heic': ftypBytes('heic'), // pick 需静态图条目
+        }, tmp);
+        expect(fileName(movParts.video!), 'IMG_0531.mov');
+      });
+    });
+
+    test('扩展名相同按小写比较:.HEIC(heix 内容)原名;.HEIF(heic 内容)→ 小写 .heic', () async {
+      await inTmp((tmp) async {
+        expect(
+          fileName(
+            (await unpack({'IMG_0777.HEIC': ftypBytes('heix')}, tmp)).image,
+          ),
+          'IMG_0777.HEIC',
+          reason: '嗅探 heic == 现扩展名 heic(小写比较)→ 原名落盘',
+        );
+        expect(
+          fileName(
+            (await unpack({'IMG_0778.HEIF': ftypBytes('heic')}, tmp)).image,
+          ),
+          'IMG_0778.heic',
+          reason: '替换段统一为嗅探结果的小写扩展名',
+        );
+      });
+    });
+
+    test('qt 内容 .mp4 错名 → 落盘 .mov;mp4(isom)内容保持原名(F2/决策 4)', () async {
+      await inTmp((tmp) async {
+        final qtParts = await unpack({
+          'IMG_0129.mp4': ftypBytes('qt  '),
+          'IMG_0129.heic': ftypBytes('heic'), // pick 需静态图条目
+        }, tmp);
+        expect(fileName(qtParts.video!), 'IMG_0129.mov');
+        expect(fileName(qtParts.image), 'IMG_0129.heic');
+
+        final mp4Parts = await unpack({
+          'IMG_0200.mp4': ftypBytes('isom'),
+          'IMG_0200.heic': ftypBytes('heic'),
+        }, tmp);
+        expect(
+          fileName(mp4Parts.video!),
+          'IMG_0200.mp4',
+          reason: 'mp4 改名无益,如实保留',
+        );
+      });
+    });
+
+    test('嗅探失败/未知内容 → 原名落盘(F3 零回归)', () async {
+      await inTmp((tmp) async {
+        expect(
+          fileName(
+            (await unpack({'IMG_0300.heif': List.filled(2048, 0)}, tmp)).image,
+          ),
+          'IMG_0300.heif',
+        );
+        expect(
+          fileName(
+            (await unpack({'IMG_0301.heif': ftypBytes('avif')}, tmp)).image,
+          ),
+          'IMG_0301.heif',
+          reason: 'avif 等其他 brand 不动(决策 3)',
+        );
+      });
+    });
+
+    test('图像+视频同时错名各自规范化;落盘字节与条目逐字节一致', () async {
+      await inTmp((tmp) async {
+        final heic = ftypBytes('heic');
+        final qt = ftypBytes('qt  ', total: 1024);
+        final parts = await unpack({
+          'IMG_0129.JPEG.heif': heic,
+          'IMG_0129.mp4': qt,
+        }, tmp);
+        expect(fileName(parts.image), 'IMG_0129.JPEG.heic');
+        expect(fileName(parts.video!), 'IMG_0129.mov');
+        expect(await parts.image.readAsBytes(), heic);
+        expect(await parts.video!.readAsBytes(), qt);
+      });
+    });
+  });
 }
