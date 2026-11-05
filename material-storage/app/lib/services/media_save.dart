@@ -137,11 +137,15 @@ SaveAssetKind classifyAssetKind({
 
 /// 单路落盘结果(成功 detail=落点;失败 detail=完整错误)。B0 SinkOutcome 沿用。
 class SinkOutcome {
-  const SinkOutcome.ok(this.detail) : isOk = true;
-  const SinkOutcome.fail(this.detail) : isOk = false;
+  const SinkOutcome.ok(this.detail, {this.okOverride}) : isOk = true;
+  const SinkOutcome.fail(this.detail) : isOk = false, okOverride = null;
 
   final bool isOk;
   final String detail;
+
+  /// 成功展示文案覆盖(C5):detail 是技术落点串,降级等场景 toast 需要人话
+  /// 时由 [saveSummary] 成功区优先取它;fail 路不适用(null)。
+  final String? okOverride;
 }
 
 /// 单路执行结果(声明 + 结果),供汇总文案与分路成败判定。
@@ -242,7 +246,7 @@ String saveSummary(List<RouteOutcome> outcomes) {
   final oks = <String>[];
   final fails = <String>[];
   for (final o in outcomes) {
-    o.outcome.isOk ? oks.add(o.route.okText) : fails.add(o.outcome.detail);
+    o.outcome.isOk ? oks.add(o.outcome.okOverride ?? o.route.okText) : fails.add(o.outcome.detail);
   }
   final buf = oks.isEmpty ? '未保存' : oks.join('、');
   return fails.isEmpty ? buf : '$buf;失败:${fails.join(';')}';

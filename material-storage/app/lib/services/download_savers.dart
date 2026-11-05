@@ -36,7 +36,8 @@ String _assetLoc(AssetEntity? e, String fallback) {
 }
 
 /// 图库路(photo_manager):saveImage/saveVideo 直存;livp 按动作解包双存
-/// (Android D1①)或 saveLivpToAlbum 恢复实况(iOS 现役);永不抛出。
+/// (Android D1①)或 saveLivpToAlbum 恢复实况(iOS 现役,失败自动降级双存,
+/// 见 [saveLivePhotoWithFallback]);永不抛出,失败文案经 [zhError] 中文化。
 Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
   try {
     if (!await _ensureGalleryPermission()) {
@@ -56,9 +57,22 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
               PhotoManager.editor.saveVideo(f, title: baseNameOf(f.path)),
         );
       case GalleryAction.saveLivePhoto:
-        // iOS:解包→darwin saveLivePhoto 恢复实况(AlbumService 现役,B0 留用)
-        await AlbumService.saveLivpToAlbum(await file.readAsBytes());
-        return const SinkOutcome.ok('已存入相册(实况照片)');
+        // iOS:解包→darwin saveLivePhoto 恢复实况(AlbumService 现役,B0 留用);
+        // 主路失败自动降级「静态图+视频分别存相册」,素材至少全部入库(C3)
+        return await saveLivePhotoWithFallback(
+          file,
+          saveLivePhoto: () async =>
+              AlbumService.saveLivpToAlbum(await file.readAsBytes()),
+          fallbackPair: (f) => saveLivpPairToGallery(
+            f,
+            saveImage: (img) => PhotoManager.editor.saveImageWithPath(
+              img.path,
+              title: baseNameOf(img.path),
+            ),
+            saveVideo: (v) =>
+                PhotoManager.editor.saveVideo(v, title: baseNameOf(v.path)),
+          ),
+        );
       case GalleryAction.saveImage:
         final e = await PhotoManager.editor.saveImageWithPath(
           file.path,
@@ -74,7 +88,77 @@ Future<SinkOutcome> gallerySaver(File file, GalleryAction action) async {
     }
   } catch (e) {
     AppLog.error('download', '图库落盘失败', e);
-    return SinkOutcome.fail('$e');
+    return SinkOutcome.fail(zhError(e));
+  }
+}
+
+/// Live Photo 已知错误模式串(image/video 两路,En=英文原串,Zh=中文映射句;
+/// zhError 与 zhifyComposite 共用同一对,收敛为文件级常量防双处副本漂移)。
+const _lpMetaFailImageEn = 'Failed to write Live Photo metadata to image file';
+const _lpMetaFailVideoEn = 'Failed to write Live Photo metadata to video file';
+const _lpMetaFailImageZh = '系统无法为静态帧写入实况标识';
+const _lpMetaFailVideoZh = '系统无法为视频写入实况标识';
+
+/// 已知 Live Photo 错误模式中文映射(F6/C4):photo_manager darwin
+/// saveLivePhoto 按扩展名判 UTI 建 ImageIO 写入目标,注入 Live Photo 配对
+/// 标识失败时抛的 PlatformException message 含固定短语,直透英文对用户无意义
+/// → 映射为可读中文;未命中模式回落原文(`'$e'`)。gallerySaver 外层 catch
+/// 统一过此映射,不向用户直透英文异常。
+String zhError(Object e) {
+  final s = '$e';
+  if (s.contains(_lpMetaFailImageEn)) {
+    return _lpMetaFailImageZh;
+  }
+  if (s.contains(_lpMetaFailVideoEn)) {
+    return _lpMetaFailVideoZh;
+  }
+  return s;
+}
+
+/// 复合文案中文净化(F6 补强):对文本中出现的两个已知 Live Photo 英文错误
+/// 模式做**子串替换**(与 [zhError] 同两句中文),其余文本原样保留——
+/// livpPairOutcome 复合分记(「静态图已入库(...);实况短片失败:...」)的
+/// 结构必须不动;无模式命中返回原文。勿用 [zhError] 整串处理复合文案:
+/// 那会把「静态图已入库」等分记一并吞掉。
+String zhifyComposite(String text) {
+  return text
+      .replaceAll(_lpMetaFailImageEn, _lpMetaFailImageZh)
+      .replaceAll(_lpMetaFailVideoEn, _lpMetaFailVideoZh);
+}
+
+/// 实况保存+降级编排(C3,纯函数注入闭包可单测):主路 [saveLivePhoto]
+/// 成功 → ok「已存入相册(实况照片)」(现状文案不变);主路抛错(任何异常)
+/// → 调 [fallbackPair]「静态图+视频分别存相册」(生产注入 [saveLivpPairToGallery])
+/// ——双成 → ok(okOverride 注明「非实况」,saveSummary 成功展示优先取它,
+/// detail 仍保留降级落点);半成/全败 → fail(文案经 [zhifyComposite] 净化
+/// 已知英文模式,**复合分记结构保留**——已入库的一半仍如实分记,iOS 矩阵
+/// share 兜底路照常由 runSavePlan 触发)。fallbackPair 自身抛错 → 同样
+/// 收口 fail(日志与文案均可回溯),不外溢到 gallerySaver 外层 catch。
+Future<SinkOutcome> saveLivePhotoWithFallback(
+  File file, {
+  required Future<void> Function() saveLivePhoto,
+  required Future<SinkOutcome> Function(File file) fallbackPair,
+}) async {
+  try {
+    await saveLivePhoto();
+    return const SinkOutcome.ok('已存入相册(实况照片)');
+  } catch (e) {
+    // 主路根因仅进 AppLog 不进用户文案(避免 toast 冗长);排查入口 =
+    // AppLog 'download' '实况恢复失败,降级为静态图+视频分别存相册'
+    AppLog.error('download', '实况恢复失败,降级为静态图+视频分别存相册', e);
+    final SinkOutcome fb;
+    try {
+      fb = await fallbackPair(file);
+    } catch (fe) {
+      AppLog.error('download', '降级路也失败', fe);
+      // zhError 先整句映射已知模式(未命中回落原文),zhifyComposite 再子串兜底
+      return SinkOutcome.fail(zhifyComposite(zhError(fe)));
+    }
+    if (fb.isOk) {
+      return SinkOutcome.ok(fb.detail, okOverride: '已存入相册(静态图与视频分别保存,非实况)');
+    }
+    // F6:fail 文案过 zhifyComposite 净化已知英文模式,复合分记结构保留
+    return SinkOutcome.fail(zhifyComposite(fb.detail));
   }
 }
 
