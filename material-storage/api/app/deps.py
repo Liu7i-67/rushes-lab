@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import dataclass
 
 from fastapi import Depends, Header, HTTPException, Request
 from sqlalchemy import select
@@ -17,7 +16,8 @@ from sqlalchemy import select
 from app.db.session import get_sessionmaker
 from app.db.tables import User
 from app.services.audit import AuditService, bind_auth_context
-from app.services.auth import OIDCService
+from app.services.auth import CurrentUser as CurrentUser  # 显式重导出(定义已下沉 services/auth.py)
+from app.services.auth import OIDCService, ensure_session_version
 from app.services.local_auth import LocalAuthService
 from app.services.mcp_auth import authenticate_pat, bearer_token
 from app.services.permissions import PermissionsService
@@ -25,22 +25,6 @@ from app.services.presign import PresignService
 from app.settings import Settings, get_settings
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class CurrentUser:
-    """authn 结果 — id 是 SQL UUID,同时做 FK 和 OpenFGA subject(#148 起)。
-
-    #154:飞书 open_id 不再进 session / CurrentUser(登录与权限都不再使用;
-    users.feishu_open_id 列保留只读作历史对照)。
-    """
-    id: uuid.UUID
-    name: str
-
-    @property
-    def subject(self) -> str:
-        """OpenFGA user subject:#148 起一律 user:<users.id UUID>。"""
-        return f"user:{self.id}"
 
 
 def settings_dep() -> Settings:
@@ -102,11 +86,8 @@ async def load_active_user(
             raise HTTPException(401, "用户不存在或已删除")
         if not row.is_active:
             raise HTTPException(401, "账号已停用,请联系管理员")
-        if (
-            expected_session_version is not None
-            and (row.session_version or 0) != expected_session_version
-        ):
-            raise HTTPException(401, "会话已失效,请重新登录")
+        # §5.5:ver 比对+401 文案在 services/auth.py::ensure_session_version(纯搬家)
+        ensure_session_version(row.session_version, expected_session_version)
         forced_change = bool(row.must_change_password and row.password_hash is not None)
         return CurrentUser(id=row.id, name=row.name), forced_change
 

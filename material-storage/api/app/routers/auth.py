@@ -33,9 +33,9 @@ from app.models import ChangePasswordIn, LocalLoginIn
 from app.routers.auth_tokens import router as tokens_router
 from app.services.audit import AuditService
 from app.services.auth import OIDCService
-from app.services.email_utils import mask_email
 from app.services.local_auth import LocalAuthService
 from app.services.mcp_gate import mcp_gate
+from app.services.oidc_email_sync import oidc_email_changed_cleanup
 from app.services.password_reset import (
     delete_unused_tokens,
     post_password_change_cleanup,
@@ -116,27 +116,15 @@ async def callback(
 
     if email_changed:
         # §5.3.5 接线落点:DEL email:code(残留验证码不能把新地址绑上)+ 审计
-        # email_changed(source=oidc)。登录主流程已成功,两者一律 best-effort。
+        # email_changed(source=oidc)—— 实现在 services/oidc_email_sync.py
+        # (纯搬家);登录主流程已成功,两者一律 best-effort。
         assert old_email is not None  # email_changed=True 蕴含快照已取
-        try:
-            await request.app.state.redis.delete(f"email:code:{user.id}")
-        except Exception:  # best-effort(Redis 抖动不拦登录,§5.3.5)
-            log.warning("OIDC email change: del email:code failed user=%s", user.id)
-        try:
-            await audit.write(
-                event_type="email_changed",
-                actor_user_id=user.id,
-                request_ip=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent"),
-                details={
-                    "old_masked": mask_email(old_email),
-                    "new_masked": mask_email(user.email),
-                    "source": "oidc",
-                },
-                actor_email_snapshot=mask_email(user.email),
-            )
-        except Exception:  # best-effort(审计失败不能拦登录,§5.9)
-            log.warning("OIDC email change: audit write failed user=%s", user.id)
+        await oidc_email_changed_cleanup(
+            request.app.state.redis, audit,
+            user_id=user.id, old_email=old_email, new_email=user.email,
+            request_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+        )
 
     # 4) 签 session JWT + set cookie
     session_token = auth.encode_session(user)

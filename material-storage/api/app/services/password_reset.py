@@ -28,7 +28,6 @@ Redis 键(§5.7.1):
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import secrets
 import uuid
@@ -39,8 +38,12 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.tables import PasswordResetToken, User
-from app.services.email_utils import email_fingerprint
-from app.services.email_verification import clear_password_failures, delete_code
+from app.services.email_verification import (
+    clear_password_failures,
+    delete_code,
+    delete_unused_reset_tokens,
+)
+from app.services.email_verification import current_email_hash as email_hash_of
 from app.services.rate_limit import (
     RateLimitUnavailable,
     epoch_hour,
@@ -112,11 +115,6 @@ def _as_utc(value: datetime | None) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value
-
-
-def email_hash_of(user_email: str | None) -> str:
-    """``sha256(email_fingerprint(email))`` —— email_hash 快照/比对同口径。"""
-    return hashlib.sha256(email_fingerprint(user_email).encode()).hexdigest()
 
 
 def generate_raw_token() -> str:
@@ -254,15 +252,11 @@ async def issue_token(
 async def delete_unused_tokens(db: AsyncSession, user_id: uuid.UUID) -> None:
     """删该用户全部**未用**重置 token(不 commit;调用方事务内,D13)。
 
-    五个密码写点共用:change-password / 管理员重置 / password-reset confirm /
-    set_password.py / set_initial_admin.py;B2 的邮箱换绑/解绑也走它。
+    实现单点收敛到 ``email_verification.delete_unused_reset_tokens``(P2 去重,
+    两者原本逐字相同);本包装保留既有 import 面(mypy no_implicit_reexport 下
+    纯 ``as`` 别名不算显式重导出,故用定义转发)。
     """
-    await db.execute(
-        delete(PasswordResetToken).where(
-            PasswordResetToken.user_id == user_id,
-            PasswordResetToken.used_at.is_(None),
-        )
-    )
+    await delete_unused_reset_tokens(db, user_id)
 
 
 async def delete_other_unused_tokens(

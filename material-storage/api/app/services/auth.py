@@ -34,11 +34,13 @@ from __future__ import annotations
 import logging
 import secrets
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
+from fastapi import HTTPException
 from jose import JWTError, jwt
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +55,24 @@ log = logging.getLogger(__name__)
 # 从 userinfo 里取值时的默认 claim 名(可被 provider.claims 覆盖)
 _DEFAULT_CLAIMS = {"sub": "sub", "name": "name", "email": "email"}
 _DEFAULT_SCOPE = "openid profile email"
+
+
+@dataclass
+class CurrentUser:
+    """authn 结果 — id 是 SQL UUID,同时做 FK 和 OpenFGA subject(#148 起)。
+
+    #154:飞书 open_id 不再进 session / CurrentUser(登录与权限都不再使用;
+    users.feishu_open_id 列保留只读作历史对照)。
+    自 deps.py 原样搬入(纯搬家);``app.deps`` 继续显式重导出,既有
+    ``from app.deps import CurrentUser`` 引用面不变。
+    """
+    id: uuid.UUID
+    name: str
+
+    @property
+    def subject(self) -> str:
+        """OpenFGA user subject:#148 起一律 user:<users.id UUID>。"""
+        return f"user:{self.id}"
 
 
 class OIDCService:
@@ -349,6 +369,18 @@ class OIDCService:
             )
         except JWTError as e:
             raise ValueError(f"invalid session token: {e}") from e
+
+
+# ─── session 版本比对(邮箱账号方案 §5.5;自 deps.py 抽出,纯搬家)────────────
+def ensure_session_version(current: int | None, expected: int | None) -> None:
+    """JWT payload 的 ``ver`` 与库内 ``session_version`` 不一致 → 401「会话已失效」。
+
+    改密/重置/禁用使 ``session_version`` 自增后,旧 JWT 立即失效;``current``
+    缺失按 0 比对(迁移后全站不掉线),``expected`` None = 不校验(PAT 走吊销、
+    dev 通道无 JWT 版本)。
+    """
+    if expected is not None and (current or 0) != expected:
+        raise HTTPException(401, "会话已失效,请重新登录")
 
 
 async def create_auth_service(settings: Settings) -> OIDCService:

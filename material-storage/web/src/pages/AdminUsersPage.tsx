@@ -18,6 +18,7 @@ import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail, useDirecto
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
 import { useCompactViewport } from '../lib/use-viewports';
+import { StatusPill, EmailFieldLabel, changedEmail } from '../components/admin/EmailVerifiedTag';
 import type { DirectoryUser, DirectoryUserCreateOut, DirectoryUserUpdateIn } from '../api/types';
 
 export default function AdminUsersPage() {
@@ -273,67 +274,6 @@ function UserRow({ user }: { user: DirectoryUser }) {
   );
 }
 
-function StatusPill({ active, mustChange, loginLocked, emailVerified, hasEmail }: {
-  active: boolean; mustChange: boolean; loginLocked?: boolean;
-  emailVerified?: boolean; hasEmail: boolean;
-}) {
-  return (
-    <>
-      <span style={{
-        fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
-        fontWeight: 500, padding: '1px 7px', borderRadius: 3,
-        color: active ? 'var(--ms-emerald)' : 'var(--ms-crimson)',
-        background: active ? 'var(--ms-emerald)14' : 'var(--ms-crimson)14',
-      }}>
-        {active ? '启用' : '停用'}
-      </span>
-      {mustChange && (
-        <span style={{
-          fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
-          fontWeight: 500, padding: '1px 7px', borderRadius: 3,
-          color: 'var(--ms-amber)', background: 'var(--ms-amber)14',
-        }}>
-          待改密
-        </span>
-      )}
-      {/* W1: 登录已锁定 — 只反映 user 维度(IP 维度锁不在此列,命中时登录仍 429),
-          tooltip 明示口径;可用行内「解锁」立即清除 */}
-      {loginLocked && (
-        <Tooltip title="连续登录失败触发锁定(用户名维度;IP 维度锁不在此列)。可用「解锁」立即清除。">
-          <span style={{
-            fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
-            fontWeight: 500, padding: '1px 7px', borderRadius: 3,
-            color: 'var(--ms-crimson)', background: 'var(--ms-crimson)14',
-          }}>
-            登录已锁定
-          </span>
-        </Tooltip>
-      )}
-      {/* 邮箱账号方案 §6.4:email_verified Tag(仅在有邮箱时渲染;旧后端无此字段
-          回落 false,排查「为什么用户说没验证」) */}
-      {hasEmail && <EmailVerifiedTag verified={emailVerified ?? false} />}
-    </>
-  );
-}
-
-// 邮箱账号方案 §6.4:验证状态 pill(列表行与编辑弹窗 label 共用)
-function EmailVerifiedTag({ verified }: { verified: boolean }) {
-  return (
-    <Tooltip title={verified
-      ? '邮箱已验证(绑定/重置成功后自动置位)'
-      : '邮箱未验证(存量录入或尚未完成验证;不影响登录与找回)'}>
-      <span style={{
-        fontFamily: 'var(--ms-font-mono)', fontSize: 10.5,
-        fontWeight: 500, padding: '1px 7px', borderRadius: 3,
-        color: verified ? 'var(--ms-emerald)' : 'var(--ms-amber)',
-        background: verified ? 'var(--ms-emerald)14' : 'var(--ms-amber)14',
-      }}>
-        {verified ? '邮箱已验证' : '邮箱未验证'}
-      </span>
-    </Tooltip>
-  );
-}
-
 // ─── 新建用户 ───────────────────────────────────────────────────────────────
 function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const create = useCreateUser();
@@ -425,19 +365,15 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
     if (!detail) return;
     try {
       const v = await form.validateFields();
-      // 邮箱账号方案 §5.3.5/§6.4:未改动邮箱时不发送 email 键 —— 后端把「提交 email 键」
-      // 视为一次邮箱变更(清验证态、作废未用重置 token),没改就不该触发
-      const originalEmail = detail.email ?? '';
-      const nextEmail = v.email?.trim() || '';
       const body: DirectoryUserUpdateIn = {
         name: v.name.trim(),
         // D3: 全量同步终态(清空选择 = 移出全部组;后端 diff 加/移双写)
         group_ids: (v.group_ids ?? []) as string[],
       };
-      if (nextEmail !== originalEmail) {
-        // D6: 留空 = 显式提交 null 清空
-        body.email = nextEmail === '' ? null : nextEmail;
-      }
+      // 邮箱账号方案 §5.3.5/§6.4:仅在实际修改时才提交 email 键(未改动不发键;
+      // D6:留空 = 显式提交 null 清空)—— 脏检查见 changedEmail
+      const email = changedEmail(detail.email, v.email);
+      if (email !== undefined) body.email = email;
       await update.mutateAsync({ userId: user.id, body });
       message.success(`已保存 ${user.name} 的资料`);
       onClose();
@@ -469,13 +405,8 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
           </Form.Item>
           <Form.Item
             name="email"
-            label={(
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
-                邮箱
-                {/* §6.4:详情侧验证状态 Tag(仅在有邮箱时展示) */}
-                {!!detail.email && <EmailVerifiedTag verified={detail.email_verified ?? false} />}
-              </span>
-            )}
+            label={<EmailFieldLabel hasEmail={!!detail.email}
+                                    verified={detail.email_verified ?? false} />}
             extra="留空提交 = 清空邮箱;仅在实际修改时才提交该字段(不改动不影响验证状态)">
             <Input placeholder="zhangsan@example.com" />
           </Form.Item>
