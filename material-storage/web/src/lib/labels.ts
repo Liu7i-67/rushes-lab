@@ -6,14 +6,16 @@
  * - 缺 key 时直接返回 raw token 不报错 — 兼容后端新增 event_type 没同步加 label 的情况
  * - keep mono 字体不变(advisor 决策:跟现有视觉一致性 > 中文渲染纯净)
  *
- * 后端 event_type 写入点全集共 64 种(2026-10-30 实数;MCP 素材服务批次 +3:
- * token_created / token_revoked / mcp_settings_changed)。本映射表 68 键 =
- * 64 真实 + 4 个历史死键(approval_card_updated / approval_notified /
+ * 后端 event_type 写入点全集共 71 种(2026-11-05 实数;邮箱账号批次 +7:
+ * email_verification_requested / email_verified / email_changed / email_unbound /
+ * password_reset_requested / password_reset_completed / password_reset_failed,
+ * 写入点 routers/account_security.py + password_reset.py)。本映射表 75 键 =
+ * 71 真实 + 4 个历史死键(approval_card_updated / approval_notified /
  * asset_tag_updated / invite_notified —— 只用于历史行展示、不在过滤下拉,勿删)。
- * 口径演变:55(2026-10-14 及之前;原算式 22+33)→ 61(2026-10-30 实数),
- * 本批 +3 = 64。全集清单见 rushes-spec/material-storage/prod-observability-fix-plan.md
- * 附录 A(W1/W4/W5/W6、风控模块与 MCP 批次随后增补;旧口径「grep 全集 22 种
- * 2026-05-18」已过时,勿按它裁剪映射)
+ * 口径演变:55(2026-10-14 及之前)→ 61(2026-10-28 风控)→ 64(2026-10-30 MCP)
+ * → 本批 +7 = 71。全集清单见 rushes-spec/material-storage/prod-observability-fix-plan.md
+ * 附录 A(W1/W4/W5/W6、风控模块、MCP 与邮箱账号批次随后增补;旧口径「grep 全集
+ * 22 种 2026-05-18」已过时,勿按它裁剪映射)
  */
 
 export const EVENT_TYPE_LABEL: Record<string, string> = {
@@ -96,6 +98,17 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   token_created: '访问令牌创建',
   token_revoked: '访问令牌吊销',
   mcp_settings_changed: 'MCP 通道设置变更',
+  // ── 邮箱账号(2026-11-05):邮箱绑定/换绑/解绑/验证 + 找回密码(方案 §5.9);
+  //    details 新键 ok / email_masked / old_masked / new_masked / purpose /
+  //    source / verified_by 由 AdminAuditPage DETAIL_KEY_LABEL 同步(不加 delivery);
+  //    找回密码三事件 actor 恒匿名(auth_method=anonymous,§5.9)──────────────────
+  email_verification_requested: '邮箱验证码发送',
+  email_verified: '邮箱验证完成',
+  email_changed: '邮箱变更',
+  email_unbound: '邮箱解绑',
+  password_reset_requested: '找回密码申请',
+  password_reset_completed: '密码重置完成',
+  password_reset_failed: '密码重置失败',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

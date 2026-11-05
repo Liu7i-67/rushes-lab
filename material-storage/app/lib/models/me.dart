@@ -1,5 +1,6 @@
 /// Me — /api/v1/auth/me 契约(auth.py 实际返回;B6 补三组级旗标,
-/// B8 补 is_folder_template_manager 管理入口例外闸门)。
+/// B8 补 is_folder_template_manager 管理入口例外闸门;邮箱账号批次补
+/// email / email_verified / password_set 三邮箱字段)。
 library;
 
 class Me {
@@ -9,6 +10,9 @@ class Me {
     this.mustChangePassword = false,
     this.isSystemAdmin = false,
     this.baiduBackupEnabled = false,
+    this.email = '',
+    this.emailVerified = false,
+    this.passwordSet = false,
     bool? isProjectCreator,
     bool? isProjectDeleter,
     bool? isArtistAccountCreator,
@@ -26,6 +30,12 @@ class Me {
       mustChangePassword: (j['must_change_password'] ?? false) as bool,
       isSystemAdmin: sysAdmin,
       baiduBackupEnabled: (j['baidu_backup_enabled'] ?? false) as bool,
+      // 邮箱账号批次(方案 §7.3):旧后端字段缺失回落空串/false 兼容灰度回滚
+      // (web `?? ''` / `?? false` 同口径);email_verified 后端恒为
+      // bool(email and email_verified_at),不出现「邮箱清空但残留已验证」。
+      email: (j['email'] ?? '') as String,
+      emailVerified: (j['email_verified'] ?? false) as bool,
+      passwordSet: (j['password_set'] ?? false) as bool,
       // 旧后端字段缺失回落 is_system_admin(web `?? is_system_admin` 同口径;
       // 现役后端恒回填,组级开关经 group#member 展开已并入字段值)。
       isProjectCreator: j['is_project_creator'] as bool?,
@@ -48,6 +58,16 @@ class Me {
 
   /// 百度网盘备份菜单显隐开关(B0① 入口置灰判断;关闭时后端 /baidu/* 统一 404)。
   final bool baiduBackupEnabled;
+
+  /// 绑定邮箱(空串=未绑定;旧后端缺失回落空串)。
+  final String email;
+
+  /// 邮箱验证态(后端 = bool(email and email_verified_at);旧后端缺失回落 false)。
+  final bool emailVerified;
+
+  /// 是否已设本地密码(false=OIDC-only/未初始化,邮箱操作入口禁用;
+  /// 旧后端缺失回落 false)。
+  final bool passwordSet;
 
   /// 新建项目总闸门(B6;create_project 守门 require_project_creator 同口径:
   /// is_org_admin 或 组级 project_creator;构造时缺省回落 [isSystemAdmin])。

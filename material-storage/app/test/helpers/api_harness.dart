@@ -16,6 +16,7 @@ import 'package:ms_app/core/api/approvals_api.dart';
 import 'package:ms_app/core/api/approvals_ops_api.dart';
 import 'package:ms_app/core/api/assets_api.dart';
 import 'package:ms_app/core/api/assets_ops_api.dart';
+import 'package:ms_app/core/api/auth_api.dart';
 import 'package:ms_app/core/api/folders_api.dart';
 import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/api/notifications_api.dart';
@@ -548,9 +549,144 @@ FakeMsApi installFakeApi([FakeMsApi? override]) {
   return api;
 }
 
+/// 邮箱账号批次:auth 域记录式假 API(邮箱绑定/换绑/验证/解绑 + 找回密码
+/// + public-config;testWidgets 的 FakeAsync 区真实 HTTP 永不推进,全部
+/// 短路记录入参、结果可编排——staged 为 Exception 则抛,否则按缺省返回)。
+class FakeAuthApi extends AuthApi {
+  FakeAuthApi(super.api);
+
+  final loginCalls = <({String username, String password})>[];
+  int meCalls = 0;
+  int logoutCalls = 0;
+  final changeCalls = <({String oldPw, String newPw})>[];
+  int publicConfigCalls = 0;
+  final sendCodeCalls = <({String email, String password})>[];
+  final confirmCalls = <String>[];
+  final unbindCalls = <String>[];
+  final resetRequestCalls = <String>[];
+  final verifyTokenCalls = <String>[];
+  final resetConfirmCalls = <({String token, String newPw})>[];
+
+  /// 结果编排:值为 Exception 则抛;record 可定制返回;其余走缺省。
+  Object? loginStaged;
+  Object? meStaged;
+  Object? changeStaged;
+  Object? publicConfigStaged;
+  Object? sendCodeStaged;
+  Object? confirmStaged;
+  Object? unbindStaged;
+  Object? resetRequestStaged;
+  Object? verifyTokenStaged;
+  Object? resetConfirmStaged;
+
+  /// me() 缺省回退(restore/页面刷新用;直接赋新 Me 模拟「绑定成功后刷新」)。
+  Me meResult = Me(id: 'u1', name: '测试');
+
+  @override
+  Future<Me> login(String username, String password) async {
+    loginCalls.add((username: username, password: password));
+    if (loginStaged is Exception) throw loginStaged!;
+    return me();
+  }
+
+  @override
+  Future<Me> me() async {
+    meCalls++;
+    if (meStaged is Exception) throw meStaged!;
+    return meResult;
+  }
+
+  @override
+  Future<void> logout() async {
+    logoutCalls++;
+  }
+
+  @override
+  Future<void> changePassword({
+    required String oldPassword,
+    required String newPassword,
+  }) async {
+    changeCalls.add((oldPw: oldPassword, newPw: newPassword));
+    if (changeStaged is Exception) throw changeStaged!;
+  }
+
+  @override
+  Future<
+    ({bool emailAuthEnabled, bool passwordResetEnabled, int passwordMinLength})
+  >
+  publicConfig() async {
+    publicConfigCalls++;
+    final s = publicConfigStaged;
+    if (s is Exception) throw s;
+    if (s
+        is ({bool emailAuthEnabled, bool passwordResetEnabled,
+          int passwordMinLength})) {
+      return s;
+    }
+    return (emailAuthEnabled: true, passwordResetEnabled: true,
+        passwordMinLength: 8);
+  }
+
+  @override
+  Future<({String maskedEmail, int expiresIn})> sendEmailCode({
+    required String email,
+    required String password,
+  }) async {
+    sendCodeCalls.add((email: email, password: password));
+    final s = sendCodeStaged;
+    if (s is Exception) throw s;
+    if (s is ({String maskedEmail, int expiresIn})) return s;
+    return (maskedEmail: 'a***@example.com', expiresIn: 600);
+  }
+
+  @override
+  Future<({String email, String action})> confirmEmailCode({
+    required String code,
+  }) async {
+    confirmCalls.add(code);
+    final s = confirmStaged;
+    if (s is Exception) throw s;
+    if (s is ({String email, String action})) return s;
+    return (email: 'a***@example.com', action: 'bind');
+  }
+
+  @override
+  Future<void> unbindEmail({required String password}) async {
+    unbindCalls.add(password);
+    if (unbindStaged is Exception) throw unbindStaged!;
+  }
+
+  @override
+  Future<void> requestPasswordReset({required String email}) async {
+    resetRequestCalls.add(email);
+    if (resetRequestStaged is Exception) throw resetRequestStaged!;
+  }
+
+  @override
+  Future<({bool valid, String emailMasked, String expiresAt})>
+  verifyResetToken({required String token}) async {
+    verifyTokenCalls.add(token);
+    final s = verifyTokenStaged;
+    if (s is Exception) throw s;
+    if (s is ({bool valid, String emailMasked, String expiresAt})) return s;
+    return (valid: true, emailMasked: 'a***@example.com',
+        expiresAt: '2026-11-05T12:00:00Z');
+  }
+
+  @override
+  Future<void> resetPassword({
+    required String token,
+    required String newPassword,
+  }) async {
+    resetConfirmCalls.add((token: token, newPw: newPassword));
+    if (resetConfirmStaged is Exception) throw resetConfirmStaged!;
+  }
+}
+
 class FakeMsApi extends MsApi {
   FakeMsApi() : super(baseUrl: 'http://b5.test.local');
 
+  late final _auth = FakeAuthApi(this);
   late final _assets = FakeAssetsApi(this);
   late final _ops = FakeOpsApi(this);
   late final _share = FakeShareApi(this);
@@ -563,6 +699,9 @@ class FakeMsApi extends MsApi {
   late final _approvalsOps = FakeApprovalOpsApi(this);
   late final _notifications = FakeNotificationsApi(this);
   late final _projects = FakeProjectsApi(this);
+
+  @override
+  FakeAuthApi get auth => _auth;
 
   @override
   FakeAssetsApi get assets => _assets;

@@ -31,8 +31,59 @@ export interface Me {
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
   must_change_password: boolean;
+  // 邮箱账号(方案 §5.8):= bool(email and email_verified_at)。可选 —— 旧后端无此
+  // 字段,消费侧用 `?? false` 渲染,兼容灰度/回滚时旧后端不返回
+  email_verified?: boolean;
   // 百度网盘备份(方案 §5.2):功能开关,控制用户菜单入口显隐
   baidu_backup_enabled: boolean;
+}
+
+// ─── 邮箱绑定 / 找回密码(方案 §5.8 接口契约总表)─────────────────────────────
+
+/** GET /auth/public-config — 登录页「忘记密码」与设置页邮箱区的显隐依据。
+ *  email_auth_enabled = password_reset_enabled = mail_ready(后端启动时算好,
+ *  配置不合法降级 false);password_min_length 供改密/重置页动态拼密码策略。 */
+export interface PublicAuthConfig {
+  email_auth_enabled: boolean;
+  password_reset_enabled: boolean;
+  password_min_length: number;
+}
+
+/** POST /auth/email/code — 验证码已发出(masked_email 用于弹窗第二步展示)。 */
+export interface EmailCodeOut {
+  status: string;
+  masked_email: string;
+  expires_in: number;
+}
+
+/** POST /auth/email/confirm — action = bind|verify|change(绑定/验证/换绑)。 */
+export interface EmailConfirmOut {
+  status: string;
+  email: string;
+  email_verified: boolean;
+  action: 'bind' | 'verify' | 'change';
+}
+
+/** POST /auth/email/unbind — 解绑成功(解绑不依赖 SMTP,mail_ready=false 仍可用)。 */
+export interface EmailUnbindOut {
+  status: string;
+}
+
+/** POST /auth/password-reset/request — 重置邮件申请受理(status 恒 sent,无泄漏)。 */
+export interface PasswordResetRequestOut {
+  status: string;
+}
+
+/** POST /auth/password-reset/verify — token 校验(只读不消费;email_masked 脱敏)。 */
+export interface PasswordResetVerifyOut {
+  valid: boolean;
+  email_masked: string;
+  expires_at: string;
+}
+
+/** POST /auth/password-reset/confirm — 重置成功(后端已踢全部旧会话)。 */
+export interface PasswordResetConfirmOut {
+  status: string;
 }
 
 export interface AdminBrief {
@@ -55,6 +106,9 @@ export interface DirectoryUser {
   // 「解锁」行按钮与「登录已锁定」pill 依此渲染。可选 —— 旧后端无此字段,消费侧
   // falsy 回落(不渲染解锁入口,同 is_project_creator 惯例)。
   login_locked?: boolean;
+  // 邮箱账号(方案 §5.8/§6.4):管理员侧排查「为什么用户说没验证」。可选 —— 旧后端
+  // 无此字段,消费侧 `?? false` 回落(仅在有邮箱时渲染 Tag)。
+  email_verified?: boolean;
 }
 
 export interface DirectoryUserCreateOut extends DirectoryUser {

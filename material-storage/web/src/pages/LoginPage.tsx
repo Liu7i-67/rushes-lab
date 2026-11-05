@@ -6,9 +6,9 @@
  */
 import { App, Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { KeyRound, User as UserIcon } from 'lucide-react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../api/client';
-import { useLocalLogin } from '../api/hooks';
+import { useLocalLogin, usePublicConfig } from '../api/hooks';
 import { useCompactViewport } from '../lib/use-viewports';
 
 const BASENAME = '/ms-static/web';
@@ -26,9 +26,16 @@ export default function LoginPage() {
   const { message } = App.useApp();
   const [params] = useSearchParams();
   const login = useLocalLogin();
+  const { data: publicConfig } = usePublicConfig();
   const [form] = Form.useForm();
   const compact = useCompactViewport();
   const next = parseNext(params.get('next'));
+  // §6.1:改密 / 重置成功后回登录的统一提示(两种来源共用同一文案)
+  const justReset = params.get('reset') === '1';
+  // §6.1:只有明确拿到 password_reset_enabled=false 才隐藏「忘记密码」;
+  // 请求失败 / 加载中(unknown)保留链接 —— 登录页是匿名用户唯一入口,
+  // 一次配置请求抖动不应该把恢复入口藏掉(点进去若功能未开,由后端 503 文案说明)
+  const showForgotLink = publicConfig?.password_reset_enabled !== false;
 
   const onFinish = async (values: { username: string; password: string }) => {
     try {
@@ -78,6 +85,15 @@ export default function LoginPage() {
           使用本地账号登录(工号 / 拼音用户名 / 邮箱均可)
         </Typography.Paragraph>
 
+        {justReset && (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginBottom: 20 }}
+            message="密码已更新,请重新登录"
+          />
+        )}
+
         <Alert
           type="info"
           style={{ marginBottom: 20 }}
@@ -107,6 +123,12 @@ export default function LoginPage() {
             </Button>
           </Form.Item>
         </Form>
+        {/* §6.1:忘记密码入口(按钮下方右侧;仅明确 password_reset_enabled=false 才隐藏) */}
+        {showForgotLink && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <Link to="/forgot-password" style={{ fontSize: 12.5 }}>忘记密码?</Link>
+          </div>
+        )}
       </Card>
       <div style={{ textAlign: 'center', marginTop: 16, fontSize: 12, color: 'var(--ms-ink-subtle)' }}>
         连续 5 次登录失败将锁定 15 分钟

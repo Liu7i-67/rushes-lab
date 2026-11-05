@@ -23,10 +23,13 @@ import type { AuditEvent } from '../api/types';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-// event_type 过滤下拉 = 后端写入全集 64 项 + 「全部」,共 65 行。
-// (原注释「61 项/62 行」是 2026-10-28 风控模块时的实数;2026-10-30 MCP 素材服务
-// 批次 +3:token_created / token_revoked / mcp_settings_changed,按本数组实数同步。
-// 更早的「55 项/56 行」是 2026-10-14 口径,已作废;后续随包回填须同步本数。)
+// event_type 过滤下拉 = 后端写入全集 71 项 + 「全部」,共 72 行。
+// (2026-11-05 邮箱账号批次 +7:email_verification_requested / email_verified /
+// email_changed / email_unbound / password_reset_requested / password_reset_completed /
+// password_reset_failed —— 找回密码链路 actor 恒匿名,行内 label 见 authMethodChip。
+// 上一口径「64 项/65 行」是 2026-10-30 MCP 素材服务时的实数;更早的「61 项/62 行」
+// 是 2026-10-28 风控模块口径、「55 项/56 行」是 2026-10-14 口径,均已作废;
+// 后续随包回填须同步本数。)
 // 注意:Select 未开 tags 模式,showSearch 只能在既有选项里搜,输不了自定义值 —
 // 后端新增 event_type 写入点时须回来补选项(后端对 event_type 是任意字符串精确匹配,无白名单)。
 // 全集核对依据:rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
@@ -70,18 +73,25 @@ const EVENT_TYPES = [
   // MCP 素材服务(2026-10-30):令牌签发/吊销(自助三端点恒 session)+ 通道设置变更
   // (details 用既有 changes 结构;labels.ts EVENT_TYPE_LABEL 两处同步)
   'token_created', 'token_revoked', 'mcp_settings_changed',
+  // 邮箱账号(2026-11-05):邮箱绑定/换绑/解绑/验证 + 找回密码(未认证链路,
+  // auth_method=anonymous;routers/account_security.py + password_reset.py)
+  'email_verification_requested', 'email_verified', 'email_changed', 'email_unbound',
+  'password_reset_requested', 'password_reset_completed', 'password_reset_failed',
 ];
 
-// MCP 渠道(2026-10-30):认证方式筛选。后端参数类型是 Literal["all","session","pat"],
-// 传空串会 422 —— 既有「全部」的空串必须显式映射为 all(列表请求与 CSV 导出共用同一映射)。
+// MCP 渠道(2026-10-30)认证方式筛选;邮箱账号批次(2026-11-05)后端 Literal
+// 扩 "anonymous"(找回密码链路未认证,审计 auth_method 显式写 anonymous,§5.9)。
+// 后端参数类型是 Literal["all","session","pat","anonymous"],传空串会 422 ——
+// 既有「全部」的空串必须显式映射为 all(列表请求与 CSV 导出共用同一映射)。
 const AUTH_METHOD_OPTIONS = [
   { value: 'all', label: '— 全部 —' },
   { value: 'session', label: '常规(session)' },
   { value: 'pat', label: '令牌(pat)' },
+  { value: 'anonymous', label: '匿名(anonymous)' },
 ];
 
-const authMethodParam = (v: string): 'all' | 'session' | 'pat' =>
-  (v === 'session' || v === 'pat' ? v : 'all');
+const authMethodParam = (v: string): 'all' | 'session' | 'pat' | 'anonymous' =>
+  (v === 'session' || v === 'pat' || v === 'anonymous' ? v : 'all');
 
 const PAGE_SIZE = 30;
 
@@ -136,6 +146,15 @@ const DETAIL_KEY_LABEL: Record<string, string> = {
   token_prefix: '令牌前缀',
   token_id: '令牌 ID',
   actor: '操作来源',
+  // 邮箱账号(2026-11-05)§5.9:7 个新事件的 details 键(邮箱一律脱敏,
+  // 禁止验证码/token/完整邮箱;reason 已有通用键)。不要加 delivery —— 方案统一用 reason
+  ok: '成功',
+  email_masked: '邮箱(脱敏)',
+  old_masked: '原邮箱(脱敏)',
+  new_masked: '新邮箱(脱敏)',
+  purpose: '用途',
+  source: '来源',
+  verified_by: '验证人',
 };
 
 export default function AdminAuditPage() {
@@ -360,7 +379,10 @@ function EventRow({
   const detailEntries = Object.entries(e.details ?? {});
   // MCP(2026-10-30):认证方式行内展示 —— 存量行 / worker 行 auth_method 为 NULL,
   // 前端归一显示「常规(session)」;仅 pat 行才展示 auth_token_id(展开态)。
+  // 邮箱账号(2026-11-05)§5.9:找回密码链路 auth_method=anonymous,
+  // 行内 label 显式给「匿名」,不落裸值。
   const isPat = e.auth_method === 'pat';
+  const isAnon = e.auth_method === 'anonymous';
   return (
     <div style={{
       position: 'relative',
@@ -401,13 +423,17 @@ function EventRow({
             <span style={{ color: 'var(--ms-ink-subtle)', fontStyle: 'italic' }}>系统</span>
           )}
         </span>
-        {/* MCP(2026-10-30):auth_method 行内展示(NULL 归一为 session) */}
-        <Tooltip title={isPat ? '个人访问令牌(PAT)操作' : '常规登录(session / 存量 NULL)操作'}>
+        {/* MCP(2026-10-30):auth_method 行内展示(NULL 归一为 session;anonymous 显式「匿名」) */}
+        <Tooltip title={isPat
+          ? '个人访问令牌(PAT)操作'
+          : isAnon
+            ? '未认证操作(邮箱找回密码等匿名链路)'
+            : '常规登录(session / 存量 NULL)操作'}>
           <span style={{
             fontSize: 10.5, padding: '1px 6px', borderRadius: 3, flexShrink: 0,
             color: isPat ? 'var(--ms-amber)' : 'var(--ms-ink-subtle)',
             border: `1px solid ${isPat ? 'var(--ms-amber)' : 'var(--ms-hairline)'}`,
-          }}>{isPat ? '令牌' : '常规'}</span>
+          }}>{isPat ? '令牌' : isAnon ? '匿名' : '常规'}</span>
         </Tooltip>
         <div style={{ flex: 1 }} />
         <Tooltip title={dayjs(e.event_time).format('YYYY-MM-DD HH:mm:ss')}>

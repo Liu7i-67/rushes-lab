@@ -24,6 +24,8 @@ class LoginForm extends StatelessWidget {
     required this.phase,
     required this.onSubmit,
     required this.onRetry,
+    this.showForgotPassword = true,
+    this.onForgotPassword,
   });
 
   final TextEditingController usernameController;
@@ -33,6 +35,12 @@ class LoginForm extends StatelessWidget {
   final SessionPhase phase;
   final VoidCallback onSubmit;
   final VoidCallback onRetry;
+
+  /// 「忘记密码?」入口显隐(邮箱账号方案 §7.1):调用方按公开配置三态判定
+  /// (仅明确 false 隐藏,null/true 都显示);[onForgotPassword] 为 null 时
+  /// 即使显隐放行也不渲染(测试环境无路由表的兜底口径)。
+  final bool showForgotPassword;
+  final VoidCallback? onForgotPassword;
 
   /// 探活就绪才放行:登录钮与键盘 done 同口径(原逻辑不变)。
   bool get _canSubmit => !busy && phase == SessionPhase.ready;
@@ -109,6 +117,17 @@ class LoginForm extends StatelessWidget {
                   : const Text('登录'),
             ),
           ),
+          // 忘记密码入口(邮箱账号方案 §7.1):登录按钮下方;仅明确
+          // passwordResetEnabled=false 隐藏,点进去由后端 503 文案兜底。
+          if (showForgotPassword && onForgotPassword != null)
+            TextButton(
+              key: const Key('login_forgot_password'),
+              onPressed: onForgotPassword,
+              child: Text(
+                '忘记密码?',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.ink2),
+              ),
+            ),
           // 固定最小 48 高错误区:空态占位避免布局跳动;P2-1 起允许 1.3
           // 字号两行自然增高(ConstrainedBox 而非定高,不裁切)。
           ConstrainedBox(

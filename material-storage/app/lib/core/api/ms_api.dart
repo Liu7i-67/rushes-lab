@@ -36,7 +36,14 @@ import 'user_agent.dart';
 import 'users_api.dart';
 
 class ApiException implements Exception {
-  ApiException(this.status, this.message, {this.raw, this.method, this.path});
+  ApiException(
+    this.status,
+    this.message, {
+    this.raw,
+    this.method,
+    this.path,
+    this.retryAfterSeconds,
+  });
 
   final int? status;
   final String message;
@@ -49,6 +56,11 @@ class ApiException implements Exception {
   /// 其余手工构造点可空,消费方需容错。
   final String? method;
   final String? path;
+
+  /// 429 机器可读剩余秒数(邮箱账号方案 §7.3,对齐后端 Retry-After 头,
+  /// §5.7.4):页面优先用它做倒计时,缺失回落文案。仅 [MsApi.err] 从响应头
+  /// `retry-after` 解析;其余构造点(手工/guard5xx)为 null,消费方需容错。
+  final int? retryAfterSeconds;
 
   @override
   String toString() => 'ApiException($status): $message';
@@ -173,7 +185,10 @@ class MsApi {
     final e = ApiException(r.statusCode, extractDetail(r.data, fallback),
         raw: r.data,
         method: r.requestOptions.method,
-        path: r.requestOptions.uri.path);
+        path: r.requestOptions.uri.path,
+        // 429 机器可读剩余时间(§5.7.4):响应头 retry-after 缺失/非数字 → null
+        retryAfterSeconds:
+            int.tryParse(r.headers.value('retry-after') ?? ''));
     final status = e.status;
     // 5xx(及极少数状态码缺失)交全局报错页;4xx/401 保持各页面 toast 与
     // 既有跳登录链路,不在此上报(D1)。后台静默轮询(noErrorReport extra)

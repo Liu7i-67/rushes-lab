@@ -76,6 +76,13 @@ class Session extends ChangeNotifier {
   MsApi? api;
   Me? me;
 
+  /// 公开配置三态(邮箱账号方案 §7.1/§7.3,登录页 _onReady 拉取写入):
+  /// null=unknown(未拉到/失败)、true、false。显隐判定一律
+  /// 「仅明确 false 隐藏」——null/true 都显示,点进去由后端 503 文案兜底,
+  /// 避免一次配置请求抖动把恢复入口藏掉。
+  bool? emailAuthEnabled;
+  bool? passwordResetEnabled;
+
   CookieJar? _persistentJar;
 
   /// cookie 落盘目录(R4b:restore 失败日志要核「目录是否存在」,存下路径
@@ -83,13 +90,6 @@ class Session extends ChangeNotifier {
   String? _cookieDirPath;
   bool _probing = false;
   final _expiredGate = SingleFlightGate(const Duration(seconds: 1));
-
-  /// Me 缓存标脏(B9 遗留清偿):改密成功但紧随的 me() 刷新失败时置 true——
-  /// 缓存里的 must_change_password 已不可信,下次 [restore] 强制重拉兜底,
-  /// 成功即清。观察入口 [meStale] 供测试。
-  bool _meStale = false;
-
-  bool get meStale => _meStale;
 
   /// 会话清空钩子(B2 遗留解耦:core 不再 import features——缩略图 URL 缓存
   /// 等特性侧资源经此挂清理回调,main.dart 注册,logout/401 统一触发)。
@@ -166,11 +166,9 @@ class Session extends ChangeNotifier {
   }
 
   /// cookie 会话恢复(重启免登录);失败=未登录,属正常态。
-  /// 标脏时强制重拉(改密后刷新失败缓存的 must_change_password 不可信)。
   Future<Me?> restore() async {
     try {
       me = await api!.auth.me();
-      _meStale = false;
     } catch (e) {
       // R4b(mobile-ux-polish-2):恢复失败不再静默吞——日志留痕(异常、持久化
       // jar 是否就绪、cookie 目录是否存在、statusCode 若可用),供企微日志推送
@@ -202,27 +200,19 @@ class Session extends ChangeNotifier {
   Future<Me> login(String username, String password) async {
     final m = await api!.auth.login(username, password);
     me = m;
-    _meStale = false; // 登录响应即新鲜 Me,标脏态一并解除
     notifyListeners();
     return m;
   }
 
-  /// 改密成功后刷新 Me(must_change_password 置否,cookie 会话不失效)。
-  /// 刷新失败不吞(B9 遗留清偿):日志留痕 + 会话标脏,下次 [restore] 强制
-  /// 重拉兜底;改密本身已生效,此处失败不向调用方报错(页面语义=改密成功)。
+  /// 改密成功(邮箱账号方案 §7.4):后端自增 session_version,旧 JWT 立即
+  /// 失效——**不再调 me() 刷新**(必 401 触发全局过期钩子),改主动
+  /// [logout] 清 me / cookie / 清缓存钩子;导航由页面统一回登录页,此处不做。
   Future<void> changePassword(String oldPassword, String newPassword) async {
     await api!.auth.changePassword(
       oldPassword: oldPassword,
       newPassword: newPassword,
     );
-    try {
-      me = await api!.auth.me();
-      _meStale = false;
-    } catch (e) {
-      AppLog.error('session', '改密成功但刷新 Me 失败(缓存标脏,下次访问兜底)', e);
-      _meStale = true;
-    }
-    notifyListeners();
+    await logout();
   }
 
   Future<void> logout() async {

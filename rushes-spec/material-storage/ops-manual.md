@@ -2,7 +2,7 @@
 
 > 适用范围:PoC server2 部署(8.156.34.238)+ 反代 server1;生产内网单机部署见 §10。
 > 适用对象:系统管理员 / 维护工程师。
-> 最后更新:2026-10-31(新增 §12 MCP 素材服务(ms-mcp)运维;§6.6/§10.3 补交叉引用)
+> 最后更新:2026-11-05(新增 §13 邮箱与找回密码——SMTP 配置/出口测试/开关矩阵/上线 12 步/回滚/运维脚本/常见故障;代码默认 EMAIL_AUTH_ENABLED=false,启用须等 §13.1 硬前置)
 
 ---
 
@@ -1273,3 +1273,214 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
   (`restart` 不重读 env_file);回滚=改回 `ENV=dev` 再 force-recreate。
   dev 环境继续 `ENV=dev`(测试依赖 X-User-Id 夹具)。
 
+
+---
+
+## 13. 邮箱与找回密码(2026-11-05)
+
+> 方案正本:`rushes-spec/material-storage/email-account-and-password-reset-plan.md`(部署与运维=其 §9 全部;本节为运维视角摘录,**冲突时以方案为准**)。
+> 需求派发:`docs/qdev/2026-11-04-email-account-reset.md`。
+> 代码状态:已就绪,默认 `EMAIL_AUTH_ENABLED=false` 整体隐藏;**部署/启用必须等 §13.1 六项硬前置书面确认**,由用户另行拍板,未确认前本节只读不执行。
+
+### 13.1 硬前置(方案 §9.1,阻断项)
+
+开工前书面确认(缺一项就不启动上线流程):
+
+| # | 前置 | 说明 |
+|---|---|---|
+| ① | SMTP 服务商与发件地址 | 建议腾讯企业邮 / 阿里云邮件推送;发件地址须与 SMTP 登录账号**同域** |
+| ② | hh2 → 465/587 出口实测 | 见 §13.3 探活脚本 |
+| ③ | 公网 HTTPS 入口与证书 | 非自签(自签会被浏览器/邮件客户端拦截) |
+| ④ | SPF / DKIM / DMARC | 见 §13.2 |
+| ⑤ | 站内通知邮件是否同期上线 | `NOTIFY_EMAIL_ENABLED`(默认 false)由产品确认 |
+| ⑥ | 入口链路真实 IP 复验 | **W2a 复验**:三入口各打一条失败请求,确认审计/Redis 里 IP 是真实客户端 IP(本手册 §11);R8 的 IP 封控完全以此为基础——未激活时 IP 维度退化为共享桶连坐。每次入口链路变更后必须复验 |
+
+产品前置:本功能要求一个**收件人可达的 HTTPS 入口**(当前是公网 `bucket.taoxiplan.com`);纯离线/无公网入口部署**不支持**,LAN 链接只是双入口兜底,不能替代。
+
+### 13.2 SPF / DKIM / DMARC
+
+- 按服务商控制台配置域名 **SPF / DKIM**,必要时 **DMARC**;否则重置邮件大概率进垃圾箱(用户会当成「没收到」反复重试,撞 R8 的 5 次 IP 失败锁)。
+- HTTPS 证书必须被邮件客户端信任(非自签)。
+- 发件地址与 SMTP 登录账号同域(服务商通常强制;反向 DNS/发件域一致性按服务商要求配)。
+
+### 13.3 出口实测
+
+```bash
+# 端口可达性(hh2 生产容器内;docker exec 默认不接 stdin,必须 -i)
+docker exec -i ms-api python - <<'PY'
+import socket
+for host, port in [("smtp.exmail.qq.com", 465), ("smtpdm.aliyun.com", 465)]:
+    try:
+        s = socket.create_connection((host, port), timeout=10); s.close()
+        print(host, port, "OK")
+    except Exception as e:
+        print(host, port, "FAIL", e)
+PY
+```
+
+- 真实发信脚本 `send_test_mail.py` 依赖本批新代码,**只在 §13.6 第 2 步代码同步之后使用**(同步前它不存在)。选型阶段若必须在同步前验证,用一次性 `docker exec -i ms-api python -c '...smtplib 读 os.environ 发信...'`;**不要把「脚本不存在」误判为「端口不通」**。
+- 若 465/587 被封:优先申请出口放行;否则在局域网部署内部 SMTP 中继(`SMTP_HOST` 指向内网中继)并**同时配置 `EMAIL_LINK_BASE_URL_LAN`**;再否则改用服务商 HTTPS API(需另写 mailer 后端,超出本批)。
+
+### 13.4 配置步骤(`.env` 不进 git)
+
+`.env` 实际路径(按 `deploy_lan.sh` 的 `REMOTE_DIR` 口径;**`/root/ms/...`、`/root/material-storage-api/...` 是旧路径,不要按它操作**):
+
+| 环境 | 路径 |
+|---|---|
+| prod | `/home/huanhua/ms/api/.env` |
+| dev | `/home/msdev/ms/api/.env` |
+
+```dotenv
+EMAIL_AUTH_ENABLED=false            # 先关,迁移+重启后再开(§13.6 第 8 步)
+NOTIFY_EMAIL_ENABLED=false          # 站内通知邮件独立开关;填 SMTP 不会自动打开
+# 功能开启时必填;不回落 WEB_APP_BASE_URL;生产不得是内网地址(校验不过则 mail_ready=false + ERROR,不阻断登录)
+EMAIL_LINK_BASE_URL=https://bucket.taoxiplan.com/ms-static/web/
+SMTP_HOST=smtp.exmail.qq.com
+SMTP_PORT=465
+SMTP_USE_SSL=true
+SMTP_USE_TLS=false
+SMTP_USERNAME=noreply@example.com
+SMTP_PASSWORD=***
+SMTP_FROM_EMAIL=noreply@example.com
+SMTP_FROM_NAME=素材库
+```
+
+- dev 的 `EMAIL_LINK_BASE_URL` 用 `http://192.168.110.221:8090/ms-static/web/`(或公网 dev 入口)。
+- **纯内网部署**:主链接仍填公网 https(本功能依赖公网入口可达);同时配 `EMAIL_LINK_BASE_URL_LAN` 兜底内网。完全没有公网入口时本功能不可用(§13.1)。
+- **`SMTP_FROM_EMAIL` 只填纯地址**;显示名走 `SMTP_FROM_NAME`。不要把 `Name <addr>` 塞进 `SMTP_FROM_EMAIL`(启动校验会拒绝,功能降级为隐藏)。
+- 端口/TLS 互斥:465 → `SMTP_USE_SSL=true + SMTP_USE_TLS=false`;587 → 反之(配错 = 半死状态,启动校验直接判 mail_ready=false)。
+- **改 `.env` 后必须 `docker compose up -d --force-recreate ms-api ms-worker`**(`restart` 不重读 env_file)。
+- 完整键位与默认值见 `material-storage/api/.env.example` / `.env.production.example` 与方案 §5.10。
+
+### 13.5 开关矩阵
+
+| `EMAIL_AUTH_ENABLED` | `NOTIFY_EMAIL_ENABLED` | SMTP(host+from) | 效果 |
+|---|---|---|---|
+| false | false | 任意 | **默认**。邮箱绑定/找回入口隐藏、发信类端点全 503;`/email/unbind` 仍可用;站内通知不发 |
+| true | 任意 | 未配/配置不合法 | `mail_ready=false`(=`EMAIL_AUTH_ENABLED && smtp_enabled` 再过 §13.4 校验),入口隐藏;日志有 `email auth disabled: invalid config: <原因>`;**登录不受影响**(降级,不崩) |
+| true | false | 已配 | 邮箱绑定/找回全量可用;站内通知仍不发 |
+| true | true | 已配 | 全量;通知邮件发给管理员录入地址,**开启前产品确认**(建议只发已验证邮箱) |
+| false | true | 已配 | 只有站内通知邮件;邮箱功能隐藏 |
+
+- `NOTIFY_EMAIL_ENABLED` **只管站内通知**(审批/邀请);换绑/解绑的安全告知邮件不受它约束(只要 SMTP 可用即 best-effort 发送)。
+- 频控默认值(共享 NAT 余量,可配):验证码 200/h/IP、10/天/用户;重置申请 120/h/IP、发信 60/h/IP、5/h/账号;verify/confirm 150/h/IP。上线首日按部门分批验证,避免全公司同一小时撞配额。
+
+### 13.6 上线顺序(12 步,方案 §9.3 逐条)
+
+> **顺序不可反**:新代码 + 旧 schema 会 500(`session_version` 列缺失);`deploy_lan.sh` 没有 alembic 步骤,必须人工先迁移;迁移窗口内暂停一切 email 写入(第 3 步 ⚠)。
+
+```bash
+# 【prod】以下默认 hh2-prod /home/huanhua/ms/api;dev 把 hh2-prod→hh2、
+# /home/huanhua/ms→/home/msdev/ms、ms-api→ms-api-dev、ms-worker→ms-worker-dev
+```
+
+0. **备份与对账**:SSH 到 hh2-prod 的 `/home/huanhua/ms/api`,在那里执行
+   `COMPOSE_DIR=/home/huanhua/ms/api bash scripts/backup_prod.sh`
+   (默认落 `${COMPOSE_DIR}/backups/pg`;要放 `/ssd/pg-backups` 先 `mkdir -p` 并 `chown huanhua`,否则脚本 `set -e` 直接退出;脚本默认 `COMPOSE_DIR=/root/material-storage-api` 是旧路径,prod 必须显式覆盖;dev 用 `/home/msdev/ms/api`;**在开发机跑会打到本机 docker**)。
+   再 `docker compose exec -T ms-api alembic current` 与 `docker compose exec -T ms-api alembic heads` 对账(宿主机不装 alembic/DB 驱动),确认线上在 `20261031_0020`(落后先补,不跨版本上代码)。
+   要对账原始邮箱大小写/首尾空白的,备份外再单独导出 `id,email` 留档(0021 的归一化是**单向**的,downgrade 不恢复)。
+1. **纯 SQL 预检(代码同步之前)**:下面两条 `docker exec ms-db psql ...`;有重复先由管理员清空其一(管理后台 `PATCH /admin/directory/users/{id}` 传 `email=null`)。**不要**在这一步跑依赖新代码的 Python 脚本(新 ORM 会 SELECT 新列撞旧 schema)。
+
+```bash
+# 1) 重复邮箱(只输出计数与用户 id,不把完整邮箱打到终端)
+docker exec ms-db psql -U msuser -d material_storage -c "
+SELECT count(*) AS n, string_agg(id::text, ',') AS user_ids
+FROM users WHERE email IS NOT NULL AND btrim(email, E' \t\n\r\f\v') <> ''
+GROUP BY lower(btrim(email, E' \t\n\r\f\v')) HAVING count(*) > 1;"
+
+# 2) 跨列冲突:某人的 username 等于另一人的 email(btrim 与迁移口径一致)
+docker exec ms-db psql -U msuser -d material_storage -c "
+SELECT a.id AS username_user_id, b.id AS email_user_id
+FROM users a JOIN users b
+  ON lower(btrim(a.username, E' \t\n\r\f\v')) = lower(btrim(b.email, E' \t\n\r\f\v')) AND a.id <> b.id;"
+```
+
+   - **优先清空有 `username` 的账号**;`username IS NULL` 的账号邮箱是唯一登录标识,直接清空会永久无法登录——**迁移前**用纯 SQL 补登录名(`UPDATE users SET username=... WHERE id=...`,先查唯一/格式禁 `@`);**迁移后**才用 `set_password.py --username <新名> --username-only`(只改登录名不重置密码)。已停用/离职账号可直接清。
+   - 跨列冲突人工决定改哪一边;**迁移前**改 username 用纯 SQL(旧 schema 安全),不要用本批新脚本;不要自动清。
+2. **代码同步**:`bash scripts/deploy_lan.sh <env>`,**不带 `--restart`**;此时运行中的进程仍是旧代码,新文件只是落盘。
+3. **先迁移**:`docker compose exec ms-api alembic upgrade head`(0021)。迁移内部的重复检测用 `text()`,不 import 新模型;有阻断数据时抛 `RuntimeError` 且 DB 停在 0020(不建索引)。
+   ⚠ **迁移完成到第 4 步 restart 之间,运行中的仍是旧代码:窗口内暂停一切 email 写入**(管理员建号/编辑、CLI/seed、OIDC 登录)。旧代码不捕获 `IntegrityError`,此时写入重复邮箱会撞新唯一索引 → 500。
+4. **重启 API/worker**:`docker compose restart ms-api ms-worker`。
+5. **构建/替换 SPA**:`pnpm build` + tar 单独同步(`deploy_lan` 不同步 `static/web`);三入口指纹一致(内网 / 公网 18080 / HTTPS,备份名建议 `web.bak-<日期>-email`)。
+6. **填 `.env`**(§13.4 模板,`NOTIFY_EMAIL_ENABLED=false`);**先预检再 recreate**——必须用 `docker compose run` 新建一次性容器(`docker exec` 继承运行中容器的旧环境,读不到刚改的 `.env`);`.env` 里开关还是 false 时 `resolve_mail_ready()` 直接返回 false 跳过校验,所以要**显式覆盖开关**才有诊断意义:
+
+```bash
+docker compose run -e EMAIL_AUTH_ENABLED=true --rm --no-deps ms-api python -c \
+  "from app.settings import get_settings; print('mail_ready=', get_settings().resolve_mail_ready(detail=True))"
+```
+
+   输出 false 时看日志 `email auth disabled: invalid config: <原因>`,别急着 recreate → `docker compose up -d --force-recreate ms-api ms-worker`(**不是 restart**)。
+7. **容器内发测试邮件**:`docker exec -i ms-api python -m scripts.send_test_mail`(收件人从 stdin/交互输入,§13.8)→ 确认收到;此时 `EMAIL_AUTH_ENABLED=false`,`GET /auth/public-config` 的 `password_reset_enabled` **应为 false**(若为 true,说明开关提前打开了,回退第 6 步)。
+8. **开总开关**:`EMAIL_AUTH_ENABLED=true` → 再次 `docker compose up -d --force-recreate ms-api ms-worker`;检查日志**没有** `email auth disabled: invalid config`(有则是配置不合法,功能被降级隐藏,登录不受影响)。
+9. **入口验证**:三入口指纹一致 + `GET /auth/public-config` 返回 `password_reset_enabled=true`;登录页刷新可见「忘记密码」。
+10. **存量邮箱处理**:
+    - **默认**:保持未验证;发布公告「邮箱已可用于找回密码;建议登录后在 设置 → 账号安全 中验证邮箱(用于接收变更告知)」;**同 NAT 的办公室按部门分批,避免首日集中验证撞每 IP 每小时配额**。
+    - **逐条标记**(仅当已线下核对归属):`docker exec -i ms-api python -m scripts.mark_email_verified --username <u>`,执行后在 stdin 输入完整邮箱确认(避免进 shell history);比较按 `strip().lower()`;每次只处理一个账号;脚本写 `email_verified` 审计(`source=ops`)。**不提供**按日期/通配批量档(D16)。
+11. **App 发版**(本批版本,预期 0.1.14+18,以 `release.mjs` 输出为准)。旧版 App 仍可登录/使用;改密后会被强制回登录页(session_version),**不能承诺「无感」**。
+
+### 13.7 回滚(方案 §9.4)
+
+| 场景 | 动作 |
+|---|---|
+| SMTP 故障/误发 | `.env` 设 `EMAIL_AUTH_ENABLED=false` → `docker compose up -d --force-recreate ms-api ms-worker`;前端发信入口消失,**发信类**端点全部 503(含 verify/confirm,存量链接一并作废);`/email/unbind` 仍可用。**若是站内通知邮件误发**:设 `NOTIFY_EMAIL_ENABLED=false`(或清空 `SMTP_HOST`/`SMTP_FROM_EMAIL`)再 force-recreate——只关 `EMAIL_AUTH_ENABLED` 止不住通知邮件 |
+| 代码回滚 | 先设开关 false,再回退代码。**回退前必须轮换 `SESSION_JWT_SECRET`**:新代码已把改密/重置用户的旧 JWT 作废(`session_version`),旧代码不校验 `ver`,不轮换会让被作废(可能被窃)的 cookie 在 7 天内重新有效。轮换代价=所有人重登一次。**若保留 0021 迁移,唯一索引仍在**:老代码管理员改重邮箱会 500;要么保留新代码,要么执行 `alembic downgrade 20261031_0020`(会删新列/表/索引) |
+| 数据修复 | 重置 token 表可整体清空(`DELETE FROM password_reset_tokens`);Redis 键用 `docker exec ms-redis redis-cli --scan --pattern 'pwreset:*' | xargs -r -I{} docker exec ms-redis redis-cli DEL {}`(`DEL` 不支持 glob,直接写 `pwreset:*` 什么都不会删;宿主机不一定装 redis-cli,所以两端都在容器内);`email:*` 同理,确认不误删其他命名空间 |
+
+**回滚硬顺序**(若需要 downgrade;顺序错会全站 500 或 alembic 找不到 revision):
+
+```bash
+# 1) 设 EMAIL_AUTH_ENABLED=false(.env,先止血)
+# 2) 先停 API/worker(downgrade 会删 session_version/email_verified_at,
+#    新代码还在线时任意认证请求会 500;EMAIL_AUTH_ENABLED=false 不会停掉 get_current_user)
+docker compose stop ms-api ms-worker
+# 3) 用新代码/迁移文件执行 downgrade(旧代码里没有 0021 迁移文件,alembic 找不到 revision;
+#    所以这一步必须在回退代码之前)
+docker compose run --rm --no-deps ms-api alembic downgrade 20261031_0020
+# 4) 回退代码(deploy_lan 从旧 commit/旧 checkout 同步)
+# 5) 轮换 SESSION_JWT_SECRET(openssl rand -hex 32;代价=所有人重登一次)
+# 6) docker compose up -d --force-recreate ms-api ms-worker
+```
+
+- **上线后 24h 内做一次回滚演练**:开关置 false → 确认公开配置返回 false、现有链接 verify 返回 503 → 再打开;演练要覆盖「需要 downgrade」这一分支,而不只是开关置 false。
+- 回滚再前滚:旧代码签发的 JWT 无 `ver`,前滚后按 0 校验;已自增版本的用户会 401 一次(重登即可)。**不要**在回滚期间把所有 `session_version` 归零(会削弱旧代码期间的安全性)。
+
+### 13.8 运维脚本与月度清理(方案 §9.5)
+
+| 脚本 | 用法 | 说明 |
+|---|---|---|
+| `check_email_duplicates.py` | `docker exec ms-api python -m scripts.check_email_duplicates` | 只读体检:重复/跨列冲突(**阻断迁移**,退出码 1)/空串/大写/疑似非法统计;纯 `text()` 显式列查询、不 import ORM(代码同步前后都能跑);输出脱敏值 + 用户 id |
+| `send_test_mail.py` | `docker exec -i ms-api python -m scripts.send_test_mail` | 用当前 settings 真实发一封测试邮件;收件人从 **stdin/交互输入**(`--to` 仅可选占位);不要求 mail_ready,只要 SMTP 配置齐备;日志/输出脱敏 |
+| `mark_email_verified.py` | `docker exec -i ms-api python -m scripts.mark_email_verified --username <u>` | 逐条标记已验证:`--username`/`--user-id` 二选一;完整邮箱走 stdin/交互确认(或 `--confirm-email -`),与库值 `strip().lower()` 完全一致才执行;存量地址不合法会拒绝并提示先换绑;写 `email_verified` 审计(`source=ops`);**无批量/日期范围档**(D16) |
+| `set_password.py`(既有) | `python -m scripts.set_password <id> --username <新名> --username-only` | **只改登录名**,不动密码/PAT/会话版本(解绑前置/存量冲突的运维路径;普通 `--username` 会重置密码并踢会话) |
+
+月度清理(低量环境也可不跑,但表会长期增长):
+
+```sql
+DELETE FROM password_reset_tokens
+ WHERE expires_at < now() - interval '30 days';
+```
+
+(只清「已过期 30 天以上」的行,含已用/未用;未用且未过期的有效链接不受影响。)
+
+### 13.9 常见故障
+
+| 症状 | 排查 / 处置 |
+|---|---|
+| 前端报「邮件发送失败」(502) | ① `docker logs ms-api --tail 200 | grep "mail send"` 看脱敏日志(`definite=true` 未发出 / `definite=false` 结果未知);② 复跑 §13.3 探活;③ 核对 `.env` 的 SMTP 五项与端口/TLS 互斥(§13.4);④ 服务商侧退信/授权码过期;⑤ `definite=false` 时提醒用户「先查收件箱再重试」(服务器可能已接受,重试会收到两封) |
+| 邮件进垃圾箱 | 域名 SPF/DKIM/DMARC 未配或不齐(§13.2);发件域与登录账号不同域;新域名信誉低。修复后让用户把发件人加白名单;**进垃圾箱不影响链接有效性**(30 分钟内可用) |
+| 邮件里的链接打不开 | ① 链接域名必须是公网入口(检查 `EMAIL_LINK_BASE_URL` 是否误填内网地址——它**不回落** `WEB_APP_BASE_URL`);② 手机 4G 下打不开=入口不是公网 https;③ 确认 SPA 已替换且三入口指纹一致(第 5/9 步);④ 链接 30 分钟过期/已被使用 → 页面会显示「链接已失效」,重新申请即可 |
+| 公网入口 502 | 按本手册 §6.1 排查(跳板机/nginx);与邮箱功能本身无关 |
+| **IP 锁应急解锁**(R8:同 IP 连续 5 次失败锁 15 分钟) | `docker exec ms-redis redis-cli DEL pwreset:lock:ip:<具体IP>` + `docker exec ms-redis redis-cli DEL pwreset:fail:ip:<具体IP>`。**必须带具体 IP,勿写 `pwreset:lock:ip:*`——`DEL` 不支持 glob,会静默无效**。执行后该 IP 的 R8 封控短暂失效,慎用;锁按 15 分钟自然过期,通常无需干预。本批无风控页入口(`risk.py` 只扫 `auth:*`),二期才收录 |
+| 重置成功后登录仍 429 | 重置只清 **user 维度**锁;IP 维度按 15 分钟自然过期(共享 NAT 下他人失败连坐)。稍等或按上行应急;**不要**清 `auth:lock:ip:*`(登录维度) |
+| 启动日志有 `email auth disabled: invalid config: <原因>` | 配置不合法被降级:按原因修 `.env`(常见=EMAIL_LINK_BASE_URL 缺失/内网/不以 `/ms-static/web/` 结尾、端口与 TLS 互斥配错、SMTP_FROM_EMAIL 带 `Name <addr>`),改后 force-recreate;**登录不受影响**,不用回滚 |
+| 首日集中验证大量 429 | 共享 NAT 撞每小时配额(§13.5 数字);按部门分批,或评估调大 §5.10 对应配置 |
+| 旧版 App 改密后被踢回登录页 | 预期行为(session_version 自增),公告口径「改密/重置后需重新登录」;不要为它回滚 session_version |
+| `/auth/public-config` 返回 false 但 SMTP 已配 | 检查 `EMAIL_AUTH_ENABLED` 是否 true + §13.5 配置合法性;预检命令见 §13.6 第 6 步 |
+
+### 13.10 已知限制(方案 §13 遗留,不在本批)
+
+- 重置邮件退信(bounce)不可见:SMTP 层失败可见,异步退信无解析。
+- `pwreset:lock:ip` 未纳入风控页,只有 §13.9 的 redis-cli 应急。
+- 管理员后台暂无 username 编辑入口;补登录名走 `set_password.py --username-only`。
+- 存量非法格式邮箱(过不了严格正则)无法自助验证/找回,需管理员换绑;不放宽用户侧校验(防邮件头注入)。
+- IDN 邮箱需先转 punycode;单标签内部域(`user@corp`)不支持。

@@ -45,3 +45,14 @@ B2/B3 并行的文件冲突面:方案 §11 已论证不冲突(B3 改 deps.py/ser
 ## 模糊点与决策记录
 
 全部 16 项关键决策(D1-D16)已在方案 §3 由用户拍板定稿;qdev 周期内无新增模糊点——实施细节一律按方案文字执行,方案未覆盖且无法从上下文推断的,子智能体在汇报中列出待 PM 裁决,不自行发明。
+
+## B6 交付记录(2026-11-05)
+
+- `material-storage/api/scripts/check_email_duplicates.py` — 迁移前置只读体检:`docker exec ms-api python -m scripts.check_email_duplicates`;纯 `text()` 显式列、不 import ORM;重复/跨列冲突退出码 1 阻断,空串/大写/疑似非法仅统计;输出脱敏值 + 用户 id。
+- `material-storage/api/scripts/send_test_mail.py` — SMTP 出口真实发信:`docker exec -i ms-api python -m scripts.send_test_mail`(收件人 stdin/交互;`--to` 仅可选占位,`--to -` 也可走管道);不要求 mail_ready,只要 SMTP 齐备;输出带 resolve_mail_ready 诊断。
+- `material-storage/api/scripts/mark_email_verified.py` — 逐条标记已验证:`docker exec -i ms-api python -m scripts.mark_email_verified --username <u>`(或 `--user-id <uuid>`);完整邮箱走 stdin/交互确认(或 `--confirm-email -`),与库值 strip().lower() 一致才执行;存量地址不合法拒绝并提示先换绑;写 `email_verified` 审计(source=ops/verified_by/email_masked);无批量档(D16)。
+- `material-storage/api/tests/test_ops_scripts.py` — 19 条契约测试(纯 text 断言/脱敏输出/stdin 读取/大小写比较/非法拒绝/互斥参数),SQLite+桩,无容器。
+- `material-storage/api/.env.example` / `.env.production.example` — 补 SMTP/EMAIL_* 注释段(EMAIL_LINK_BASE_URL 必填/不回落/生产非内网、端口-TLS 互斥、force-recreate 要点)。
+- `rushes-spec/material-storage/ops-manual.md` — 新增 §13「邮箱与找回密码」(§13.1 硬前置 ~ §13.10 已知限制;上线 12 步与方案 §9.3 逐条对照),头部「最后更新」同步。
+- `scripts/changelog.md` — 新增 `## 2026-11-05` 节(commit hash 待合并回填)。
+- 自测:`uv run ruff check <3 脚本+测试>` 0 error;`uv run pytest tests/test_ops_scripts.py -o asyncio_mode=auto` 19 passed;`uv run mypy app` 158 errors(基线不动,脚本不在 mypy 范围);三脚本 `--help` 退出码 0。

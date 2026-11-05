@@ -49,6 +49,13 @@ import type {
   PatTokenListResponse,
   Project,
   ProjectCreated,
+  PublicAuthConfig,
+  EmailCodeOut,
+  EmailConfirmOut,
+  EmailUnbindOut,
+  PasswordResetRequestOut,
+  PasswordResetVerifyOut,
+  PasswordResetConfirmOut,
   RiskIpUnlockOut,
   RiskLocksOut,
   SearchResult,
@@ -81,15 +88,93 @@ export const useLocalLogin = () => {
   });
 };
 
-// #149: 修改密码(旧密码 + 新密码;新密码需过服务端策略)
-export const useChangePassword = () => {
-  const qc = useQueryClient();
-  return useMutation({
+// #149: 修改密码(旧密码 + 新密码;新密码需过服务端策略)。
+// 邮箱账号方案 §6.6:改密成功后 session_version 自增,原会话已失效 —— 不再
+// invalidateQueries(['me'])(必 401);清缓存回登录由 ChangePasswordPage 负责
+export const useChangePassword = () =>
+  useMutation({
     mutationFn: async (body: { old_password: string; new_password: string }) =>
       (await http.post<{ status: string }>('/api/v1/auth/change-password', body)).data,
+  });
+
+// ─── 邮箱绑定 / 找回密码(方案 §6.5)────────────────────────────────────────
+// 本区块 hooks 统一带 meta: { silent: true }:400/409/422/429/502/503 是业务失败,
+// 页面各自就地提示;若不加,App.tsx 的 QueryCache/MutationCache onError 会再弹一次
+// 全局 toast(usePublicConfig 失败还会在登录页弹「数据加载失败」)。
+
+/** GET /auth/public-config — 邮箱功能显隐依据(mail_ready)。staleTime 5min +
+ *  retry:false:一次抖动不该让登录页入口闪烁/消失,失败时消费侧按 unknown 处理
+ *  (登录页保留入口、重置页 password_min_length 回落 8)。 */
+export const usePublicConfig = () =>
+  useQuery({
+    queryKey: ['public-config'],
+    queryFn: async () => (await http.get<PublicAuthConfig>('/api/v1/auth/public-config')).data,
+    staleTime: 5 * 60_000,
+    retry: false,
+    meta: { silent: true },
+  });
+
+/** POST /auth/email/code — 发送邮箱验证码(session-only;bind/change/verify 三态共用)。 */
+export const useSendEmailCode = () =>
+  useMutation({
+    mutationFn: async (body: { email: string; password: string }) =>
+      (await http.post<EmailCodeOut>('/api/v1/auth/email/code', body)).data,
+    meta: { silent: true },
+  });
+
+/** POST /auth/email/confirm — 确认验证码完成绑定/验证/换绑(session_version 不变,
+ *  成功后安全刷新 me,设置页邮箱/Tag 立即更新)。 */
+export const useConfirmEmailCode = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { code: string }) =>
+      (await http.post<EmailConfirmOut>('/api/v1/auth/email/confirm', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
+    meta: { silent: true },
   });
 };
+
+/** POST /auth/email/unbind — 解除邮箱绑定(只要求当前密码;解绑不依赖 SMTP)。 */
+export const useUnbindEmail = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { password: string }) =>
+      (await http.post<EmailUnbindOut>('/api/v1/auth/email/unbind', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
+    meta: { silent: true },
+  });
+};
+
+/** POST /auth/password-reset/request — 申请重置邮件(公开;账号枚举显式报错见方案 D7)。 */
+export const useRequestPasswordReset = () =>
+  useMutation({
+    mutationFn: async (body: { email: string }) =>
+      (await http.post<PasswordResetRequestOut>('/api/v1/auth/password-reset/request', body)).data,
+    meta: { silent: true },
+  });
+
+/** POST /auth/password-reset/verify — 校验重置 token(公开,只读不消费)。
+ *  用 useQuery 而非 mutation:挂载即验 + 同 token 去重(StrictMode 双挂载/依赖变化
+ *  只发一次),429 冷却后页面可用 refetch() 重试。enabled=false 时静默不取数。 */
+export const useVerifyResetToken = (token: string | null | undefined) =>
+  useQuery({
+    queryKey: ['password-reset-verify', token],
+    queryFn: async () =>
+      (await http.post<PasswordResetVerifyOut>('/api/v1/auth/password-reset/verify', {
+        token,
+      })).data,
+    enabled: !!token,
+    retry: false,
+    meta: { silent: true },
+  });
+
+/** POST /auth/password-reset/confirm — 提交新密码(公开;成功后后端踢全部旧会话)。 */
+export const useResetPassword = () =>
+  useMutation({
+    mutationFn: async (body: { token: string; new_password: string }) =>
+      (await http.post<PasswordResetConfirmOut>('/api/v1/auth/password-reset/confirm', body)).data,
+    meta: { silent: true },
+  });
 
 // ─── projects ──────────────────────────────────────────────────────────────
 export const useProjects = () =>

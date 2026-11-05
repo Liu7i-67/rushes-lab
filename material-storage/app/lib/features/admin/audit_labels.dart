@@ -1,11 +1,14 @@
 /// 审计展示常量(B8;web AdminAuditPage EVENT_TYPES / labels.ts 映射对齐):
-/// 事件类型筛选全集(65 项含『全部』= 64 个事件类型,后端任意字符串精确匹配
+/// 事件类型筛选全集(72 项含『全部』= 71 个事件类型,后端任意字符串精确匹配
 /// 无白名单——新增写入点须回补)与粗分类配色(details 键中文 label 桌面已有,
 /// 移动端仅挑高频键,缺省回落裸键)。
-/// 计数注释 2026-10-30 MCP 素材服务批次 +3('token_created'/'token_revoked'/
-/// 'mcp_settings_changed')时按实数更正:web AdminAuditPage.tsx 同为 64 事件+
-/// 『全部』=65;两者映射键数不同(web labels.ts 多 4 个历史死键,App 无),勿互抄。
-/// 前值 2026-10-28 风控模块 +1('ip_login_unlocked')时更正为 61 事件+『全部』=62。
+/// 计数注释 2026-11-05 邮箱绑定/找回密码批次 +7('email_verification_requested'/
+/// 'email_verified'/'email_changed'/'email_unbound'/'password_reset_requested'/
+/// 'password_reset_completed'/'password_reset_failed')时按实数更正:
+/// 71 事件 + 『全部』= 72(App 无 auth_method 筛选维度,勿照抄 web)。
+/// 前值 2026-10-30 MCP 素材服务批次 +3 时为 64 事件+『全部』=65;两者映射键数
+/// 不同(web labels.ts 多 4 个历史死键,App 无),勿互抄。
+/// 前前值 2026-10-28 风控模块 +1 时为 61 事件+『全部』=62。
 library;
 
 import 'package:flutter/material.dart';
@@ -48,6 +51,12 @@ const kAuditEventTypes = <String>[
   'folder_renamed', 'folder_moved', 'asset_batch_moved',
   // MCP 素材服务(2026-10-30):令牌签发/吊销 + 通道设置变更(仅代码,本轮不发版)
   'token_created', 'token_revoked', 'mcp_settings_changed',
+  // 邮箱绑定/找回密码(2026-11-05 方案 §5.9,7 个新增;App 无 auth_method
+  // 筛选维度,不加 anonymous 该维度)
+  'email_verification_requested', 'email_verified', 'email_changed',
+  'email_unbound',
+  'password_reset_requested', 'password_reset_completed',
+  'password_reset_failed',
 ];
 
 /// event_type → 中文 label(app-polish F7;web labels.ts EVENT_TYPE_LABEL 同
@@ -122,6 +131,14 @@ const kAuditEventLabels = <String, String>{
   'token_created': '访问令牌创建',
   'token_revoked': '访问令牌吊销',
   'mcp_settings_changed': 'MCP 通道设置变更',
+  // 邮箱绑定/找回密码(2026-11-05 方案 §5.9;web labels.ts 同口径)
+  'email_verification_requested': '邮箱验证码请求',
+  'email_verified': '邮箱绑定/验证',
+  'email_changed': '邮箱变更',
+  'email_unbound': '邮箱解绑',
+  'password_reset_requested': '找回密码申请',
+  'password_reset_completed': '密码重置完成',
+  'password_reset_failed': '找回密码失败',
 };
 
 /// event_type → 展示文案(F7 接入点共用):缺 key 回落 raw token。
@@ -159,6 +176,15 @@ const kAuditDetailKeyLabels = <String, String>{
   'token_prefix': '令牌前缀',
   'token_id': '令牌 ID',
   'actor': '操作来源',
+  // 邮箱绑定/找回密码(2026-11-05 方案 §5.9 details 契约键;reason/user_id/
+  // action/email 已有;details 里的邮箱恒为 mask_email 脱敏值)
+  'ok': '结果',
+  'email_masked': '邮箱(脱敏)',
+  'old_masked': '原邮箱(脱敏)',
+  'new_masked': '新邮箱(脱敏)',
+  'purpose': '用途',
+  'source': '来源',
+  'verified_by': '验证人',
 };
 
 /// event_type → 粗分类色(web eventColor 同规则;颜色随主题令牌)。

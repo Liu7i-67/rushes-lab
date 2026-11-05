@@ -34,4 +34,24 @@ void main() {
     final me = Me.fromJson(const {'id': 'u-3', 'name': null});
     expect(me.name, '');
   });
+
+  test('Me.fromJson:邮箱三字段齐备(邮箱账号方案 §7.3)', () {
+    final me = Me.fromJson(const {
+      'id': 'u-4',
+      'name': 'Evan',
+      'email': 'evan@example.com',
+      'email_verified': true,
+      'password_set': true,
+    });
+    expect(me.email, 'evan@example.com');
+    expect(me.emailVerified, isTrue);
+    expect(me.passwordSet, isTrue);
+  });
+
+  test('Me.fromJson:邮箱三字段缺失回落空串/false(旧后端灰度回滚兼容)', () {
+    final me = Me.fromJson(const {'id': 'u-5', 'name': 'Evan'});
+    expect(me.email, '');
+    expect(me.emailVerified, isFalse);
+    expect(me.passwordSet, isFalse);
+  });
 }

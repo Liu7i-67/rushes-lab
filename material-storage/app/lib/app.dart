@@ -31,6 +31,8 @@ import 'features/baidu/bind_code_page.dart';
 import 'features/baidu/task_detail_page.dart';
 import 'features/error_report/error_report_page.dart';
 import 'features/me/about_page.dart';
+import 'features/me/account_email_page.dart';
+import 'features/auth/forgot_password_page.dart';
 import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
@@ -41,6 +43,126 @@ import 'theme/app_theme.dart';
 import 'theme/context_tk.dart';
 import 'theme/theme_controller.dart';
 import 'widgets/toast.dart' show ToastRouteObserver;
+
+/// 命名路由表(顶层函数,便于单测直测两新路由可达性;onGenerateRoute 直转)。
+Route<dynamic>? msOnGenerateRoute(RouteSettings s) {
+  switch (s.name) {
+    case '/':
+      return MaterialPageRoute(builder: (_) => const LoginPage());
+    case '/home':
+      return MaterialPageRoute(builder: (_) => const HomeShell());
+    case '/about':
+      // feat/app-about-icp §2.2:关于我们(logo/版本/备案号展示)
+      return MaterialPageRoute(builder: (_) => const AboutPage());
+    case '/change-password':
+      // arguments=true 强制流(must_change_password;无返回,成功回登录页)
+      final forced = (s.arguments as bool?) ?? false;
+      return MaterialPageRoute(
+        builder: (_) => ChangePasswordPage(forced: forced),
+      );
+    case '/forgot-password':
+      // 邮箱账号方案 §7.2:忘记密码(公开页;登录页入口 pushNamed)
+      return MaterialPageRoute(builder: (_) => const ForgotPasswordPage());
+    case '/account/email':
+      // 邮箱账号方案 §7.3:账号与安全 · 邮箱(我的页入口 pushNamed)
+      return MaterialPageRoute(builder: (_) => const AccountEmailPage());
+    case '/folders':
+      // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用);
+      // B6:附带 my_roles(「新建一级文件夹」闸门=admin/uploader)
+      final a = s.arguments as (String, String, List<String>);
+      return MaterialPageRoute(
+        builder: (_) => FoldersPage(
+          projectId: a.$1,
+          projectName: a.$2,
+          myRoles: a.$3,
+        ),
+      );
+    case '/assets':
+      // B3:附带 where 显示路径(传输任务归属展示)
+      final a = s.arguments as (String, String, String);
+      return MaterialPageRoute(
+        builder: (_) => AssetsPage(folderId: a.$1, folderName: a.$2, where: a.$3),
+      );
+    case '/trash':
+      // B5:文件夹回收站(软删列表+恢复)
+      final a = s.arguments as (String, String); // (folderId, folderName)
+      return MaterialPageRoute(
+        builder: (_) => TrashPage(folderId: a.$1, folderName: a.$2),
+      );
+    case '/approvals':
+      // B7:审批中心(scope=all&pending / scope=self 双段)
+      return MaterialPageRoute(builder: (_) => const ApprovalsPage());
+    case '/notifications':
+      // B7:通知中心(kind 白名单跳转)
+      return MaterialPageRoute(
+        builder: (_) => const NotificationsPage(),
+      );
+    case '/my-permissions':
+      // B7:我的权限(项目角色 + 已批准临时授权)
+      return MaterialPageRoute(
+        builder: (_) => const MyPermissionsPage(),
+      );
+    case '/deleted-projects':
+      // B6:已删除项目回收站(列表+恢复;入口闸门 is_project_deleter)
+      return MaterialPageRoute(
+        builder: (_) => const DeletedProjectsPage(),
+      );
+    case '/preview':
+      // B2 §8.2 预览:列表序列+起点+单夹详情下载权
+      final args = s.arguments as PreviewArgs;
+      return MaterialPageRoute(builder: (_) => PreviewPage(args: args));
+    case '/baidu':
+      // B9 §8.10 网盘备份用户侧完整页(绑定状态+任务列表)
+      return MaterialPageRoute(builder: (_) => const BaiduPage());
+    case '/baidu-new-task':
+      // B9 §8.10 新建备份任务向导(源目录/项目/承接夹)
+      return MaterialPageRoute(
+        builder: (_) => const BaiduNewTaskPage(),
+      );
+    case '/baidu-task':
+      // B9 §8.10 任务详情(进度+文件明细+文件级三操作)
+      final id = s.arguments as String;
+      return MaterialPageRoute(
+        builder: (_) => BaiduTaskDetailPage(taskId: id),
+      );
+    case '/baidu-bind':
+      // B0① 百度绑定 oob 复制码流程(§8.10;从网盘备份页进入)
+      return MaterialPageRoute(builder: (_) => const BindCodePage());
+    case '/admin':
+      // B8:管理后台入口页(页内深链兜底二次闸 is_system_admin)
+      return MaterialPageRoute(builder: (_) => const AdminHomePage());
+    case '/admin/users':
+      return MaterialPageRoute(builder: (_) => const AdminUsersPage());
+    case '/admin/groups':
+      return MaterialPageRoute(builder: (_) => const AdminGroupsPage());
+    case '/admin/audit':
+      return MaterialPageRoute(builder: (_) => const AdminAuditPage());
+    case '/admin/grant-templates':
+      return MaterialPageRoute(
+        builder: (_) => const AdminGrantTemplatesPage(),
+      );
+    case '/admin/folder-templates':
+      // 目录模板例外闸门(持 flag 非 admin 直达;页内 403 提示兜底)
+      return MaterialPageRoute(
+        builder: (_) => const AdminFolderTemplatesPage(),
+      );
+    case '/admin/baidu-tasks':
+      return MaterialPageRoute(
+        builder: (_) => const AdminBaiduTasksPage(),
+      );
+    case '/admin/risk':
+      // 风控(§5.1 深链;页面级 EmptyState 闸,非 admin 直接锁定态)
+      return MaterialPageRoute(builder: (_) => const AdminRiskPage());
+    case '/admin/usage':
+      // 使用统计(§5.1 深链;同款页面级闸)
+      return MaterialPageRoute(builder: (_) => const AdminUsagePage());
+    case '/error-report':
+      // feat/app-error-page F1-F3:全局报错提醒页;无构造参数,
+      // 页面自行从 errorReporter.currentError 取首条错误详情(D2)。
+      return MaterialPageRoute(builder: (_) => const ErrorReportPage());
+  }
+  return null;
+}
 
 class MsApp extends StatefulWidget {
   const MsApp({super.key});
@@ -115,120 +237,7 @@ class _MsAppState extends State<MsApp> {
             ),
           );
         },
-        onGenerateRoute: (s) {
-          switch (s.name) {
-            case '/':
-              return MaterialPageRoute(builder: (_) => const LoginPage());
-            case '/home':
-              return MaterialPageRoute(builder: (_) => const HomeShell());
-            case '/about':
-              // feat/app-about-icp §2.2:关于我们(logo/版本/备案号展示)
-              return MaterialPageRoute(builder: (_) => const AboutPage());
-            case '/change-password':
-              // arguments=true 强制流(must_change_password;无返回,成功进 HomeShell)
-              final forced = (s.arguments as bool?) ?? false;
-              return MaterialPageRoute(
-                builder: (_) => ChangePasswordPage(forced: forced),
-              );
-            case '/folders':
-              // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用);
-              // B6:附带 my_roles(「新建一级文件夹」闸门=admin/uploader)
-              final a = s.arguments as (String, String, List<String>);
-              return MaterialPageRoute(
-                builder: (_) => FoldersPage(
-                  projectId: a.$1,
-                  projectName: a.$2,
-                  myRoles: a.$3,
-                ),
-              );
-            case '/assets':
-              // B3:附带 where 显示路径(传输任务归属展示)
-              final a = s.arguments as (String, String, String);
-              return MaterialPageRoute(
-                builder: (_) =>
-                    AssetsPage(folderId: a.$1, folderName: a.$2, where: a.$3),
-              );
-            case '/trash':
-              // B5:文件夹回收站(软删列表+恢复)
-              final a =
-                  s.arguments as (String, String); // (folderId, folderName)
-              return MaterialPageRoute(
-                builder: (_) => TrashPage(folderId: a.$1, folderName: a.$2),
-              );
-            case '/approvals':
-              // B7:审批中心(scope=all&pending / scope=self 双段)
-              return MaterialPageRoute(builder: (_) => const ApprovalsPage());
-            case '/notifications':
-              // B7:通知中心(kind 白名单跳转)
-              return MaterialPageRoute(
-                builder: (_) => const NotificationsPage(),
-              );
-            case '/my-permissions':
-              // B7:我的权限(项目角色 + 已批准临时授权)
-              return MaterialPageRoute(
-                builder: (_) => const MyPermissionsPage(),
-              );
-            case '/deleted-projects':
-              // B6:已删除项目回收站(列表+恢复;入口闸门 is_project_deleter)
-              return MaterialPageRoute(
-                builder: (_) => const DeletedProjectsPage(),
-              );
-            case '/preview':
-              // B2 §8.2 预览:列表序列+起点+单夹详情下载权
-              final args = s.arguments as PreviewArgs;
-              return MaterialPageRoute(builder: (_) => PreviewPage(args: args));
-            case '/baidu':
-              // B9 §8.10 网盘备份用户侧完整页(绑定状态+任务列表)
-              return MaterialPageRoute(builder: (_) => const BaiduPage());
-            case '/baidu-new-task':
-              // B9 §8.10 新建备份任务向导(源目录/项目/承接夹)
-              return MaterialPageRoute(
-                builder: (_) => const BaiduNewTaskPage(),
-              );
-            case '/baidu-task':
-              // B9 §8.10 任务详情(进度+文件明细+文件级三操作)
-              final id = s.arguments as String;
-              return MaterialPageRoute(
-                builder: (_) => BaiduTaskDetailPage(taskId: id),
-              );
-            case '/baidu-bind':
-              // B0① 百度绑定 oob 复制码流程(§8.10;从网盘备份页进入)
-              return MaterialPageRoute(builder: (_) => const BindCodePage());
-            case '/admin':
-              // B8:管理后台入口页(页内深链兜底二次闸 is_system_admin)
-              return MaterialPageRoute(builder: (_) => const AdminHomePage());
-            case '/admin/users':
-              return MaterialPageRoute(builder: (_) => const AdminUsersPage());
-            case '/admin/groups':
-              return MaterialPageRoute(builder: (_) => const AdminGroupsPage());
-            case '/admin/audit':
-              return MaterialPageRoute(builder: (_) => const AdminAuditPage());
-            case '/admin/grant-templates':
-              return MaterialPageRoute(
-                builder: (_) => const AdminGrantTemplatesPage(),
-              );
-            case '/admin/folder-templates':
-              // 目录模板例外闸门(持 flag 非 admin 直达;页内 403 提示兜底)
-              return MaterialPageRoute(
-                builder: (_) => const AdminFolderTemplatesPage(),
-              );
-            case '/admin/baidu-tasks':
-              return MaterialPageRoute(
-                builder: (_) => const AdminBaiduTasksPage(),
-              );
-            case '/admin/risk':
-              // 风控(§5.1 深链;页面级 EmptyState 闸,非 admin 直接锁定态)
-              return MaterialPageRoute(builder: (_) => const AdminRiskPage());
-            case '/admin/usage':
-              // 使用统计(§5.1 深链;同款页面级闸)
-              return MaterialPageRoute(builder: (_) => const AdminUsagePage());
-            case '/error-report':
-              // feat/app-error-page F1-F3:全局报错提醒页;无构造参数,
-              // 页面自行从 errorReporter.currentError 取首条错误详情(D2)。
-              return MaterialPageRoute(builder: (_) => const ErrorReportPage());
-          }
-          return null;
-        },
+        onGenerateRoute: msOnGenerateRoute,
       ),
     );
   }

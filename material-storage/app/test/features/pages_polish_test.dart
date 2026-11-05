@@ -18,7 +18,6 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:ms_app/core/api/auth_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/core/transfers/transfer_queue.dart';
 import 'package:ms_app/core/transfers/transfer_task.dart';
@@ -35,18 +34,15 @@ import 'package:ms_app/widgets/app_segmented.dart';
 import '../helpers/api_harness.dart';
 
 // ── E2:auth 域记录式假 API(session.changePassword 走 auth.changePassword+
-//    auth.me 两端点,均须短路段免真实 HTTP)──────────────────────────────────
-class _AuthFakeApi extends AuthApi {
+//    logout 两端点(邮箱账号方案 §7.4 改造:成功即主动 logout 清会话,不再
+//    me() 刷新),均须短路段免真实 HTTP;继承 helpers FakeAuthApi 满足
+//    FakeMsApi.auth 的返回型约束)───────────────────────────────────────────
+class _AuthFakeApi extends FakeAuthApi {
   _AuthFakeApi(super.api);
 
-  final changeCalls = <({String oldPw, String newPw})>[];
-
   @override
-  Future<void> changePassword({
-    required String oldPassword,
-    required String newPassword,
-  }) async {
-    changeCalls.add((oldPw: oldPassword, newPw: newPassword));
+  Future<void> logout() async {
+    logoutCalls++;
   }
 
   @override
@@ -154,7 +150,10 @@ void main() {
       oldPw: 'Old-1',
       newPw: 'New-1!',
     ), reason: '前置:改密请求已发(假 API 短路)');
-    // TODO(app-polish E2): 现状应失败(成功即静默 pop,无任何反馈),交付后转绿
+    // 邮箱账号方案 §7.4:成功即主动 logout 清会话(session_version 已自增,
+    // 不再 me() 刷新),强制流与普通流统一回登录页('/')
+    expect(api.auth.logoutCalls, 1, reason: '改密成功主动 logout 清会话');
+    expect(session.me, isNull, reason: 'logout 清空 Me 缓存');
     expect(
       find.textContaining('重新登录'),
       findsWidgets,
@@ -179,12 +178,16 @@ void main() {
     await tester.pump();
 
     // 小调注释:E5 精修后页面为分组卡片列表,退出登录行在 600dp 测试视口
-    // 惰性构建窗口外,先滚到底再点(交互语义不变)
+    // 惰性构建窗口外,先滚到底再点(交互语义不变);邮箱账号批次在
+    // 「账号与安全」组新增「邮箱」行(修改密码上方),行位再下移一档——
+    // 惰性构建≠行中心进入视口,补一拍短拖后再点
     await tester.dragUntilVisible(
       find.text('退出登录'),
       find.byType(ListView),
       const Offset(0, -200),
     );
+    await tester.drag(find.byType(ListView), const Offset(0, -120));
+    await tester.pump();
     await tester.tap(find.text('退出登录'));
     await tester.pump();
     await tester.pump();

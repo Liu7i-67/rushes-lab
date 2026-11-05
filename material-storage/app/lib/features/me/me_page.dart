@@ -9,6 +9,7 @@ import 'package:flutter/material.dart' hide Badge;
 import '../../core/haptics.dart';
 import '../../core/session.dart';
 import '../../main.dart' show kAppBuildStamp;
+import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_confirm.dart';
@@ -110,6 +111,20 @@ class MePage extends StatelessWidget {
               MeGroup(
                 title: '账号与安全',
                 children: [
+                  // 邮箱账号方案 §7.3:邮箱行在「修改密码」上方;副标题=
+                  // 当前邮箱或 未绑定/未验证;显隐=仅明确 emailAuthEnabled
+                  // == false 且无邮箱隐藏(已有邮箱始终显示,页内只留解绑)。
+                  if (showMeEmailRow(
+                    me,
+                    emailAuthEnabled: session.emailAuthEnabled,
+                  ))
+                    AppRow(
+                      leading: const Icon(Icons.mail_outline),
+                      title: '邮箱',
+                      subtitle: emailRowSubtitle(me),
+                      onTap: () =>
+                          Navigator.of(context).pushNamed('/account/email'),
+                    ),
                   AppRow(
                     leading: const Icon(Icons.password_outlined),
                     title: '修改密码',
@@ -163,3 +178,20 @@ class MePage extends StatelessWidget {
 /// 独立纯函数便于单测(test 环境恒空 stamp,无法经环境变量注入)。
 @visibleForTesting
 String? buildStampLabel(String stamp) => stamp.isEmpty ? null : '构建 $stamp';
+
+/// 「邮箱」行显隐(邮箱账号方案 §7.3):仅明确 emailAuthEnabled == false
+/// **且**当前无邮箱才隐藏——已有邮箱始终显示(邮箱功能关闭时页内只保留
+/// 解绑,解绑不依赖 SMTP);配置 unknown(null)/true 都显示。
+/// 独立纯函数便于单测。
+@visibleForTesting
+bool showMeEmailRow(Me? me, {required bool? emailAuthEnabled}) =>
+    !(emailAuthEnabled == false && (me?.email.isEmpty ?? true));
+
+/// 「邮箱」行副标题:有邮箱显示当前值(未验证加注),无邮箱落「未绑定」。
+/// 独立纯函数便于单测。
+@visibleForTesting
+String emailRowSubtitle(Me? me) {
+  final email = me?.email ?? '';
+  if (email.isEmpty) return '未绑定';
+  return (me?.emailVerified ?? false) ? email : '$email(未验证)';
+}

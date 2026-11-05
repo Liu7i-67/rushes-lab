@@ -24,6 +24,9 @@ const ApprovalsPage = lazy(() => import('./pages/ApprovalsPage'));
 const DevLoginPage = lazy(() => import('./pages/DevLoginPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'));
+// 邮箱账号方案 §6.5:找回密码两公开页(匿名可达,AppShell 无条件放行)
+const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./pages/ResetPasswordPage'));
 const ShareLandingPage = lazy(() => import('./pages/ShareLandingPage'));
 const RequestLinkLandingPage = lazy(() => import('./pages/RequestLinkLandingPage'));
 const AdminAuditPage = lazy(() => import('./pages/AdminAuditPage'));
@@ -45,14 +48,17 @@ const NotificationsPage = lazy(() => import('./pages/NotificationsPage'));
 const qc = new QueryClient({
   defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: false, retry: false } },
   queryCache: new QueryCache({
-    onError: (err) => {
+    onError: (err, query) => {
+      // 邮箱账号方案 §6.5:hook 带 meta.silent = 页面自行就地提示,不再弹全局 toast
+      if (query.meta?.silent) return;
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401 || status === 403) return;
       antMessage.error(errorMessage(err, '数据加载失败'));
     },
   }),
   mutationCache: new MutationCache({
-    onError: (err) => {
+    onError: (err, _variables, _context, mutation) => {
+      if (mutation.meta?.silent) return;
       const status = (err as { response?: { status?: number } })?.response?.status;
       if (status === 401) return;
       antMessage.error(errorMessage(err, '操作失败'));
@@ -93,6 +99,9 @@ const RouterRoutes = () => (
       <Route path="/dev-login" element={<DevLoginPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/change-password" element={<ChangePasswordPage />} />
+      {/* 邮箱账号方案 §6.5:找回密码公开页(邮件链接落 fragment,不进代理日志) */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       {/* 账号设置(MCP 素材服务 D15:Web 端自助创建/吊销个人访问令牌) */}
       <Route path="/settings" element={<SettingsPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
@@ -114,10 +123,17 @@ function AppShell() {
     return () => document.body.classList.remove('ms-compact');
   }, [compact]);
 
-  // #149: 本地登录 / 改密是独立页(无 AppShell),未登录时也放行(useLocation 为 basename 相对路径)
-  const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password';
+  // #149: 本地登录 / 改密是独立页(无 AppShell),未登录时也放行(useLocation 为 basename 相对路径);
+  // 邮箱账号方案 §6.5:找回密码两公开页同样归入 onAuthPage 白名单
+  const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password'
+    || location.pathname === '/forgot-password' || location.pathname === '/reset-password';
 
-  if (location.pathname === '/dev-login') return <RouterRoutes />;
+  // 无壳放行(先于 me 判断,同 /dev-login):已登录浏览器里点邮件链接打开
+  // /forgot-password、/reset-password 也不渲染顶栏;/forgot-password 登录态访问允许,不强制跳走
+  if (location.pathname === '/dev-login' || location.pathname === '/forgot-password'
+    || location.pathname === '/reset-password') {
+    return <RouterRoutes />;
+  }
 
   if (isLoading) {
     return (

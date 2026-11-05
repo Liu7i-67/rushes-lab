@@ -6,20 +6,25 @@
  * - 自愿流程:UserMenu「修改密码」(me.password_set 时可见)
  *
  * 未登录访问 → 跳 /login?next=/change-password。
+ * 邮箱账号方案 §6.6:改密成功后 session_version 自增、原会话已失效 —— 成功后
+ * queryClient.clear() 清掉旧 me 缓存并回 /login?reset=1(导航只此一处,不再回首页)。
  */
 import { App, Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { Navigate, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { errorMessage } from '../api/client';
-import { useChangePassword, useMe } from '../api/hooks';
+import { useChangePassword, useMe, usePublicConfig } from '../api/hooks';
+import {
+  buildPasswordRe, DEFAULT_PASSWORD_MIN_LENGTH, passwordPolicyHint,
+} from '../lib/password-policy';
 import { useCompactViewport } from '../lib/use-viewports';
-
-/** 镜像后端密码策略:≥8 位,且同时含字母和数字(AUTH_PASSWORD_MIN_LENGTH=8) */
-const PW_RE = /^(?=.*[A-Za-z])(?=.*\d).{8,}$/;
 
 export default function ChangePasswordPage() {
   const navigate = useNavigate();
   const { message } = App.useApp();
+  const queryClient = useQueryClient();
   const { data: me, isLoading, isError } = useMe();
+  const { data: publicConfig } = usePublicConfig();
   const change = useChangePassword();
   const [form] = Form.useForm();
   const compact = useCompactViewport();
@@ -28,12 +33,18 @@ export default function ChangePasswordPage() {
   if (isError || !me) return <Navigate to="/login?next=/change-password" replace />;
 
   const forced = me.must_change_password;
+  // 密码策略与重置页共用一份(§6.3);min_length 来自 public-config,拉取失败回落 8
+  const minLength = publicConfig?.password_min_length ?? DEFAULT_PASSWORD_MIN_LENGTH;
+  const pwRe = buildPasswordRe(minLength);
 
   const onFinish = async (v: { old_password: string; new_password: string }) => {
     try {
       await change.mutateAsync({ old_password: v.old_password, new_password: v.new_password });
-      message.success(forced ? '密码已设置' : '密码已修改');
-      navigate('/', { replace: true });
+      // §6.6:改密后原会话已失效(session_version 自增),不再 invalidate ['me'](必 401);
+      // 清全部缓存回登录,导航只此一处
+      queryClient.clear();
+      message.success(forced ? '密码已设置,请重新登录' : '密码已修改,请重新登录');
+      navigate('/login?reset=1', { replace: true });
     } catch (err) {
       message.error(errorMessage(err, '修改密码失败'));
     }
@@ -70,10 +81,11 @@ export default function ChangePasswordPage() {
             label="新密码"
             rules={[
               { required: true, message: '请输入新密码' },
-              { pattern: PW_RE, message: '至少 8 位,且同时包含字母和数字' },
+              // antd v6 陷阱:pattern 与 min/max 混在同一 rule 会互吞,长度交给正则表达
+              { pattern: pwRe, message: passwordPolicyHint(minLength) },
             ]}
           >
-            <Input.Password placeholder="≥8 位,含字母和数字" />
+            <Input.Password placeholder={passwordPolicyHint(minLength)} />
           </Form.Item>
           <Form.Item
             name="confirm_password"

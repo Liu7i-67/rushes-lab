@@ -49,6 +49,10 @@ class _LoginPageState extends State<LoginPage> {
   bool _restoring = false;
   String? _error;
 
+  /// 公开配置一次性守卫(邮箱账号方案 §7.1):本页生命周期只拉一次,
+  /// 防会话变化反复触发;失败保持 null=unknown(入口按显示兜底)。
+  bool _configLoaded = false;
+
   @override
   void initState() {
     super.initState();
@@ -70,13 +74,34 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   /// 探活命中:先试 cookie 会话恢复(重启免登录);强制改密者直达改密页。
+  /// 公开配置为 fire-and-forget 前置(§7.1):不 await 阻塞 restore——配置
+  /// 请求挂起不得拖慢会话恢复;3s 短超时,失败落 null=unknown(显隐判定
+  /// 「仅明确 false 隐藏」,点进去由后端 503 文案兜底)。
   Future<void> _onReady() async {
+    _loadPublicConfig();
     if (_restoring || session.me != null || !mounted) return;
     _restoring = true;
     final me = await session.restore();
     _restoring = false;
     if (!mounted || me == null) return;
     _goAfterAuth(me.mustChangePassword);
+  }
+
+  /// GET /auth/public-config(fire-and-forget;调用方不 await,§7.1)。
+  Future<void> _loadPublicConfig() async {
+    final api = session.api;
+    if (_configLoaded || api == null) return;
+    _configLoaded = true;
+    try {
+      final cfg =
+          await api.auth.publicConfig().timeout(const Duration(seconds: 3));
+      session.emailAuthEnabled = cfg.emailAuthEnabled;
+      session.passwordResetEnabled = cfg.passwordResetEnabled;
+    } catch (_) {
+      // 拉不到保持 unknown:入口不隐藏(§7.1;noErrorReport 已静默 5xx)
+    } finally {
+      if (mounted) setState(() {});
+    }
   }
 
   void _goAfterAuth(bool mustChange) {
@@ -186,6 +211,13 @@ class _LoginPageState extends State<LoginPage> {
                                   phase: session.phase,
                                   onSubmit: _login,
                                   onRetry: session.probe,
+                                  // 邮箱账号方案 §7.1:仅明确 false 隐藏;
+                                  // null(未拉到/失败)/true 都显示
+                                  showForgotPassword:
+                                      session.passwordResetEnabled != false,
+                                  onForgotPassword: () =>
+                                      Navigator.of(context)
+                                          .pushNamed('/forgot-password'),
                                 ),
                               ),
                             ),

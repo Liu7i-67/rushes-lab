@@ -21,7 +21,8 @@ import '../../widgets/toast.dart';
 class ChangePasswordPage extends StatefulWidget {
   const ChangePasswordPage({super.key, this.forced = false});
 
-  /// true=首登强制流:无返回键,附退出登录出口,成功后进 HomeShell。
+  /// true=首登强制流:无返回键,附退出登录出口;成功后与普通流统一回登录页
+  /// (邮箱账号方案 §7.4,session_version 已自增踢全部旧会话)。
   final bool forced;
 
   @override
@@ -65,14 +66,12 @@ class _ChangePasswordPageState extends State<ChangePasswordPage> {
     try {
       await session.changePassword(oldPw, newPw);
       if (!mounted) return;
-      // E2:先出成功反馈(含「重新登录」口径)再跳转——改密后旧会话失效,
-      // 强制流进首页由路由守卫接管,非强制流返回上一页
+      // E2:先出成功反馈(含「重新登录」口径)再跳转。邮箱账号方案 §7.4:
+      // 后端 session_version 已自增、旧会话已由 Session.changePassword 主动
+      // logout 清空——强制流与普通流统一回登录页,导航只保留此处一处
+      // (删除原 `/home` push 与 pop() 双路径,避免双重跳转)。
       toast(context, '密码已更新,请重新登录', tone: ToastTone.success);
-      if (widget.forced) {
-        Navigator.of(context).pushNamedAndRemoveUntil('/home', (r) => false);
-      } else {
-        Navigator.of(context).pop();
-      }
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (r) => false);
     } on ApiException catch (e) {
       setState(() => _error = e.message);
     } catch (e) {
