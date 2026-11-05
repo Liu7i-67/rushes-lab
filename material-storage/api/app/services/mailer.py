@@ -10,6 +10,10 @@
   后断开 —— 服务器可能已接受,调用方保留 token / 验证码并提示检查邮箱)。
 - From / To 一律 ``email.headerregistry.Address`` 构造防头注入;
   **display_name 不能传 None**(CPython 3.12 会 TypeError),未配置时用空串。
+- Message-ID / Date 必须自己补(P0 实锤:Gmail 对缺 Message-ID 的邮件直接
+  550-5.7.1 拒收,RFC 5322);EmailMessage / smtplib.send_message / QQ 企业邮
+  中继都**不会**自动生成。Message-ID 域名取 SMTP_FROM_EMAIL 的 @ 后部分,
+  解析失败回退 ``localhost``(防跨邮件系统判重)。
 - **send_mail 自己校验收件人**(不信任调用方):含 `, ; < > " / 空白 /
   控制字符 → MailSendError(definite=True)。
 - 日志只出现 mask_email 脱敏后的收件人(方案 §10.4 验收硬项)。
@@ -23,6 +27,7 @@ import smtplib
 import time
 from email.headerregistry import Address
 from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 from app.services.email_utils import is_header_safe_addr, mask_email
 from app.settings import Settings
@@ -97,6 +102,9 @@ async def send_mail(
     )
     msg["To"] = Address(display_name="", addr_spec=to)
     msg["Subject"] = subject
+    # RFC 5322 必备头,缺了 Gmail 直接 550-5.7.1 拒收(见模块 docstring 钉子)。
+    msg["Message-ID"] = make_msgid(domain=_from_domain(settings))
+    msg["Date"] = formatdate(localtime=True)
     msg.set_content(body)
 
     budget = settings.smtp_total_timeout_seconds if timeout is None else timeout
@@ -130,6 +138,17 @@ async def send_mail(
         raise MailSendError(f"mail send failed: {outcome.exc!r}", definite=definite) from outcome.exc
 
     log.info("mail sent to=%s subject=%r in %.1fs", mask_email(to), subject, time.monotonic() - started)
+
+
+def _from_domain(settings: Settings) -> str:
+    """Message-ID 的域名:SMTP_FROM_EMAIL ``@`` 后部分;解析失败回退 localhost。
+
+    纯防御分支:无 @ / 空 domain 的 from 地址在 ``Address(addr_spec=...)``
+    处就会抛 InvalidHeaderDefect,到不了这里;保留回退以免未来校验口径变化
+    时 Message-ID 悄悄变成空域名。
+    """
+    _, sep, domain = (settings.smtp_from_email or "").rpartition("@")
+    return domain if sep and domain else "localhost"
 
 
 def _send_sync(settings: Settings, msg: EmailMessage, outcome: _SendOutcome) -> None:

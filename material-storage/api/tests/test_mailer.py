@@ -7,13 +7,16 @@
 - 「确定失败」vs「结果未知」:连接拒绝 / 连接超时 / 认证失败 / RCPT 拒收 →
   definite=True;DATA 阶段断开 / 外层 wait_for 总预算超时 → definite=False
 - 外层总预算默认取 settings.smtp_total_timeout_seconds
+- Message-ID / Date 头显式补齐(Gmail 550-5.7.1):域名 = from 域名,无 @ 回退 localhost
 - 日志只出现 mask_email 脱敏收件人
 - email_utils 基础部分:normalize_email / mask_email / is_header_safe_addr
 """
 
 from __future__ import annotations
 
+import email.utils
 import logging
+import re
 import smtplib
 import time
 from typing import Any, ClassVar
@@ -125,6 +128,34 @@ async def test_headers_empty_display_name_uses_plain_addr(smtp_calls: dict[str, 
     """smtp_from_name 未配置 → display_name 传空串(传 None 会 TypeError,§5.6.1)。"""
     await send_mail(mk_settings(), to="alice@example.com", subject="s", body="b")
     assert str(smtp_calls["msg"]["From"]) == "noreply@example.com"
+
+
+# ─── Message-ID / Date 头(Gmail 550-5.7.1 修复)──────────────────────────────
+async def test_message_id_and_date_headers_present(smtp_calls: dict[str, Any]) -> None:
+    """发出的消息必须自带合法 Message-ID(域名 = from 域名)与 Date 头。
+
+    P0 实锤:EmailMessage / smtplib.send_message / QQ 企业邮中继都不会自动补,
+    Gmail 对缺 Message-ID 的邮件直接 550-5.7.1 拒收(RFC 5322)。
+    """
+    settings = mk_settings(smtp_from_email="noreply@taoxiplan.com")
+    await send_mail(settings, to="alice@gmail.com", subject="s", body="b")
+    msg = smtp_calls["msg"]
+
+    # Message-ID 形如 <...@taoxiplan.com>:尖括号包裹、无空白、域名 = from 域名
+    msg_id = str(msg["Message-ID"])
+    assert re.fullmatch(r"<[^<>\s]+@taoxiplan\.com>", msg_id) is not None, msg_id
+
+    # Date 存在且可按 RFC 5322 解析
+    date_hdr = msg["Date"]
+    assert date_hdr is not None
+    assert email.utils.parsedate_to_datetime(str(date_hdr)) is not None
+
+
+def test_from_domain_fallback_localhost() -> None:
+    """from 地址无 @ / 空 domain → Message-ID 域名回退 localhost(防御分支)。"""
+    assert mailer._from_domain(mk_settings(smtp_from_email="noreply@taoxiplan.com")) == "taoxiplan.com"
+    assert mailer._from_domain(mk_settings(smtp_from_email="no-at-sign")) == "localhost"
+    assert mailer._from_domain(mk_settings(smtp_from_email=None)) == "localhost"
 
 
 # ─── 收件人 / 发件人安全校验(不信任调用方)───────────────────────────────────
