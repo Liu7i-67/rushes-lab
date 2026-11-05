@@ -77,24 +77,36 @@ async def get_audit(request: Request):
 _FORCED_CHANGE_OK_ROUTES = frozenset({"me", "change_password", "logout"})
 
 # ─── current user(cookie session → Bearer PAT → dev header)─────────────────
-async def load_active_user(uid: uuid.UUID) -> tuple[CurrentUser, bool]:
+async def load_active_user(
+    uid: uuid.UUID, *, expected_session_version: int | None = None,
+) -> tuple[CurrentUser, bool]:
     """按 users.id 查库,一次拿齐 F5(is_active)+ F15(强制改密)判定所需的列。
 
     F5:禁用必须立即下线,不能等 JWT 7 天过期 —— 所有需要登录的端点一律 401。
     返回 `(CurrentUser, forced_change)`(口径与 /me 一致)。**每次认证一次 PK 查询**:
     别拆成两次开 session,缩略图这类高频端点会被每请求两次 round-trip 放大。
     session / dev 通道 / PAT 链(``app/services/mcp_auth.py``)共用本实现。
+
+    expected_session_version(邮箱账号方案 §5.5,仅 session 通道传):JWT payload
+    的 ``ver`` 与库内 ``session_version`` 不一致 → 401「会话已失效」(改密/重置/
+    禁用后旧 JWT 立即失效)。None = 不校验(PAT 走吊销、dev 通道无 JWT 版本)。
     """
     async with get_sessionmaker()() as db:
         stmt = select(
             User.id, User.name, User.is_active,
             User.must_change_password, User.password_hash,
+            User.session_version,
         ).where(User.id == uid)
         row = (await db.execute(stmt)).first()
         if row is None:
             raise HTTPException(401, "用户不存在或已删除")
         if not row.is_active:
             raise HTTPException(401, "账号已停用,请联系管理员")
+        if (
+            expected_session_version is not None
+            and (row.session_version or 0) != expected_session_version
+        ):
+            raise HTTPException(401, "会话已失效,请重新登录")
         forced_change = bool(row.must_change_password and row.password_hash is not None)
         return CurrentUser(id=row.id, name=row.name), forced_change
 
@@ -129,7 +141,10 @@ async def get_current_user(
             uid = uuid.UUID(payload["sub"])
             # F5:is_active 校验放最前 —— 禁用账号任何端点一律 401(含改密/me),
             # 优先于 F15 的 403(禁用状态下的改密诉求无意义)
-            user, forced_change = await load_active_user(uid)
+            # §5.5:ver 缺失/为 null 的存量 JWT 一律按 0 比对(迁移后全站不掉线)
+            user, forced_change = await load_active_user(
+                uid, expected_session_version=int(payload.get("ver") or 0),
+            )
         except (ValueError, KeyError) as e:
             # decode 失败 ≠ 会话有效:回落 PAT(生产不再直接 401 —— 否则
             # ms-mcp 转发请求被浏览器残留 cookie 挡死);dev 下再回落 X-User-Id,

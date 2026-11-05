@@ -54,10 +54,11 @@
   真正被吊销的行 —— 审计由调用方在 commit 之后逐条写(无活跃 token 则不写)。
 
 ★ 吊销挂钩钉子(D13):``grep -rn "password_hash\\s*=" --include=*.py app scripts``
-应命中 5 个生产写点(4 处赋值 + 1 处构造参数):
+应命中 6 个生产写点(5 处赋值 + 1 处构造参数):
   app/routers/auth.py(change-password)、app/routers/directory.py(reset-password)、
   scripts/set_password.py、scripts/set_initial_admin.py(以上密码变更)、
-  app/routers/directory.py(disable,is_active 路径)。
+  app/routers/directory.py(disable,is_active 路径)、
+  app/services/password_reset.py(邮箱找回密码 confirm,方案 §5.4.4)。
 后续新增密码/禁用写点必须同步调用 ``revoke_user_tokens``。
 """
 from __future__ import annotations

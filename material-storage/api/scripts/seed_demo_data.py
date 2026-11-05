@@ -26,12 +26,13 @@ from typing import Any
 import boto3
 from botocore.client import Config
 from botocore.exceptions import ClientError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_sessionmaker
-from app.db.tables import Asset, Folder, Organization, Project, User
+from app.db.tables import Asset, Folder, Organization, PasswordResetToken, Project, User
+from app.services.email_utils import normalize_email
 from app.services.permissions import create_permissions_service, fmt_subject
 from app.settings import get_settings
 
@@ -187,10 +188,13 @@ async def main() -> None:
         # 幂等:on_conflict_do_update 按 id upsert;重跑时 Evan(ou_evan_local)会被
         # 上面"真 user"查询捞到,走下方同一升级流程。
         if not real_users:
-            # 邮箱账号方案 §5.3.5 seed 段:email 归一后写入;set_ 只在 lower(email)
-            # 实际变化时才含 email(值没变不动,重跑不触碰邮箱相关状态);撞
+            # 邮箱账号方案 §5.3.5 seed 段:email 归一(normalize_email 唯一口径)
+            # 后写入;set_ 只在 lower(email) **实际变化**时才含 email 与
+            # email_verified_at=NULL(值没变不动,重跑不与 dev 验证状态打架);
+            # email 变化时同步删未用重置 token(§5.3.5 清理联动);撞
             # lower(email) 唯一索引(迁移 0021)时跳过 email 写入给可读提示。
-            evan_email = "evan@dev.local"
+            evan_email = normalize_email("evan@dev.local")
+            assert evan_email is not None
             current = (
                 await session.execute(select(User.email).where(User.id == LOCAL_ADMIN_ID))
             ).first()
@@ -198,8 +202,12 @@ async def main() -> None:
                 "name": "Evan", "username": "evan",
                 "feishu_open_id": "ou_evan_local", "is_active": True,
             }
-            if current is None or current[0] is None or current[0].strip().lower() != evan_email:
+            email_changed = (
+                current is None or current[0] is None or current[0].strip().lower() != evan_email
+            )
+            if email_changed:
                 evan_set["email"] = evan_email
+                evan_set["email_verified_at"] = None
             try:
                 await session.execute(
                     insert(User).values(
@@ -210,6 +218,16 @@ async def main() -> None:
                         set_=evan_set,
                     )
                 )
+                if email_changed:
+                    # §5.3.5 清理联动:邮箱值变化 → 作废未用重置 token(同事务;
+                    # DEL email:code 不做 —— CLI 无现成 Redis,验证码 600s TTL
+                    # 自然过期兜底,方案 §5.5.1 允许跳过)
+                    await session.execute(
+                        delete(PasswordResetToken).where(
+                            PasswordResetToken.user_id == LOCAL_ADMIN_ID,
+                            PasswordResetToken.used_at.is_(None),
+                        )
+                    )
             except IntegrityError:
                 await session.rollback()
                 log.warning(
@@ -223,7 +241,12 @@ async def main() -> None:
                         username="evan", feishu_open_id="ou_evan_local", is_active=True,
                     ).on_conflict_do_update(
                         index_elements=["id"],
-                        set_={k: v for k, v in evan_set.items() if k != "email"},
+                        # 邮箱没写成 = 邮箱未变化:验证态清理也不做(勿把
+                        # email_verified_at 一并置 NULL,与「值没变不清」口径一致)
+                        set_={
+                            k: v for k, v in evan_set.items()
+                            if k not in ("email", "email_verified_at")
+                        },
                     )
                 )
             # outsider:只建用户行,不写任何 OpenFGA 权限 tuple(测试契约:无权限普通用户)

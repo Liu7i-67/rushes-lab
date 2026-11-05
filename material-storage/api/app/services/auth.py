@@ -40,11 +40,12 @@ from urllib.parse import urlencode
 
 import httpx
 from jose import JWTError, jwt
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.tables import User
+from app.db.tables import PasswordResetToken, User
+from app.services.email_utils import mask_email
 from app.settings import Settings
 
 log = logging.getLogger(__name__)
@@ -132,19 +133,23 @@ class OIDCService:
     async def _find_by_email(self, db: AsyncSession, email: str) -> User | None:
         """按 email 找已有本地账号(email 列无唯一约束,理论上可能多命中)。
 
-        多命中时取 created_at 最早的一个(确定性),并告警供排查。
+        多命中时取 created_at 最早的一个(确定性),并告警供排查(脱敏,§10.4
+        「日志无完整邮箱」验收)。
         """
         res = await db.execute(select(User).where(func.lower(User.email) == email))
         matches = list(res.scalars().all())
         if len(matches) > 1:
-            log.warning("OIDC email %s 命中 %d 个本地账号,取最早创建的一个", email, len(matches))
+            log.warning(
+                "OIDC email %s 命中 %d 个本地账号,取最早创建的一个",
+                mask_email(email), len(matches),
+            )
             return min(matches, key=lambda u: u.created_at)
         return matches[0] if matches else None
 
     async def _email_taken_by_other(
         self, db: AsyncSession, email: str, *, exclude_id: uuid.UUID | None = None,
     ) -> bool:
-        """lower(email) 占用预检(邮箱账号方案 §5.3.5 OIDC 段,B1 最小守卫)。
+        """lower(email) 占用预检(邮箱账号方案 §5.3.5 OIDC 段)。
 
         exclude_id 排除本人(同步分支比对自身邮箱不算占用)。命中多条时
         limit(1) 即可 —— 只回答「是否被占」,归属排查走管理后台。
@@ -154,10 +159,31 @@ class OIDCService:
             stmt = stmt.where(User.id != exclude_id)
         return (await db.execute(stmt)).first() is not None
 
+    async def _username_cross_conflict(
+        self, db: AsyncSession, email: str, *, exclude_id: uuid.UUID | None = None,
+    ) -> bool:
+        """lower(username) 跨列冲突预检(§5.3.5 OIDC 段):IdP 邮箱撞本地登录名。
+
+        不拦会让「用邮箱登录」(username 优先匹配)命中别人的 username;
+        exclude_id 排除本人兼容「username 本身是邮箱」的历史账号。
+        """
+        stmt = select(User.id).where(func.lower(User.username) == email).limit(1)
+        if exclude_id is not None:
+            stmt = stmt.where(User.id != exclude_id)
+        return (await db.execute(stmt)).first() is not None
+
+    async def _email_writable(
+        self, db: AsyncSession, email: str, *, exclude_id: uuid.UUID | None,
+    ) -> bool:
+        """email 可写判定:未被他人 lower(email) 占用 且 不与 lower(username) 冲突(§5.3.5)。"""
+        if await self._email_taken_by_other(db, email, exclude_id=exclude_id):
+            return False
+        return not await self._username_cross_conflict(db, email, exclude_id=exclude_id)
+
     async def upsert_user_from_userinfo(
         self, db: AsyncSession, userinfo: dict[str, Any]
-    ) -> User:
-        """IdP userinfo → upsert users 表,返 ORM User 对象。
+    ) -> tuple[User, bool, str | None]:
+        """IdP userinfo → upsert users 表,返 ``(user, email_changed, old_email)``。
 
         匹配顺序(F16:防 IdP 首登时已有本地账号被重复建号):
           1. oidc_sub(provider 的 sub claim;ADR-0007 起 OIDC 用户的身份匹配键)
@@ -165,6 +191,15 @@ class OIDCService:
              找已有本地账号并绑定 oidc_sub;仅当该账号尚未绑定其它 oidc_sub
              才关联(避免把已属于别的 IdP 身份的账号抢过来)。
           两路都 miss → 新建 User。
+
+        邮箱账号方案 §5.3.5 OIDC 完整版:
+          - 新建/同步前 email 已 strip().lower();占用(含跨列冲突)→ 跳过写入
+            (新建不带 email / 已有用户保留旧邮箱),不 500;
+          - **email 值变化**(大小写-only 归一化不算)→ 同事务清
+            email_verified_at + 删未用重置 token(D4/D13:IdP 改邮箱不能让新地址
+            自动成为恢复通道);``DEL email:code`` 与 ``email_changed`` 审计由
+            callback 做(那里有 redis / AuditService,§5.3.5 接线落点);
+          - 返回三元组:email_changed=False 时 old_email 为 None。
         """
         sub = userinfo.get(self._claim("sub")) or userinfo.get("sub")
         if not sub:
@@ -177,7 +212,7 @@ class OIDCService:
             if user is not None and user.oidc_sub not in (None, sub):
                 log.warning(
                     "OIDC email %s 已被 oidc_sub=%s 占用,不抢占,按新用户建号",
-                    email, user.oidc_sub,
+                    mask_email(email), user.oidc_sub,
                 )
                 user = None
 
@@ -185,11 +220,14 @@ class OIDCService:
             default_org = self._settings.default_organization_id
             org_uuid = uuid.UUID(default_org) if default_org else None
             new_name = userinfo.get(self._claim("name")) or userinfo.get("name") or "unknown"
-            # B1 最小写入守卫(方案 §5.3.5 OIDC 段):email 已 lower(见上);被
-            # 其他账号占用时跳过写入(建号不带 email),不因唯一索引 500。
+            # §5.3.5:email 已 lower(见上);被其他账号占用(含 lower(username)
+            # 跨列冲突)→ 跳过写入(建号不带 email),不因唯一索引 500
             new_email = email or None
-            if new_email and await self._email_taken_by_other(db, new_email):
-                log.warning("OIDC email occupied by other account, create without email: sub=%s", sub)
+            if new_email and not await self._email_writable(db, new_email, exclude_id=None):
+                log.warning(
+                    "OIDC email occupied/cross-conflict, create without email: sub=%s email=%s",
+                    sub, mask_email(new_email),
+                )
                 new_email = None
             user = User(
                 oidc_sub=sub,
@@ -218,7 +256,7 @@ class OIDCService:
             await db.refresh(user)
             log.info("created user from OIDC sub=%s name=%s org=%s",
                      sub, user.name, org_uuid)
-            return user
+            return user, False, None
 
         # 命中已有用户:email 兜底关联时补绑 sub;同步可能变化的字段
         changed = False
@@ -229,20 +267,37 @@ class OIDCService:
         if new_name and user.name != new_name:
             user.name = new_name
             changed = True
-        # B1 最小写入守卫(方案 §5.3.5 OIDC 段):email lower 后比对;被他人
-        # 占用(排除本人)→ 跳过写入保留旧邮箱,不 500。
+        # §5.3.5:email lower 后比对;被他人占用(含跨列冲突,排除本人)→ 跳过
+        # 写入保留旧邮箱,不 500;值变化 → 清验证态 + 删未用重置 token(同事务)
+        email_changed = False
+        old_email: str | None = None
         if email and email != (user.email or "").strip().lower():
-            if await self._email_taken_by_other(db, email, exclude_id=user.id):
-                log.warning("OIDC email occupied by other account, keep old email: sub=%s user=%s", sub, user.id)
-            else:
+            if await self._email_writable(db, email, exclude_id=user.id):
+                old_email = user.email
                 user.email = email
+                user.email_verified_at = None
+                email_changed = True
                 changed = True
+            else:
+                log.warning(
+                    "OIDC email occupied/cross-conflict, keep old email: sub=%s user=%s email=%s",
+                    sub, user.id, mask_email(email),
+                )
         # backfill organization_id(老 user 没绑 org)
         if user.organization_id is None and self._settings.default_organization_id:
             user.organization_id = uuid.UUID(self._settings.default_organization_id)
             changed = True
         if changed:
             try:
+                # 删未用重置 token 的 execute 会 autoflush 脏的 email UPDATE ——
+                # 竞态撞唯一索引与在 commit 撞等价,一并按「保留旧邮箱」收口
+                if email_changed:
+                    await db.execute(
+                        delete(PasswordResetToken).where(
+                            PasswordResetToken.user_id == user.id,
+                            PasswordResetToken.used_at.is_(None),
+                        )
+                    )
                 await db.commit()
             except IntegrityError:
                 # email 撞唯一索引(与占用预检的竞态窗口):回滚后保留旧邮箱,
@@ -259,9 +314,12 @@ class OIDCService:
                 if user.organization_id is None and self._settings.default_organization_id:
                     user.organization_id = uuid.UUID(self._settings.default_organization_id)
                 await db.commit()
+                # email 已回滚到库内旧值:本次不算变化(回调不写 email_changed 审计)
+                email_changed = False
+                old_email = None
             await db.refresh(user)
 
-        return user
+        return user, email_changed, (old_email if email_changed else None)
 
     # ─── session JWT ───────────────────────────────────────────────────────
     def encode_session(self, user: User) -> str:
@@ -269,6 +327,10 @@ class OIDCService:
         payload = {
             "sub": str(user.id),
             "name": user.name,
+            # 会话版本(邮箱账号方案 §5.5):改密/重置/禁用自增后,deps 比对
+            # 不一致 → 401。必须容忍 transient User(session_version 为 None):
+            # `None or 0` → 0,不能写出 ver:null(解码侧 int(None) 会 500)
+            "ver": getattr(user, "session_version", 0) or 0,
             "iat": int(now.timestamp()),
             "exp": int((now + timedelta(seconds=self._settings.session_jwt_ttl_seconds)).timestamp()),
         }

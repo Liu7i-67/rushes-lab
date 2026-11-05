@@ -26,6 +26,7 @@ import asyncio
 import logging
 import sys
 import uuid
+from datetime import UTC, datetime
 
 import boto3
 from botocore.client import Config
@@ -35,6 +36,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db.session import get_sessionmaker
 from app.db.tables import Folder, Organization, Project, User
+from app.services.email_utils import normalize_email
 from app.services.permissions import create_permissions_service
 from app.settings import get_settings
 
@@ -57,25 +59,36 @@ TENANT_KEY = "dev_tenant_001"
 
 
 def _norm_email(v: str | None) -> str | None:
-    """邮箱归一(strip + lower + 空串归 NULL;邮箱账号方案 §5.3.5 seed 段)。
+    """邮箱归一唯一口径:收编为 email_utils.normalize_email(§5.3.5 seed 段)。
 
     lower(email) 部分唯一索引(迁移 0021)上线后,空串/大写写入会撞索引;
     SQLite 测试库更会把空串纳入唯一索引,一律归 NULL。
     """
-    return (v or "").strip().lower() or None
+    return normalize_email(v)
 
 
-async def _insert_user_or_die(session, values: dict) -> None:  # type: ignore[type-arg]
+async def _insert_user_or_die(session, values: dict, *, dev_verified: bool) -> None:  # type: ignore[arg-type]
     """users 幂等插入:email 撞 lower(email) 唯一索引 → 可读错误退出。
 
-    on_conflict_do_nothing 只消化 id 冲突;email 被其它账号占用时(迁移 0021
-    的唯一索引)直接抛 IntegrityError —— 不静默跳过 seed 账号,让运维先在管理
-    后台清空占用账号的邮箱再重跑(方案 §5.3.5 seed 段「可读错误」口径)。
+    - on_conflict 语义按 env 分流(方案 §5.3.5 seed 段):
+      dev → ``on_conflict_do_update`` 补 ``email_verified_at``(已有 dev 库的
+      do_nothing 不会补验证,本地验收会假红;set_ 只补验证,不动 email ——
+      管理员改过的邮箱不被 bootstrap 覆盖);
+      非 dev(prod bootstrap 也会执行本脚本)→ 保持 do_nothing,种子邮箱
+      **未验证**,与迁移「存量邮箱一律未验证」(D3)一致。
+    - email 被其它账号占用时(迁移 0021 的唯一索引)直接抛 IntegrityError
+      —— 不静默跳过 seed 账号,让运维先在管理后台清空占用账号的邮箱再重跑。
     """
-    try:
-        await session.execute(
-            insert(User).values(**values).on_conflict_do_nothing(index_elements=["id"])
+    stmt = insert(User).values(**values)
+    if dev_verified:
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["id"],
+            set_={"email_verified_at": values["email_verified_at"]},
         )
+    else:
+        stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+    try:
+        await session.execute(stmt)
     except IntegrityError as e:
         await session.rollback()
         raise SystemExit(
@@ -90,6 +103,10 @@ async def main() -> None:
     sm = get_sessionmaker()
 
     # ─── 1) DB upsert ─────────────────────────────────────────────────────
+    # dev 才给种子邮箱置已验证(§10.2 手工验收第 13 条:本地验收不必先跑
+    # mark_email_verified);prod bootstrap 保持未验证(D3)
+    dev_verified = settings.env == "dev"
+    verified_at = datetime.now(UTC) if dev_verified else None
     async with sm() as session:
         # organization(tenant_key 与 seed_demo_data 一致,OpenFGA org subject 用它)
         await session.execute(
@@ -109,9 +126,11 @@ async def main() -> None:
                 feishu_open_id="dev_admin_open_id",
                 name="alice (admin)",
                 email=_norm_email("alice@dev.local"),
+                email_verified_at=verified_at,
                 is_active=True,
                 organization_id=ORG_ID,
             ),
+            dev_verified=dev_verified,
         )
         await _insert_user_or_die(
             session,
@@ -121,9 +140,11 @@ async def main() -> None:
                 feishu_open_id="dev_member_open_id",
                 name="bob (member)",
                 email=_norm_email("bob@dev.local"),
+                email_verified_at=verified_at,
                 is_active=True,
                 organization_id=ORG_ID,
             ),
+            dev_verified=dev_verified,
         )
         # project
         await session.execute(

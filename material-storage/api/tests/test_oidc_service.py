@@ -60,7 +60,7 @@ class FakeResult:
     def scalar_one_or_none(self) -> User | None:
         return self._rows[0] if self._rows else None
 
-    def scalars(self) -> "FakeResult":
+    def scalars(self) -> FakeResult:
         return self
 
     def all(self) -> list[User | None]:
@@ -120,7 +120,7 @@ class TestUpsertUserFromUserinfo:
         db = FakeSession([FakeResult([existing])])
         svc = OIDCService(make_settings())
         try:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": NAME, "email": EMAIL}
             )
         finally:
@@ -130,6 +130,9 @@ class TestUpsertUserFromUserinfo:
         assert db.executes == 1, "sub 命中后不应再查 email"
         assert db.commits == 1
         assert user.name == NAME
+        # email 与存量一致(LOCAL_EMAIL==EMAIL):不算变化,不触发 OIDC 清理链
+        assert email_changed is False
+        assert old_email is None
 
     async def test_email_fallback_links_local_user(self) -> None:
         """F16 核心:sub miss + email 命中已有本地账号 → 补绑 oidc_sub,不重复建号。"""
@@ -137,7 +140,7 @@ class TestUpsertUserFromUserinfo:
         db = FakeSession([FakeResult([]), FakeResult([existing])])
         svc = OIDCService(make_settings())
         try:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": NAME, "email": EMAIL}
             )
         finally:
@@ -148,13 +151,16 @@ class TestUpsertUserFromUserinfo:
         assert user.name == NAME
         assert db.added == [], "不应新建用户"
         assert db.commits == 1
+        assert email_changed is False and old_email is None
 
     async def test_email_miss_creates_new_user(self) -> None:
-        """sub + email 都 miss → 新建用户(第 3 路 = 邮箱占用预检,无人占用)。"""
-        db = FakeSession([FakeResult([]), FakeResult([]), FakeResult([])])
+        """sub + email 都 miss → 新建用户(第 3/4 路 = 邮箱占用 + 跨列预检,无人占用)。"""
+        db = FakeSession([
+            FakeResult([]), FakeResult([]), FakeResult([]), FakeResult([]),
+        ])
         svc = OIDCService(make_settings())
         try:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": NAME, "email": EMAIL}
             )
         finally:
@@ -165,6 +171,8 @@ class TestUpsertUserFromUserinfo:
         assert user.email == EMAIL
         assert user.name == NAME
         assert user.is_active is True
+        # 新建分支:无旧邮箱,email_changed 恒 False(callback 不写 email_changed 审计)
+        assert email_changed is False and old_email is None
 
     async def test_email_taken_by_other_oidc_sub_not_stolen(self) -> None:
         """email 命中但已绑其它 oidc_sub → 不抢账号,按新用户建号;占用者持有
@@ -173,7 +181,7 @@ class TestUpsertUserFromUserinfo:
         db = FakeSession([FakeResult([]), FakeResult([other]), FakeResult([other])])
         svc = OIDCService(make_settings())
         try:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": NAME, "email": EMAIL}
             )
         finally:
@@ -184,3 +192,4 @@ class TestUpsertUserFromUserinfo:
         assert user.oidc_sub == SUB
         assert user.email is None, "被占用的邮箱不能写进新账号"
         assert db.added == [user], "应新建独立账号"
+        assert email_changed is False and old_email is None

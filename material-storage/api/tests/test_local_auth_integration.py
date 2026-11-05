@@ -395,14 +395,17 @@ async def test_change_password_flow(client: AsyncClient, make_user) -> None:
     r = await client.post("/api/v1/auth/change-password",
                           json={"old_password": PASS_OK, "new_password": new_pw})
     assert r.status_code == 200, r.text
-    # 改密后 /me 不再要求强制改密
+    # §5.5 会话版本:改密后同一 cookie 的 /me → 401(session_version 已自增,
+    # 旧 JWT 全部失效;前端在改密成功后主动清会话回登录页)
     me = await client.get("/api/v1/auth/me")
-    assert me.status_code == 200
-    assert me.json()["must_change_password"] is False
-    # 新密码登录成功
+    assert me.status_code == 401
+    # 新密码登录成功 → 新会话 /me 不再要求强制改密
     r = await client.post("/api/v1/auth/local/login",
                           json={"username": uname, "password": new_pw})
     assert r.status_code == 200, r.text
+    me = await client.get("/api/v1/auth/me")
+    assert me.status_code == 200
+    assert me.json()["must_change_password"] is False
     # 旧密码不再可用
     r = await client.post("/api/v1/auth/local/login",
                           json={"username": uname, "password": PASS_OK})
@@ -516,13 +519,19 @@ async def test_forced_change_blocks_other_endpoints(
     r3 = await client.get("/api/v1/auth/me")
     assert r3.status_code == 200, r3.text
 
-    # 改密成功 → 解除强制
+    # 改密成功 → 解除强制;但 §5.5 会话版本自增后**同一 cookie** 的后续请求
+    # 401(旧 JWT 失效),须用新密码重登拿新会话才放行
     r4 = await client.post("/api/v1/auth/change-password",
                            json={"old_password": PASS_OK, "new_password": "newpass1"})
     assert r4.status_code == 200, r4.text
     r5 = await client.get("/api/v1/projects")
-    assert r5.status_code == 200, r5.text
-    assert r5.json() is not None
+    assert r5.status_code == 401, r5.text
+    r6 = await client.post("/api/v1/auth/local/login",
+                           json={"username": uname, "password": "newpass1"})
+    assert r6.status_code == 200, r6.text
+    r7 = await client.get("/api/v1/projects")
+    assert r7.status_code == 200, r7.text
+    assert r7.json() is not None
 
 
 @pytest.mark.asyncio

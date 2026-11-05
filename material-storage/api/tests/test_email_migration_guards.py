@@ -56,18 +56,43 @@ class FakeLocalAuth:
 
 @pytest.fixture
 async def db_factory():
-    """内存 SQLite,只建 users 表(含 uq_users_email_lower 表达式唯一索引)。"""
+    """内存 SQLite,建 users + password_reset_tokens(B2 起 OIDC/管理员改邮箱
+    会删未用重置 token,少建表会在 DELETE 上炸)。"""
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all, tables=[User.__table__])
+        await conn.run_sync(
+            Base.metadata.create_all,
+            tables=[User.__table__, PasswordResetToken.__table__],
+        )
     factory = async_sessionmaker(engine, expire_on_commit=False)
     yield factory
     await engine.dispose()
 
 
+class _FakeRedis:
+    """update_directory_user 改邮箱后 DEL email:code 的最小 redis 面。"""
+
+    def __init__(self) -> None:
+        self.deleted: list[str] = []
+
+    async def delete(self, *keys: str) -> int:
+        self.deleted.extend(keys)
+        return len(keys)
+
+
 def _fake_request() -> SimpleNamespace:
-    # update_directory_user 只读 request.client / request.headers(审计 ctx)
-    return SimpleNamespace(client=None, headers={})
+    # update_directory_user 读 request.client / request.headers(审计 ctx)与
+    # request.app.state(B2:清空守卫要 auth.enabled,改邮箱后 DEL email:code
+    # 要 redis —— best-effort,但要能取到属性)
+    return SimpleNamespace(
+        client=None, headers={},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                auth=SimpleNamespace(enabled=False),
+                redis=_FakeRedis(),
+            ),
+        ),
+    )
 
 
 async def _seed(db_factory, **overrides: Any) -> User:
@@ -273,13 +298,14 @@ async def test_oidc_new_user_email_occupied_creates_without_email(db_factory) ->
     svc = _svc()
     try:
         async with db_factory() as db:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": "新用户", "email": "CHEN@example.com"},
             )
     finally:
         await svc.close()
     assert user.oidc_sub == SUB
     assert user.email is None
+    assert email_changed is False and old_email is None
 
 
 async def test_oidc_sync_keeps_old_email_when_occupied(db_factory) -> None:
@@ -289,7 +315,7 @@ async def test_oidc_sync_keeps_old_email_when_occupied(db_factory) -> None:
     svc = _svc()
     try:
         async with db_factory() as db:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": "改名", "email": "new@example.com"},
             )
     finally:
@@ -297,23 +323,59 @@ async def test_oidc_sync_keeps_old_email_when_occupied(db_factory) -> None:
     assert user.id == target.id
     assert user.email == "old@example.com"
     assert user.name == "改名"
+    assert email_changed is False and old_email is None
 
 
 async def test_oidc_sync_updates_email_when_free(db_factory) -> None:
-    """同步分支正路径:新邮箱无人占用 → lower 后写入。"""
-    target = await _seed(db_factory, username="t1", email="old@example.com", oidc_sub=SUB)
+    """同步分支正路径:新邮箱无人占用 → lower 写入;三元组报 email_changed+
+    旧邮箱;verified_at 清空;未用重置 token 被删(§5.3.5 OIDC 完整版)。"""
+    target = await _seed(db_factory, username="t1", email="old@example.com",
+                         oidc_sub=SUB, email_verified_at=datetime.now(UTC))
+    async with db_factory() as db:
+        db.add(PasswordResetToken(
+            user_id=target.id, token_hash="e" * 64,
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        ))
+        db.add(PasswordResetToken(
+            user_id=target.id, token_hash="f" * 64, used_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(minutes=30),
+        ))
+        await db.commit()
     svc = _svc()
     try:
         async with db_factory() as db:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": "T", "email": "New@Example.com"},
             )
     finally:
         await svc.close()
     assert user.email == "new@example.com"
+    assert email_changed is True
+    assert old_email == "old@example.com"
     async with db_factory() as db:
         t = await db.get(User, target.id)
         assert t is not None and t.email == "new@example.com"
+        # D4/D13:IdP 改邮箱不自动验证新地址;重置链接作废
+        assert t.email_verified_at is None
+        tokens = (await db.execute(select(PasswordResetToken))).scalars().all()
+        assert [x.token_hash for x in tokens] == ["f" * 64], "只删未用 token"
+
+
+async def test_oidc_sync_cross_column_conflict_keeps_old_email(db_factory) -> None:
+    """同步分支:新邮箱与某账号 lower(username) 相同(跨列冲突)→ 保留旧邮箱(§5.3.5)。"""
+    await _seed(db_factory, username="login@example.com")
+    target = await _seed(db_factory, username="t1", email="old@example.com", oidc_sub=SUB)
+    svc = _svc()
+    try:
+        async with db_factory() as db:
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
+                db, {"sub": SUB, "name": "T", "email": "Login@Example.com"},
+            )
+    finally:
+        await svc.close()
+    assert user.id == target.id
+    assert user.email == "old@example.com"
+    assert email_changed is False
 
 
 async def test_oidc_new_user_integrity_error_falls_back_to_no_email(
@@ -326,40 +388,51 @@ async def test_oidc_new_user_integrity_error_falls_back_to_no_email(
     async def _not_taken(db: Any, email: str, **kw: Any) -> bool:
         return False
 
+    async def _no_conflict(db: Any, email: str, **kw: Any) -> bool:
+        return False
+
     svc = _svc()
     monkeypatch.setattr(svc, "_email_taken_by_other", _not_taken)
+    monkeypatch.setattr(svc, "_username_cross_conflict", _no_conflict)
     try:
         async with db_factory() as db:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": "sub-race", "name": "R", "email": "race@example.com"},
             )
     finally:
         await svc.close()
     assert user.oidc_sub == "sub-race"
     assert user.email is None
+    assert email_changed is False
 
 
 async def test_oidc_sync_integrity_error_keeps_old_email(
     db_factory, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """竞态兜底:同步 commit 撞唯一索引 → 回滚保留旧邮箱,sub 绑定/改名不丢。"""
+    """竞态兜底:同步 commit 撞唯一索引 → 回滚保留旧邮箱,sub 绑定/改名不丢;
+    回滚后 email_changed 归 False(callback 不写 email_changed 审计)。"""
     await _seed(db_factory, username="occ", email="race@example.com")
     target = await _seed(db_factory, username="t1", email="old@example.com", oidc_sub=SUB)
 
     async def _not_taken(db: Any, email: str, **kw: Any) -> bool:
         return False
 
+    async def _no_conflict(db: Any, email: str, **kw: Any) -> bool:
+        return False
+
     svc = _svc()
     monkeypatch.setattr(svc, "_email_taken_by_other", _not_taken)
+    monkeypatch.setattr(svc, "_username_cross_conflict", _no_conflict)
     try:
         async with db_factory() as db:
-            user = await svc.upsert_user_from_userinfo(
+            user, email_changed, old_email = await svc.upsert_user_from_userinfo(
                 db, {"sub": SUB, "name": "改名了", "email": "race@example.com"},
             )
     finally:
         await svc.close()
     assert user.email == "old@example.com"
     assert user.name == "改名了"
+    assert email_changed is False and old_email is None
     async with db_factory() as db:
         t = await db.get(User, target.id)
         assert t is not None

@@ -262,7 +262,7 @@ def _build_audit_query(
     project_id: uuid.UUID | None,
     from_time: datetime | None,
     to_time: datetime | None,
-    auth_method: Literal["all", "session", "pat"] = "all",
+    auth_method: Literal["all", "session", "pat", "anonymous"] = "all",
 ):
     stmt = select(AuditEvent)
     if event_type:
@@ -280,8 +280,12 @@ def _build_audit_query(
         stmt = stmt.where(AuditEvent.event_time <= to_time)
     # MCP 素材服务(D4):认证方式筛选,NULL 一律归入 session(非令牌操作 = 存量
     # 行 / worker / CLI);参数类型钉死 Literal(前端「全部」的空串须显式映射 all)
+    # anonymous(邮箱账号方案 §5.9):邮箱找回密码链路全部未认证,审计显式写
+    # "anonymous" —— 只改类型不加分支会让筛选返回全量,必须补 elif
     if auth_method == "pat":
         stmt = stmt.where(AuditEvent.auth_method == "pat")
+    elif auth_method == "anonymous":
+        stmt = stmt.where(AuditEvent.auth_method == "anonymous")
     elif auth_method == "session":
         stmt = stmt.where(or_(
             AuditEvent.auth_method.is_(None),
@@ -298,9 +302,9 @@ async def list_audit(
     project_id: uuid.UUID | None = Query(None),
     from_time: datetime | None = Query(None, alias="from"),
     to_time: datetime | None = Query(None, alias="to"),
-    auth_method: Literal["all", "session", "pat"] = Query(
+    auth_method: Literal["all", "session", "pat", "anonymous"] = Query(
         "all",
-        description="认证方式筛选:all/session/pat;NULL(存量行)视为 session",
+        description="认证方式筛选:all/session/pat/anonymous;NULL(存量行)视为 session",
     ),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
@@ -355,9 +359,9 @@ async def export_audit_csv(
     project_id: uuid.UUID | None = Query(None),
     from_time: datetime | None = Query(None, alias="from"),
     to_time: datetime | None = Query(None, alias="to"),
-    auth_method: Literal["all", "session", "pat"] = Query(
+    auth_method: Literal["all", "session", "pat", "anonymous"] = Query(
         "all",
-        description="与列表同参:all/session/pat;NULL(存量行)视为 session",
+        description="与列表同参:all/session/pat/anonymous;NULL(存量行)视为 session",
     ),
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(require_system_admin),

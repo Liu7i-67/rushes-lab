@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 import uuid
@@ -44,6 +45,10 @@ from app.db.session import get_sessionmaker
 from app.db.tables import User
 from app.services.audit import AuditService
 from app.services.org import get_default_organization
+from app.services.password_reset import (
+    delete_unused_tokens,
+    post_password_change_cleanup,
+)
 from app.services.passwords import generate_temp_password, hash_password
 from app.services.permissions import create_permissions_service
 from app.services.tokens import revoke_user_tokens
@@ -130,6 +135,11 @@ async def main() -> int:
 
         user.password_hash = hash_password(password)
         user.must_change_password = not args.no_force_change
+        # 邮箱账号方案 §5.5.1:初始化/改密 ⇒ session_version+1(目标旧 JWT 全部
+        # 失效;transient User 未 flush 时为 None,必须 (or 0)+1 不能裸 += 1)
+        # + 删未用重置 token(旧重置链接不能再改密,D13)
+        user.session_version = (user.session_version or 0) + 1
+        await delete_unused_tokens(db, user.id)
         # D13 第四处挂钩(可对既有用户改密,是生产重置密码的另一入口):
         # 吊销该用户全部活跃 PAT —— 与 password_hash 写入同事务、commit 之前
         revoked_tokens = await revoke_user_tokens(
@@ -137,6 +147,23 @@ async def main() -> int:
         )
         await db.commit()
         user_id = str(user.id)
+
+    # commit 后 best-effort:DEL email:code + 清 email:chg:fail/lock(§5.5.1);
+    # CLI 无常驻 Redis,短连接 from_url + aclose,失败只 log(验证码 TTL 兜底)
+    redis = None
+    try:
+        import redis.asyncio as redis_asyncio
+
+        redis = redis_asyncio.from_url(
+            str(settings.redis_url), decode_responses=True,
+        )
+        await post_password_change_cleanup(redis, user_id)
+    except Exception as exc:
+        log.warning("email:code/chg 清理跳过(Redis 不可达): %r", exc)
+    finally:
+        if redis is not None:
+            with contextlib.suppress(Exception):
+                await redis.aclose()
 
     # commit 之后用**新 session** 的 AuditService 逐条写 token_revoked
     # (actor=cli;只写本次真正被吊销的行,无活跃令牌不写;审计失败不回滚密码)

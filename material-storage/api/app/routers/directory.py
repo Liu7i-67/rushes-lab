@@ -50,9 +50,19 @@ from app.models import (
     UserCreateIn,
     UserUpdateIn,
 )
+from app.services import email_verification as ev
 from app.services.audit import AuditService
+from app.services.email_utils import (
+    email_fingerprint,
+    has_non_email_login,
+    strict_normalize_email,
+)
 from app.services.local_auth import LocalAuthService
 from app.services.org import get_default_organization
+from app.services.password_reset import (
+    delete_unused_tokens,
+    post_password_change_cleanup,
+)
 from app.services.passwords import generate_temp_password, hash_password
 from app.services.permissions import (
     PermissionsService,
@@ -181,6 +191,9 @@ async def list_directory_users(
                 is_active=u.is_active, must_change_password=u.must_change_password,
                 created_at=u.created_at, resigned_at=u.resigned_at,
                 login_locked=locked_map.get(u.id, False),
+                # 邮箱验证态(§5.3.5):= bool(email and verified_at);支持工单
+                # 不用再靠 CLI 查
+                email_verified=bool(u.email and u.email_verified_at),
             )
             for u in users
         ],
@@ -225,6 +238,18 @@ async def create_directory_user(
     if dup is not None:
         raise HTTPException(409, f"登录名已存在:{payload.username}")
 
+    # 邮箱占用预检(§5.3.5 管理员建号:email 已在 UserCreateIn 严格校验+归一):
+    # lower(email) 属他人 / 与 lower(username) 跨列冲突 → 409(竞态兜底仍在
+    # provision 的 IntegrityError 捕获)
+    new_email = (payload.email or "").strip().lower() or None
+    if new_email is not None:
+        if await ev.email_taken_by_other(db, new_email, exclude_id=None):
+            raise HTTPException(
+                409, "该邮箱已被其他账号使用;如该邮箱属于本账号,请先清空原账号的邮箱",
+            )
+        if await ev.username_cross_conflict(db, new_email, exclude_id=None):
+            raise HTTPException(409, "该邮箱与某个登录名冲突,请联系管理员处理")
+
     # F3.3 原子性:用户落库前先全量校验组存在(组加载留在路由层,方案 B4)
     want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
 
@@ -244,6 +269,8 @@ async def create_directory_user(
         created_at=new_user.created_at, resigned_at=None,
         # W1:真实态单查(新号一般未锁,但 name 形态 key 跨同名用户共享,可能带出)
         login_locked=(await local_auth.users_login_locked([new_user]))[new_user.id],
+        # 新建账号邮箱必未验证(管理员建号不置 email_verified_at,§5.3.5)
+        email_verified=bool(new_user.email and new_user.email_verified_at),
         temporary_password=temp_pw,
     )
 
@@ -275,6 +302,7 @@ async def get_directory_user(
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
         group_ids=[g.id for _gm, g in rows],
         group_names=[g.name for _gm, g in rows],
+        email_verified=bool(target.email and target.email_verified_at),
     )
 
 
@@ -307,29 +335,68 @@ async def update_directory_user(
         want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
 
     # name / email:email 显式 null=清空(D6),以 model_fields_set 区分「未传」
-    # B1 最小写入守卫(邮箱账号方案 §5.3.5 管理员侧):email 写入前
-    # strip().lower() 归一、空串归 NULL;大小写-only 的归一化不算变化不写库。
-    # 严格校验 / verified_at 清理 / 删重置 token 等完整守卫由 B2 落地。
+    # 与「传 null」。§5.3.5 管理员编辑完整守卫:严格校验(仅对变更值)、占用/
+    # 跨列预检、清空登录方式守卫、email_verified_at 清理、删未用重置 token、
+    # DEL email:code —— **全部放在「键存在且值实际变化」的块内**(PATCH {} 的
+    # 缺省 None 不得把邮箱清空;未变更的存量非法地址不回溯校验,管理页原样
+    # 回显提交不会被 422 拒)。
     changes: dict[str, object] = {}
     if payload.name is not None and payload.name != target.name:
         changes["name"] = {"old": target.name, "new": payload.name}
         target.name = payload.name
     email_written = False
     if "email" in payload.model_fields_set:
+        cur_email = email_fingerprint(target.email) or None
         new_email = (payload.email or "").strip().lower() or None
-        if new_email != ((target.email or "").strip().lower() or None):
+        if new_email != cur_email:
+            if new_email is not None:
+                # 严格校验仅作用于新增/变更值(§5.3.5);UserUpdateIn 的宽松
+                # field_validator 拦不住的存量脏格式在「变更时」收口
+                try:
+                    new_email = strict_normalize_email(payload.email or "")
+                except ValueError as exc:
+                    raise HTTPException(
+                        422, "email 格式不正确:仅支持标准邮箱地址,请更正后再提交",
+                    ) from exc
+            elif target.is_active and not has_non_email_login(
+                target, request.app.state.auth.enabled,
+            ):
+                # 清空 email 且在职且无独立登录名 → 拒(解绑语义对齐 §5.3.4;
+                # 停用/离职账号允许清空 —— 回收邮箱给新员工的常规场景)
+                raise HTTPException(
+                    400, "当前账号没有独立登录名,清空邮箱后将无法登录;请先停用账号"
+                         "或联系管理员设置登录名",
+                )
+            if new_email is not None:
+                if await ev.email_taken_by_other(db, new_email, exclude_id=target.id):
+                    raise HTTPException(
+                        409, "该邮箱已被其他账号使用;如该邮箱属于本账号,请先清空原账号的邮箱",
+                    )
+                if await ev.username_cross_conflict(db, new_email, exclude_id=target.id):
+                    raise HTTPException(409, "该邮箱与某个登录名冲突,请联系管理员处理")
             changes["email"] = {"old": target.email, "new": new_email}
             target.email = new_email
+            # 任何 email 值变化:清验证态 + 删未用重置 token(同事务,防「发码后
+            # 管理员改邮箱、用户又用旧码改回去」);大小写-only 归一化不进本分支
+            target.email_verified_at = None
+            await ev.delete_unused_reset_tokens(db, target.id)
             email_written = True
     try:
         await db.commit()
     except IntegrityError as e:
-        # lower(email) 唯一索引(迁移 0021)兜底:预检未做(最小口径),并发/
-        # 大小写变体撞索引在这里收敛为 409,不 500
+        # lower(email) 唯一索引(迁移 0021)兜底:预检与 commit 之间的竞态窗口
+        # 在这里收敛为 409,不 500
         await db.rollback()
         if not email_written:
             raise
         raise HTTPException(409, "该邮箱已被其他账号使用") from e
+    if email_written:
+        # DEL email:code:{id}:commit 后 best-effort(Redis 抖动不能让编辑 500;
+        # 残留验证码 600s 自然过期兜底,§5.3.5)
+        try:
+            await request.app.state.redis.delete(ev.code_key(target.id))
+        except Exception:
+            log.warning("del email:code after admin email change failed user=%s", target.id)
 
     # D3 全量同步:以 group_memberships 现状为基线 diff(added 按入参序)
     groups_added: list[dict[str, str]] = []
@@ -376,6 +443,7 @@ async def update_directory_user(
         must_change_password=target.must_change_password,
         created_at=target.created_at, resigned_at=target.resigned_at,
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
+        email_verified=bool(target.email and target.email_verified_at),
     )
 
 
@@ -407,11 +475,18 @@ async def disable_directory_user(
     n = await permissions.revoke_user_completely(str(user_id))
     target.is_active = False
     target.resigned_at = datetime.now(UTC)
+    # 邮箱账号方案 §5.5.1 第 7 步:禁用 ⇒ session_version+1(安全动作:重新启用
+    # 后旧 JWT 不复活)+ 删该用户未用重置 token(停用者不能走邮箱重置回来)
+    target.session_version = (target.session_version or 0) + 1
+    await delete_unused_tokens(db, user_id)
     # D13 第五处挂钩:禁用 ⇒ 吊销该用户全部活跃 PAT。必须在同一事务 commit 之前
     # (否则重新启用后旧 PAT 会复活 —— 禁用只拦截认证、不吊销令牌);
     # 审计在 commit 之后逐条写(actor=admin, reason=user_disabled)。
     revoked_tokens = await revoke_user_tokens(db, user_id=user_id, reason="user_disabled")
     await db.commit()
+
+    # commit 后 best-effort:DEL email:code(残留验证码不能在被禁期间确认换绑)
+    await post_password_change_cleanup(request.app.state.redis, user_id)
 
     await audit.write(
         event_type="user_disabled",
@@ -525,10 +600,19 @@ async def reset_directory_user_password(
     temp_pw = generate_temp_password()
     target.password_hash = hash_password(temp_pw)
     target.must_change_password = True
+    # 邮箱账号方案 §5.5.1 第 5 步:管理员重置 ⇒ session_version+1(目标用户全部
+    # 旧 JWT 失效,下一次请求 401;临时密码重新登录走强制改密)+ 删该用户未用
+    # 重置 token(不能拿旧重置链接绕过临时密码,§5.4.4 末注)
+    target.session_version = (target.session_version or 0) + 1
+    await delete_unused_tokens(db, user_id)
     # D13 第二处挂钩:管理员重置密码 ⇒ 吊销该用户全部活跃 PAT(同事务 commit 之前);
     # 审计在 commit 之后逐条写(actor=admin, reason=password_changed)
     revoked_tokens = await revoke_user_tokens(db, user_id=user_id, reason="password_changed")
     await db.commit()
+
+    # commit 后 best-effort:DEL email:code + 清 email:chg:fail/lock(§5.5.1;
+    # 复用「重置即解锁」语义,Redis 抖动不能让管理员重置 500)
+    await post_password_change_cleanup(request.app.state.redis, user_id)
 
     cleared = await local_auth.clear_locks(target)
     await audit.write(
@@ -716,7 +800,7 @@ async def _read_flag_group_ids(
         tuples = await permissions.read_all_tuples(
             object_type="organization", object_id=tenant_key, relation=relation,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("read %s tuples fail err=%s", relation, e)
         return set()
     out: set[uuid.UUID] = set()
@@ -770,7 +854,7 @@ async def _sync_group_org_flag(
                 subject=subject,
                 relation=relation,
             )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if enable and is_already_exists_error(e):
             return  # 重复置位(如 true→true 的 PATCH),幂等成功
         log.warning(
@@ -1076,7 +1160,7 @@ async def delete_directory_group(
                     subject=subject,
                     relation=relation,
                 )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("delete group org flag tuple fail group=%s err=%s", group_id, e)
 
     # OpenFGA member tuples(尽力而为,不阻塞 DB 删除)

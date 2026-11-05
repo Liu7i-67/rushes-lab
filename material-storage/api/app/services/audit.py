@@ -110,8 +110,19 @@ class AuditService:
         event_time: datetime | None = None,
         auth_method: str | None = None,
         auth_token_id: uuid_lib.UUID | None = None,
+        actor_email_snapshot: str | None = None,
     ) -> AuditEvent:
+        """写一条审计事件(dedup_key 幂等,独立 commit)。
+
+        ``actor_email_snapshot``(邮箱账号方案 §5.9)是**脱敏覆盖参数**:
+        邮箱事件传 ``mask_email(...)`` 值,避免新事件把完整邮箱写进快照列
+        (``_resolve_actor_snapshot`` 默认无条件取 ``user.email``)。默认 None
+        = 不覆盖,保持既有行为;调用方传 None 与「用户无邮箱」语义等价
+        (resolved 快照也是 None)。
+        """
         actor_snapshot = await self._resolve_actor_snapshot(actor_user_id)
+        if actor_email_snapshot is not None:
+            actor_snapshot["actor_email_snapshot"] = actor_email_snapshot
         default_method, default_token_id = self._default_auth()
         record = {
             "id": uuid_lib.uuid4(),

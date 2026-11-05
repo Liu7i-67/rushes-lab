@@ -434,6 +434,80 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(..., min_length=1, max_length=128)
 
 
+# 邮箱严格校验唯一口径(§5.3.5):email_utils 落地后走它;B3 并行窗口的
+# ImportError 兜底与 §5.3.5 严格正则同口径(422 语义一致),B2/B3 入参共用。
+try:
+    from app.services.email_utils import (
+        strict_normalize_email as _strict_normalize_email,
+    )
+except ImportError:
+    _STRICT_EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+
+    def _strict_normalize_email(v: str) -> str:  # type: ignore[misc]
+        norm = v.strip().lower()
+        if not norm or len(norm) > 254 or not _STRICT_EMAIL_RE.fullmatch(norm):
+            raise ValueError("邮箱格式不正确")
+        return norm
+
+
+# ─── 邮箱绑定/换绑/解绑(B2,方案 §5.8;session 三端点入参)────────────────────
+
+
+class EmailCodeIn(BaseModel):
+    """POST /auth/email/code 入参:目标邮箱 + 当前密码。
+
+    email 在**请求解析期**走 strict_normalize_email(严格正则 + strip + lower,
+    §5.3.2 第 5 步):格式错 422 的请求进不了处理流程、不消耗请求预算;
+    不做宽松地址兼容分支(§13.12)。
+    """
+
+    email: str = Field(..., max_length=254)
+    password: str = Field(..., min_length=1, max_length=128)
+
+    @field_validator("email")
+    @classmethod
+    def _norm(cls, v: str) -> str:
+        return _strict_normalize_email(v)
+
+
+class EmailCodeConfirmIn(BaseModel):
+    """POST /auth/email/confirm 入参:6 位数字验证码。"""
+
+    code: str = Field(..., pattern=r"^\d{6}$")
+
+
+class EmailUnbindIn(BaseModel):
+    """POST /auth/email/unbind 入参:当前密码(解绑不依赖 mail_ready,§5.3.4)。"""
+
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+# ─── 邮箱找回密码(B3,方案 §5.8;公开三端点入参)─────────────────────────────
+
+
+class PasswordResetRequestIn(BaseModel):
+    """POST /auth/password-reset/request 入参:严格校验在解析期(422),不计数。"""
+
+    email: str = Field(..., max_length=254)
+
+    @field_validator("email")
+    @classmethod
+    def _norm(cls, v: str) -> str:
+        return _strict_normalize_email(v)
+
+
+class PasswordResetTokenIn(BaseModel):
+    """POST /auth/password-reset/verify 入参:重置链接 #token= 片段(43 字符)。"""
+
+    token: str = Field(..., min_length=20, max_length=128)
+
+
+class PasswordResetConfirmIn(PasswordResetTokenIn):
+    """POST /auth/password-reset/confirm 入参;密码策略在端点内校验(400)。"""
+
+    new_password: str = Field(..., min_length=1, max_length=128)
+
+
 # ─── MCP 素材服务:个人访问令牌(PAT;方案 D2/D3,2026-10-30)───────────────────
 class TokenCreateIn(BaseModel):
     """POST /api/v1/auth/tokens 入参。
@@ -697,14 +771,20 @@ class DirectoryUserOut(BaseModel):
     # 显示,前端 pill 文案需标注「用户名维度」);列表端点批量 pipeline MGET 三形态
     # 锁 key,详情/建号/编辑响应单查真实值;锁定状态以实时查 Redis 为准,不从审计推断
     login_locked: bool = False
+    # 邮箱验证态(邮箱账号方案 §5.3.5):= bool(email and email_verified_at);
+    # **给默认值 False** —— 漏构造点只显示「未验证」而不是 Pydantic 500;
+    # 四处构造点(列表/建号/详情/编辑)都要显式传真值,测试逐一断言。
+    email_verified: bool = False
 
 
 class UserCreateIn(BaseModel):
     """POST /admin/directory/users 入参。
 
-    username 建后即定(D7);email 轻格式校验(D6);group_ids=F3 建用户同时
-    入组(默认 [],≤50 对齐权限模板上限 D9),组存在性在路由内先全量校验
-    (任一无效 → 422,用户不创建,F3.3 原子)。
+    username 建后即定(D7);email **严格校验**(邮箱账号方案 §5.3.5:新建无
+    存量值,可以严格 —— 管理员不应继续制造「用户永远无法自助验证」的地址;
+    strip+lower 归一、空串归 None);group_ids=F3 建用户同时入组(默认 [],
+    ≤50 对齐权限模板上限 D9),组存在性在路由内先全量校验(任一无效 → 422,
+    用户不创建,F3.3 原子)。
     """
 
     username: str = Field(..., min_length=2, max_length=64,
@@ -724,7 +804,13 @@ class UserCreateIn(BaseModel):
     @field_validator("email")
     @classmethod
     def _email_format(cls, v: str | None) -> str | None:
-        return _validate_email_format(v)
+        # None / 空白 → None;非空值走严格校验并归一(§5.3.5 管理员段)
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        return _strict_normalize_email(v)
 
 
 class UserUpdateIn(BaseModel):

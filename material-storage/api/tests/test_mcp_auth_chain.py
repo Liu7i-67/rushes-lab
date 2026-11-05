@@ -133,7 +133,10 @@ def patch_token(
             lookup_calls["n"] = lookup_calls.get("n", 0) + 1
         return resolved
 
-    async def _load(uid: uuid.UUID) -> tuple[CurrentUser, bool]:
+    async def _load(
+        uid: uuid.UUID, *, expected_session_version: int | None = None,
+    ) -> tuple[CurrentUser, bool]:
+        # §5.5:mcp_auth 走默认 None(PAT 不校验会话版本),签名保持 kwargs 同形
         return CurrentUser(id=uid, name="alice"), forced_change
 
     monkeypatch.setattr(mcp_auth_mod, "lookup_token", _lookup)
@@ -246,7 +249,9 @@ async def test_cookie_decode_ok_but_user_disabled_raises_without_fallback(
     calls: dict[str, int] = {}
     patch_token(monkeypatch, resolved=make_resolved(), lookup_calls=calls)
 
-    async def _load_disabled(uid: uuid.UUID) -> tuple[CurrentUser, bool]:
+    async def _load_disabled(
+        uid: uuid.UUID, *, expected_session_version: int | None = None,
+    ) -> tuple[CurrentUser, bool]:
         raise HTTPException(401, "账号已停用,请联系管理员")
 
     monkeypatch.setattr(deps_mod, "load_active_user", _load_disabled)

@@ -158,15 +158,21 @@ class LocalAuthService:
 
     # ─── 管理员解锁(W1)— key 形态派生与清理收敛在本服务,key 拼写勿外泄 ──
     @staticmethod
-    def user_key_forms(user: User) -> list[str]:
+    def user_key_forms(user: User, *, include_name: bool = True) -> list[str]:
         """user 的登录名三形态(username/email/name,非空去重 lower)。
 
         登录三级匹配按「输入 lower()」落 key,失败计数/锁会散在三种形态上,
         清理必须三形态全覆盖(否则静默清空 —— DEL 不存在的 key 不报错)。
-        name 形态的 key 跨显示名相同的用户共享(方案 §1.3 已知并接受)。
+        name 形态的 key 跨显示名相同的用户共享(方案 §1.3 已知并接受);
+        include_name=False 供匿名邮箱重置 confirm 调用(方案 §5.4.4 第 8 步):
+        匿名重置只清 username/email 两形态,绝不清 name(跨用户共享)与 IP 锁。
         """
         out: list[str] = []
-        for v in (user.username, user.email, user.name):
+        values: tuple[str | None, ...] = (
+            (user.username, user.email, user.name) if include_name
+            else (user.username, user.email)
+        )
+        for v in values:
             if not v:
                 continue
             u = v.lower()
@@ -174,14 +180,18 @@ class LocalAuthService:
                 out.append(u)
         return out
 
-    async def clear_locks(self, user: User) -> ClearLocksResult:
+    async def clear_locks(
+        self, user: User, *, include_name: bool = True,
+    ) -> ClearLocksResult:
         """清 user 维度登录锁 + 失败计数(W1)。
 
-        对三形态逐一 DEL ``auth:lock:user:{u}`` + ``auth:fail:user:{u}``
+        对形态逐一 DEL ``auth:lock:user:{u}`` + ``auth:fail:user:{u}``
         (**必须 lower()**,与落 key 口径一致);unlock 端点与 reset-password
-        共用本方法,返回实际清到的形态与是否存在过锁。
+        共用本方法,返回实际清到的形态与是否存在过锁。include_name 默认 True
+        保持 directory.py 三形态行为;邮箱重置 confirm 显式传 False
+        (方案 §5.4.4:匿名动作不得影响同名用户/任何 IP 维度锁)。
         """
-        forms = self.user_key_forms(user)
+        forms = self.user_key_forms(user, include_name=include_name)
         pipe = self._redis.pipeline()
         for u in forms:
             pipe.delete(_LOCK_USER_KEY.format(username=u))

@@ -33,8 +33,13 @@ from app.models import ChangePasswordIn, LocalLoginIn
 from app.routers.auth_tokens import router as tokens_router
 from app.services.audit import AuditService
 from app.services.auth import OIDCService
+from app.services.email_utils import mask_email
 from app.services.local_auth import LocalAuthService
 from app.services.mcp_gate import mcp_gate
+from app.services.password_reset import (
+    delete_unused_tokens,
+    post_password_change_cleanup,
+)
 from app.services.tokens import revoke_user_tokens
 from app.settings import get_settings
 
@@ -85,12 +90,14 @@ async def login(
 
 @router.get("/callback")
 async def callback(
+    request: Request,
     code: str = Query(...),
     state: str = Query(...),
     expected_state: str | None = Cookie(default=None, alias=_OIDC_STATE_COOKIE),
     next_url: str = Cookie(default=_DEFAULT_AFTER_LOGIN, alias=_OIDC_NEXT_COOKIE),
     db: AsyncSession = Depends(get_db),
     auth: OIDCService = Depends(get_auth_service),
+    audit: AuditService = Depends(get_audit),  # noqa: B008  # OIDC email_changed 审计
 ) -> RedirectResponse:
     if not auth.enabled:
         raise HTTPException(400, "OIDC provider 未配置 — 当前为纯本地登录")
@@ -101,10 +108,35 @@ async def callback(
     token = await auth.exchange_code_for_token(code)
     # 2) access_token → userinfo
     userinfo = await auth.fetch_userinfo(token["access_token"])
-    # 3) upsert(按 oidc_sub 匹配)
-    user = await auth.upsert_user_from_userinfo(db, userinfo)
+    # 3) upsert(按 oidc_sub 匹配;§5.3.5:email 变化时 service 内已清
+    #    email_verified_at + 删未用重置 token,这里只做接线侧清理与审计)
+    user, email_changed, old_email = await auth.upsert_user_from_userinfo(db, userinfo)
     if not user.is_active:
         raise HTTPException(403, "用户已离职 / 被禁用,请联系管理员")
+
+    if email_changed:
+        # §5.3.5 接线落点:DEL email:code(残留验证码不能把新地址绑上)+ 审计
+        # email_changed(source=oidc)。登录主流程已成功,两者一律 best-effort。
+        assert old_email is not None  # email_changed=True 蕴含快照已取
+        try:
+            await request.app.state.redis.delete(f"email:code:{user.id}")
+        except Exception:  # best-effort(Redis 抖动不拦登录,§5.3.5)
+            log.warning("OIDC email change: del email:code failed user=%s", user.id)
+        try:
+            await audit.write(
+                event_type="email_changed",
+                actor_user_id=user.id,
+                request_ip=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                details={
+                    "old_masked": mask_email(old_email),
+                    "new_masked": mask_email(user.email),
+                    "source": "oidc",
+                },
+                actor_email_snapshot=mask_email(user.email),
+            )
+        except Exception:  # best-effort(审计失败不能拦登录,§5.9)
+            log.warning("OIDC email change: audit write failed user=%s", user.id)
 
     # 4) 签 session JWT + set cookie
     session_token = auth.encode_session(user)
@@ -224,6 +256,10 @@ async def me(
         "union_id": user.feishu_union_id,
         "name": user.name,
         "email": user.email,
+        # 邮箱验证态(邮箱账号方案 §5.8 既有端点改动):= bool(email and
+        # email_verified_at)—— 避免「邮箱已清空但 verified_at 残留」显示成
+        # 已验证;前端按 `?? false` 兼容灰度/回滚时旧后端不返回该键
+        "email_verified": bool(user.email and user.email_verified_at),
         "organization_id": str(user.organization_id) if user.organization_id else None,
         "is_active": user.is_active,
         "is_system_admin": is_system_admin,
@@ -386,6 +422,7 @@ async def change_password(
     # D13b:PAT 一律 403「令牌不允许管理令牌/改密」—— 否则持 PAT 者可用旧密码
     # 自助改密,绕开「改密须由 session 发起」的语义(D11 口径依赖此)。
     # **逐路由守卫,勿给整个 auth router 挂**(/auth/local/login 会被挡死)。
+    request: Request,
     cur: CurrentUser = Depends(require_session_auth),  # noqa: B008
     db: AsyncSession = Depends(get_db),  # noqa: B008
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008
@@ -395,7 +432,9 @@ async def change_password(
     """修改密码;首登 must_change_password=true 时前端强制走此流程(#149)。
 
     原密码校验通过 → 新密码过策略 → 写库 + must_change_password 置 false。
-    已登录 session 不失效(stateless JWT,机制零改动)。
+    邮箱账号方案 §5.5(R5「改密整踢登录」):改密同时 session_version+1,本人
+    全部旧 JWT(含当前请求用的 cookie)立即失效,下一次请求 401 —— 前端在
+    改密成功后主动清会话回登录页,不要依赖刷新 me(会 401 触发跳转)。
     """
     ip = ctx.get("request_ip") or "unknown"
     user = await db.get(User, cur.id)
@@ -424,12 +463,20 @@ async def change_password(
 
     user.password_hash = local_auth.hash_password(body.new_password)
     user.must_change_password = False
+    # 邮箱账号方案 §5.5.1 第 5 步:改密 ⇒ session_version+1(旧 JWT 全部失效;
+    # 同一事务、commit 之前)+ 删该用户未用重置 token(D13,旧链接不能再改密)
+    user.session_version = (user.session_version or 0) + 1
+    await delete_unused_tokens(db, user.id)
     # D13 安全不变量:密码变更 ⇒ 吊销该用户全部活跃 PAT。吊销 UPDATE 必须与
     # password_hash 写入同事务、同一次 commit 之前(commit 之后再吊销会造出
     # 「密码已改而 PAT 仍有效」的窗口);审计在 commit 之后逐条写(只写本次
     # 真正被吊销的行,无活跃令牌则不写),审计失败只 log 不回滚。
     revoked_tokens = await revoke_user_tokens(db, user_id=user.id, reason="password_changed")
     await db.commit()
+
+    # commit 之后 best-effort:DEL email:code(旧验证码不能继续换绑)+ 清
+    # email:chg:fail/lock;Redis 抖动不得把「密码已改」变成 500(§5.5.1)
+    await post_password_change_cleanup(request.app.state.redis, user.id)
 
     await audit.write(
         event_type="password_changed",
