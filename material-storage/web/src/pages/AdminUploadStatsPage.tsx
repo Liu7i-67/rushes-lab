@@ -1,7 +1,9 @@
 /**
  * /admin/upload-stats — 文件上传数量统计页(2026-11-06 统计面板方案 §5.2)。
  *
- * 按项目分行的生活图文 / 口播视频 / 生活视频 / 其他分类计数 + 全部项目汇总行:
+ * 按项目分行的生活图文 / 口播视频 / 生活视频 / 其他分类计数 + 全部项目汇总行(置顶首行):
+ * - 汇总行不再走表底 Table.Summary,而是合成 UploadStatsRow 注入 dataSource 首位
+ *   (用户反馈:Summary 要滚到底才看得到;首行一眼可读,rows 空时也展示全 0);
  * - 筛选行 = 项目多选(数据源 useAllProjects —— useProjects 默认 limit=100 会静默截断,
  *   >100 项目时下拉缺项;两者权限过滤口径相同均走 GET /projects,天然排除归档)
  *   + 日期范围(picker="date" 必填,默认近 30 天)+ 查询按钮;
@@ -33,6 +35,21 @@ const PROJECT_IDS_LIMIT = 200;
 const defaultRange = (): Range => [dayjs().subtract(29, 'day'), dayjs()];
 
 const numberFmt = (n: number) => n.toLocaleString();
+
+// ── 汇总行置顶(2026-11-06 用户反馈:表底 Summary 要滚到底才看得到)────────────
+// 哨兵 id:汇总行是合成的 UploadStatsRow(非真实项目),id 用不可能与项目 UUID 相撞的常量;
+// 各列均无客户端 sorter(排序在后端:total desc → project_name asc),dataSource 顺序即
+// 渲染顺序,汇总行恒第一;日后若给列加 sorter,须把该行排除在排序外,否则汇总会被重排。
+const SUMMARY_ROW_ID = '__summary_all__';
+const isSummaryRow = (r: UploadStatsRow) => r.project_id === SUMMARY_ROW_ID;
+
+// 汇总行视觉区分:轻背景 + 加粗。样式内联在 td(onCell)上 —— antd 的行 hover 底色也是
+// 画在 td 上的类样式,优先级打不过内联样式,汇总行 hover 不掉底色;scroll.x 横滚时汇总行
+// 与普通行共用同一 colgroup,列宽 / 对齐不受影响。轻背景用既有令牌,深浅色主题各自取值。
+const summaryCellProps = (record: UploadStatsRow) =>
+  isSummaryRow(record)
+    ? { style: { background: 'var(--ms-hairline-soft)', fontWeight: 600 } }
+    : {};
 
 /** 分类口径注记(§11 措辞:.ts/.svg 落「其他」是带 mime 前提的条件性结论,勿写成无条件)。*/
 function CategoryHint() {
@@ -100,10 +117,25 @@ export default function AdminUploadStatsPage() {
     );
   }
 
+  // 汇总行注入 dataSource 首位(rows 恒为数组且后端零填充,空集时汇总展示全 0);
+  // 数值口径以后端 summary 为准(= rows 逐列求和),前端不重复求和。
+  const tableRows: UploadStatsRow[] = data
+    ? [{
+        project_id: SUMMARY_ROW_ID,
+        project_code: '',
+        project_name: '全部项目汇总',
+        ...data.summary,
+      },
+      ...data.rows]
+    : [];
+
   const columns: ColumnsType<UploadStatsRow> = [
     {
-      title: '项目', key: 'project', ellipsis: true,
-      render: (_, r) => (
+      title: '项目', key: 'project', ellipsis: true, onCell: summaryCellProps,
+      // 汇总行项目列只留一行加粗文案(合成的 project_code 为空串,不再渲染副行)
+      render: (_, r) => isSummaryRow(r) ? (
+        <div style={{ fontSize: 13, color: 'var(--ms-ink)' }}>全部项目汇总</div>
+      ) : (
         <div style={{ minWidth: 0 }}>
           <div style={{ fontSize: 13, color: 'var(--ms-ink)' }}>{r.project_name}</div>
           <div style={{
@@ -112,11 +144,11 @@ export default function AdminUploadStatsPage() {
         </div>
       ),
     },
-    { title: '生活图文', dataIndex: 'life_images', align: 'right', width: 100, render: numberFmt },
-    { title: '口播视频', dataIndex: 'voice_videos', align: 'right', width: 100, render: numberFmt },
-    { title: '生活视频', dataIndex: 'life_videos', align: 'right', width: 100, render: numberFmt },
-    { title: '其他', dataIndex: 'others', align: 'right', width: 80, render: numberFmt },
-    { title: '合计', dataIndex: 'total', align: 'right', width: 100, render: numberFmt },
+    { title: '生活图文', dataIndex: 'life_images', align: 'right', width: 100, onCell: summaryCellProps, render: numberFmt },
+    { title: '口播视频', dataIndex: 'voice_videos', align: 'right', width: 100, onCell: summaryCellProps, render: numberFmt },
+    { title: '生活视频', dataIndex: 'life_videos', align: 'right', width: 100, onCell: summaryCellProps, render: numberFmt },
+    { title: '其他', dataIndex: 'others', align: 'right', width: 80, onCell: summaryCellProps, render: numberFmt },
+    { title: '合计', dataIndex: 'total', align: 'right', width: 100, onCell: summaryCellProps, render: numberFmt },
   ];
 
   return (
@@ -181,7 +213,9 @@ export default function AdminUploadStatsPage() {
         />
       )}
 
-      {/* 结果表:未发起过查询给引导空态;rows 恒为数组(后端零填充),空集即无可达项目 */}
+      {/* 结果表:未发起过查询给引导空态(此时尚无数据,不渲染汇总行);发起查询后汇总行
+          恒为首行 —— rows 为空也展示全 0 汇总,数据为零本身就是有效结果。首取数时
+          data 未就绪 dataSource 为空,locale 空态文案兜底,与 loading 态不冲突 */}
       {!query ? (
         <Table
           columns={columns}
@@ -197,7 +231,7 @@ export default function AdminUploadStatsPage() {
       ) : (
         <Table
           columns={columns}
-          dataSource={data?.rows ?? []}
+          dataSource={tableRows}
           rowKey="project_id"
           loading={isFetching && !data}
           scroll={{ x: 'max-content' }}
@@ -207,28 +241,6 @@ export default function AdminUploadStatsPage() {
               所选范围内暂无数据(无可访问的项目或窗口内无上传)
             </span>
           ) }}
-          summary={data ? () => (
-            <Table.Summary.Row>
-              <Table.Summary.Cell index={0}>
-                <span style={{ fontWeight: 500 }}>全部项目汇总</span>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={1} align="right">
-                <span style={{ fontWeight: 500 }}>{numberFmt(data.summary.life_images)}</span>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={2} align="right">
-                <span style={{ fontWeight: 500 }}>{numberFmt(data.summary.voice_videos)}</span>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={3} align="right">
-                <span style={{ fontWeight: 500 }}>{numberFmt(data.summary.life_videos)}</span>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={4} align="right">
-                <span style={{ fontWeight: 500 }}>{numberFmt(data.summary.others)}</span>
-              </Table.Summary.Cell>
-              <Table.Summary.Cell index={5} align="right">
-                <span style={{ fontWeight: 500 }}>{numberFmt(data.summary.total)}</span>
-              </Table.Summary.Cell>
-            </Table.Summary.Row>
-          ) : undefined}
         />
       )}
     </div>
