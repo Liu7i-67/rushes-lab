@@ -64,6 +64,14 @@ USER_DIRECT_RELATIONS: tuple[tuple[str, str], ...] = (
     # 组删除授权,照 project_deleter 先例维持「每个组级 flag 都有防御项」不变量);
     # 未部署时同样被 continue 容错,不炸
     ("organization", "file_deleter"),
+    # ("organization", "stats_viewer"):组级「统计面板」父开关防御项(2026-11-06
+    # 统计面板方案 §3.2,照 file_deleter 先例维持「每个组级 flag 都有防御项」
+    # 不变量);未部署时同样被 continue 容错,不炸
+    ("organization", "stats_viewer"),
+    # ("organization", "usage_stats_viewer"):组级「使用统计」子开关防御项(同上)
+    ("organization", "usage_stats_viewer"),
+    # ("organization", "upload_stats_viewer"):组级「文件上传数量统计」子开关防御项(同上)
+    ("organization", "upload_stats_viewer"),
     ("department", "member"),
     ("group", "member"),
     ("project", "admin"),
@@ -714,6 +722,56 @@ class PermissionsService:
         return await self.check(
             user_subject=f"user:{user_id}",
             relation="artist_account_creator",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_stats_viewer(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#stats_viewer check(组开关经 group#member 展开)。
+
+        仿 is_org_project_creator(2026-11-06 统计面板方案 §3.2):本方法只是
+        check 半边 —— /me 回显的完整口径 = is_org_admin 或本方法(父 flag 仅控
+        面板入口,不单独授任何数据);两个子 flag(usage/upload_stats_viewer)
+        的应用层守门完整口径另合取本方法(父∧子,防不一致 tuple,合取判定在
+        deps.py 层单一 helper,不进 permissions 层)。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="stats_viewer",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_usage_stats_viewer(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#usage_stats_viewer check(组开关经 group#member 展开)。
+
+        仿 is_org_stats_viewer(2026-11-06 统计面板方案 §3.2):应用层守门 /
+        /me 的完整口径 = is_org_admin 或(stats_viewer 且本方法)—— 父∧子合取,
+        不一致 tuple(「子开父关」)下接口不可达,安全性单调。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="usage_stats_viewer",
+            object_type="organization",
+            object_id=organization_tenant_key,
+        )
+
+    async def is_org_upload_stats_viewer(
+        self, *, user_id: str, organization_tenant_key: str
+    ) -> bool:
+        """FGA 半边:organization#upload_stats_viewer check(组开关经 group#member 展开)。
+
+        仿 is_org_stats_viewer(2026-11-06 统计面板方案 §3.2):应用层守门 /
+        /me 的完整口径 = is_org_admin 或(stats_viewer 且本方法)—— 父∧子合取,
+        与 usage_stats_viewer 侧同构、相互独立。
+        """
+        return await self.check(
+            user_subject=f"user:{user_id}",
+            relation="upload_stats_viewer",
             object_type="organization",
             object_id=organization_tenant_key,
         )

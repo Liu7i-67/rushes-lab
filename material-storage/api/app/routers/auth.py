@@ -12,8 +12,11 @@ endpoints:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from collections.abc import Coroutine
+from typing import Any
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -23,6 +26,7 @@ from app.db.session import get_db
 from app.db.tables import User
 from app.deps import (
     CurrentUser,
+    _org_stats_sub_allowed,  # 统计面板子 flag 合取单一事实源(方案 §3.2;/me 内联复用)
     get_audit,
     get_current_user,
     get_local_auth,
@@ -126,6 +130,20 @@ async def callback(
     return resp
 
 
+async def _me_flag_check(coro: Coroutine[Any, Any, bool]) -> bool:
+    """单 flag FGA check 的逐 flag 容错包裹(/me flags gather 并行化用)。
+
+    2026-11-06 统计面板方案 §3.2 把 /me 的组级 flag 补查(既有五 flag + 新增
+    三 flag)一并 asyncio.gather 并行化(交付项);gather 无法逐项 try/except,
+    本包裹等价承载原「逐 flag 内联 try/except → False」口径:FGA 抖动 /
+    model 未 push 只吞成该 flag False,不致 /me 500、不影响其余 flag。
+    """
+    try:
+        return await coro
+    except Exception:  # noqa: BLE001
+        return False
+
+
 @router.get("/me", dependencies=[Depends(mcp_gate)])
 async def me(
     request: Request,
@@ -148,6 +166,11 @@ async def me(
     is_folder_template_manager = False
     is_artist_account_creator = False
     is_file_deleter = False
+    # 组级统计三 flag(2026-11-06 统计面板方案 §3.2):父 stats_viewer 仅控面板
+    # 入口;两子 flag 守门口径 = is_org_admin ∨ (stats_viewer ∧ 子)
+    is_stats_viewer = False
+    is_usage_stats_viewer = False
+    is_upload_stats_viewer = False
     if org:
         _, tenant_key = org
         perms = request.app.state.permissions
@@ -158,64 +181,84 @@ async def me(
         except Exception:  # noqa: BLE001
             pass
         # 系统 admin 直通 true(admin 蕴含于守门口径,不重复 check);
-        # 非 admin 才进下方 check 分支覆盖该值
+        # 非 admin 才进下方 gather 补查覆盖该组值。2026-11-06 统计面板方案 §3.2
+        # 交付项:新增三 flag 与既有五 flag 一并 asyncio.gather 并行化 —— /me 是
+        # 前端冷启动热路径,8 次 FGA check 一次并行往返(原串行逐 flag
+        # try/except 的容错口径由 _me_flag_check 等价承载);is_stats_viewer 的
+        # check 结果计算一次、供两个合取子项复用(按 flag 粒度独立实现会多打
+        # 父 check,补查计数 5→8 次的前提,勿)
         is_project_creator = bool(is_system_admin)
-        if not is_system_admin:
-            try:
-                is_project_creator = await perms.is_org_project_creator(
-                    user_id=str(user.id), organization_tenant_key=tenant_key,
-                )
-            except Exception:  # noqa: BLE001
-                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
-
-        # 组级「删除项目」权限(F6.7):与 require_project_deleter 守门同口径
-        # (is_org_admin 或 organization#project_deleter,组开关经 group#member 展开)
         is_project_deleter = bool(is_system_admin)
-        if not is_system_admin:
-            try:
-                is_project_deleter = await perms.is_org_project_deleter(
-                    user_id=str(user.id), organization_tenant_key=tenant_key,
-                )
-            except Exception:  # noqa: BLE001
-                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
-
-        # 组级「管理目录模板」权限(目录模板方案 §3.3):与写守门
-        # require_folder_template_manager 同口径(is_org_admin 或
-        # organization#folder_template_manager,组开关经 group#member 展开)
         is_folder_template_manager = bool(is_system_admin)
-        if not is_system_admin:
-            try:  # noqa: SIM105  与上方两个 flag 块同款 try/except 形状(不换 contextlib.suppress)
-                is_folder_template_manager = await perms.is_org_folder_template_manager(
-                    user_id=str(user.id), organization_tenant_key=tenant_key,
-                )
-            except Exception:
-                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
-
-        # 组级「新建项目时创建艺人账号」权限(艺人账号内嵌方案 §3.3/§4.4):与写守门
-        # 同口径(is_org_admin 或 organization#artist_account_creator,组开关经
-        # group#member 展开);POST /projects 的端点内组合校验另含 project_creator 支
         is_artist_account_creator = bool(is_system_admin)
-        if not is_system_admin:
-            try:  # noqa: SIM105  与上方三个 flag 块同款 try/except 形状(不换 contextlib.suppress)
-                is_artist_account_creator = await perms.is_org_artist_account_creator(
-                    user_id=str(user.id), organization_tenant_key=tenant_key,
-                )
-            except Exception:
-                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
-
-        # 组级「删除文件/文件夹」权限(2026-10-16 组删除授权 F9):口径 =
-        # is_system_admin 或 organization#file_deleter(组开关经 group#member 展开)。
-        # **不含** org admin 直通 —— org admin 删文件走既有对象级权限,现状即如此,
-        # 不借本需求扩大;对资产的完整删除守门另需对象 can_view 且非 sensitive
-        # (见 assets.py / folders.py),本字段只是前端闸门的开关半边
         is_file_deleter = bool(is_system_admin)
+        is_stats_viewer = bool(is_system_admin)
+        is_usage_stats_viewer = bool(is_system_admin)
+        is_upload_stats_viewer = bool(is_system_admin)
         if not is_system_admin:
-            try:  # noqa: SIM105  与上方四个 flag 块同款 try/except 形状(不换 contextlib.suppress)
-                is_file_deleter = await perms.is_org_file_deleter(
+            (
+                creator_r, deleter_r, tmpl_r, artist_r, file_del_r,
+                stats_r, usage_r, upload_r,
+            ) = await asyncio.gather(
+                _me_flag_check(perms.is_org_project_creator(
                     user_id=str(user.id), organization_tenant_key=tenant_key,
-                )
-            except Exception:
-                pass  # FGA 抖动 / model 未 push 不致 /me 500,按 auth.py 现状惯例回 False
+                )),
+                _me_flag_check(perms.is_org_project_deleter(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_folder_template_manager(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_artist_account_creator(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_file_deleter(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_stats_viewer(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_usage_stats_viewer(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+                _me_flag_check(perms.is_org_upload_stats_viewer(
+                    user_id=str(user.id), organization_tenant_key=tenant_key,
+                )),
+            )
+            is_project_creator = creator_r
+            # 组级「删除项目」权限(F6.7):与 require_project_deleter 守门同口径
+            # (is_org_admin 或 organization#project_deleter,组开关经 group#member 展开)
+            is_project_deleter = deleter_r
+            # 组级「管理目录模板」权限(目录模板方案 §3.3):与写守门
+            # require_folder_template_manager 同口径(is_org_admin 或
+            # organization#folder_template_manager,组开关经 group#member 展开)
+            is_folder_template_manager = tmpl_r
+            # 组级「新建项目时创建艺人账号」权限(艺人账号内嵌方案 §3.3/§4.4):与写守门
+            # 同口径(is_org_admin 或 organization#artist_account_creator,组开关经
+            # group#member 展开);POST /projects 的端点内组合校验另含 project_creator 支
+            is_artist_account_creator = artist_r
+            # 组级「删除文件/文件夹」权限(2026-10-16 组删除授权 F9):口径 =
+            # is_system_admin 或 organization#file_deleter(组开关经 group#member 展开)。
+            # **不含** org admin 直通 —— org admin 删文件走既有对象级权限,现状即如此,
+            # 不借本需求扩大;对资产的完整删除守门另需对象 can_view 且非 sensitive
+            # (见 assets.py / folders.py),本字段只是前端闸门的开关半边
+            is_file_deleter = file_del_r
+            # 组级「统计面板」父权限(2026-11-06 统计面板方案 §3.2):
+            # is_org_admin ∨ check(organization#stats_viewer);结果只算一次
+            is_stats_viewer = stats_r
+            # 两子 flag 合取复用 deps helper(口径单一事实源,三边已算好、helper
+            # 不再打 FGA):is_org_admin ∨ (stats_viewer ∧ 子) —— 父∧子合取防
+            # 「子开父关」不一致 tuple 下前端显卡片而 API 403
+            is_usage_stats_viewer = await _org_stats_sub_allowed(
+                perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+                sub_relation="usage_stats_viewer",
+                is_admin=is_system_admin, parent_check=stats_r, sub_check=usage_r,
+            )
+            is_upload_stats_viewer = await _org_stats_sub_allowed(
+                perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+                sub_relation="upload_stats_viewer",
+                is_admin=is_system_admin, parent_check=stats_r, sub_check=upload_r,
+            )
 
     return {
         "id": str(user.id),
@@ -240,6 +283,16 @@ async def me(
         # (is_system_admin or organization#file_deleter,不含 org admin 直通);
         # 前端闸门用
         "is_file_deleter": is_file_deleter,
+        # 组级「统计面板」父权限(2026-11-06 统计面板方案 §3.2):与守门口径一致
+        # (is_org_admin 或 organization#stats_viewer);仅控面板入口,前端三态门
+        # is_stats_viewer ?? is_system_admin 消费
+        "is_stats_viewer": is_stats_viewer,
+        # 组级「使用统计」子权限(2026-11-06 统计面板方案 §3.2):与守门合取口径
+        # 一致(is_org_admin 或 stats_viewer ∧ 本 flag);前端闸门用
+        "is_usage_stats_viewer": is_usage_stats_viewer,
+        # 组级「文件上传数量统计」子权限(2026-11-06 统计面板方案 §3.2):合取
+        # 口径同上;前端闸门用
+        "is_upload_stats_viewer": is_upload_stats_viewer,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

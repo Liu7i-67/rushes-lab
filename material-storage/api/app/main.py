@@ -31,6 +31,7 @@ from app.routers import (
     request_links,
     risk,
     share,
+    upload_stats,
     usage_stats,
     users,
 )
@@ -171,9 +172,18 @@ def create_app() -> FastAPI:
         notifications.router, prefix="/api/v1/notifications", tags=["notifications"],
         dependencies=gate,
     )
-    # 客户端使用统计(2026-10-27 usage-analytics;只读聚合,仅 system admin)
+    # 客户端使用统计(2026-10-27 usage-analytics;只读聚合,守门已放宽为
+    # require_usage_stats_viewer:is_org_admin ∨ (stats_viewer ∧ usage_stats_viewer),
+    # 2026-11-06 统计面板需求 §4.5;系统 admin 恒直通)
     app.include_router(
         usage_stats.router, prefix="/api/v1/admin/usage", tags=["usage-stats"], dependencies=gate,
+    )
+    # 文件上传数量统计(2026-11-06 stats-panel-upload-stats §4;按项目四分类计数 +
+    # 汇总,守门 require_upload_stats_viewer:is_org_admin ∨ (stats_viewer ∧
+    # upload_stats_viewer),系统 admin 恒直通)
+    app.include_router(
+        upload_stats.router, prefix="/api/v1/admin/stats", tags=["upload-stats"],
+        dependencies=gate,
     )
     # 登录风控(2026-10-28 risk-control-module-plan;锁列表 + 解 IP 锁,仅 system admin)
     app.include_router(risk.router, prefix="/api/v1/admin/risk", tags=["risk"], dependencies=gate)

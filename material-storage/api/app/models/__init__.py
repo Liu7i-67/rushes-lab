@@ -905,3 +905,41 @@ class RiskIpUnlockOut(BaseModel):
 
     ip: str
     was_locked: bool
+
+
+# ─── 文件上传数量统计(2026-11-06 stats-panel-upload-stats,需求 §4.1)──────────
+# 四桶互斥由服务层单条 CASE 保证(优先级 livp > 口播视频 > 生活视频 > 图片,每条
+# 资产恰好落一桶),故 total = 四桶之和 ≡ count(*);summary = rows 逐列求和
+# (排序与求和契约在服务层单点实现,模型只定形状,同 UsageStatsOut 惯例)。
+class UploadStatsTotalsOut(BaseModel):
+    """四分类计数(life_images=生活图文:图片+livp / voice_videos=口播视频 /
+    life_videos=生活视频 / others=三者之外)+ total 合计。"""
+
+    life_images: int
+    voice_videos: int
+    life_videos: int
+    others: int
+    total: int
+
+
+class UploadStatsRowOut(UploadStatsTotalsOut):
+    """按项目分行走分类计数;窗口内无资产的项目零填充全 0 行(表格诚实显示)。
+
+    行集合 = 项目宇宙(GET /projects 同口径,零填充)∪ 计数面补充(仅 folder
+    级 grant、项目不可见但有数即现,不零填充),语义差异见方案 §4.4。
+    """
+
+    project_id: uuid.UUID
+    project_code: str
+    project_name: str
+
+
+class UploadStatsOut(BaseModel):
+    """GET /api/v1/admin/stats/uploads 响应(需求 §4.1 契约)。
+
+    rows 恒为数组(排序 total desc → project_name asc,宇宙为空时为 [],
+    无 sentinel);summary = rows 逐列求和(后端为准,前端 Table Summary 同显)。
+    """
+
+    rows: list[UploadStatsRowOut] = []
+    summary: UploadStatsTotalsOut

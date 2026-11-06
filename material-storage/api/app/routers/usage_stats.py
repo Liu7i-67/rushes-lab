@@ -1,6 +1,9 @@
 """usage-stats router — 客户端使用统计聚合端点(2026-10-27 usage-analytics 需求 §3.1)。
 
-  GET /api/v1/admin/usage/stats — 三端占比 + 内外网占比;仅 system admin。
+  GET /api/v1/admin/usage/stats — 三端占比 + 内外网占比;守门
+  require_usage_stats_viewer(2026-11-06 统计面板方案 §4.5/D2 由
+  require_system_admin 放宽:org admin 或「统计面板 ∧ 使用统计」组权限;
+  路径 / 参数 / 响应 / 聚合行为零变化,App 共用端点零改动)。
 
 独立 router(不堆进 1100+ 行的 admin.py,需求决策 P1);时间参数四分支 +
 三类 422(naive / 乱序 / 超窗)按需求 §4 写死。只读端点,无写入副作用。
@@ -14,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.deps import CurrentUser, require_system_admin
+from app.deps import CurrentUser, require_usage_stats_viewer
 from app.models import UsageStatsOut
 from app.services.usage_stats import UsageStatsService
 
@@ -35,10 +38,16 @@ async def usage_stats(
     metric: Literal["active_users", "logins"] = Query("active_users"),
     daily: bool = Query(True, description="false 时 daily 返回 []"),
     db: AsyncSession = Depends(get_db),  # noqa: B008  FastAPI DI,repo 全量同款
-    user: CurrentUser = Depends(require_system_admin),  # noqa: B008
+    # 2026-11-06 统计面板方案 §4.5(D2):require_system_admin →
+    # require_usage_stats_viewer 守门放宽(org admin ∨ 统计面板父∧子组权限,
+    # 系统 admin 恒直通);路径 / 参数 / 响应 / 聚合行为零变化
+    user: CurrentUser = Depends(require_usage_stats_viewer),  # noqa: B008
 ) -> UsageStatsOut:
     """使用统计聚合(需求 §4):totals / by_platform / by_platform_class /
-    by_network / cross / daily;users 各分组独立去重,跨组不可加。"""
+    by_network / cross / daily;users 各分组独立去重,跨组不可加。
+
+    守门(2026-11-06 统计面板方案 §4.5):require_usage_stats_viewer ——
+    org admin 或被授权「统计面板+使用统计」的组成员,非仅 system admin。"""
     _ = user.id
     now = datetime.now(UTC)
     # 时间规则四分支(需求 §4 写死)。先补 to 再补 from 即覆盖全部分支:

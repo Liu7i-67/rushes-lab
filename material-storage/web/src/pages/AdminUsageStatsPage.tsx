@@ -6,7 +6,8 @@
  * - metric 切换 active_users(默认)/ logins;
  * - daily 开关控制日趋势取数(false 时后端 daily=[],趋势节自动不渲染);
  * - 页面纯展示:不做二次解析 / 二次去重;daily 的 users 跨维度不可加,前端不求和;
- * - 数据面 require_system_admin(backend enforce):非系统管理员直连 URL 由后端 403
+ * - 数据面 require_usage_stats_viewer(backend enforce;2026-11-06 统计面板方案 §4.5,
+ *   口径 = org admin ∨ (stats_viewer ∧ usage_stats_viewer)):无权用户直连 URL 由后端 403
  *   (全局 queryCache 静默跳过),页面先用 me 做体验提示(照 AdminBaiduTasksPage)。
  *
  * 布局照 AdminAuditPage 页头 / 过滤栏惯例;占比条与交叉表拆子组件(方案 P3)。
@@ -73,13 +74,14 @@ export default function AdminUsageStatsPage() {
   const { data, isLoading } = useAdminUsageStats(params);
 
   // 前端体验守卫(后端仍 enforce;me 未就绪时不拦,交给后端 403 → 空态兜底)
-  if (me && !me.is_system_admin) {
+  // 2026-11-06 统计面板方案 §5.3:守门放宽为 is_usage_stats_viewer ?? is_system_admin
+  if (me && !(me.is_usage_stats_viewer ?? me.is_system_admin)) {
     return (
       <div className="ms-enter" style={{ maxWidth: 520 }}>
         <Alert
           type="warning" showIcon
-          message="只有系统管理员可以查看使用统计"
-          description="如需查看客户端与网络环境占比,请联系系统管理员。"
+          message="只有获得授权的用户可以查看使用统计"
+          description="如需查看客户端与网络环境占比,请联系系统管理员开通。"
         />
       </div>
     );

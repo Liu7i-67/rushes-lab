@@ -497,3 +497,203 @@ async def require_inline_artist_creator(
         "inline artist creator permission required"
         "(仅系统管理员或被授权「新建项目时创建艺人账号」的可建项目组成员可查询登录名占用)",
     )
+
+
+# ─── 统计面板组级权限(2026-11-06 统计面板方案 §3.2)───────────────────────────
+async def _org_stats_sub_allowed(
+    perms: PermissionsService,
+    *,
+    user_id: str,
+    organization_tenant_key: str,
+    sub_relation: str,
+    is_admin: bool | None = None,
+    parent_check: bool | None = None,
+    sub_check: bool | None = None,
+) -> bool:
+    """统计面板子模块合取判定 — deps 层单一私有 helper(方案 §3.2,勿进 permissions 层)。
+
+    口径写死、require_usage(upload)_stats_viewer / get_is_usage(upload)_stats_viewer /
+    auth /me 内联多处共用,防多份手写合取漂移:
+
+        is_org_admin ∨ (check(organization#stats_viewer) ∧ check(organization#<sub_relation>))
+
+    父∧子合取防「子开父关」不一致 tuple(直改 FGA / 并发 PATCH 可能产生)绕过
+    面板直打接口 —— 不一致态下接口不可达,安全性单调(方案 §3.2)。三个
+    precomputed 入参传 None = helper 内自行补查(require_/get_is_ 形态,顺序
+    短路与 require_project_creator 模板同构:admin 直通 → 父 fail-fast → 子);
+    /me 冷启动热路径把 gather 已取到的边传入(is_stats_viewer 的 check 结果
+    计算一次、供两个合取子项复用,补查计数 5→8 次的前提),此时本 helper 不再
+    打 FGA。sub_relation 仅认 usage_stats_viewer / upload_stats_viewer(派发
+    写死,调用方拼错 relation 立即 ValueError 而非静默判 False)。组合判定历来
+    在应用层(permissions.is_org_* docstring 明文「这是 check 半边」),故落
+    deps.py 不进 permissions 层,勿破既有分层。
+    """
+    if sub_relation not in ("usage_stats_viewer", "upload_stats_viewer"):
+        raise ValueError(f"unknown stats sub relation: {sub_relation}")
+    if is_admin is None:
+        is_admin = await perms.is_org_admin(
+            user_id=user_id, organization_tenant_key=organization_tenant_key,
+        )
+    if is_admin:
+        return True
+    if parent_check is None:
+        parent_check = await perms.is_org_stats_viewer(
+            user_id=user_id, organization_tenant_key=organization_tenant_key,
+        )
+    if not parent_check:
+        return False
+    if sub_check is None:
+        if sub_relation == "usage_stats_viewer":
+            sub_check = await perms.is_org_usage_stats_viewer(
+                user_id=user_id, organization_tenant_key=organization_tenant_key,
+            )
+        else:
+            sub_check = await perms.is_org_upload_stats_viewer(
+                user_id=user_id, organization_tenant_key=organization_tenant_key,
+            )
+    return bool(parent_check and sub_check)
+
+
+async def require_usage_stats_viewer(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> CurrentUser:
+    """使用统计守门 — GET /admin/usage/stats 用(2026-11-06 统计面板方案 §3.2/§4.5)。
+
+    口径:is_org_admin ∨ (stats_viewer ∧ usage_stats_viewer)(合取走
+    _org_stats_sub_allowed 单一事实源)—— 由 require_system_admin 放宽而来,
+    系统 admin 恒直通,组开关成员经 group#member 自动展开。default org 缺失
+    对齐 require_system_admin(500);FGA 异常不上吞(部署顺序保证 model 先
+    push,方案 §8 铁律);403 文案与 upload 版区分。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if not await _org_stats_sub_allowed(
+        perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+        sub_relation="usage_stats_viewer",
+    ):
+        raise HTTPException(
+            403,
+            "usage stats viewer permission required"
+            "(仅系统管理员或被授权「使用统计」的组成员可查看使用统计)",
+        )
+    return user
+
+
+async def require_upload_stats_viewer(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> CurrentUser:
+    """文件上传数量统计守门 — GET /admin/stats/uploads 用(统计面板方案 §3.2)。
+
+    口径:is_org_admin ∨ (stats_viewer ∧ upload_stats_viewer),与
+    require_usage_stats_viewer 同构(合取走 _org_stats_sub_allowed 单一事实源)、
+    403 文案区分。default org 缺失 500;FGA 异常不上吞(同上,方案 §8)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        raise HTTPException(500, "no default organization configured")
+    _, tenant_key = org
+    if not await _org_stats_sub_allowed(
+        perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+        sub_relation="upload_stats_viewer",
+    ):
+        raise HTTPException(
+            403,
+            "upload stats viewer permission required"
+            "(仅系统管理员或被授权「文件上传数量统计」的组成员可查看文件上传数量统计)",
+        )
+    return user
+
+
+async def get_is_stats_viewer(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> bool:
+    """返当前 user 是否可见统计面板入口(不抛 403,bool)。
+
+    口径写死(与 /me 内联回显一致):is_org_admin 或 check(organization#
+    stats_viewer)—— 父 flag 单独成口径(仅控入口,无子合取)。default org
+    缺失 → False、FGA 抖动 try/except → False(get_is_project_creator 惯例,
+    model 未 push 不致调用方 500)。当前无路由消费:仅作口径单一事实源与未来
+    端点备用,/me 沿内联形态不依赖本 dep(方案 §3.2)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        return False
+    _, tenant_key = org
+    try:
+        if await perms.is_org_admin(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        ):
+            return True
+        return await perms.is_org_stats_viewer(
+            user_id=str(user.id), organization_tenant_key=tenant_key,
+        )
+    except Exception:
+        return False
+
+
+async def get_is_usage_stats_viewer(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> bool:
+    """返当前 user 是否可用「使用统计」(不抛 403,bool)。
+
+    与 require_usage_stats_viewer 写死同口径(is_org_admin ∨ (stats_viewer ∧
+    usage_stats_viewer),合取走 _org_stats_sub_allowed 单一事实源);default
+    org 缺失 → False、FGA 抖动 → False。当前无路由消费(口径单一事实源 +
+    未来端点备用,方案 §3.2;/me 沿内联形态不依赖本 dep)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        return False
+    _, tenant_key = org
+    try:
+        return await _org_stats_sub_allowed(
+            perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+            sub_relation="usage_stats_viewer",
+        )
+    except Exception:
+        return False
+
+
+async def get_is_upload_stats_viewer(
+    request: Request,
+    user: CurrentUser = _Depends(get_current_user),
+) -> bool:
+    """返当前 user 是否可用「文件上传数量统计」(不抛 403,bool)。
+
+    与 require_upload_stats_viewer 写死同口径(is_org_admin ∨ (stats_viewer ∧
+    upload_stats_viewer),合取走 _org_stats_sub_allowed 单一事实源);default
+    org 缺失 → False、FGA 抖动 → False。当前无路由消费(口径单一事实源 +
+    未来端点备用,方案 §3.2;/me 沿内联形态不依赖本 dep)。
+    """
+    perms: PermissionsService = request.app.state.permissions
+    from app.services.org import get_default_organization
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    if not org:
+        return False
+    _, tenant_key = org
+    try:
+        return await _org_stats_sub_allowed(
+            perms, user_id=str(user.id), organization_tenant_key=tenant_key,
+            sub_relation="upload_stats_viewer",
+        )
+    except Exception:
+        return False
