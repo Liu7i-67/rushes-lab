@@ -192,6 +192,7 @@ life_images_expr = livp_expr | image_expr
 口径说明:
 - 视频/图片判定与 `is_video_asset/is_image_asset` 完全同构(mime 前缀 OR filename 扩展名),扩展名刻意沿用 thumb 清单;**边界口径与夹具前提**:`.ts` 落「其他」仅当 content_type 非 `video/*`(mime 是 video/* 时按 mime 落「生活视频」),`.svg` 落「其他」仅当 content_type 非 `image/*`(image/png mime 的 .svg 落「生活图文」)——§7 用例的夹具 mime 前提即此,tooltip 口径照此措辞,勿写成无条件结论;
 - 「口播视频」只作用于视频:非视频文件名含关键词仍按自身类别归类(图片含「口播视频」字样 → 生活图文);
+- **2026-11-06 用户拍板**:口播视频路径匹配改为按**当前位置**(`folder.minio_prefix + filename`,SQL 侧 `func.concat` 拼接,join folders 在计数 SQL 本就存在);落库 `minio_key` 为上传时刻快照(D1-B 文件夹改名/移动只重算 prefix、不回填存量 key)会过期,**不参与匹配** —— 目录即分类:移动/改名文件夹即时生效,挪出「口播视频」夹即不再计口播;
 - **asset 级单文件授权不在计数面**:盲搜对 asset#explicit_downloader(单文件临时 grant)本就「宁漏勿泄」不纳入(assets.py:648-649 docstring),本端点沿同一保守口径——持单文件授权者可下载该资产但其不计入统计,记此处防后来者当 bug「修」;
 - ILIKE 对 CJK 无大小写问题;`~*` 大小写不敏感匹配扩展名。
 
@@ -324,6 +325,7 @@ GROUP BY f.project_id, p.code, p.name
 - FGA 部署顺序违反(model 后推)→ require_* 500:§8 第 1 步铁律,已在 deps 先例注释与本文档双处钉死;
 - 非 admin folder_id IN 列表极大(数千 folder)时 SQL IN 变长:当前量级无碍,增长后可改 VALUES join(记 §12);OpenFGA `list_objects` 无分页兜底,可达对象超单响应上限会静默截断致漏计(permissions.py:158-177,盲搜继承的既有行为,非新引入)——统计对漏计更敏感,量级上涨后改带 continuation 的枚举(记 §12);
 - 口播视频依赖命名约定,归类随资产自身 filename/minio_key 即时计算(非快照):**资产改名(批量前缀)会同步重写 filename+minio_key(assets.py:851/969/1019)→ 改变其归类**;文件夹改名/移动**不重写存量 assets.minio_key**(folders.py:205-207,仅重算 folder.minio_prefix)→ **不影响存量归类**,但此后再对资产做批量改名时新 key 按新 prefix 拼接(间接交互)。页面 tooltip 按此口径注记,勿写「文件夹改名导致归类漂移」;
+- **2026-11-06 用户拍板(修订上条)**:口播视频路径匹配改为按当前位置(folder.minio_prefix+filename);落库 minio_key 为上传时刻快照不参与匹配 → 文件夹改名/移动**即时改变**存量资产的口播归类(目录即分类,挪出「口播视频」夹即不再计),上条「不影响存量归类」自本日起不再成立,页面 tooltip 口径注记已同步;
 - 百度导入资产的「上传时间」= 导入完成时刻(非网盘原始时间),同上注记;
 - .ts/.svg 等刻意排除项落「其他」:与 thumb 派发同口径,避免两套清单漂移;
 - 补充行(项目不可见仅 folder 可达)回显 project_code 略超盲搜先例(盲搜回显不含 code,models/__init__.py:171-176)——泄露量级可忽略,**该取舍已记录于本文档,上线后勿当缺陷回报**;tooltip 口径注记带一句「行内项目编码以当前库为准」,保持「宁漏勿泄」论证严谨;

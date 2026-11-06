@@ -51,7 +51,9 @@ const summaryCellProps = (record: UploadStatsRow) =>
     ? { style: { background: 'var(--ms-hairline-soft)', fontWeight: 600 } }
     : {};
 
-/** 分类口径注记(§11 措辞:.ts/.svg 落「其他」是带 mime 前提的条件性结论,勿写成无条件)。*/
+/** 分类口径注记(§11 措辞:.ts/.svg 落「其他」是带 mime 前提的条件性结论,勿写成无条件)。
+ * 口播视频 2026-11-06 用户拍板改按「当前位置」匹配(文件名或当前所在目录路径,
+ * folder.minio_prefix+filename;落库 minio_key 为上传时刻快照不参与)。 */
 function CategoryHint() {
   return (
     <p style={{
@@ -59,13 +61,14 @@ function CategoryHint() {
       display: 'flex', alignItems: 'baseline', gap: 6, flexWrap: 'wrap',
     }}>
       <span>
-        分类口径:生活图文 = 图片 + livp;口播视频 = 视频且文件名 / 路径含「口播视频」;生活视频 = 其余视频
+        分类口径:生活图文 = 图片 + livp;口播视频 = 视频且文件名或当前所在目录路径含「口播视频」;生活视频 = 其余视频
       </span>
       <Tooltip title={(
         <div style={{ maxWidth: 320 }}>
           <div>· 时间按自然日筛选,后端按东八区(Asia/Shanghai)归一为 00:00:00 ~ 23:59:59;</div>
           <div>· 已删除(软删)资产不计数,恢复后重新计数;归档 / 已删除项目不计;</div>
           <div>· 百度导入资产的「上传时间」= 导入完成时刻(非网盘原始时间);</div>
+          <div>· 口播视频 = 文件名或当前所在目录路径含「口播视频」(按当前位置匹配,移动/改名文件夹即时生效);</div>
           <div>· .ts / .svg 等刻意排除的扩展名落「其他」(其 mime 为 video/* / image/* 时仍按 mime 归类);</div>
           <div>· 行内项目编码以当前库为准。</div>
         </div>

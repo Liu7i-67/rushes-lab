@@ -21,8 +21,10 @@ relation 的 model 重推到测试 store**(api/scripts/openfga_write_model.sh;ms
   - date_from/date_to 日粒度必填;后端固定 +08:00 归一半开区间
     [from 00:00+08, to+1d 00:00+08)(§4.2);from>to / 纯日期差>365 天 /
     date_to+1d 溢出(9999-12-31 的 OverflowError 守卫)→ 422
-  - 分类单条 CASE,优先级 livp > 口播视频(视频 ∧ filename/minio_key 含
-    「口播视频」)> 生活视频 > 图片;livp/图片并入生活图文;.ts/.svg 在夹具
+  - 分类单条 CASE,优先级 livp > 口播视频(视频 ∧ filename 或当前所在目录
+    路径 folder.minio_prefix+filename 含「口播视频」,2026-11-06 用户拍板按
+    当前位置匹配,落库 minio_key 不参与)> 生活视频 > 图片;livp/图片并入
+    生活图文;.ts/.svg 在夹具
     content_type 为空或 octet-stream 时落「其他」(VIDEO_EXTS/IMAGE_EXTS 刻意
     不含,thumb_exts 单一事实来源,§4.3);桶互斥 → total == 四桶和 == count(*)
   - 计数面:deleted_at IS NULL ∧ 项目活性(is_archived=false ∧ 项目 deleted_at
@@ -164,8 +166,9 @@ async def test_classification_matrix_table_driven(client: AsyncClient) -> None:
     - livp 置顶:.livp 即便 content_type=video/* 仍落生活图文(§4.4 CASE 首分支,
       与上传派发优先级 livp>image>video 同构),.livp+空 mime 同样生活图文;
     - 图片:jpg/heic 扩展名兜底(octet-stream)+ png mime;
-    - 口播视频只作用于视频:filename 或 minio_key 路径段任一含「口播视频」即口播桶
-      (双字段防御性冗余,§4.3);图片名含关键词仍生活图文;
+    - 口播视频只作用于视频:filename 或当前所在目录路径(folder.minio_prefix+
+      filename)含「口播视频」即口播桶(2026-11-06 用户拍板按当前位置匹配,
+      落库 minio_key 不参与,§4.3);图片名含关键词仍生活图文;
     - 生活视频:mp4 / mov+octet-stream(扩展名兜底)/ mime video 无扩展名;
     - 其他:zip/mp3;**.ts 与 .svg 夹具 content_type 为空或 octet-stream** 落其他
       (§7.1 夹具前提:mime 是 video/* 的 .ts 会按 mime 落生活视频,口径才自洽);
@@ -174,15 +177,20 @@ async def test_classification_matrix_table_driven(client: AsyncClient) -> None:
     顺带钉 §4.1 契约字段与 project_ids 单选交集。"""
     proj = await _create_project(client)
     folder = await _create_folder(client, proj["id"], _uniq("cls_f"))
-    cases = [  # (说明, filename, content_type, 期望桶, minio_key 覆盖({u}=uuid 片段))
+    # 口播样本所在夹:名含「口播视频」→ minio_prefix = "<name>/" 含关键词
+    # (2026-11-06 口径:口播按当前所在目录匹配,不再看落库 minio_key)
+    voice_folder = await _create_folder(client, proj["id"], _uniq("口播视频_f"))
+    # 第 5 列哨兵:该样本建在 voice_folder(见下方循环)
+    _VOICE_DIR_SAMPLE = "@voice_folder"
+    cases = [  # (说明, filename, content_type, 期望桶, minio_key 覆盖(_VOICE_DIR_SAMPLE 除外))
         ("jpg+octet-stream 扩展名兜底", "photo.jpg", "application/octet-stream", "life_images", None),
         ("heic+octet-stream 扩展名兜底", "IMG_0001.heic", "application/octet-stream", "life_images", None),
         ("png mime", "pic.png", "image/png", "life_images", None),
         ("livp+空 mime", "memo.livp", None, "life_images", None),
         ("livp 置顶:video/* mime 仍生活图文", "memo2.livp", "video/mp4", "life_images", None),
         ("口播视频:filename 含关键词", "口播视频_开场.mp4", "video/mp4", "voice_videos", None),
-        ("口播视频:minio_key 路径段含关键词", "take3.mp4", "video/mp4", "voice_videos",
-         "zz-upstat/口播视频/{u}/take3.mp4"),
+        ("口播视频:所在目录前缀含关键词(建在名含「口播视频」的夹)", "take3.mp4", "video/mp4",
+         "voice_videos", _VOICE_DIR_SAMPLE),
         ("普通 mp4", "a.mp4", "video/mp4", "life_videos", None),
         ("mov+octet-stream 扩展名兜底", "b.mov", "application/octet-stream", "life_videos", None),
         ("mime video 无扩展名", "noext_clip", "video/quicktime", "life_videos", None),
@@ -200,9 +208,17 @@ async def test_classification_matrix_table_driven(client: AsyncClient) -> None:
     aids: list[uuid.UUID] = []
     try:
         for _label, fname, ctype, bucket, key_override in cases:
-            key = key_override.replace("{u}", uuid.uuid4().hex) if key_override else None
+            if key_override == _VOICE_DIR_SAMPLE:
+                # 真实构造链:minio_key = folder.minio_prefix + '/' + filename
+                # (assets.py:197);夹名含关键词 → 快照 key 与当前位置同含关键词,
+                # 「不看落库 key」由 test_voice_over_follows_current_folder 钉死
+                key = f"{voice_folder['minio_prefix'].rstrip('/')}/{fname}"
+                fid = voice_folder["id"]
+            else:
+                key = None
+                fid = folder["id"]
             aids.append(await _insert_asset(
-                folder["id"], fname, content_type=ctype,
+                fid, fname, content_type=ctype,
                 created_at=_dt(D_IN, 12), minio_key=key,
             ))
             expect[bucket] = expect.get(bucket, 0) + 1
@@ -224,7 +240,72 @@ async def test_classification_matrix_table_driven(client: AsyncClient) -> None:
         assert [x["project_id"] for x in body["rows"]] == [str(proj["id"])], body["rows"]
         assert {k: body["summary"][k] for k in expect} == expect, body["summary"]
     finally:
-        await _cleanup(client, aids=aids, folder_ids=[folder["id"]], project_ids=[proj["id"]])
+        await _cleanup(client, aids=aids, folder_ids=[folder["id"], voice_folder["id"]],
+                       project_ids=[proj["id"]])
+
+
+# ─── 口播「当前位置」口径:挪入即计/挪出即不计(2026-11-06 用户拍板场景)─────────
+async def test_voice_over_follows_current_folder(client: AsyncClient) -> None:
+    """钉死移动语义(2026-11-06 用户拍板:目录即分类,匹配只看当前位置
+    folder.minio_prefix || filename,落库 minio_key 为上传时刻快照不参与):
+    ① 普通夹建 mp4 → DB 直改 folder_id 挪入名含「口播视频」的夹 → 即计口播;
+    ② 反向:「口播视频」夹建的 mp4(其 minio_key 按真实构造链含关键词)挪出到
+       普通夹 → 不计口播、落生活视频(minio_key 仍含关键词但不参与匹配);
+       ①挪入的 a_in 未再动、照计口播 —— 终态口播 1 + 生活视频 1。
+    挪夹 DB 直改 folder_id 且不回填 minio_key,与线上 D1-B 文件夹移动「物理对象
+    不动、DB 重算 prefix」同态(folders.py:205 起)。"""
+    proj = await _create_project(client)
+    plain = await _create_folder(client, proj["id"], _uniq("plain_f"))
+    voice = await _create_folder(client, proj["id"], _uniq("口播视频_f"))
+    # 两侧 minio_key 均按真实构造链拼(folder.minio_prefix + '/' + filename,
+    # assets.py:197):a_in 的 key 不含关键词,a_out 的 key 含关键词(快照)
+    a_in = await _insert_asset(
+        plain["id"], "talk.mp4", content_type="video/mp4", created_at=_dt(D_IN, 12),
+        minio_key=f"{plain['minio_prefix'].rstrip('/')}/talk.mp4",
+    )
+    a_out = await _insert_asset(
+        voice["id"], "show.mp4", content_type="video/mp4", created_at=_dt(D_IN, 12, 1),
+        minio_key=f"{voice['minio_prefix'].rstrip('/')}/show.mp4",
+    )
+    from sqlalchemy import update
+
+    from app.db.session import get_sessionmaker
+    from app.db.tables import Asset
+
+    async def _move(aid: uuid.UUID, target_folder_id: str) -> None:
+        """DB 直改 folder_id 挪夹(minio_key 保持建时快照不回填)。"""
+        async with get_sessionmaker()() as db:
+            await db.execute(
+                update(Asset).where(Asset.id == aid)
+                .values(folder_id=uuid.UUID(target_folder_id)),
+            )
+            await db.commit()
+
+    try:
+        # 初态:普通夹 mp4 落生活视频,口播夹 mp4 落口播
+        r = await client.get(URL, params=_q(pids=[proj["id"]]), headers=_h(EVAN_ID))
+        assert r.status_code == 200, r.text
+        row = _row(r.json(), proj["id"])
+        assert row is not None and row["voice_videos"] == 1 and row["life_videos"] == 1, row
+
+        # ① 普通夹 → 口播夹:即时计口播(minio_key 不含关键词也计)
+        await _move(a_in, voice["id"])
+        r2 = await client.get(URL, params=_q(pids=[proj["id"]]), headers=_h(EVAN_ID))
+        assert r2.status_code == 200, r2.text
+        row2 = _row(r2.json(), proj["id"])
+        assert row2 is not None and row2["voice_videos"] == 2 and row2["life_videos"] == 0, row2
+
+        # ② 口播夹 → 普通夹:a_out 的 minio_key 仍含「口播视频」(快照不回填),
+        #    但当前位置已不在口播夹 → 不计口播、落生活视频;a_in 留在口播夹
+        #    (①挪入后未再动)照计口播 —— key 含关键词也不救,当前位置说了算
+        await _move(a_out, plain["id"])
+        r3 = await client.get(URL, params=_q(pids=[proj["id"]]), headers=_h(EVAN_ID))
+        assert r3.status_code == 200, r3.text
+        row3 = _row(r3.json(), proj["id"])
+        assert row3 is not None and row3["voice_videos"] == 1 and row3["life_videos"] == 1, row3
+    finally:
+        await _cleanup(client, aids=[a_in, a_out],
+                       folder_ids=[plain["id"], voice["id"]], project_ids=[proj["id"]])
 
 
 # ─── §7.2 软删不计 / 恢复重计 + 项目活性(行不出现)───────────────────────────

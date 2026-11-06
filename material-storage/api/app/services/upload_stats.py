@@ -1,6 +1,6 @@
 """Upload stats service — 文件上传数量统计聚合(2026-11-06 stats-panel-upload-stats §4.2-§4.4)。
 
-依托 assets 单表(无类型列,分类由 content_type + filename/minio_key 推导)做只读
+依托 assets 单表(无类型列,分类由 content_type + filename/当前所在目录推导)做只读
 聚合,不新建表、不写埋点;回答「窗口内每项目四分类各上传多少 + 全选汇总」。
 
 约定(需求 docs/qdev/2026-11-06-stats-panel-upload-stats.md):
@@ -8,6 +8,10 @@
   livp > 口播视频 > 生活视频 > 图片,单条 sa.case 每条资产恰好落一桶,
   四桶 count(*) FILTER 复用同一表达式 → total = 四桶之和 ≡ count(*);
   扩展名清单由 thumb_exts.VIDEO_EXTS/IMAGE_EXTS 生成(单一事实来源,勿手抄)
+- 口播视频按「当前位置」匹配(2026-11-06 用户拍板):filename 或
+  folder.minio_prefix || filename 含「口播视频」即计 —— 目录即分类:移动/改名
+  文件夹即时生效,挪出「口播视频」夹即不再计;落库 minio_key 为上传时刻
+  快照(D1-B 文件夹改名/移动只重算 prefix、不回填存量 key)会过期,不参与匹配
 - 软删不计数(D6,deleted_at IS NULL);归档/软删项目不进任何口径(D3,admin
   分支同样适用,不因直通而放宽)
 - 数据权限 = 盲搜同款 folder 级零泄露(D3;系统 admin true() 直通):
@@ -64,13 +68,17 @@ _IMAGE_EXPR = (Asset.content_type.like("image/%") & (Asset.content_type != "imag
 )
 # livp:.livp 后缀(livp 不属于 image,thumb_exts.is_livp_asset 同口径)。
 _LIVP_EXPR = Asset.filename.op("~*")(r"\.livp$")
-# 口播关键词:filename / minio_key 任一命中即算。minio_key = folder.minio_prefix +
-# '/' + filename(assets.py:197),filename 分支天然被 minio_key 分支覆盖;保留
-# 双分支作防御性冗余(两字段理论上独立演进),勿删 —— 后读者勿误以为必须两字段
-# 同时含关键词(方案 §4.3 明示)。
-_VOICE_KW_EXPR = Asset.filename.ilike(f"%{VOICE_OVER_VIDEO_KEYWORD}%") | Asset.minio_key.ilike(
-    f"%{VOICE_OVER_VIDEO_KEYWORD}%",
-)
+# 口播关键词:按「当前位置」匹配(2026-11-06 用户拍板,目录即分类):filename 或
+# folder.minio_prefix || filename 任一命中即算。落库 minio_key 是上传时刻快照
+# (彼时 minio_key = folder.minio_prefix + '/' + filename,assets.py:197;D1-B
+# 文件夹改名/移动只重算 folder.minio_prefix、不回填存量 assets.minio_key)→
+# 会过期,刻意不参与匹配 —— 移动/改名文件夹即时生效,挪出「口播视频」夹即不再
+# 计口播。ILIKE '%kw%' 是子串匹配,对 minio_prefix 尾斜杠有无不敏感(无需 rstrip)。
+# join folders 在计数 SQL 本就存在,直接引用 Folder.minio_prefix;勿再「补回」
+# a.minio_key 分支(后读者勿当遗漏)。
+_VOICE_KW_EXPR = Asset.filename.ilike(f"%{VOICE_OVER_VIDEO_KEYWORD}%") | func.concat(
+    Folder.minio_prefix, Asset.filename,
+).ilike(f"%{VOICE_OVER_VIDEO_KEYWORD}%")
 
 # 桶互斥:单条 CASE 按优先级落桶。不用四条独立布尔 FILTER —— content_type 是
 # 客户端可控值(上传直传),content_type=image/png + .mp4 文件名的资产会同时命中
