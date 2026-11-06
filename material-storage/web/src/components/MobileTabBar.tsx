@@ -8,7 +8,7 @@ import { useState } from 'react';
 import { Badge, Drawer } from 'antd';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  Bell, ClipboardCheck, CloudDownload, Folder, FolderTree, LayoutTemplate, Menu, Search,
+  BarChart3, Bell, ClipboardCheck, CloudDownload, Folder, FolderTree, LayoutTemplate, Menu, Search,
   ScrollText, ServerCog, Settings, ShieldCheck, Users as UsersIcon, UsersRound,
 } from 'lucide-react';
 import { useMe, useNotificationsUnread } from '../api/hooks';
@@ -59,6 +59,11 @@ export function MobileTabBar() {
     ] : []),
     ...((me?.is_folder_template_manager ?? me?.is_system_admin) ? [
       { to: '/admin/folder-templates', label: '目录模板', icon: <FolderTree size={16} strokeWidth={1.8} /> },
+    ] : []),
+    // 统计面板(2026-11-06 方案 §5.1/D10):三态门(同 AppHeader PC 口径),
+    // 移动端由此首次可达使用统计与文件上传数量统计
+    ...((me?.is_stats_viewer ?? me?.is_system_admin) ? [
+      { to: '/admin/stats', label: '统计', icon: <BarChart3 size={16} strokeWidth={1.8} /> },
     ] : []),
   ];
 

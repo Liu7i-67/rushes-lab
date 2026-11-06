@@ -27,6 +27,18 @@ export interface Me {
   // 此字段,消费侧用 `?? false` 回落(与 is_project_* 不同:旧后端本就无组级删除
   // 授权能力,回落 false 而非 is_system_admin;当前删除闸门实际走 Folder.my_delete_grant)。
   is_file_deleter?: boolean;
+  // 统计面板(2026-11-06 方案 §3.2):可见「统计」入口(口径 = is_org_admin ∨
+  // 用户组 stats_viewer,含系统 admin)。可选 —— 旧后端无此字段,消费侧用
+  // `?? is_system_admin` 回落(照 is_folder_template_manager 惯例)。
+  is_stats_viewer?: boolean;
+  // 统计面板子模块「使用统计」(2026-11-06 方案 §3.2;口径 = is_org_admin ∨
+  // 用户组 usage_stats_viewer ∧ stats_viewer,含系统 admin)。可选 —— 旧后端无
+  // 此字段,消费侧用 `?? is_system_admin` 回落。
+  is_usage_stats_viewer?: boolean;
+  // 统计面板子模块「文件上传数量统计」(2026-11-06 方案 §3.2;口径 = is_org_admin ∨
+  // 用户组 upload_stats_viewer ∧ stats_viewer,含系统 admin)。可选 —— 旧后端无
+  // 此字段,消费侧用 `?? is_system_admin` 回落。
+  is_upload_stats_viewer?: boolean;
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -99,6 +111,13 @@ export interface DirectoryGroup {
   // 删除文件/文件夹权限可授予用户组(2026-10-16):组级「删除文件与文件夹」权限回显
   // (仿 can_delete_project,真实态存 OpenFGA file_deleter tuple;旧后端无此字段 → undefined 视为 false)
   can_delete_files?: boolean;
+  // 统计面板(2026-11-06 方案 §3.3):组级「查看统计面板」父权限回显
+  // (真实态存 OpenFGA stats_viewer tuple;旧后端无此字段 → undefined 视为 false)
+  can_view_stats?: boolean;
+  // 统计面板子模块:组级「使用统计」权限回显(仿 can_view_stats;旧后端无此字段 → undefined 视为 false)
+  can_view_usage_stats?: boolean;
+  // 统计面板子模块:组级「文件上传数量统计」权限回显(仿 can_view_stats;旧后端无此字段 → undefined 视为 false)
+  can_view_upload_stats?: boolean;
 }
 
 export interface DirectoryGroupMember {

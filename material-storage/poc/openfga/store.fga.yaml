@@ -34,6 +34,11 @@ name: material-storage-poc
 #      —— 组级「允许删除文件与文件夹」开关,与 project_deleter 同款模式;应用层守门
 #      = is_system_admin ∨ 对象级 can_admin ∨ (check(file_deleter) ∧ 对象 can_view ∧
 #      非 sensitive)(授权 ∧ 可见,sensitive 不穿透);改后须重推 model
+#  11. 2026-11-06(统计面板):organization 增 stats_viewer / usage_stats_viewer /
+#      upload_stats_viewer: [user, group#member] 三条组级 relation(统计面板方案 §3.1)
+#      —— 「统计面板」父权限 + 「使用统计」/「文件上传数量统计」两子权限;三条相互
+#      独立(不写 derived 蕴含),应用层子模块守门 = is_org_admin ∨ (stats_viewer ∧ 子)
+#      合取防不一致 tuple;改后须重推 model
 
 model: |
   model
@@ -79,6 +84,14 @@ model: |
       # can_view ∧ 非 sensitive)—— 授权 ∧ 可见(需求决策 #2),组织开关分支
       # 一律不适用 sensitive 资产/夹(决策 #3);系统 admin 恒可删由应用层直通保证
       define file_deleter: [user, group#member]
+      # 组级「统计面板」父权限(2026-11-06 统计面板方案 §3.1):同 project_creator
+      # 模式 —— UI 只写组主体,组员判定由 check 自动展开 group#member;仅控面板
+      # 入口,不单独授任何数据;应用层子模块守门 = is_org_admin ∨ (stats_viewer ∧ 子)
+      define stats_viewer: [user, group#member]
+      # 组级「使用统计」子权限:父开关开启后 UI 才展示;守门合取父 relation
+      define usage_stats_viewer: [user, group#member]
+      # 组级「文件上传数量统计」子权限:同上
+      define upload_stats_viewer: [user, group#member]
 
   type project
     relations
@@ -201,6 +214,19 @@ tuples:
   # (生产开关由 PATCH /admin/directory/groups 写 tuple,此处只为 fga model test)
   - user: group:grp_editors#member
     relation: file_deleter
+    object: organization:tenant_demo
+  # 组级「统计面板」父权限(2026-11-06 统计面板方案 §3.1):测试用例同样挂剪辑师组
+  # (生产开关由 PATCH /admin/directory/groups 写 tuple,此处只为 fga model test)
+  - user: group:grp_editors#member
+    relation: stats_viewer
+    object: organization:tenant_demo
+  # 组级「使用统计」子权限(同上)
+  - user: group:grp_editors#member
+    relation: usage_stats_viewer
+    object: organization:tenant_demo
+  # 组级「文件上传数量统计」子权限(同上)
+  - user: group:grp_editors#member
+    relation: upload_stats_viewer
     object: organization:tenant_demo
   # 移出组用例的静态编码:dave 仅具部门身份、无任何组成员 tuple → project_creator
   # 为 false(证明 project_creator 不随 department#member 扩散;真实移出组 =
@@ -499,3 +525,94 @@ tests:
         object: organization:tenant_demo
         assertions:
           file_deleter: false
+
+      # ─── 组级「统计面板」父权限(2026-11-06 统计面板方案 §3.1)─────────────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          stats_viewer: true
+
+      # 组员 ✓:mia 同组(子部门 member + 组成员双身份)
+      - user: user:ou_mia
+        object: organization:tenant_demo
+        assertions:
+          stats_viewer: true
+
+      # 非组员 ✗ / 移出组 ✗(同 project_creator 静态编码口径:dave 在 editing
+      # 部门但不在剪辑师组,钉住 stats_viewer 不随 department#member 扩散)
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          stats_viewer: false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          stats_viewer: false
+
+      # org admin 不自动蕴含 stats_viewer(独立 relation;系统 admin 恒可见面板
+      # 由应用层守门 is_org_admin ∨ (父 ∧ 子) 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          stats_viewer: false
+
+      # ─── 组级「使用统计」子权限(2026-11-06 统计面板方案 §3.1)─────────────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          usage_stats_viewer: true
+
+      # 组员 ✓:mia 同组(子部门 member + 组成员双身份)
+      - user: user:ou_mia
+        object: organization:tenant_demo
+        assertions:
+          usage_stats_viewer: true
+
+      # 非组员 ✗ / 移出组 ✗(同 project_creator 静态编码口径)
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          usage_stats_viewer: false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          usage_stats_viewer: false
+
+      # org admin 不自动蕴含 usage_stats_viewer(独立 relation;系统 admin 恒可
+      # 由应用层守门 is_org_admin ∨ (父 ∧ 子) 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          usage_stats_viewer: false
+
+      # ─── 组级「文件上传数量统计」子权限(2026-11-06 统计面板方案 §3.1)──────────
+      # 组员 ✓:evan 经 grp_editors#member 展开命中
+      - user: user:ou_evan
+        object: organization:tenant_demo
+        assertions:
+          upload_stats_viewer: true
+
+      # 组员 ✓:mia 同组(子部门 member + 组成员双身份)
+      - user: user:ou_mia
+        object: organization:tenant_demo
+        assertions:
+          upload_stats_viewer: true
+
+      # 非组员 ✗ / 移出组 ✗(同 project_creator 静态编码口径)
+      - user: user:ou_outsider
+        object: organization:tenant_demo
+        assertions:
+          upload_stats_viewer: false
+      - user: user:ou_dave
+        object: organization:tenant_demo
+        assertions:
+          upload_stats_viewer: false
+
+      # org admin 不自动蕴含 upload_stats_viewer(独立 relation;系统 admin 恒可
+      # 由应用层守门 is_org_admin ∨ (父 ∧ 子) 并集保证)
+      - user: user:ou_alice
+        object: organization:tenant_demo
+        assertions:
+          upload_stats_viewer: false

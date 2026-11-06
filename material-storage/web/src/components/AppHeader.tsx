@@ -113,8 +113,6 @@ export function AppHeader({ me }: Props) {
               <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />
               {/* W3: 管理员备份任务观测 — 仅系统管理员可见 */}
               <NavChip to="/admin/baidu-tasks" label="备份任务" navigate={navigate} />
-              {/* F5: 客户端使用统计 — 仅系统管理员可见 */}
-              <NavChip to="/admin/usage" label="使用统计" navigate={navigate} />
               {/* 风控模块: 登录风控 — 仅系统管理员可见 */}
               <NavChip to="/admin/risk" label="风控" navigate={navigate} />
               {/* MCP 素材服务(2026-10-30): 通道开关 / 配额 / 全量令牌 — 仅系统管理员可见 */}
@@ -125,6 +123,12 @@ export function AppHeader({ me }: Props) {
               口径同 NewProjectModal 入口闸门,旧后端无字段回落 is_system_admin */}
           {(me.is_folder_template_manager ?? me.is_system_admin) && (
             <NavChip to="/admin/folder-templates" label="目录模板" navigate={navigate} />
+          )}
+          {/* 统计面板(2026-11-06 方案 §5.1)— 三态门:org admin / 系统管理员 / 持组
+              stats_viewer flag 成员可见;原「使用统计」chip 自 admin 块迁入此区
+              (使用统计页经由面板进入,子模块各自独立控权) */}
+          {(me.is_stats_viewer ?? me.is_system_admin) && (
+            <NavChip to="/admin/stats" label="统计" navigate={navigate} />
           )}
         </nav>
 

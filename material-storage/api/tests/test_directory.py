@@ -351,3 +351,144 @@ async def test_groups_picker_returns_local_groups(client: AsyncClient) -> None:
     assert len(hit) == 1
     assert hit[0]["name"] == gname
     assert hit[0]["member_count"] == 0
+
+
+# ─── 组级统计三 flag(2026-11-06 统计面板方案 §3.3,照既有五 flag 同构七件套)──
+# ⚠️ 跑前须重推含三条新 relation 的 model 到测试 store(openfga_write_model.sh)。
+_STATS_FLAG_RELATIONS = {
+    "can_view_stats": "stats_viewer",
+    "can_view_usage_stats": "usage_stats_viewer",
+    "can_view_upload_stats": "upload_stats_viewer",
+}
+
+
+async def _stats_flag_on(perms, gid: str, relation: str) -> bool:
+    """组主体是否持有 organization#<relation>(组主体直查,check 自动展开 group#member)。"""
+    from app.db.session import get_sessionmaker
+    from app.services.org import get_default_organization
+
+    async with get_sessionmaker()() as db:
+        org = await get_default_organization(db)
+    assert org is not None, "测试前置:settings.default_organization_id 未配置"
+    return await perms.check(
+        user_subject=f"group:{gid}#member", relation=relation,
+        object_type="organization", object_id=org[1],
+    )
+
+
+async def _patch_group(client: AsyncClient, gid: str, body: dict) -> dict:
+    r = await client.patch(
+        f"/api/v1/admin/directory/groups/{gid}", json=body, headers=_h(EVAN_ID),
+    )
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def _audit_events(client: AsyncClient, event_type: str) -> list[dict]:
+    r = await client.get("/api/v1/admin/audit", params={
+        "event_type": event_type, "actor_user_id": EVAN_ID, "limit": 500,
+    }, headers=_h(EVAN_ID))
+    assert r.status_code == 200, r.text
+    return list(r.json())
+
+
+@pytest.mark.asyncio
+async def test_stats_group_flags_tri_state_create_full_and_delete_cleanup(
+    client: AsyncClient, app_with_lifespan,
+) -> None:
+    """三 flag tri-state(照 test_group_file_deleter T1 同构):默认 False 无
+    tuple;PATCH true → tuple 写 + 双回显;仅改名的不带字段 PATCH → tuple 原样
+    (防静默撤权);false ×2 → 删 tuple 幂等。建组 POST 全量三 flag → 201 回显
+    True×3 + tuple 已写 + 列表回显(_read_flag_group_ids 增读三条);删组 →
+    三条 org tuple 全清(删组 relation 列表含三条,§1.2 七件套)。"""
+    perms = app_with_lifespan.state.permissions
+    for flag, relation in _STATS_FLAG_RELATIONS.items():
+        rc = await client.post("/api/v1/admin/directory/groups",
+                               json={"name": _uniq("stats_grp")}, headers=_h(EVAN_ID))
+        assert rc.status_code == 201, rc.text
+        gid = rc.json()["id"]
+        try:
+            r1 = await _patch_group(client, gid, {flag: True})
+            assert r1[flag] is True, r1
+            assert await _stats_flag_on(perms, gid, relation) is True
+            rn = await _patch_group(client, gid, {"name": _uniq("stats_ren")})
+            assert rn[flag] is True, rn  # 仅改名的不带字段 PATCH 不得撤 tuple
+            assert await _stats_flag_on(perms, gid, relation) is True
+            for _ in range(2):  # false → 删 tuple;重复清除幂等(不 500)
+                r2 = await _patch_group(client, gid, {flag: False})
+                assert r2[flag] is False, r2
+            assert await _stats_flag_on(perms, gid, relation) is False
+        finally:
+            await client.delete(
+                f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID),
+            )
+
+    # 建组全量:POST 三 flag 全置位 → 201 回显 + tuple 已写 + 列表回显
+    rc = await client.post("/api/v1/admin/directory/groups", json={
+        "name": _uniq("stats_full"), "description": "统计三 flag 全量",
+        "can_view_stats": True, "can_view_usage_stats": True,
+        "can_view_upload_stats": True,
+    }, headers=_h(EVAN_ID))
+    assert rc.status_code == 201, rc.text
+    gj = rc.json()
+    gid = gj["id"]
+    try:
+        assert all(gj[f] is True for f in _STATS_FLAG_RELATIONS), gj
+        for relation in _STATS_FLAG_RELATIONS.values():
+            assert await _stats_flag_on(perms, gid, relation) is True, relation
+        recho = await client.get("/api/v1/admin/directory/groups",
+                                 params={"q": gj["name"]}, headers=_h(EVAN_ID))
+        assert recho.status_code == 200, recho.text
+        echo = [g for g in recho.json() if g["id"] == gid]
+        assert echo, recho.json()
+        assert all(echo[0][f] is True for f in _STATS_FLAG_RELATIONS), recho.json()
+    finally:
+        await client.delete(f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID))
+        for relation in _STATS_FLAG_RELATIONS.values():  # 删组清 tuple(三条全清)
+            assert await _stats_flag_on(perms, gid, relation) is False, (
+                f"删组必须清理 organization#{relation} tuple"
+            )
+
+
+@pytest.mark.asyncio
+async def test_stats_group_flags_audit_details(
+    client: AsyncClient, app_with_lifespan,
+) -> None:
+    """审计 details(方案 §3.3 + 既有五 flag 先例):group_created details 纳入三
+    flag 置位值;group_updated 仅真实转变记 {old,new},同值重写不产生 details 键
+    (照 can_delete_files 先例)。级联复位属前端行为,后端不测(§7)。"""
+    rc = await client.post("/api/v1/admin/directory/groups", json={
+        "name": _uniq("stats_audit"), "description": "统计审计组",
+        "can_view_stats": True, "can_view_usage_stats": True,
+        "can_view_upload_stats": True,
+    }, headers=_h(EVAN_ID))
+    assert rc.status_code == 201, rc.text
+    gid = rc.json()["id"]
+    try:
+        ev = await _audit_events(client, "group_created")
+        hit = [e for e in ev if (e.get("details") or {}).get("group_id") == gid]
+        assert len(hit) == 1, ev
+        d = hit[0]["details"]
+        assert d["can_view_stats"] is True and d["can_view_usage_stats"] is True, d
+        assert d["can_view_upload_stats"] is True, d
+        # 真实转变 True→False:{old,new}
+        await _patch_group(client, gid, {"can_view_stats": False})
+        ev2 = await _audit_events(client, "group_updated")
+        hit2 = [e for e in ev2
+                if (e.get("details") or {}).get("group_id") == gid
+                and "can_view_stats" in (e.get("details") or {})]
+        assert len(hit2) == 1, ev2
+        assert hit2[0]["details"]["can_view_stats"] == {"old": True, "new": False}, hit2[0]
+        # 同值重写 false→false:无转变,不产生 details 键(仍只有转变那一条)
+        await _patch_group(client, gid, {"can_view_stats": False})
+        ev3 = await _audit_events(client, "group_updated")
+        hit3 = [e for e in ev3
+                if (e.get("details") or {}).get("group_id") == gid
+                and "can_view_stats" in (e.get("details") or {})]
+        assert len(hit3) == 1, ev3
+    finally:
+        rd = await client.delete(
+            f"/api/v1/admin/directory/groups/{gid}", headers=_h(EVAN_ID),
+        )
+        assert rd.status_code == 200, rd.text
+

@@ -33,6 +33,10 @@ const AdminGrantTemplatesPage = lazy(() => import('./pages/AdminGrantTemplatesPa
 const AdminFolderTemplatesPage = lazy(() => import('./pages/AdminFolderTemplatesPage'));
 const AdminBaiduTasksPage = lazy(() => import('./pages/AdminBaiduTasksPage'));
 const AdminUsageStatsPage = lazy(() => import('./pages/AdminUsageStatsPage'));
+// 统计面板(2026-11-06 方案 §5.1):模块卡片列表 + 文件上传数量统计页
+// (入口三态门 is_stats_viewer ?? is_system_admin;子模块各自独立控权)
+const AdminStatsPanelPage = lazy(() => import('./pages/AdminStatsPanelPage'));
+const AdminUploadStatsPage = lazy(() => import('./pages/AdminUploadStatsPage'));
 // 风控模块(2026-10-28):登录风控(被锁账号/被锁 IP + 解锁处置;仅系统管理员,后端 require_system_admin)
 const AdminRiskPage = lazy(() => import('./pages/AdminRiskPage'));
 // MCP 素材服务(2026-10-30):/settings 自助访问令牌 + /admin/mcp-settings 管理后台
@@ -81,8 +85,15 @@ const RouterRoutes = () => (
       <Route path="/admin/folder-templates" element={<AdminFolderTemplatesPage />} />
       {/* W3: 管理员备份任务观测(仅系统管理员;后端 require_system_admin 拦 403) */}
       <Route path="/admin/baidu-tasks" element={<AdminBaiduTasksPage />} />
-      {/* F5: 客户端使用统计(三端占比 + 内外网占比;仅系统管理员,后端 require_system_admin) */}
+      {/* F5: 客户端使用统计(三端占比 + 内外网占比;2026-11-06 起守门放宽为
+          require_usage_stats_viewer = org admin ∨ (stats_viewer ∧ usage_stats_viewer) */}
       <Route path="/admin/usage" element={<AdminUsageStatsPage />} />
+      {/* 统计面板(2026-11-06 方案 §5.1):模块卡片页,入口 chip 三态门
+          is_stats_viewer ?? is_system_admin;子模块卡片按各自子 flag 显隐 */}
+      <Route path="/admin/stats" element={<AdminStatsPanelPage />} />
+      {/* 文件上传数量统计(2026-11-06 方案 §5.2;按项目分类计数,后端
+          require_upload_stats_viewer,同上合取口径) */}
+      <Route path="/admin/upload-stats" element={<AdminUploadStatsPage />} />
       {/* 风控模块: 登录风控(被锁账号/被锁 IP 视图 + 解锁处置;仅系统管理员,后端 require_system_admin) */}
       <Route path="/admin/risk" element={<AdminRiskPage />} />
       {/* MCP 素材服务(2026-10-30):管理后台 MCP 通道设置 + 全部用户令牌(仅系统管理员) */}

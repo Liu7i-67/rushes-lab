@@ -846,6 +846,11 @@ export const useCreateGroup = () => {
       // 删除文件/文件夹权限可授予用户组(2026-10-16):组级「删除文件与文件夹」开关
       // (同款 Create bool,缺省 false 服务端兜底;true 时写 file_deleter tuple)
       can_delete_files?: boolean;
+      // 统计面板(2026-11-06 方案 §3.3):组级「查看统计面板」父开关 + 两子开关
+      // (同款 Create bool,缺省 false 服务端兜底)
+      can_view_stats?: boolean;
+      can_view_usage_stats?: boolean;
+      can_view_upload_stats?: boolean;
     }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
@@ -870,6 +875,11 @@ export const useUpdateGroup = () => {
       can_create_artist_account?: boolean;
       // 删除文件/文件夹权限可授予用户组(2026-10-16):can_delete_files 同款 tri-state
       can_delete_files?: boolean;
+      // 统计面板(2026-11-06 方案 §3.3):can_view_stats 父开关 + 两子开关,同款 tri-state
+      // (None 不动;父开关 true→false 的级联复位由页面显式发 false 清 tuple)
+      can_view_stats?: boolean;
+      can_view_usage_stats?: boolean;
+      can_view_upload_stats?: boolean;
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;
@@ -1365,11 +1375,11 @@ export const useAdminBaiduTaskFiles = (
     refetchInterval: active ? 15_000 : false,
   });
 
-// ─── 使用统计(F5;GET /api/v1/admin/usage/stats,require_system_admin)───────
+// ─── 使用统计(F5;GET /api/v1/admin/usage/stats,require_usage_stats_viewer)──
 // 响应模型照需求文档 §4 契约(后端并行开发中,字段名以文档为准)。users 均为
 // count(DISTINCT actor_user_id) —— 跨分组不可加:totals / by_platform /
 // by_platform_class / by_network / cross 各自独立分组去重,前端只展示不二次聚合。
-// 非系统 admin 后端 403(全局 queryCache 对 403 静默跳过,页面自行空态兜底)。
+// 无权用户后端 403(全局 queryCache 对 403 静默跳过,页面自行空态兜底)。
 export type UsageMetric = 'active_users' | 'logins';
 
 export interface UsageTotals { users: number; events: number; }
@@ -1413,6 +1423,55 @@ export const useAdminUsageStats = (params: UsageStatsParams | null = {}) =>
     queryFn: async () =>
       (await http.get<UsageStatsOut>('/api/v1/admin/usage/stats', {
         params: params ?? {},
+      })).data,
+    enabled: params !== null,
+    placeholderData: keepPreviousData,
+  });
+
+// ─── 文件上传数量统计(2026-11-06 统计面板方案 §4.1;GET /api/v1/admin/stats/uploads,
+//     require_upload_stats_viewer)──────────────────────────────────────────────
+export interface UploadStatsTotals {
+  life_images: number;   // 生活图文(图片 + livp)
+  voice_videos: number;  // 口播视频(视频且 filename/minio_key 含「口播视频」)
+  life_videos: number;   // 生活视频(其余视频)
+  others: number;        // 其他
+  total: number;         // 合计(= 四桶之和;后端 CASE 互斥保证)
+}
+
+export interface UploadStatsRow extends UploadStatsTotals {
+  project_id: string;
+  project_code: string;
+  project_name: string;
+}
+
+export interface UploadStatsOut {
+  rows: UploadStatsRow[];       // 按项目零填充,total desc → project_name asc
+  summary: UploadStatsTotals;   // 汇总(rows 逐列求和,以后端为准)
+}
+
+export interface UploadStatsParams {
+  /** 项目 id 列表(缺省/空 = 全部 in-scope 项目)。**序列化铁律**:hook 内先
+   *  `join(',')` 成单字符串再交 axios —— 契约是单参数逗号串;数组直接交 axios
+   *  默认序列化为 `project_ids[]=a&project_ids[]=b`,后端键名不匹配拿到 None →
+   *  按「缺省=全部」返回,用户选了项目却查全部的静默错误。 */
+  projectIds?: string[];
+  dateFrom: string;   // 'YYYY-MM-DD';00:00:00/23:59:59 语义由后端归一,前端不拼时间
+  dateTo: string;
+}
+
+/** GET /api/v1/admin/stats/uploads。params 传 null = 不启用(手动触发门:查询前
+ *  恒 null,点「查询」才 setState 传参);参数整体进 queryKey,keepPreviousData
+ *  保旧数据切参不白屏(照 useAdminUsageStats)。 */
+export const useUploadStats = (params: UploadStatsParams | null) =>
+  useQuery({
+    queryKey: ['admin-upload-stats', params],
+    queryFn: async () =>
+      (await http.get<UploadStatsOut>('/api/v1/admin/stats/uploads', {
+        params: params === null ? {} : {
+          ...(params.projectIds?.length ? { project_ids: params.projectIds.join(',') } : {}),
+          date_from: params.dateFrom,
+          date_to: params.dateTo,
+        },
       })).data,
     enabled: params !== null,
     placeholderData: keepPreviousData,

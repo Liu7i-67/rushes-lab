@@ -12,9 +12,9 @@ endpoints:
   POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
   POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码;顺带清登录锁 W1)
   POST   /api/v1/admin/directory/users/{id}/unlock          — 重置登录锁定(user 维度 + 审计反查 IP 连带清,W1)
-  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account flag 读回)
-  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account)
-  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account(tri-state)
+  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account + 统计父/子 flag 读回)
+  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats)
+  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats(tri-state)
   DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清)
   GET    /api/v1/admin/directory/groups/{id}/members        — 组内成员列表
   POST   /api/v1/admin/directory/groups/{id}/members        — 加成员(写 group_memberships + group#member tuple)
@@ -631,6 +631,13 @@ class DirectoryGroupOut(BaseModel):
     # can_delete_project 完全一致;置位组织开关只对非 sensitive 资产/夹生效
     # (守门在 assets/folders 路由,见需求文档 F3-F8)
     can_delete_files: bool = False
+    # 2026-11-06 统计面板方案 §3.3:组级「统计面板」父开关(第 6 个 flag),
+    # 语义与 can_create_project 完全一致;仅控面板入口,两个子 flag 守门另合取本 flag
+    can_view_stats: bool = False
+    # 组级「使用统计」子开关(第 7 个 flag);守门口径 = org admin ∨ (父 ∧ 本 flag)
+    can_view_usage_stats: bool = False
+    # 组级「文件上传数量统计」子开关(第 8 个 flag);守门口径同上合取
+    can_view_upload_stats: bool = False
 
 
 class GroupCreateIn(BaseModel):
@@ -646,6 +653,12 @@ class GroupCreateIn(BaseModel):
     can_create_artist_account: bool = False
     # 2026-10-16:置位 = 写 organization#file_deleter tuple(删除文件/文件夹)
     can_delete_files: bool = False
+    # 2026-11-06 统计面板方案 §3.3:置位 = 写 organization#stats_viewer tuple(统计面板父开关)
+    can_view_stats: bool = False
+    # 2026-11-06:置位 = 写 organization#usage_stats_viewer tuple(使用统计子开关)
+    can_view_usage_stats: bool = False
+    # 2026-11-06:置位 = 写 organization#upload_stats_viewer tuple(文件上传数量统计子开关)
+    can_view_upload_stats: bool = False
 
 
 class GroupUpdateIn(BaseModel):
@@ -663,6 +676,12 @@ class GroupUpdateIn(BaseModel):
     can_create_artist_account: bool | None = None
     # 2026-10-16:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
     can_delete_files: bool | None = None
+    # 2026-11-06 统计面板方案 §3.3:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
+    can_view_stats: bool | None = None
+    # 2026-11-06:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
+    can_view_usage_stats: bool | None = None
+    # 2026-11-06:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
+    can_view_upload_stats: bool | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -684,7 +703,8 @@ async def _read_flag_group_ids(
     relation: str,
 ) -> set[uuid.UUID]:
     """定向 read default org 上指定 relation(project_creator / project_deleter /
-    file_deleter / folder_template_manager)置位组 id 集合。
+    file_deleter / folder_template_manager / artist_account_creator / stats_viewer /
+    usage_stats_viewer / upload_stats_viewer)置位组 id 集合。
 
     **必须带 relation 过滤**:不带 relation 的全量 read 撞 OpenFGA read 单页上限
     (organization 上每个启用用户一条 #member tuple,百人级单页必漏);
@@ -728,7 +748,8 @@ async def _sync_group_org_flag(
 
     relation=project_creator(§2.2)/ project_deleter(F6.2)/ file_deleter(2026-10-16
     组删除授权)/ folder_template_manager(目录模板方案 §4.3)/ artist_account_creator
-    (艺人账号内嵌方案 §4.3;relation 由 store.fga.yaml model 声明,本路由只按既有
+    (艺人账号内嵌方案 §4.3)/ stats_viewer / usage_stats_viewer / upload_stats_viewer
+    (2026-11-06 统计面板方案 §3.3;relation 由 store.fga.yaml model 声明,本路由只按既有
     tuple 格式写入/删除)。尽力而为,
     不 500(先例 create_directory_user 的 org member tuple):flag 读回展示的是真实
     tuple 状态,写失败仅 log.warning,管理员重试 PATCH 即补写。tuple 读写一律走
@@ -773,7 +794,8 @@ async def list_directory_groups(
     permissions: PermissionsService = Depends(get_permissions),
 ) -> list[DirectoryGroupOut]:
     """组列表(带成员数)+ creator/deleter/delete-files/folder-template/artist-account
-    flag 读回(定向 read,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权)。
+    + 统计父/子三 flag 读回(定向 read,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/
+    2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3)。
 
     编辑弹窗数据来自列表行(无组详情路由),flag 按 FGA tuple 真实态回显;
     read 异常时尽力而为回 False,不阻塞列表。
@@ -802,6 +824,11 @@ async def list_directory_groups(
     file_deleter_ids = await _read_flag_group_ids(permissions, db, "file_deleter")
     folder_tmpl_ids = await _read_flag_group_ids(permissions, db, "folder_template_manager")
     artist_ids = await _read_flag_group_ids(permissions, db, "artist_account_creator")
+    # 统计面板三 flag(2026-11-06 统计面板方案 §3.3):组列表串行 FGA read 5→8 次
+    # (文档已记,组量小可接受;gather 并行化是可选项,勿当性能问题误修)
+    stats_ids = await _read_flag_group_ids(permissions, db, "stats_viewer")
+    usage_stats_ids = await _read_flag_group_ids(permissions, db, "usage_stats_viewer")
+    upload_stats_ids = await _read_flag_group_ids(permissions, db, "upload_stats_viewer")
     return [
         DirectoryGroupOut(
             id=g.id, name=g.name, description=g.description,
@@ -811,6 +838,9 @@ async def list_directory_groups(
             can_delete_files=g.id in file_deleter_ids,
             can_manage_folder_templates=g.id in folder_tmpl_ids,
             can_create_artist_account=g.id in artist_ids,
+            can_view_stats=g.id in stats_ids,
+            can_view_usage_stats=g.id in usage_stats_ids,
+            can_view_upload_stats=g.id in upload_stats_ids,
         )
         for g, cnt in rows
     ]
@@ -825,7 +855,7 @@ async def create_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权)。"""
+    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3)。"""
     dup = await db.execute(select(Group).where(Group.name == payload.name))
     if dup.scalar_one_or_none() is not None:
         raise HTTPException(409, f"组名已存在:{payload.name}")
@@ -855,6 +885,19 @@ async def create_directory_group(
         await _sync_group_org_flag(
             permissions, db, g.id, relation="artist_account_creator", enable=True,
         )
+    # 2026-11-06 统计面板方案 §3.3:三 flag 同款置位
+    if payload.can_view_stats:
+        await _sync_group_org_flag(
+            permissions, db, g.id, relation="stats_viewer", enable=True,
+        )
+    if payload.can_view_usage_stats:
+        await _sync_group_org_flag(
+            permissions, db, g.id, relation="usage_stats_viewer", enable=True,
+        )
+    if payload.can_view_upload_stats:
+        await _sync_group_org_flag(
+            permissions, db, g.id, relation="upload_stats_viewer", enable=True,
+        )
     await audit.write(
         event_type="group_created",
         actor_user_id=user.id,
@@ -863,16 +906,22 @@ async def create_directory_group(
                  "can_delete_project": payload.can_delete_project,
                  "can_delete_files": payload.can_delete_files,
                  "can_manage_folder_templates": payload.can_manage_folder_templates,
-                 "can_create_artist_account": payload.can_create_artist_account},
+                 "can_create_artist_account": payload.can_create_artist_account,
+                 "can_view_stats": payload.can_view_stats,
+                 "can_view_usage_stats": payload.can_view_usage_stats,
+                 "can_view_upload_stats": payload.can_view_upload_stats},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
     log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s "
-             "file_deleter=%s folder_tmpl=%s artist=%s",
+             "file_deleter=%s folder_tmpl=%s artist=%s stats=%s usage_stats=%s "
+             "upload_stats=%s",
              g.id, g.name, user.id, payload.can_create_project,
              payload.can_delete_project, payload.can_delete_files,
              payload.can_manage_folder_templates,
-             payload.can_create_artist_account)
+             payload.can_create_artist_account,
+             payload.can_view_stats, payload.can_view_usage_stats,
+             payload.can_view_upload_stats)
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=0, created_at=g.created_at,
@@ -881,6 +930,9 @@ async def create_directory_group(
         can_delete_files=payload.can_delete_files,
         can_manage_folder_templates=payload.can_manage_folder_templates,
         can_create_artist_account=payload.can_create_artist_account,
+        can_view_stats=payload.can_view_stats,
+        can_view_usage_stats=payload.can_view_usage_stats,
+        can_view_upload_stats=payload.can_view_upload_stats,
     )
 
 
@@ -894,7 +946,7 @@ async def update_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """改组名 / 描述;can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account tri-state(None=不动 / true=写 / false=删)。"""
+    """改组名 / 描述;can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats tri-state(None=不动 / true=写 / false=删)。"""
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
@@ -951,6 +1003,34 @@ async def update_directory_group(
             permissions, db, group_id, relation="artist_account_creator",
             enable=payload.can_create_artist_account,
         )
+    # 2026-11-06 统计面板方案 §3.3:三 flag 同款 tri-state + 审计 {old,new}
+    # (父 can_view_stats 与两子 can_view_usage/upload_stats 后端不做跨字段级联
+    # 校验,一致性靠 UI 级联 + 守门合取,方案 §3.3)
+    stats_old: bool | None = None
+    if payload.can_view_stats is not None:
+        stats_old = group_id in await _read_flag_group_ids(permissions, db, "stats_viewer")
+        await _sync_group_org_flag(
+            permissions, db, group_id, relation="stats_viewer",
+            enable=payload.can_view_stats,
+        )
+    usage_stats_old: bool | None = None
+    if payload.can_view_usage_stats is not None:
+        usage_stats_old = group_id in await _read_flag_group_ids(
+            permissions, db, "usage_stats_viewer",
+        )
+        await _sync_group_org_flag(
+            permissions, db, group_id, relation="usage_stats_viewer",
+            enable=payload.can_view_usage_stats,
+        )
+    upload_stats_old: bool | None = None
+    if payload.can_view_upload_stats is not None:
+        upload_stats_old = group_id in await _read_flag_group_ids(
+            permissions, db, "upload_stats_viewer",
+        )
+        await _sync_group_org_flag(
+            permissions, db, group_id, relation="upload_stats_viewer",
+            enable=payload.can_view_upload_stats,
+        )
     details: dict[str, object] = {"group_id": str(group_id), "name": g.name}
     if payload.can_create_project is not None:
         details["can_create_project"] = payload.can_create_project
@@ -975,6 +1055,21 @@ async def update_directory_group(
     ):
         details["can_create_artist_account"] = {"old": artist_old,
                                                 "new": payload.can_create_artist_account}
+    if payload.can_view_stats is not None and payload.can_view_stats != stats_old:
+        details["can_view_stats"] = {"old": stats_old,
+                                     "new": payload.can_view_stats}
+    if (
+        payload.can_view_usage_stats is not None
+        and payload.can_view_usage_stats != usage_stats_old
+    ):
+        details["can_view_usage_stats"] = {"old": usage_stats_old,
+                                           "new": payload.can_view_usage_stats}
+    if (
+        payload.can_view_upload_stats is not None
+        and payload.can_view_upload_stats != upload_stats_old
+    ):
+        details["can_view_upload_stats"] = {"old": upload_stats_old,
+                                            "new": payload.can_view_upload_stats}
     await audit.write(
         event_type="group_updated",
         actor_user_id=user.id,
@@ -1010,6 +1105,23 @@ async def update_directory_group(
         out_artist = group_id in await _read_flag_group_ids(
             permissions, db, "artist_account_creator",
         )
+    # 2026-11-06 统计面板方案 §3.3:三 flag 同款「入参带按入参 / 没带读真实态」
+    if payload.can_view_stats is not None:
+        out_stats = payload.can_view_stats
+    else:
+        out_stats = group_id in await _read_flag_group_ids(permissions, db, "stats_viewer")
+    if payload.can_view_usage_stats is not None:
+        out_usage_stats = payload.can_view_usage_stats
+    else:
+        out_usage_stats = group_id in await _read_flag_group_ids(
+            permissions, db, "usage_stats_viewer",
+        )
+    if payload.can_view_upload_stats is not None:
+        out_upload_stats = payload.can_view_upload_stats
+    else:
+        out_upload_stats = group_id in await _read_flag_group_ids(
+            permissions, db, "upload_stats_viewer",
+        )
     cnt = (await db.execute(
         select(func.count()).select_from(GroupMembership)
         .where(GroupMembership.group_id == group_id)
@@ -1022,6 +1134,9 @@ async def update_directory_group(
         can_delete_files=out_file_deleter,
         can_manage_folder_templates=out_folder_tmpl,
         can_create_artist_account=out_artist,
+        can_view_stats=out_stats,
+        can_view_usage_stats=out_usage_stats,
+        can_view_upload_stats=out_upload_stats,
     )
 
 
@@ -1045,16 +1160,18 @@ async def delete_directory_group(
     name = g.name
 
     # 顺手删 organization 上组级 flag tuple(project_creator / project_deleter /
-    # file_deleter / folder_template_manager / artist_account_creator,§2.2/F6.2/
-    # §4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权;尽力而为,
-    # remove_org_relation 幂等吞 not_exists,组本就未置位时静默 no-op)
+    # file_deleter / folder_template_manager / artist_account_creator /
+    # stats_viewer / usage_stats_viewer / upload_stats_viewer,§2.2/F6.2/
+    # §4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权/2026-11-06 统计面板方案
+    # §3.3;尽力而为,remove_org_relation 幂等吞 not_exists,组本就未置位时静默 no-op)
     try:
         org = await get_default_organization(db)
         if org:
             _, tenant_key = org
             subject = fmt_subject("group", str(group_id))
             for relation in ("project_creator", "project_deleter", "file_deleter",
-                             "folder_template_manager", "artist_account_creator"):
+                             "folder_template_manager", "artist_account_creator",
+                             "stats_viewer", "usage_stats_viewer", "upload_stats_viewer"):
                 await permissions.remove_org_relation(
                     organization_tenant_key=tenant_key,
                     subject=subject,

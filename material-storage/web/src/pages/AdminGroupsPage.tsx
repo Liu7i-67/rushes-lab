@@ -15,6 +15,12 @@
  * 删除文件/文件夹权限可授予用户组(2026-10-16/F11):第 5 个组级开关「允许组成员删除
  * 文件与文件夹」(can_delete_files,tri-state 同款;建组态与编辑态均展示,建组态直接
  * 随表单提交)+ 列表「可删文件」徽标。
+ * 统计面板(2026-11-06 方案 §3.3):第 6 个组级开关「允许组成员查看统计面板」
+ * (can_view_stats,tri-state 同款)+ 级联两子开关「使用统计」/「文件上传数量统计」
+ * (can_view_usage_stats / can_view_upload_stats,照 artist 方案 F4 模式:子开关仅
+ * 父开关开启时展示,父开关 true→false 转变瞬间 setFieldValue(false) + 强制置 touched,
+ * 确保该次 PATCH 显式发 false 清 tuple;勿改成 watch+effect 形态)+ 列表「统计」徽标
+ * (任一 stats flag 置位时展示)。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
@@ -206,6 +212,18 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
               }}>可删文件</span>
             </Tooltip>
           )}
+          {/* 统计徽标(2026-11-06 方案 §3.3):任一 stats flag 置位即展示一枚「统计」
+              (样式照「可建项目」;子权限详情在编辑弹窗可见,不逐枚加徽标防拥挤) */}
+          {(group.can_view_stats || group.can_view_usage_stats || group.can_view_upload_stats) && (
+            <Tooltip title="组内成员可见「统计」面板(使用统计 / 文件上传数量统计子模块权限在编辑弹窗内单独配置)">
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
+                borderRadius: 3,
+              }}>统计</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -264,9 +282,16 @@ function GroupFormModal({ open, onClose, group }: {
   const [artistFlagTouched, setArtistFlagTouched] = useState(false);
   // 删除文件/文件夹组授权(2026-10-16/F11):can_delete_files 同款 tri-state
   const [filesFlagTouched, setFilesFlagTouched] = useState(false);
+  // 统计面板(2026-11-06 方案 §3.3):can_view_stats 父开关 + 两子开关 tri-state;
+  // 父开关 true→false 转变瞬间的级联复位也会强制置两个子 touched(PATCH 显式发 false 清 tuple)
+  const [statsFlagTouched, setStatsFlagTouched] = useState(false);
+  const [usageStatsFlagTouched, setUsageStatsFlagTouched] = useState(false);
+  const [uploadStatsFlagTouched, setUploadStatsFlagTouched] = useState(false);
   // 子开关仅父开关开启时展示(建组态与编辑态均适用);数据驱动,弹窗挂载时父已 false
   // 不做任何复位动作 —— 防「仅改名保存」静默撤权(directory.py tri-state 注释明确防范)
   const canCreateProject = Form.useWatch('can_create_project', form) === true;
+  // 统计面板两子开关同款:Form.useWatch 控渲染(照 artist F4,勿改成 watch+effect)
+  const canViewStats = Form.useWatch('can_view_stats', form) === true;
 
   const submit = async () => {
     try {
@@ -283,6 +308,11 @@ function GroupFormModal({ open, onClose, group }: {
           ...(artistFlagTouched
             ? { can_create_artist_account: v.can_create_artist_account === true } : {}),
           ...(filesFlagTouched ? { can_delete_files: v.can_delete_files === true } : {}),
+          ...(statsFlagTouched ? { can_view_stats: v.can_view_stats === true } : {}),
+          ...(usageStatsFlagTouched
+            ? { can_view_usage_stats: v.can_view_usage_stats === true } : {}),
+          ...(uploadStatsFlagTouched
+            ? { can_view_upload_stats: v.can_view_upload_stats === true } : {}),
         });
         message.success('已保存');
       } else {
@@ -293,6 +323,10 @@ function GroupFormModal({ open, onClose, group }: {
           can_manage_folder_templates: v.can_manage_folder_templates === true,
           can_create_artist_account: v.can_create_artist_account === true,
           can_delete_files: v.can_delete_files === true,
+          // 统计面板三开关:新建 POST 全量传(方案 §3.3)
+          can_view_stats: v.can_view_stats === true,
+          can_view_usage_stats: v.can_view_usage_stats === true,
+          can_view_upload_stats: v.can_view_upload_stats === true,
         });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
@@ -311,6 +345,8 @@ function GroupFormModal({ open, onClose, group }: {
                setFlagTouched(false); setDeleteFlagTouched(false);
                setFolderFlagTouched(false); setArtistFlagTouched(false);
                setFilesFlagTouched(false);
+               setStatsFlagTouched(false);
+               setUsageStatsFlagTouched(false); setUploadStatsFlagTouched(false);
              }
            }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
@@ -323,11 +359,17 @@ function GroupFormModal({ open, onClose, group }: {
               can_manage_folder_templates: group.can_manage_folder_templates ?? false,
               can_create_artist_account: group.can_create_artist_account ?? false,
               can_delete_files: group.can_delete_files ?? false,
+              can_view_stats: group.can_view_stats ?? false,
+              can_view_usage_stats: group.can_view_usage_stats ?? false,
+              can_view_upload_stats: group.can_view_upload_stats ?? false,
             } : {
               can_create_project: false,
               can_manage_folder_templates: false,
               can_create_artist_account: false,
               can_delete_files: false,
+              can_view_stats: false,
+              can_view_usage_stats: false,
+              can_view_upload_stats: false,
             }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
@@ -394,6 +436,49 @@ function GroupFormModal({ open, onClose, group }: {
           <Switch checkedChildren="开" unCheckedChildren="关"
                   onChange={() => setFilesFlagTouched(true)} />
         </Form.Item>
+        {/* 统计面板父开关(2026-11-06 方案 §3.3,建组态与编辑态均展示):面板入口 flag;
+            后端守门为 is_org_admin ∨ (stats_viewer ∧ 对应子),父子约束靠本页 UI 级联落实 */}
+        <Form.Item name="can_view_stats" valuePropName="checked"
+                   label={switchLabel(
+                     '允许组成员查看统计面板',
+                     '开启后组内成员可见「统计」入口(具体子模块权限见下方两个开关);系统管理员不受此开关影响',
+                   )}>
+          <Switch checkedChildren="开" unCheckedChildren="关"
+                  onChange={(checked) => {
+                    setStatsFlagTouched(true);
+                    // 级联复位时机写死(照 artist F4):仅父开关 onChange 由 true→false
+                    // 的转变瞬间 setFieldValue(false) + 强制置两个 touched,确保该次
+                    // PATCH 显式发 false 清 tuple;弹窗挂载时父已 false 不触发
+                    if (!checked) {
+                      form.setFieldValue('can_view_usage_stats', false);
+                      form.setFieldValue('can_view_upload_stats', false);
+                      setUsageStatsFlagTouched(true);
+                      setUploadStatsFlagTouched(true);
+                    }
+                  }} />
+        </Form.Item>
+        {/* 统计两子开关(照 artist F4):仅父开关开启时展示(建组态与编辑态均适用);
+            复位只在父开关 onChange true→false 转变瞬间做,勿改成 watch+effect 形态 */}
+        {canViewStats && (
+          <>
+            <Form.Item name="can_view_usage_stats" valuePropName="checked"
+                       label={switchLabel(
+                         '子模块:使用统计',
+                         '开启后组内成员可经统计面板查看客户端三端占比 / 内外网占比(依托审计日志聚合);系统管理员不受此开关影响',
+                       )}>
+              <Switch checkedChildren="开" unCheckedChildren="关"
+                      onChange={() => setUsageStatsFlagTouched(true)} />
+            </Form.Item>
+            <Form.Item name="can_view_upload_stats" valuePropName="checked"
+                       label={switchLabel(
+                         '子模块:文件上传数量统计',
+                         '开启后组内成员可经统计面板查看按项目分类的上传数量统计(遵守数据权限);系统管理员不受此开关影响',
+                       )}>
+              <Switch checkedChildren="开" unCheckedChildren="关"
+                      onChange={() => setUploadStatsFlagTouched(true)} />
+            </Form.Item>
+          </>
+        )}
       </Form>
     </Modal>
   );
