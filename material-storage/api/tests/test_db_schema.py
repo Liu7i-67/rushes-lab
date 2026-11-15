@@ -44,6 +44,8 @@ def test_all_tables_in_metadata() -> None:
         # 0020:MCP 素材服务(PAT + 系统配置 KV)
         "personal_access_tokens",
         "system_flags",
+        # 0021:用户模块组级授权(组对组关系落 DB 不进 FGA,D2)
+        "user_create_grants",
     }
 
 

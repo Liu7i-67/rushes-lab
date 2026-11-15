@@ -30,6 +30,7 @@ test_boundary_ext / test_default_template 惯例);孤儿 pin 行无害保留(方
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -39,6 +40,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import create_app
+from tests.test_project_soft_delete import scratch_migration_db
 
 # seed 写死的真 user / fake outsider(同 test_project_soft_delete.py)
 EVAN_ID = "3f1b659e-9ef1-4e65-aa03-4407ad7bcfc4"
@@ -624,9 +626,15 @@ def test_migration_user_project_pins_upgrade_downgrade() -> None:
 
     独立可跳过:需在有 alembic.ini 的 material-storage/api 目录内运行(容器内
     WORKDIR 即该目录),且 alembic CLI 可用、DB 可连;不满足则 skip。
-    末尾必回 head,顺序执行下不影响同 session 其他用例(未假设 xdist 并行)。
+    2026-11-15 起三段式改打一次性临时库(env DB_URL=scratch,live 库零接触):
+    downgrade -1 会 DROP 新 head 0021 的 user_create_grants + users.created_by,
+    打 live 库会毁掉管理员配置的组级授权与存量创建人回填(基建
+    scratch_migration_db 定义在 test_project_soft_delete.py,tests 间 import
+    照 test_baidu_concurrency ← test_baidu_integration 先例)。
+    末尾临时库强制 DROP;live 库零改动,顺序执行下不影响同 session 其他用例
+    (未假设 xdist 并行)。
     注:pytest.mark.alembic 为自定义标记(pyproject 未注册,仅告警),便于
-    `-m "not alembic"` 圈选跳过。(照 test_project_soft_delete.py:640 三段式)
+    `-m "not alembic"` 圈选跳过。
     """
     api_dir = Path(__file__).resolve().parents[1]
     if not (api_dir / "alembic.ini").exists():
@@ -636,17 +644,21 @@ def test_migration_user_project_pins_upgrade_downgrade() -> None:
     except (OSError, subprocess.CalledProcessError) as e:
         pytest.skip(f"alembic CLI 不可用: {e}")
 
-    def _run(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["alembic", *args],
-            cwd=str(api_dir),
-            capture_output=True,
-            text=True,
-        )
+    with scratch_migration_db() as scratch_url:
 
-    up1 = _run("upgrade", "head")
-    assert up1.returncode == 0, f"upgrade head 失败: {up1.stderr or up1.stdout}"
-    down = _run("downgrade", "-1")
-    assert down.returncode == 0, f"downgrade -1 失败: {down.stderr or down.stdout}"
-    up2 = _run("upgrade", "head")
-    assert up2.returncode == 0, f"回 upgrade head 失败: {up2.stderr or up2.stdout}"
+        def _run(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["alembic", *args],
+                cwd=str(api_dir),
+                capture_output=True,
+                text=True,
+                # 一次性临时库:env.py 读 get_settings().db_url,覆盖 DB_URL
+                env={**os.environ, "DB_URL": scratch_url},
+            )
+
+        up1 = _run("upgrade", "head")
+        assert up1.returncode == 0, f"upgrade head 失败: {up1.stderr or up1.stdout}"
+        down = _run("downgrade", "-1")
+        assert down.returncode == 0, f"downgrade -1 失败: {down.stderr or down.stdout}"
+        up2 = _run("upgrade", "head")
+        assert up2.returncode == 0, f"回 upgrade head 失败: {up2.stderr or up2.stdout}"

@@ -4,6 +4,10 @@
 docs/qdev/2026-11-15-user-delegation.md「接口定义」§5 +「测试功能点」§7 T1-T15
 (迁移存量回填不在用例范围)。harness/夹具照抄 test_directory_users_ext.py 与
 test_group_file_deleter.py;组在 finally 删、用户无删除 API 靠唯一 marker 不清理。
+**cookie 纪律**:登录(会 set ms_session)一律走 _login 的独立一次性 AsyncClient,
+session 共享 client 永远只带 X-User-Id —— get_current_user 的 cookie 优先级高于
+dev X-User-Id 兜底,jar 一旦被登录 cookie 污染,后续全部请求会串成该登录用户
+(must_change_password=true)遭首登强改密 403。
 各用例契约细节见其 docstring;要点:4 端点守门放宽(GET/POST /users、GET
 /users/{id}、reset-password → 非 granted 403,非 admin 仅见 created_by=自己),
 PATCH/disable/enable/unlock 与 groups 全族仍 admin-only;建号组校验 422
@@ -113,8 +117,12 @@ async def _patch_group(client: AsyncClient, gid: str, body: dict) -> dict:
 
 
 async def _group_echo_by_id(client: AsyncClient, gid: str) -> dict | None:
-    """组列表按 id 取回(无组详情路由,读接口回显 user_create_grants 真实态)。"""
-    r = await client.get("/api/v1/admin/directory/groups", headers=_h(EVAN_ID))
+    """组列表按 id 取回(无组详情路由,读接口回显 user_create_grants 真实态)。
+
+    显式 limit=200(端点上限,directory.py list_directory_groups Query le=200,
+    默认 50):t14 现造 51 组 + 库内历史残留 ud_* 组,目标组可能落在默认首页之外。"""
+    r = await client.get("/api/v1/admin/directory/groups",
+                         params={"limit": 200}, headers=_h(EVAN_ID))
     assert r.status_code == 200, r.text
     hits = [g for g in r.json() if g["id"] == gid]
     return hits[0] if hits else None
@@ -140,10 +148,19 @@ async def _me(client: AsyncClient, uid: str) -> dict:
     return r.json()
 
 
-async def _login(client: AsyncClient, username: str, password: str):
-    """POST /auth/local/login(账号密码登录;只验响应,session cookie 不使用)。"""
-    return await client.post(
-        "/api/v1/auth/local/login", json={"username": username, "password": password})
+async def _login(app, username: str, password: str):
+    """POST /auth/local/login(账号密码登录,只验响应体)。
+
+    刻意用**独立一次性 AsyncClient**(同 app 新建 transport,空 cookie jar):
+    登录成功会 set ms_session,而 get_current_user 是 cookie 优先于 dev
+    X-User-Id 兜底 —— 若落到 session 共享 client 的 jar 上,其后所有请求
+    (哪怕带 EVAN 的 X-User-Id)都会被当成刚建的新用户(must_change_password
+    =true)遭首登强改密拦截 403。共享 client 永远只走 X-User-Id 头。
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        return await ac.post(
+            "/api/v1/auth/local/login", json={"username": username, "password": password})
 
 
 async def _reset_pw(client: AsyncClient, actor: str, uid: str):
@@ -264,7 +281,9 @@ async def test_delegation_t03_delegator_sees_only_own_created(client: AsyncClien
 
 
 @pytest.mark.asyncio
-async def test_delegation_t04_create_granted_temp_pw_login(client: AsyncClient) -> None:
+async def test_delegation_t04_create_granted_temp_pw_login(
+    client: AsyncClient, app_with_lifespan,
+) -> None:
     """T4(F7/F8):组长建号 group_ids=[授权目标组] → 201 + 临时密码回显;临时密码
     可直接登录且 must_change_password=true;created_by 落库;用户真入目标组。"""
     t1 = await _create_group(client, "ud_t4_tgt")
@@ -275,7 +294,7 @@ async def test_delegation_t04_create_granted_temp_pw_login(client: AsyncClient) 
         assert r.status_code == 201, r.text
         x = r.json()
         assert x["must_change_password"] is True and len(x["temporary_password"]) >= 8, x
-        lg = await _login(client, uname, x["temporary_password"])   # 临时密码可登录
+        lg = await _login(app_with_lifespan, uname, x["temporary_password"])  # 可登录
         assert lg.status_code == 200 and lg.json()["must_change_password"] is True, lg.text
         det = await _get_user(client, EVAN_ID, x["id"])       # created_by 落库(admin 视角)
         assert det.status_code == 200 and det.json()["created_by_name"] == boss_name, det.text
@@ -308,7 +327,7 @@ async def test_delegation_t05_create_ungranted_group_422(client: AsyncClient) ->
                                                            limit=200))["items"]}
         assert not {u_g, u_u, u_m} & names, names
     finally:
-        await _cleanup_groups(client, gid, other, t1["id"])
+        await _cleanup_groups(client, gid, other["id"], t1["id"])
 
 
 @pytest.mark.asyncio
@@ -325,7 +344,9 @@ async def test_delegation_t06_create_empty_groups_201(client: AsyncClient) -> No
 
 
 @pytest.mark.asyncio
-async def test_delegation_t07_reset_own_old_pw_invalid(client: AsyncClient) -> None:
+async def test_delegation_t07_reset_own_old_pw_invalid(
+    client: AsyncClient, app_with_lifespan,
+) -> None:
     """T7(F9):组长重置自己建的用户 → 200 新临时密码;旧密码登录 401,新密码登录
     200 且 must_change_password=true;列表态同样回 true。"""
     t1 = await _create_group(client, "ud_t7_tgt")
@@ -340,8 +361,9 @@ async def test_delegation_t07_reset_own_old_pw_invalid(client: AsyncClient) -> N
         assert r.status_code == 200, r.text
         new_pw = r.json()["temporary_password"]
         assert new_pw != old_pw, "新临时密码不应与旧密码相同"
-        assert (await _login(client, uname, old_pw)).status_code == 401, "旧密码必须已失效"
-        lg = await _login(client, uname, new_pw)
+        assert (await _login(app_with_lifespan, uname, old_pw)).status_code == 401, (
+            "旧密码必须已失效")
+        lg = await _login(app_with_lifespan, uname, new_pw)
         assert lg.status_code == 200 and lg.json()["must_change_password"] is True, lg.text
         body = await _list_users(client, uid, q=uname)   # 列表态 must_change_password=true
         hit = next(u for u in body["items"] if u["id"] == x["id"])
@@ -537,7 +559,7 @@ async def test_delegation_t14_grant_targets_invalid_over50_422(client: AsyncClie
         }, headers=_h(EVAN_ID))
         assert rc.status_code == 422 and _INVALID_GROUP_IDS in rc.text, rc.text
         rl = await client.get("/api/v1/admin/directory/groups",
-                              params={"q": ghost_name}, headers=_h(EVAN_ID))
+                              params={"q": ghost_name, "limit": 200}, headers=_h(EVAN_ID))
         assert all(g["name"] != ghost_name for g in rl.json()), rl.json()
         # 重复 id → 去重容忍,200 且终态 [t1]
         rd = await _patch_group(client, gid, {"user_create_group_ids": [t1["id"], t1["id"]]})

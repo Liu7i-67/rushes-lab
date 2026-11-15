@@ -33,12 +33,18 @@ DELETE API 收尾(已删除 404 视为成功),不再需要 DB 直改归档;用�
 """
 from __future__ import annotations
 
+import asyncio
+import os
+import secrets
 import subprocess
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.engine import make_url
 
 from app.main import create_app
 
@@ -636,6 +642,54 @@ async def test_restore_roundtrip_and_audit(client: AsyncClient) -> None:
         await _soft_delete(client, pid)   # 恢复态收尾:再删掉防挤占列表
 
 
+# ─── 迁移冒烟共享基建:一次性临时库(user-delegation 2026-11-15 起)─────────────
+@contextmanager
+def scratch_migration_db() -> Iterator[str]:
+    """建一次性临时库并 yield 其 DB_URL(asyncpg scheme 不变),finally 强制 DROP。
+
+    2026-11-15(user-delegation)起必须:三段式冒烟的 downgrade -1 会 DROP
+    新 head 迁移 0021 的 user_create_grants + users.created_by —— 直接打 live
+    库会毁掉管理员配置的组级授权与存量创建人回填(dev 已两次实锤),不可承受;
+    故迁移冒烟统一改打随机名临时库(ms_migration_smoke_<hex6>),live 库零接触。
+
+    - 建/删库走 SQLAlchemy async engine(asyncpg)AUTOCOMMIT:CREATE/DROP
+      DATABASE 不允许在事务内,仓内无同步 psycopg 驱动;管理连接连
+      settings.db_url 指向的既有库(同主机/端口/用户/密码),库名随机防撞;
+    - DROP DATABASE ... WITH (FORCE)(PG13+):先断残留活动连接,防临时库因
+      连接未释放删除失败;
+    - 消费方把 yielded URL 作为 DB_URL env 传给 alembic 子进程(env.py 读
+      get_settings().db_url,pydantic-settings 默认 env 名即 DB_URL),
+      三段式照旧但打临时库。
+    失败路径:CREATE 失败直接抛(连不上 DB = 环境问题,如实暴露);yield 体
+    异常时 finally 仍 DROP。
+    """
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.settings import get_settings
+
+    base = make_url(str(get_settings().db_url))
+    scratch_name = f"ms_migration_smoke_{secrets.token_hex(3)}"
+    # 勿 str(URL):sqlalchemy 会把密码掩码成 ***(连接必 401 失败),必须
+    # render_as_string(hide_password=False) 拿真密码的合法 URL 形态
+    scratch_url = base.set(database=scratch_name).render_as_string(hide_password=False)
+
+    async def _admin_exec(statement: str) -> None:
+        # isolation_level=AUTOCOMMIT:CREATE/DROP DATABASE 不能进事务块
+        engine = create_async_engine(base, isolation_level="AUTOCOMMIT")
+        try:
+            async with engine.connect() as conn:
+                await conn.execute(text(statement))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_admin_exec(f'CREATE DATABASE "{scratch_name}"'))
+    try:
+        yield scratch_url
+    finally:
+        asyncio.run(_admin_exec(f'DROP DATABASE "{scratch_name}" WITH (FORCE)'))
+
+
 # ─── T17:迁移冒烟 upgrade head → downgrade -1 → upgrade head ─────────────────
 @pytest.mark.alembic
 def test_migration_project_soft_delete_upgrade_downgrade() -> None:
@@ -644,7 +698,12 @@ def test_migration_project_soft_delete_upgrade_downgrade() -> None:
 
     独立可跳过:需在有 alembic.ini 的 material-storage/api 目录内运行(容器内
     WORKDIR 即该目录),且 alembic CLI 可用、DB 可连;不满足则 skip。
-    末尾必回 head,顺序执行下不影响同 session 其他用例(未假设 xdist 并行)。
+    2026-11-15 起三段式改打一次性临时库(env DB_URL=scratch,live 库零接触):
+    downgrade -1 会 DROP 新 head 0021 的 user_create_grants + users.created_by,
+    打 live 库会毁掉管理员配置的组级授权与存量创建人回填(见
+    scratch_migration_db docstring)。
+    末尾临时库强制 DROP;live 库零改动,顺序执行下不影响同 session 其他用例
+    (未假设 xdist 并行)。
     注:pytest.mark.alembic 为自定义标记(pyproject 未注册,仅告警),便于
     `-m "not alembic"` 圈选跳过。
     """
@@ -656,14 +715,21 @@ def test_migration_project_soft_delete_upgrade_downgrade() -> None:
     except (OSError, subprocess.CalledProcessError) as e:
         pytest.skip(f"alembic CLI 不可用: {e}")
 
-    def _run(*args: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["alembic", *args], cwd=str(api_dir), capture_output=True, text=True,
-        )
+    with scratch_migration_db() as scratch_url:
 
-    up1 = _run("upgrade", "head")
-    assert up1.returncode == 0, f"upgrade head 失败: {up1.stderr or up1.stdout}"
-    down = _run("downgrade", "-1")
-    assert down.returncode == 0, f"downgrade -1 失败: {down.stderr or down.stdout}"
-    up2 = _run("upgrade", "head")
-    assert up2.returncode == 0, f"回 upgrade head 失败: {up2.stderr or up2.stdout}"
+        def _run(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["alembic", *args],
+                cwd=str(api_dir),
+                capture_output=True,
+                text=True,
+                # 一次性临时库:env.py 读 get_settings().db_url,覆盖 DB_URL
+                env={**os.environ, "DB_URL": scratch_url},
+            )
+
+        up1 = _run("upgrade", "head")
+        assert up1.returncode == 0, f"upgrade head 失败: {up1.stderr or up1.stdout}"
+        down = _run("downgrade", "-1")
+        assert down.returncode == 0, f"downgrade -1 失败: {down.stderr or down.stdout}"
+        up2 = _run("upgrade", "head")
+        assert up2.returncode == 0, f"回 upgrade head 失败: {up2.stderr or up2.stdout}"
