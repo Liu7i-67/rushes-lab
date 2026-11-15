@@ -257,6 +257,14 @@ class FakeAdminMsApi extends FakeMsApi {
 FakeAdminMsApi _install() {
   final api = FakeAdminMsApi();
   session.api = api;
+  // 管理页用例默认管理员登录态(2026-11-15 用户模块组级授权开放):行操作
+  // 菜单按 `me.isSystemAdmin` 裁剪,me=null 会被当成未授权访客,编辑/停用/
+  // 启用/解锁入口全部消失;百度任务归属者等用例在 _install() 后自行覆盖。
+  session.me = Me.fromJson({
+    'id': 'admin',
+    'name': '系统管理员',
+    'is_system_admin': true,
+  });
   addTearDown(() {
     session.api = null;
     session.me = null;

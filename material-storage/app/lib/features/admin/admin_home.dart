@@ -1,7 +1,9 @@
 /// AdminHomePage — 管理后台入口(B8 功能点 1;方案 §8.9):二级页大标题 +
 /// 2 列磁贴(用户/用户组/审计/权限模板/目录模板/备份任务/风控/使用统计)。
 ///
-/// 闸门:页面本身仅 is_system_admin(我的页入口已闸;深链兜底二次判),
+/// 闸门:页面本身 is_system_admin;深链兜底放行用户模块弱门
+/// `is_user_manager ?? is_system_admin`(用户模块组级授权开放)——非 admin
+/// 被授权者进本页仅见「用户」磁贴,其余磁贴仍 is_system_admin(D8/D9);
 /// 目录模板例外闸门 `is_folder_template_manager ?? is_system_admin` 由
 /// 我的页独立磁贴直达,不依赖本页。
 library;
@@ -32,8 +34,12 @@ class AdminHomePage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 深链兜底:非 system admin(web 各 Admin*Page 内嵌 Alert 同口径)
-    if (!(session.me?.isSystemAdmin ?? false)) {
+    // 深链兜底:非 system admin 且非用户模块被授权(web 各 Admin*Page 内嵌
+    // Alert 同口径);被授权非 admin 进本页仅见「用户」磁贴(下方逐磁贴门控)
+    final me = session.me;
+    final isAdmin = me?.isSystemAdmin ?? false;
+    final isUserManager = me?.isUserManager ?? false;
+    if (!isAdmin && !isUserManager) {
       return Scaffold(
         body: Column(
           children: [
@@ -48,64 +54,70 @@ class AdminHomePage extends StatelessWidget {
         ),
       );
     }
+    // 用户模块组级授权开放:「用户」磁贴弱门 isUserManager(用户组/审计等
+    // 其余磁贴保持 isSystemAdmin,D9);admin 的 isUserManager 恒 true,
+    // 磁贴集合与顺序对 admin 不变。
     final tiles = <_Tile>[
-      _Tile(
-        Icons.person_outline,
-        '用户',
-        '账号与角色',
-        () => _open(context, const AdminUsersPage()),
-      ),
-      _Tile(
-        Icons.groups_outlined,
-        '用户组',
-        '按团队授权',
-        () => _open(context, const AdminGroupsPage()),
-      ),
-      _Tile(
-        Icons.receipt_long_outlined,
-        '审计日志',
-        '关键操作留痕',
-        () => _open(context, const AdminAuditPage()),
-      ),
-      _Tile(
-        Icons.key_outlined,
-        '授权模板',
-        '常用权限预设',
-        () => _open(context, const AdminGrantTemplatesPage()),
-      ),
-      _Tile(
-        Icons.account_tree_outlined,
-        '目录模板',
-        '新建项目结构',
-        () => _open(context, const AdminFolderTemplatesPage()),
-      ),
-      _Tile(
-        Icons.cloud_outlined,
-        '备份任务',
-        '全站备份视图',
-        () => _open(context, const AdminBaiduTasksPage()),
-      ),
-      // 风控模块(2026-10-28 §5.1):导航照既有磁贴 _open 直推 widget,不走 pushNamed
-      _Tile(
-        Icons.shield_outlined,
-        '风控',
-        '登录锁定处置',
-        () => _open(context, const AdminRiskPage()),
-      ),
-      _Tile(
-        Icons.insights,
-        '使用统计',
-        '三端与内外网占比',
-        () => _open(context, const AdminUsagePage()),
-      ),
+      if (isUserManager)
+        _Tile(
+          Icons.person_outline,
+          '用户',
+          '账号与角色',
+          () => _open(context, const AdminUsersPage()),
+        ),
+      if (isAdmin) ...[
+        _Tile(
+          Icons.groups_outlined,
+          '用户组',
+          '按团队授权',
+          () => _open(context, const AdminGroupsPage()),
+        ),
+        _Tile(
+          Icons.receipt_long_outlined,
+          '审计日志',
+          '关键操作留痕',
+          () => _open(context, const AdminAuditPage()),
+        ),
+        _Tile(
+          Icons.key_outlined,
+          '授权模板',
+          '常用权限预设',
+          () => _open(context, const AdminGrantTemplatesPage()),
+        ),
+        _Tile(
+          Icons.account_tree_outlined,
+          '目录模板',
+          '新建项目结构',
+          () => _open(context, const AdminFolderTemplatesPage()),
+        ),
+        _Tile(
+          Icons.cloud_outlined,
+          '备份任务',
+          '全站备份视图',
+          () => _open(context, const AdminBaiduTasksPage()),
+        ),
+        // 风控模块(2026-10-28 §5.1):导航照既有磁贴 _open 直推 widget,不走 pushNamed
+        _Tile(
+          Icons.shield_outlined,
+          '风控',
+          '登录锁定处置',
+          () => _open(context, const AdminRiskPage()),
+        ),
+        _Tile(
+          Icons.insights,
+          '使用统计',
+          '三端与内外网占比',
+          () => _open(context, const AdminUsagePage()),
+        ),
+      ],
     ];
     return Scaffold(
       body: Column(
         children: [
-          const PageHeader(
+          PageHeader(
             back: true,
             title: '管理后台',
-            subtitle: '系统管理员 · 用户、用户组、审计与模板',
+            subtitle: isAdmin ? '系统管理员 · 用户、用户组、审计与模板' : '用户账号管理',
           ),
           Expanded(
             child: LayoutBuilder(
