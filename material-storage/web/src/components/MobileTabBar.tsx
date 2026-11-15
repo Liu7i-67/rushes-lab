@@ -40,8 +40,9 @@ export function MobileTabBar() {
 
   const active = activeTabOf(location.pathname);
 
-  // "更多"条目(W3 2026-10-17):admin 块五项(审计/用户管理/用户组管理/权限模板/备份任务)
-  // 仅系统管理员可见(非 admin 不出现 403 死链);目录模板是独立三态门
+  // "更多"条目(W3 2026-10-17):admin 块(审计/用户组管理/权限模板/备份任务/MCP 设置)
+  // 仅系统管理员可见(非 admin 不出现 403 死链);「用户管理」自 2026-11-15 用户模块
+  // 组级授权开放起改弱门(is_user_manager ?? is_system_admin);目录模板是独立三态门
   // (is_folder_template_manager ?? is_system_admin,同 AppHeader PC 口径)——
   // 仅持 folder_template_manager flag 的非系统 admin 组员也要能看到,故不并入 admin 数组
   const moreItems = [
@@ -50,7 +51,14 @@ export function MobileTabBar() {
     { to: '/my-permissions', label: '我的权限', icon: <ShieldCheck size={16} strokeWidth={1.8} /> },
     ...(me?.is_system_admin ? [
       { to: '/admin/audit', label: '审计', icon: <ScrollText size={16} strokeWidth={1.8} /> },
+    ] : []),
+    // 用户管理(2026-11-15 用户模块组级授权开放 F5):弱门 — 系统管理员 ∨ 被授权
+    // user_manager 组成员可见(旧后端无字段回落 is_system_admin,同 AppHeader PC 口径);
+    // 用户组管理/审计等其余管理项仍仅系统管理员
+    ...((me?.is_user_manager ?? me?.is_system_admin) ? [
       { to: '/admin/users', label: '用户管理', icon: <UsersIcon size={16} strokeWidth={1.8} /> },
+    ] : []),
+    ...(me?.is_system_admin ? [
       { to: '/admin/groups', label: '用户组管理', icon: <UsersRound size={16} strokeWidth={1.8} /> },
       { to: '/admin/grant-templates', label: '权限模板', icon: <LayoutTemplate size={16} strokeWidth={1.8} /> },
       { to: '/admin/baidu-tasks', label: '备份任务', icon: <CloudDownload size={16} strokeWidth={1.8} /> },

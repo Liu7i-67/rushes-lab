@@ -39,6 +39,15 @@ export interface Me {
   // 用户组 upload_stats_viewer ∧ stats_viewer,含系统 admin)。可选 —— 旧后端无
   // 此字段,消费侧用 `?? is_system_admin` 回落。
   is_upload_stats_viewer?: boolean;
+  // 用户模块组级授权开放(2026-11-15 方案 §5.4):可见/可用「用户」模块(口径 =
+  // is_org_admin ∨ 被组授权(user_create_grants 授权组成员),含系统 admin)。
+  // 可选 —— 旧后端无此字段,消费侧用 `?? is_system_admin` 回落(照
+  // is_folder_template_manager 三态门先例)。
+  is_user_manager?: boolean;
+  // 用户模块组级授权开放(2026-11-15 方案 §5.4):非 admin 被授权时 = 新建用户可选的
+  // 目标组集合(含名称);admin 恒 [](admin 走 directory groups 接口取全量选项)。
+  // 可选 —— 旧后端无此字段,消费侧用 `?? []` 回落。
+  user_create_groups?: { id: string; name: string }[];
   // #149: 本地密码已设置(可走账号密码登录 / 修改密码)
   password_set: boolean;
   // #149: 首次登录强制改密(仅 password_set=true 时后端才报 true)
@@ -67,6 +76,10 @@ export interface DirectoryUser {
   // 「解锁」行按钮与「登录已锁定」pill 依此渲染。可选 —— 旧后端无此字段,消费侧
   // falsy 回落(不渲染解锁入口,同 is_project_creator 惯例)。
   login_locked?: boolean;
+  // 用户模块组级授权开放(2026-11-15 方案 §5.3):账号创建人姓名(users.created_by
+  // 反查 join,列表批量回填非 N+1;存量无审计来源 / 创建人已删 → null,UI 显示「—」)。
+  // 可选 —— 旧后端无此字段,消费侧 `?? '—'` 回落。DirectoryUserDetail 继承同名字段。
+  created_by_name?: string | null;
 }
 
 export interface DirectoryUserCreateOut extends DirectoryUser {
@@ -118,6 +131,11 @@ export interface DirectoryGroup {
   can_view_usage_stats?: boolean;
   // 统计面板子模块:组级「文件上传数量统计」权限回显(仿 can_view_stats;旧后端无此字段 → undefined 视为 false)
   can_view_upload_stats?: boolean;
+  // 用户模块组级授权开放(2026-11-15 方案 §5.2):本组被授权使用用户模块时,成员新建
+  // 用户可加入的目标组(id 与 names 同序,按组名排序;空数组 = 未授权,授权态 = 集合
+  // 非空)。可选 —— 旧后端无此字段,消费侧 `?? []` 回落。
+  user_create_group_ids?: string[];
+  user_create_group_names?: string[];
 }
 
 export interface DirectoryGroupMember {

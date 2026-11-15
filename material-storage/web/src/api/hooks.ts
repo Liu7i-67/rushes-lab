@@ -851,6 +851,9 @@ export const useCreateGroup = () => {
       can_view_stats?: boolean;
       can_view_usage_stats?: boolean;
       can_view_upload_stats?: boolean;
+      // 用户模块组级授权开放(2026-11-15 方案 §5.2):「新建用户时可选择的用户组」
+      // 目标组全量集合(Create list,缺省 [] 服务端兜底 = 不授权;授权态 = 集合非空)
+      user_create_group_ids?: string[];
     }) =>
       (await http.post<DirectoryGroup>('/api/v1/admin/directory/groups', body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['directory-groups'] }),
@@ -880,6 +883,10 @@ export const useUpdateGroup = () => {
       can_view_stats?: boolean;
       can_view_usage_stats?: boolean;
       can_view_upload_stats?: boolean;
+      // 用户模块组级授权开放(2026-11-15 方案 §5.2):user_create_group_ids 同款 tri-state
+      // (undefined 省略 = None 不动;list = 全量替换终态;[] = 撤销授权)。
+      // 调用方仅在表单改动过(开关或目标组选择)时显式传入,JSON 序列化自动省略 undefined
+      user_create_group_ids?: string[];
     }) => {
       const { groupId, ...body } = args;
       return (await http.patch<DirectoryGroup>(`/api/v1/admin/directory/groups/${groupId}`, body)).data;

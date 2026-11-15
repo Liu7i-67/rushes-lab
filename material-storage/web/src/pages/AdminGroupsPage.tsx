@@ -21,9 +21,14 @@
  * 父开关开启时展示,父开关 true→false 转变瞬间 setFieldValue(false) + 强制置 touched,
  * 确保该次 PATCH 显式发 false 清 tuple;勿改成 watch+effect 形态)+ 列表「统计」徽标
  * (任一 stats flag 置位时展示)。
+ * 用户模块组级授权开放(2026-11-15 方案 F3/F4):「用户模块(可新建用户)」开关
+ * (UI-only user_create_enabled,后端无 bool — 授权态 = user_create_grants 集合非空)+
+ * 「新建时可选择的用户组」多选(user_create_group_ids,开关开时强制 ≥1;照 can_delete_files
+ * tri-state touched 惯例:仅改动过才随 PATCH 携带,开关开→关强制置 touched 并提交 []
+ * 撤销授权)+ 组行「用户模块」徽标。
  */
 import {
-  Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Skeleton, Switch, Tooltip,
+  Alert, App, Button, Empty, Form, Input, Modal, Popconfirm, Select, Skeleton, Switch, Tooltip,
 } from 'antd';
 import { QuestionCircleOutlined } from '@ant-design/icons';
 import { Pencil, Plus, Search as SearchIcon, Trash2, Users as UsersIcon } from 'lucide-react';
@@ -224,6 +229,20 @@ function GroupRow({ group }: { group: DirectoryGroup }) {
               }}>统计</span>
             </Tooltip>
           )}
+          {/* 用户模块徽标(2026-11-15 方案 F4):授权态 = user_create_grants 目标组集合非空,
+              样式照「可建项目」;tooltip 列目标组名(names 缺失时回落数量) */}
+          {(group.user_create_group_ids?.length ?? 0) > 0 && (
+            <Tooltip title={`组内成员可使用「用户」模块,新建用户时可选择目标组:${
+              (group.user_create_group_names ?? []).join('、')
+              || `${group.user_create_group_ids!.length} 个组`}`}>
+              <span style={{
+                padding: '1px 7px', fontSize: 10, letterSpacing: '0.04em',
+                fontFamily: 'var(--ms-font-mono)',
+                color: 'var(--ms-accent)', background: 'var(--ms-accent-soft)',
+                borderRadius: 3,
+              }}>用户模块</span>
+            </Tooltip>
+          )}
         </div>
         {group.description && (
           <div style={{
@@ -287,11 +306,22 @@ function GroupFormModal({ open, onClose, group }: {
   const [statsFlagTouched, setStatsFlagTouched] = useState(false);
   const [usageStatsFlagTouched, setUsageStatsFlagTouched] = useState(false);
   const [uploadStatsFlagTouched, setUploadStatsFlagTouched] = useState(false);
+  // 用户模块组级授权开放(2026-11-15 方案 F3):开关(user_create_enabled,UI-only —
+  // 后端无 bool,授权态 = user_create_grants 集合非空)+ 目标组多选(user_create_group_ids)
+  // 各自 tri-state touched;开关开→关强制置 ids touched 并 setFieldValue([]),
+  // 确保该次 PATCH 显式发 [] 撤销授权(照 stats 父开关级联复位惯例)
+  const [userCreateFlagTouched, setUserCreateFlagTouched] = useState(false);
+  const [userCreateIdsTouched, setUserCreateIdsTouched] = useState(false);
   // 子开关仅父开关开启时展示(建组态与编辑态均适用);数据驱动,弹窗挂载时父已 false
   // 不做任何复位动作 —— 防「仅改名保存」静默撤权(directory.py tri-state 注释明确防范)
   const canCreateProject = Form.useWatch('can_create_project', form) === true;
   // 统计面板两子开关同款:Form.useWatch 控渲染(照 artist F4,勿改成 watch+effect)
   const canViewStats = Form.useWatch('can_view_stats', form) === true;
+  // 用户模块目标组多选同款:Form.useWatch 控渲染(勿改成 watch+effect)
+  const userCreateEnabled = Form.useWatch('user_create_enabled', form) === true;
+  // F3: 目标组多选选项 = 全量用户组(本弹窗自行挂 useDirectoryGroups('');
+  // 与页面搜索列表同 queryKey 缓存共享,数据同源)
+  const { data: groups } = useDirectoryGroups('');
 
   const submit = async () => {
     try {
@@ -313,6 +343,11 @@ function GroupFormModal({ open, onClose, group }: {
             ? { can_view_usage_stats: v.can_view_usage_stats === true } : {}),
           ...(uploadStatsFlagTouched
             ? { can_view_upload_stats: v.can_view_upload_stats === true } : {}),
+          // F3: user_create_group_ids tri-state —— 开关或目标组选择改动过才携带
+          // (undefined 省略 = None 不动);开关已关时目标组字段随条件挂载卸载
+          // (preserve=false 值不进 form store),`?? []` 显式发 [] = 撤销授权
+          ...(userCreateFlagTouched || userCreateIdsTouched
+            ? { user_create_group_ids: (v.user_create_group_ids ?? []) as string[] } : {}),
         });
         message.success('已保存');
       } else {
@@ -327,6 +362,8 @@ function GroupFormModal({ open, onClose, group }: {
           can_view_stats: v.can_view_stats === true,
           can_view_usage_stats: v.can_view_usage_stats === true,
           can_view_upload_stats: v.can_view_upload_stats === true,
+          // F3: 新建 POST 全量传(照 can_delete_files 惯例;开关关时 `?? []` = 不授权)
+          user_create_group_ids: (v.user_create_group_ids ?? []) as string[],
         });
         message.success(`用户组「${v.name.trim()}」已创建`);
       }
@@ -347,6 +384,7 @@ function GroupFormModal({ open, onClose, group }: {
                setFilesFlagTouched(false);
                setStatsFlagTouched(false);
                setUsageStatsFlagTouched(false); setUploadStatsFlagTouched(false);
+               setUserCreateFlagTouched(false); setUserCreateIdsTouched(false);
              }
            }}
            confirmLoading={isEdit ? update.isPending : create.isPending}
@@ -362,6 +400,9 @@ function GroupFormModal({ open, onClose, group }: {
               can_view_stats: group.can_view_stats ?? false,
               can_view_usage_stats: group.can_view_usage_stats ?? false,
               can_view_upload_stats: group.can_view_upload_stats ?? false,
+              // F3: 回显 — 授权态 = 目标组集合非空;ids 预填多选
+              user_create_enabled: (group.user_create_group_ids ?? []).length > 0,
+              user_create_group_ids: group.user_create_group_ids ?? [],
             } : {
               can_create_project: false,
               can_manage_folder_templates: false,
@@ -370,6 +411,8 @@ function GroupFormModal({ open, onClose, group }: {
               can_view_stats: false,
               can_view_usage_stats: false,
               can_view_upload_stats: false,
+              user_create_enabled: false,
+              user_create_group_ids: [],
             }}>
         <Form.Item name="name" label="组名" rules={[{ required: true, max: 128 }]}>
           <Input placeholder="策划组" autoFocus />
@@ -478,6 +521,51 @@ function GroupFormModal({ open, onClose, group }: {
                       onChange={() => setUploadStatsFlagTouched(true)} />
             </Form.Item>
           </>
+        )}
+        {/* 用户模块组级授权开放(2026-11-15 方案 F3):父开关 UI-only(后端无 bool,
+            授权态 = 下方目标组集合非空);开→关的级联复位照 stats 惯例仅在 onChange
+            true→false 转变瞬间做(setFieldValue([]) + 强制置 ids touched → PATCH 显式
+            发 [] 撤销授权),勿改成 watch+effect 形态 */}
+        <Form.Item name="user_create_enabled" valuePropName="checked"
+                   label={switchLabel(
+                     '用户模块(可新建用户)',
+                     '开启后组内成员可见「用户」模块:可查看自己创建的用户、新建用户(加入下方所选目标组)并重置自建用户密码;编辑/停用/启用等仍仅系统管理员。关闭并保存即撤销授权(此前创建的用户归属不变,但创建者立即失去可见与操作权)',
+                   )}>
+          <Switch checkedChildren="开" unCheckedChildren="关"
+                  onChange={(checked) => {
+                    setUserCreateFlagTouched(true);
+                    if (!checked) {
+                      form.setFieldValue('user_create_group_ids', []);
+                      setUserCreateIdsTouched(true);
+                    }
+                  }} />
+        </Form.Item>
+        {/* F3: 目标组多选(仅父开关开启时展示;开关开时校验 ≥1 才允许提交)。
+            值变更即置 touched → 该次 PATCH 携带全量终态(list = 全量替换) */}
+        {userCreateEnabled && (
+          <Form.Item name="user_create_group_ids"
+                     label={switchLabel(
+                       '新建时可选择的用户组',
+                       '组成员新建用户时,可把用户加入这些目标组(可含本组);至少选择 1 个',
+                     )}
+                     rules={[{
+                       validator: (_, v: unknown) =>
+                         Array.isArray(v) && v.length >= 1
+                           ? Promise.resolve()
+                           : Promise.reject(new Error('至少选择 1 个目标用户组')),
+                     }]}>
+            <Select
+              mode="multiple"
+              showSearch
+              optionFilterProp="label"
+              allowClear
+              placeholder="选择目标用户组(可多选)"
+              loading={!groups}
+              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+              notFoundContent="无用户组"
+              onChange={() => setUserCreateIdsTouched(true)}
+            />
+          </Form.Item>
         )}
       </Form>
     </Modal>

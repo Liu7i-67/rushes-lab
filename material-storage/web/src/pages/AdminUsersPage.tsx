@@ -5,6 +5,11 @@
  * backend 对目录接口 enforce system admin;前端仅做体验提示。
  * 管理后台优化:新建用户可选用户组(F3.1)、行内编辑姓名/邮箱/用户组(F4.1)、
  * 服务端分页 + 总数(F5.2)。
+ * 用户模块组级授权开放(2026-11-15 方案 F2/F5/F7-F10):页内 gate 改弱门
+ * (is_user_manager ?? is_system_admin);行卡片显示「创建人」(created_by_name);
+ * 被授权非管理员仅见自己创建的用户(后端过滤)、行内仅保留「重置密码」
+ * (编辑/停用/启用/解锁仍管理员专属,后端 403 兜底)、新建用户的组选项 =
+ * me.user_create_groups(授权目标组);管理员路径完全不变。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Pagination, Popconfirm, Select, Skeleton, Tooltip,
@@ -31,14 +36,19 @@ export default function AdminUsersPage() {
   });
   const handleQ = (v: string) => { setQ(v); setPage(1); };
   const handleIsActive = (v: boolean | undefined) => { setIsActive(v); setPage(1); };
+  // 用户模块组级授权开放(2026-11-15 方案 F10/D4):非管理员行内仅保留「重置密码」;
+  // me 未加载期间按管理员渲染(与下方 gate 同口径),数据权限由后端过滤兜底
+  const isSystemAdmin = me?.is_system_admin ?? true;
 
-  if (me && !me.is_system_admin) {
+  // F5: 页内 gate 改弱门 — 系统管理员 ∨ 被授权组成员(旧后端无字段回落 is_system_admin,
+  // 照目录模板三态门先例);未授权者不出现 403 死页
+  if (me && !(me.is_user_manager ?? me.is_system_admin)) {
     return (
       <div className="ms-enter" style={{ maxWidth: 520 }}>
         <Alert
           type="warning" showIcon
-          message="只有系统管理员可以管理用户"
-          description="如需创建本地账号,请联系系统管理员。"
+          message="没有用户模块访问权限"
+          description="用户模块已开放给被授权的用户组;如需访问,请联系系统管理员为所在用户组开通授权。"
         />
       </div>
     );
@@ -67,7 +77,7 @@ export default function AdminUsersPage() {
       ) : (
         <div className="ms-enter-stagger"
              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {data.items.map(u => <UserRow key={u.id} user={u} />)}
+          {data.items.map(u => <UserRow key={u.id} user={u} canManage={isSystemAdmin} />)}
         </div>
       )}
       {data && data.total > USERS_PAGE_SIZE && (
@@ -145,7 +155,7 @@ function FilterBar({ q, setQ, isActive, setIsActive, total }: {
   );
 }
 
-function UserRow({ user }: { user: DirectoryUser }) {
+function UserRow({ user, canManage }: { user: DirectoryUser; canManage: boolean }) {
   const { message } = App.useApp();
   const disable = useDisableUser();
   const enable = useEnableUser();
@@ -229,13 +239,19 @@ function UserRow({ user }: { user: DirectoryUser }) {
         flexBasis: compact ? '100%' : undefined,
       }}>
         创建于 {dayjs(user.created_at).format('YYYY-MM-DD')}
+        {/* 用户模块组级授权开放(2026-11-15 方案 F2):账号创建人;无来源(NULL)显示「—」 */}
+        {` · 创建人 ${user.created_by_name ?? '—'}`}
       </span>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
-        <Button size="small" icon={<Pencil size={12} strokeWidth={2} />}
-                onClick={() => setEditOpen(true)}>
-          编辑
-        </Button>
-        {user.is_active ? (
+        {/* F10/D4: 非管理员(被授权组成员)仅保留「重置密码」— 编辑/停用/启用/解锁
+            仍管理员专属(后端对 PATCH/disable/enable/unlock 强制 403 兜底) */}
+        {canManage && (
+          <Button size="small" icon={<Pencil size={12} strokeWidth={2} />}
+                  onClick={() => setEditOpen(true)}>
+            编辑
+          </Button>
+        )}
+        {canManage && (user.is_active ? (
           <Button size="small" danger icon={<Power size={12} strokeWidth={2} />}
                   loading={busy} onClick={doDisable}>
             停用
@@ -245,13 +261,13 @@ function UserRow({ user }: { user: DirectoryUser }) {
                   loading={busy} onClick={doEnable}>
             启用
           </Button>
-        )}
+        ))}
         <Button size="small" icon={<RotateCcw size={12} strokeWidth={2} />}
                 loading={busy} onClick={doReset}>
           重置密码
         </Button>
         {/* W1: 解锁 — 仅登录锁定行渲染(Popconfirm 二次确认;同 AdminGroupsPage 删除先例) */}
-        {user.login_locked && (
+        {canManage && user.login_locked && (
           <Popconfirm
             title={`解锁 ${user.name} 的登录锁定?`}
             description="清除用户名维度锁定与失败计数,并连带清近 24h 失败 IP 的锁;完成后即可重新登录。"
@@ -317,8 +333,11 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const [created, setCreated] = useState<DirectoryUserCreateOut | null>(null);
-  // F3.1: 用户组多选(可搜索;不选可提交)
-  const { data: groups } = useDirectoryGroups('');
+  // F7(2026-11-15 用户模块组级授权开放):非管理员(被授权组成员)建号的组选项 =
+  // me.user_create_groups(授权目标组);不再调 useDirectoryGroups(组接口仍仅系统
+  // 管理员,管理员路径不变)。me 未加载期间按管理员渲染(与页内 gate 同口径)。
+  const { data: me } = useMe();
+  const isDelegated = !!me && me.is_system_admin === false;
 
   const submit = async () => {
     try {
@@ -358,18 +377,25 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
           <Form.Item name="email" label="邮箱(可选)">
             <Input placeholder="zhangsan@example.com" />
           </Form.Item>
-          <Form.Item name="group_ids" label="用户组(可选)"
-                     extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
-            <Select
-              mode="multiple"
-              showSearch
-              optionFilterProp="label"
-              allowClear
-              placeholder="选择用户组(可多选)"
-              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
-              notFoundContent="无用户组"
-            />
-          </Form.Item>
+          {/* F7: 组选项按身份切换(条件挂载,两分支 Form.Item 同名 group_ids,提交逻辑不变):
+              被授权非管理员 = me.user_create_groups(授权目标组,静态集合);
+              管理员 = AdminGroupIdsSelect(useDirectoryGroups 全量,既有行为不变) */}
+          {isDelegated ? (
+            <Form.Item name="group_ids" label="用户组(可选)"
+                       extra="仅可选择管理员授权的用户组;可不选">
+              <Select
+                mode="multiple"
+                showSearch
+                optionFilterProp="label"
+                allowClear
+                placeholder="选择用户组(可多选)"
+                options={(me.user_create_groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+                notFoundContent="无可用用户组"
+              />
+            </Form.Item>
+          ) : (
+            <AdminGroupIdsSelect />
+          )}
           <Alert type="info" showIcon style={{ marginBottom: 8 }}
                  message="创建成功后会显示一次性临时密码,用户首次登录需改密。" />
         </Form>
@@ -378,6 +404,26 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
                          onClose={() => setCreated(null)}
                          title="用户已创建" />
     </>
+  );
+}
+
+/** 管理员路径的建号组多选(F3.1 全量组选项,既有行为不变)。独立子组件隔离
+ *  useDirectoryGroups:被授权非管理员态不挂载、不发 /admin/directory/groups 请求。 */
+function AdminGroupIdsSelect() {
+  const { data: groups } = useDirectoryGroups('');
+  return (
+    <Form.Item name="group_ids" label="用户组(可选)"
+               extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
+      <Select
+        mode="multiple"
+        showSearch
+        optionFilterProp="label"
+        allowClear
+        placeholder="选择用户组(可多选)"
+        options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+        notFoundContent="无用户组"
+      />
+    </Form.Item>
   );
 }
 
