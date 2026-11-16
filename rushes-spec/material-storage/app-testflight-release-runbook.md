@@ -167,7 +167,19 @@ print(json.load(urllib.request.urlopen(req)))
 
 ---
 
-## 5. 本次发布记录（2026-10-20）
+## 5. 发布记录
+
+### 2026-11-16 · 0.1.15 (19)
+
+- App 已改名 **「浣花视界」**，Bundle ID `com.taoxiplan.huanhuashijie`，App ID `6827453407`
+  （不再是 §0 时期的 `dev.rushes.msApp` / `Rushes 素材库`）。
+- 构建：`flutter build ipa --release`（Flutter 3.47.7 / Xcode 27.2），IPA 27MB。
+- 上传：altool 成功，Delivery UUID `774608e9-856f-4c12-8bf5-851f2cb319ab`。
+- 处理：`VALID`，已分配「内部测试」组（81 名测试员），`whatsNew` 留空。
+- 上一版：build 18（2026-11-04）。
+
+### 2026-10-20 · 0.1.0 (2)
+
 
 - App：`Rushes 素材库`，Bundle ID `dev.rushes.msApp`
 - `0.1.0 (1)`：上传后被苹果拒，`ITMS-90683` 缺 `NSCameraUsageDescription`
