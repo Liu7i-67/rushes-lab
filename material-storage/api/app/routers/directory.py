@@ -1,19 +1,21 @@
 """directory router — 本地用户/组管理后台(ADR-0007 / issue #150)。
 
-组管理全族 + 用户 PATCH/停启用/解锁仅 system admin(require_system_admin);
-用户模块四端点(list / create / detail / reset-password)自 user-delegation
-(2026-11-15)放宽为登录用户 + services/user_module_access.resolve 判定:
-系统 admin 直通,被授权组成员可看/建/重置自己创建的用户。成员变更复用
-permissions.add_user_to_group / remove_user_from_group 直接同步 OpenFGA tuple
-(不再经过飞书通讯录)。
+组管理全族 + 用户 unlock 仅 system admin(require_system_admin);用户模块
+七端点(list / create / detail / PATCH / disable / enable / reset-password)
+自 user-delegation 放宽为登录用户 + services/user_module_access.resolve 判定
+(2026-11-15 §5.1 先放宽四端点;2026-11-16 §13 增 PATCH/停启用):系统 admin
+直通,被授权组成员可看/建/重置/编辑/停启用自己创建的用户(编辑 group_ids 须
+⊆ 授权目标组;enable 与 disable 对称开放,D10;unlock 仍 admin-only,D12)。
+成员变更复用 permissions.add_user_to_group / remove_user_from_group 直接同步
+OpenFGA tuple(不再经过飞书通讯录)。
 
 endpoints:
   GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active 筛选;login_locked[W1,仅 user 维度]仅作响应回显,非筛选参数;非 admin 只见 created_by=自己,F6)
   POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning;非 admin group_ids 须 ⊆ 授权目标组,F7)
   GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序;非 admin 仅自建用户,F10)
-  PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3;仍仅 admin)
-  POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit(仍仅 admin)
-  POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple;仍仅 admin)
+  PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3;非 admin 仅自建用户且 group_ids ⊆ 授权目标组,§13)
+  POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit(非 admin 仅自建用户,§13)
+  POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple;非 admin 仅自建用户,§13/D10)
   POST   /api/v1/admin/directory/users/{id}/reset-password  — 重置密码(新临时密码;顺带清登录锁 W1;非 admin 仅自建用户,F9)
   POST   /api/v1/admin/directory/users/{id}/unlock          — 重置登录锁定(user 维度 + 审计反查 IP 连带清,W1;仍仅 admin)
   GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account + 统计父/子 flag + 用户模块授权目标组读回)
@@ -347,7 +349,7 @@ async def update_directory_user(
     payload: UserUpdateIn,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
@@ -358,16 +360,36 @@ async def update_directory_user(
     先校验(用户存在 / 组 id 全存在,任一无效 422 且不变更)→ name/email 落库
     → 组 diff:added 走加成员双写、removed 走移成员双写(各记成员审计);
     总审计 user_updated(details.changes 含 old/new)。
+    用户模块放宽(user-delegation §13):非 granted 403;非 admin 仅可编辑自己
+    创建的用户(404 优先,归属不符 403),且 group_ids ⊆ 授权目标组(越权组
+    422,与建号端点同款 invalid_group_ids marker+括注);全量同步语义不变 ——
+    自建用户当前持有的越界组(如 admin 后加的)随本次同步移除,以提交终态为准;
+    审计事件仍 user_updated(actor 已天然区分身份)。
     """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user_not_found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权编辑该用户(仅可编辑自己创建的用户)")
 
     # F4.3 原子性:组 id 全量预校验,任一无效 → 422,不做任何变更
     want_ids: list[uuid.UUID] | None = None
     groups: dict[uuid.UUID, Group] = {}
     if payload.group_ids is not None:
         want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
+        # §13:非 admin 编辑的 group_ids ⊆ 授权目标组(越权组 422,与建号端点
+        # 同款 invalid_group_ids marker+括注;404/归属 403 先于此)
+        if not access.is_system_admin:
+            unallowed = [gid for gid in want_ids if gid not in access.allowed_group_ids]
+            if unallowed:
+                raise HTTPException(
+                    422,
+                    f"invalid_group_ids:{','.join(str(g) for g in unallowed)}"
+                    "(无权限使用的用户组)",
+                )
 
     # name / email:email 显式 null=清空(D6),以 model_fields_set 区分「未传」
     changes: dict[str, object] = {}
@@ -448,14 +470,24 @@ async def disable_directory_user(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> dict[str, object]:
-    """禁用(离职=手动禁用):revoke_user_completely 撤全部 tuple + is_active=false + audit。"""
+    """禁用(离职=手动禁用):revoke_user_completely 撤全部 tuple + is_active=false + audit。
+
+    用户模块放宽(user-delegation §13):非 granted 403;非 admin 仅可停用自己
+    创建的用户(404 优先,归属不符 403);revoke 全部 tuple + 吊销 PAT + 审计
+    逻辑零改动。
+    """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user not found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权停用该用户(仅可停用自己创建的用户)")
     if not target.is_active:
         raise HTTPException(409, "用户已处于禁用状态")
 
@@ -500,7 +532,7 @@ async def enable_directory_user(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> dict[str, object]:
@@ -509,10 +541,18 @@ async def enable_directory_user(
     禁用时 revoke_user_completely 撤掉了全部 tuple(含 group#member),但
     group_memberships 表行保留 —— 启用必须逐条重建,否则 UI 显示还在组里、
     OpenFGA 里没有 tuple,组带来的项目权限静默失效。
+    用户模块放宽(user-delegation §13/D10):与 disable 对称开放,否则非管理员
+    停用后无人可恢复;非 granted 403;非 admin 仅可启用自己创建的用户
+    (404 优先,归属不符 403 且先于状态 409);恢复逻辑零改动。
     """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user not found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权启用该用户(仅可启用自己创建的用户)")
     if target.is_active:
         raise HTTPException(409, "用户已是启用状态")
 

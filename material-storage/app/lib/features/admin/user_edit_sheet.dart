@@ -1,6 +1,10 @@
 /// 编辑用户表单(B8 功能点 2;web EditUserModal 移动版):详情回显后才可保存
 /// (防空 group_ids 全量同步清光所属组——web 双保险同款);email 留空提交=
 /// 显式 null 清空(D6),group_ids 全量同步(D3);登录名只读。
+/// §13 增量(2026-11-16):非 admin(被授权组成员,仅可编辑自建用户)组字段
+/// 数据源切换——仅 me.userCreateGroups 范围内本地选择(groups 接口 admin-only,
+/// 非 admin 403),预填=当前所属 ∩ 授权范围,提交体不变(后端 422
+/// invalid_group_ids / 403 归属兜底);admin 走 GroupMultiSelect 远程搜索不变。
 library;
 
 import 'package:flutter/material.dart';
@@ -13,6 +17,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/form_text_field.dart';
 import 'admin_form_skeleton.dart';
 import 'group_multi_select.dart';
+import 'user_form_sheets.dart' show RestrictedGroupSelectField;
 
 /// 打开编辑表单;返回是否成功提交(调用方据此刷新列表)。
 Future<bool> showEditUserSheet(BuildContext context, DirectoryUser user) async {
@@ -41,7 +46,13 @@ class _EditUserSheetState extends State<_EditUserSheet> {
   late final TextEditingController _email = TextEditingController(
     text: widget.user.email ?? '',
   );
-  List<DirectoryGroup> _groups = const [];
+  // §13 增量:非 admin 组字段受限本地多选(数据源 me.userCreateGroups),
+  // admin 仍 GroupMultiSelect 远程搜索(建号 sheet 同款双轨)。
+  late final _restricted = !(session.me?.isSystemAdmin ?? false);
+  late final _allowedGroups =
+      session.me?.userCreateGroups ?? const <GroupBrief>[];
+  List<DirectoryGroup> _groups = const []; // admin 选择值(GroupMultiSelect)
+  List<GroupBrief> _picked = const []; // 非 admin 选择值(受限本地多选)
   DirectoryUserDetail? _detail;
   String? _error;
   var _submitting = false;
@@ -56,6 +67,18 @@ class _EditUserSheetState extends State<_EditUserSheet> {
     try {
       final d = await session.api!.directory.getUser(widget.user.id);
       if (!mounted) return;
+      // 非 admin 不打 groups 接口(admin-only 403):预填=当前所属组 ∩
+      // 授权目标组(越界组无名称可显,保存全量同步时按提交终态移除)。
+      if (_restricted) {
+        setState(() {
+          _detail = d;
+          _picked = [
+            for (final g in _allowedGroups)
+              if (d.groupIds.contains(g.id)) g,
+          ];
+        });
+        return;
+      }
       final all = await session.api!.directory.listGroups(limit: 200);
       if (!mounted) return;
       setState(() {
@@ -84,7 +107,11 @@ class _EditUserSheetState extends State<_EditUserSheet> {
         widget.user.id,
         name: name,
         email: _email.text.trim().isEmpty ? null : _email.text.trim(),
-        groupIds: [for (final g in _groups) g.id],
+        // 全量同步终态不变(D3);非 admin 提交=受限多选勾选集合
+        // (⊆ 授权目标组,越界组随之移除,后端 422 invalid_group_ids 兜底)。
+        groupIds: _restricted
+            ? [for (final g in _picked) g.id]
+            : [for (final g in _groups) g.id],
       );
       if (!mounted) return;
       Navigator.of(context).pop(true);
@@ -135,10 +162,17 @@ class _EditUserSheetState extends State<_EditUserSheet> {
             keyboardType: TextInputType.emailAddress,
           ),
           const SizedBox(height: 10),
-          GroupMultiSelect(
-            value: _groups,
-            onChanged: (v) => setState(() => _groups = v),
-          ),
+          if (_restricted)
+            RestrictedGroupSelectField(
+              allowed: _allowedGroups,
+              value: _picked,
+              onChanged: (v) => setState(() => _picked = v),
+            )
+          else
+            GroupMultiSelect(
+              value: _groups,
+              onChanged: (v) => setState(() => _groups = v),
+            ),
           const SizedBox(height: 6),
           Text(
             '保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限',

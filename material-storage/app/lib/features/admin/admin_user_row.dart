@@ -1,6 +1,7 @@
 /// 用户行(B8 功能点 2 拆件):头像 + 姓名 + 邮箱 + 创建人行 + 状态徽标行 +
 /// 操作菜单(编辑/启停/重置密码/解锁——解锁仅 login_locked 行渲染,web W1
-/// 同口径;用户模块组级授权开放后非 admin 仅保留「重置密码」F10 最小集);
+/// 同口径;§13 增量 2026-11-16:非 admin(被授权组成员,列表只有自建行)放开
+/// 编辑/停用/启用,仅「解锁」仍 admin-only D12;归属越权由后端 404/403 兜底);
 /// 确认 → 调端点 → toast/一次性密码回显 → 刷新;409/422 detail 透传。
 library;
 
@@ -25,9 +26,13 @@ class AdminUserRow extends StatelessWidget {
   final VoidCallback onChanged;
 
   Future<void> _openActions(BuildContext context) async {
-    // 用户模块组级授权开放:非 admin(被授权组成员)仅保留「重置密码」
-    // (F10 最小集:编辑/停用/启用/解锁仍管理员专属;解锁对非 admin 不渲染)。
-    final canManage = session.me?.isSystemAdmin ?? false;
+    // §13 增量(2026-11-16):编辑/停用/启用对非 admin(被授权组成员,列表
+    // 只有自建行)放开——canManage=isUserManager(admin 恒 true,Me 构造缺省
+    // 回落 is_system_admin);仅「解锁」仍 admin-only(D12,canUnlock=
+    // is_system_admin);自建归属越权由后端 404/403 兜底。
+    final me = session.me;
+    final canManage = me?.isUserManager ?? false;
+    final canUnlock = me?.isSystemAdmin ?? false;
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -60,7 +65,7 @@ class AdminUserRow extends StatelessWidget {
               subtitle: const Text('生成新临时密码,仅回显一次'),
               onTap: () => Navigator.of(context).pop('reset'),
             ),
-            if (canManage && user.loginLocked)
+            if (canUnlock && user.loginLocked)
               ListTile(
                 leading: const Icon(Icons.lock_open_outlined),
                 title: const Text('解锁'),

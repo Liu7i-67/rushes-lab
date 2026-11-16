@@ -1,20 +1,23 @@
-"""用户模块组级授权开放 — 后端集成测试(T1-T15)。
+"""用户模块组级授权开放 — 后端集成测试(T1-T16)。
 
 跑在 ms-api 容器里(`docker exec ms-api pytest`)。唯一需求依据:
 docs/qdev/2026-11-15-user-delegation.md「接口定义」§5 +「测试功能点」§7 T1-T15
-(迁移存量回填不在用例范围)。harness/夹具照抄 test_directory_users_ext.py 与
++ §13 增量(2026-11-16:T9 翻转 + T16;迁移存量回填不在用例范围)。
+harness/夹具照抄 test_directory_users_ext.py 与
 test_group_file_deleter.py;组在 finally 删、用户无删除 API 靠唯一 marker 不清理。
 **cookie 纪律**:登录(会 set ms_session)一律走 _login 的独立一次性 AsyncClient,
 session 共享 client 永远只带 X-User-Id —— get_current_user 的 cookie 优先级高于
 dev X-User-Id 兜底,jar 一旦被登录 cookie 污染,后续全部请求会串成该登录用户
 (must_change_password=true)遭首登强改密 403。
-各用例契约细节见其 docstring;要点:4 端点守门放宽(GET/POST /users、GET
-/users/{id}、reset-password → 非 granted 403,非 admin 仅见 created_by=自己),
-PATCH/disable/enable/unlock 与 groups 全族仍 admin-only;建号组校验 422
-invalid_group_ids(空组可建 D3);user_create_grants tri-state(None=不动 /
-list=全量替换终态 / []=撤销),出参 ids/names 同序按组名排序,删组级联(F13);
-/me 增 is_user_manager + user_create_groups 三态;审计 user_created.created_by
-(非管理员 source=delegated_create)+ group_updated 授权 diff。
+各用例契约细节见其 docstring;要点:7 端点守门放宽(GET/POST /users、GET
+/users/{id}、reset-password → 非 granted 403,非 admin 仅见 created_by=自己;
+§13 起 PATCH/disable/enable 同款放宽,非 admin 仅可编辑/停启用自建用户,
+编辑 group_ids 须 ⊆ 授权目标组),unlock 与 groups 全族仍 admin-only;建号/
+编辑组校验 422 invalid_group_ids(空组可建 D3);user_create_grants tri-state
+(None=不动 / list=全量替换终态 / []=撤销),出参 ids/names 同序按组名排序,
+删组级联(F13);/me 增 is_user_manager + user_create_groups 三态;审计
+user_created.created_by(非管理员 source=delegated_create)+ group_updated
+授权 diff。
 预期前置(同 test_directory.py,另加迁移):seed_demo_data.py 已跑过(Evan = 真
 user + org admin;outsider = fake 零权限);OpenFGA store/model 已 push;env=dev
 (X-User-Id header 模拟身份);迁移 20261115_0021 已 upgrade(users.created_by +
@@ -393,23 +396,45 @@ async def test_delegation_t08_reset_others_403_ghost_404(client: AsyncClient) ->
 
 
 @pytest.mark.asyncio
-async def test_delegation_t09_other_ops_admin_only_403(client: AsyncClient) -> None:
-    """T9(F10/D8):被授权组长对自己建的用户 PATCH/停用/启用/解锁全 403(自建目标
-    也 403,证明是操作级门不是归属);他人详情 403;groups 全族不变 admin-only。"""
+async def test_delegation_t09_edit_disable_enable_own_created(client: AsyncClient) -> None:
+    """T9(§13/D10):被授权组长对自己建的用户 PATCH(改名 + 组全量同步)/停用/
+    启用均 200:改名生效且用户真入授权目标组;disable 后 is_active=false 且
+    admin 视角仍可见(归属不变);enable 后恢复 true;unlock 仍 403(D12);
+    他人详情 403;groups 全族不变 admin-only(D8)。"""
     t1 = await _create_group(client, "ud_t9_tgt")
-    gid, uid, _ = await _make_delegator(client, "ud_t9", [t1["id"]])
+    gid, uid, boss_name = await _make_delegator(client, "ud_t9", [t1["id"]])
     try:
         r0 = await _post_user(client, uid, _uniq("ud_t9_new"), "T9 自建目标")
         assert r0.status_code == 201, r0.text
         x = r0.json()
         y = await _create_user(client, "ud_t9_admin", name="T9 admin建目标")
+        # PATCH 自建:改名 + group_ids 全量同步到授权目标组 → 200
         r = await client.patch(f"/api/v1/admin/directory/users/{x['id']}",
-                               json={"name": "T9 越权改名"}, headers=_h(uid))
-        assert r.status_code == 403, r.text
-        for path in ("disable", "enable", "unlock"):
-            rp = await client.post(
-                f"/api/v1/admin/directory/users/{x['id']}/{path}", headers=_h(uid))
-            assert rp.status_code == 403, (path, rp.text)
+                               json={"name": "T9 组长改名", "group_ids": [t1["id"]]},
+                               headers=_h(uid))
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "T9 组长改名", r.text
+        rm = await client.get(f"/api/v1/admin/directory/groups/{t1['id']}/members",
+                              headers=_h(EVAN_ID))
+        assert any(m["user_id"] == x["id"] for m in rm.json()), rm.json()  # 真入目标组
+        # disable 自建 → 200;is_active=false 且 admin 视角仍可见(归属不变)
+        rd = await client.post(f"/api/v1/admin/directory/users/{x['id']}/disable",
+                               headers=_h(uid))
+        assert rd.status_code == 200, rd.text
+        det = await _get_user(client, EVAN_ID, x["id"])
+        assert det.status_code == 200, det.text
+        assert det.json()["is_active"] is False, det.text
+        assert det.json()["created_by_name"] == boss_name, det.text
+        # enable 自建 → 200,恢复 true(停启用对称开放,D10)
+        re_ = await client.post(f"/api/v1/admin/directory/users/{x['id']}/enable",
+                                headers=_h(uid))
+        assert re_.status_code == 200, re_.text
+        det2 = await _get_user(client, uid, x["id"])
+        assert det2.status_code == 200 and det2.json()["is_active"] is True, det2.text
+        # unlock 仍 403(§13/D12:解锁不在开放范围)
+        ru = await client.post(f"/api/v1/admin/directory/users/{x['id']}/unlock",
+                               headers=_h(uid))
+        assert ru.status_code == 403, ru.text
         assert (await _get_user(client, uid, y["id"])).status_code == 403  # 他人详情
         # groups 全族仍 require_system_admin(D8:授权配置是管理员动作)
         rg = await client.get("/api/v1/admin/directory/groups", headers=_h(uid))
@@ -417,13 +442,12 @@ async def test_delegation_t09_other_ops_admin_only_403(client: AsyncClient) -> N
         rc = await client.post("/api/v1/admin/directory/groups",
                                json={"name": _uniq("ud_t9_grp")}, headers=_h(uid))
         assert rc.status_code == 403, rc.text
-        rm = await client.patch(f"/api/v1/admin/directory/groups/{t1['id']}",
-                                json={"name": _uniq("ud_t9_ren")}, headers=_h(uid))
-        assert rm.status_code == 403, rm.text
-        rd = await client.delete(f"/api/v1/admin/directory/groups/{t1['id']}", headers=_h(uid))
-        assert rd.status_code == 403, rd.text
-        det = await _get_user(client, EVAN_ID, x["id"])   # 越权 PATCH 未生效
-        assert det.json()["name"] == "T9 自建目标", det.text
+        rm2 = await client.patch(f"/api/v1/admin/directory/groups/{t1['id']}",
+                                 json={"name": _uniq("ud_t9_ren")}, headers=_h(uid))
+        assert rm2.status_code == 403, rm2.text
+        rdg = await client.delete(f"/api/v1/admin/directory/groups/{t1['id']}",
+                                  headers=_h(uid))
+        assert rdg.status_code == 403, rdg.text
     finally:
         await _cleanup_groups(client, gid, t1["id"])
 
@@ -611,3 +635,60 @@ async def test_delegation_t15_audit_created_by_and_grant_diff(client: AsyncClien
             removed, evs)  # 清:双删
     finally:
         await _cleanup_groups(client, gid, t2["id"], t1["id"])
+
+
+@pytest.mark.asyncio
+async def test_delegation_t16_edit_ungranted_groups_and_others_403(
+    client: AsyncClient,
+) -> None:
+    """T16(§13):非 admin PATCH 自建用户 group_ids 含 ghost / 未授权真实组 / 混合
+    → 422 invalid_group_ids(ghost 与未授权消息区分,与建号端点同款)且原子不变
+    (名称与组成员均不动);PATCH/disable/enable 他人(admin 建 / 另组长建)→
+    403(归属 403 先于状态 409);PATCH 不存在的用户 → 404(优先于归属 403)。"""
+    t1 = await _create_group(client, "ud_t16_tgt")
+    other = await _create_group(client, "ud_t16_other")   # 真实存在但未授权
+    gid1, uid1, _ = await _make_delegator(client, "ud_t16a", [t1["id"]])
+    gid2, uid2, _ = await _make_delegator(client, "ud_t16b", [t1["id"]])
+    try:
+        r0 = await _post_user(client, uid1, _uniq("ud_t16_new"), "T16 自建基线")
+        assert r0.status_code == 201, r0.text
+        x = r0.json()
+        url = f"/api/v1/admin/directory/users/{x['id']}"
+        # 越权组:ghost(不存在)与未授权真实组均 422 且消息区分(T5 同款口径)
+        rg = await client.patch(url, json={"group_ids": [str(uuid.uuid4())]},
+                                headers=_h(uid1))
+        assert rg.status_code == 422 and _INVALID_GROUP_IDS in rg.text, rg.text
+        ru = await client.patch(url, json={"group_ids": [other["id"]]},
+                                headers=_h(uid1))
+        assert ru.status_code == 422 and _INVALID_GROUP_IDS in ru.text, ru.text
+        assert rg.json()["detail"] != ru.json()["detail"], "消息须区分(同建号端点)"
+        rmix = await client.patch(url, json={"group_ids": [t1["id"], other["id"]]},
+                                  headers=_h(uid1))
+        assert rmix.status_code == 422 and _INVALID_GROUP_IDS in rmix.text, rmix.text
+        # 原子不变:名称 / 组成员与基线一致(三次 422 均未落任何变更)
+        det = await _get_user(client, EVAN_ID, x["id"])
+        assert det.status_code == 200, det.text
+        assert det.json()["name"] == "T16 自建基线", det.text
+        assert det.json()["group_ids"] == [], det.text
+        # 他人(admin 建 / 另组长建)→ PATCH/disable 全 403
+        y = await _create_user(client, "ud_t16_admin", name="T16 admin建")
+        r2 = await _post_user(client, uid2, _uniq("ud_t16_b2"), "T16 别组长建")
+        assert r2.status_code == 201, r2.text
+        z = r2.json()
+        for tid in (y["id"], z["id"]):
+            rp = await client.patch(f"/api/v1/admin/directory/users/{tid}",
+                                    json={"name": "T16 越权改名"}, headers=_h(uid1))
+            assert rp.status_code == 403, (tid, rp.text)
+            rd = await client.post(f"/api/v1/admin/directory/users/{tid}/disable",
+                                   headers=_h(uid1))
+            assert rd.status_code == 403, (tid, rd.text)
+        # enable 对 admin 建的用户 403(归属 403 先于「已是启用」409)
+        ren = await client.post(f"/api/v1/admin/directory/users/{y['id']}/enable",
+                                headers=_h(uid1))
+        assert ren.status_code == 403, ren.text
+        # 目标不存在 → 404(优先于归属 403,既有口径不变)
+        rn = await client.patch(f"/api/v1/admin/directory/users/{uuid.uuid4()}",
+                                json={"name": "T16 不存在"}, headers=_h(uid1))
+        assert rn.status_code == 404, rn.text
+    finally:
+        await _cleanup_groups(client, gid1, gid2, other["id"], t1["id"])

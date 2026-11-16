@@ -1,11 +1,13 @@
 /// 用户模块组级授权开放(docs/qdev/2026-11-15-user-delegation.md §7 A1-A5)
 /// widget 测试:A1 被授权非 admin 磁贴弱门(用户磁贴可见/用户组磁贴不可见,
-/// admin home 深链兜底)、A2 用户行创建人列与非 admin 菜单裁剪(仅重置密码)、
+/// admin home 深链兜底)、A2 用户行创建人列与非 admin 行菜单(§13 放开:
+/// 编辑/停用|启用/重置密码,解锁仍 admin-only)、
 /// A3 建号表单组选项=me.userCreateGroups(受限态禁远程搜索)与提交体、
 /// A4 组表单用户模块开关+目标组多选(编辑态预填/不动不携带/开关关→[]/建组
 /// 态携带)、A5 admin 不回归(全磁贴/全菜单/建号组选项走远程搜索)。
 /// §11 增量(2026-11-16):建号 sheet 姓名预填=操作者姓名去末段前缀
-/// (含 `_` 截前缀/无 `_` 预填空)。
+/// (含 `_` 截前缀/无 `_` 预填空)。§13 增量(2026-11-16 ③):非 admin 编辑
+/// sheet 组字段受限本地多选(选项=授权目标组,不打 groups 接口)。
 ///
 /// 假 API 族本文件自持(照 admin_pages_test.dart 记录式桩风格),directory 桩
 /// 按 §5.2/§5.3 契约扩展(created_by_name / user_create_group_ids);Me 经
@@ -32,12 +34,15 @@ class FakeDirectoryApi extends DirectoryApi {
   FakeDirectoryApi(super.api);
 
   Object? usersStaged;
+  Object? userDetailStaged;
   List<DirectoryGroup> groupResult = const [];
   final createCalls = <Map<String, dynamic>>[];
+  final updateCalls = <Map<String, dynamic>>[];
   final resetCalls = <String>[];
   final unlockCalls = <String>[];
   final createGroupCalls = <Map<String, dynamic>>[];
   final updateGroupCalls = <Map<String, dynamic>>[];
+  var listGroupCalls = 0;
 
   @override
   Future<DirectoryUsersPage> listUsers({
@@ -81,6 +86,48 @@ class FakeDirectoryApi extends DirectoryApi {
   }
 
   @override
+  Future<DirectoryUserDetail> getUser(String userId) async {
+    final staged = userDetailStaged;
+    if (staged is Exception) throw staged;
+    return staged as DirectoryUserDetail? ??
+        DirectoryUserDetail(
+          id: userId,
+          username: 'u$userId',
+          name: '用户$userId',
+          email: '$userId@x.com',
+          isActive: true,
+          mustChangePassword: false,
+          createdAt: '2026-11-14T08:00:00Z',
+          groupIds: const [],
+          groupNames: const [],
+        );
+  }
+
+  @override
+  Future<DirectoryUser> updateUser(
+    String userId, {
+    required String name,
+    Object? email,
+    required List<String> groupIds,
+  }) async {
+    updateCalls.add({
+      'id': userId,
+      'name': name,
+      'email': email,
+      'group_ids': groupIds,
+    });
+    return DirectoryUser(
+      id: userId,
+      username: 'u$userId',
+      name: name,
+      email: email as String?,
+      isActive: true,
+      mustChangePassword: false,
+      createdAt: '2026-11-14T08:00:00Z',
+    );
+  }
+
+  @override
   Future<String> resetPassword(String userId) async {
     resetCalls.add(userId);
     return 'New-Tmp-777';
@@ -101,7 +148,10 @@ class FakeDirectoryApi extends DirectoryApi {
     String q = '',
     int limit = 50,
     int offset = 0,
-  }) async => groupResult;
+  }) async {
+    listGroupCalls++;
+    return groupResult;
+  }
 
   @override
   Future<DirectoryGroup> createGroup({
@@ -139,8 +189,11 @@ class FakeDirectoryApi extends DirectoryApi {
       // tri-state:null=字段省略不动(组授权撤销语义 []=清空)
       'user_create_group_ids': userCreateGroupIds,
     });
-    return _group(groupId, name ?? '组$groupId',
-        userCreateGroupIds: userCreateGroupIds ?? const []);
+    return _group(
+      groupId,
+      name ?? '组$groupId',
+      userCreateGroupIds: userCreateGroupIds ?? const [],
+    );
   }
 }
 
@@ -176,11 +229,8 @@ Me _delegatedMe() => Me.fromJson({
 });
 
 /// admin(用户模块恒开;user_create_groups 恒 [] — 全量选项走远程搜索)。
-Me _adminMe() => Me.fromJson({
-  'id': 'u1',
-  'name': '系统管理员',
-  'is_system_admin': true,
-});
+Me _adminMe() =>
+    Me.fromJson({'id': 'u1', 'name': '系统管理员', 'is_system_admin': true});
 
 DirectoryUser _user(
   String id, {
@@ -213,8 +263,10 @@ DirectoryGroup _group(
 );
 
 /// 建号表单 sheet 内文本字段序(登录名 / 姓名 / 邮箱,后续可能是组选择字段)。
-Finder get _sheetFields =>
-    find.descendant(of: find.byType(BottomSheet), matching: find.byType(TextField));
+Finder get _sheetFields => find.descendant(
+  of: find.byType(BottomSheet),
+  matching: find.byType(TextField),
+);
 
 /// 用户模块开关(SwitchListTile 标题含「用户模块」;标题文案随实现微调)。
 Finder get _userModuleTile => find.ancestor(
@@ -229,9 +281,7 @@ bool _userModuleOn(WidgetTester tester) =>
 
 void main() {
   // A1:被授权非 admin — 我的页磁贴弱门(三态)。
-  testWidgets('A1:我的页磁贴 — 被授权非 admin 用户磁贴可见、管理后台(用户组)磁贴不可见', (
-    tester,
-  ) async {
+  testWidgets('A1:我的页磁贴 — 被授权非 admin 用户磁贴可见、管理后台(用户组)磁贴不可见', (tester) async {
     Widget host() => MaterialApp(
       home: Builder(
         builder: (context) =>
@@ -263,9 +313,7 @@ void main() {
   });
 
   // A1:admin home 深链兜底弱门 — 被授权非 admin 仅见用户磁贴。
-  testWidgets('A1:admin home 深链 — 被授权非 admin 仅见用户磁贴,无用户组/审计磁贴', (
-    tester,
-  ) async {
+  testWidgets('A1:admin home 深链 — 被授权非 admin 仅见用户磁贴,无用户组/审计磁贴', (tester) async {
     _install();
     session.me = _delegatedMe();
     await tester.pumpWidget(const MaterialApp(home: AdminHomePage()));
@@ -277,8 +325,9 @@ void main() {
     expect(find.text('备份任务'), findsNothing);
   });
 
-  // A2:创建人列(有值显示/空显示 —)+ 非 admin 行菜单仅重置密码 + 重置全流程。
-  testWidgets('A2:用户行 — 创建人有值显示名字、空显示 —;非 admin 行菜单仅重置密码', (
+  // A2:创建人列(有值显示/空显示 —)+ §13 非 admin 行菜单放开(编辑/停用
+  // |启用,解锁仍 admin-only)+ 重置全流程。
+  testWidgets('A2:用户行 — 创建人有值显示名字、空显示 —;非 admin 菜单=编辑/停用/重置密码且无解锁', (
     tester,
   ) async {
     final api = _install();
@@ -299,17 +348,24 @@ void main() {
     expect(find.textContaining('张三'), findsWidgets);
     expect(find.textContaining('—'), findsOneWidget, reason: '无创建人行显示 —');
 
-    // 非 admin 行菜单裁剪:最小集仅重置密码(锁定行也不出现解锁/编辑/停启用;
-    // 断言 scope 到菜单 sheet — 页面筛选 chip 轨有同名「停用/启用」)
+    // §13 菜单放开:锁定行(自建)出现 编辑/停用(active 走停用侧)/重置密码;
+    // 「解锁」仍 admin-only(D12)不渲染;「启用」不出现(active 对称面);
+    // 断言 scope 到菜单 sheet — 页面筛选 chip 轨有同名「停用/启用」
     await tester.tap(find.text('用户3'));
     await tester.pumpAndSettle();
     final menu = find.byType(BottomSheet);
     expect(
+      find.descendant(of: menu, matching: find.text('编辑')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: menu, matching: find.text('停用')),
+      findsOneWidget,
+    );
+    expect(
       find.descendant(of: menu, matching: find.text('重置密码')),
       findsOneWidget,
     );
-    expect(find.descendant(of: menu, matching: find.text('编辑')), findsNothing);
-    expect(find.descendant(of: menu, matching: find.text('停用')), findsNothing);
     expect(find.descendant(of: menu, matching: find.text('启用')), findsNothing);
     expect(find.descendant(of: menu, matching: find.text('解锁')), findsNothing);
 
@@ -323,6 +379,84 @@ void main() {
     await tester.tap(find.text('完成'));
     await tester.pumpAndSettle();
     expect(find.text('New-Tmp-777'), findsNothing);
+  });
+
+  // §13 增量(2026-11-16 ③):非 admin 打开编辑 sheet — 组字段=受限本地
+  // 多选(选项=授权目标组,不打 groups 接口/无远程搜索),预填=当前所属 ∩
+  // 授权范围(越界组不显),保存提交体=勾选终态(全量同步移除越界组)。
+  testWidgets('§13:非 admin 编辑 sheet — 组选项=授权目标组,预填交集,提交体 group_ids 全量同步', (
+    tester,
+  ) async {
+    final api = _install();
+    session.me = _delegatedMe(); // 授权目标组:A组(ga)/C组(gc)
+    api.directory.usersStaged = DirectoryUsersPage(
+      items: [_user('1', createdByName: '张三')],
+      total: 1,
+    );
+    // 若误走 admin-only groups 接口,结果也不含授权组,断言必炸
+    api.directory.groupResult = [_group('gb', 'B组')];
+    // 详情:当前持有越界组 gb(如管理员后加),授权范围内仅 A组
+    api.directory.userDetailStaged = DirectoryUserDetail(
+      id: '1',
+      username: 'u1',
+      name: '用户1',
+      email: '1@x.com',
+      isActive: true,
+      mustChangePassword: false,
+      createdAt: '2026-11-14T08:00:00Z',
+      groupIds: const ['ga', 'gb'],
+      groupNames: const ['A组', 'B组'],
+    );
+    await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
+    await tester.pumpAndSettle();
+
+    // 行菜单 → 编辑
+    await tester.tap(find.text('用户1'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.descendant(of: find.byType(BottomSheet), matching: find.text('编辑')),
+    );
+    await tester.pumpAndSettle();
+
+    // 受限组字段:预填=当前所属 ∩ 授权范围=A组(单组显示组名,越界 gb 不显);
+    // 未打 admin-only groups 接口
+    expect(find.text('A组'), findsOneWidget, reason: '预填交集单组显示组名');
+    expect(api.directory.listGroupCalls, 0, reason: '非 admin 不打 groups 接口');
+
+    // 点字段弹受限多选弹层:候选=授权目标组 A组/C组(B组不在列,无远程
+    // 搜索);scope 到顶层 sheet(.last — 底层编辑 sheet 同为 BottomSheet,
+    // 其组字段预填值也是「A组」)
+    await tester.tap(find.widgetWithText(TextField, 'A组'));
+    await tester.pumpAndSettle();
+    final pickSheet = find.byType(BottomSheet).last;
+    expect(
+      find.descendant(of: pickSheet, matching: find.text('A组')),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(of: pickSheet, matching: find.text('C组')),
+      findsOneWidget,
+    );
+    expect(find.text('B组'), findsNothing);
+    expect(api.users.groupSearchCalls, isEmpty, reason: '受限态禁远程搜索');
+
+    // 勾 C组 → 完成(2) → 字段回显「2 组」
+    await tester.tap(find.descendant(of: pickSheet, matching: find.text('C组')));
+    await tester.pump();
+    await tester.tap(find.text('完成(2)'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 组'), findsOneWidget);
+
+    // 保存 → 提交体:group_ids=勾选终态 ga/gc(越界 gb 被全量同步移除);
+    // 姓名回显携带、邮箱留原值非 null
+    await tester.ensureVisible(find.text('保存'));
+    await tester.pump();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(api.directory.updateCalls.single['id'], '1');
+    expect(api.directory.updateCalls.single['name'], '用户1');
+    expect(api.directory.updateCalls.single['email'], '1@x.com');
+    expect(api.directory.updateCalls.single['group_ids'], ['ga', 'gc']);
   });
 
   // A3:非 admin 建号 — 组选项=me.userCreateGroups(受限态禁远程搜索),提交体正确。
@@ -358,13 +492,9 @@ void main() {
     expect(api.users.groupSearchCalls, isEmpty, reason: '受限态禁远程搜索');
 
     // 勾选 A组 + C组 → 完成(2) 回填字段
-    await tester.tap(
-      find.descendant(of: sheet, matching: find.text('A组')),
-    );
+    await tester.tap(find.descendant(of: sheet, matching: find.text('A组')));
     await tester.pump();
-    await tester.tap(
-      find.descendant(of: sheet, matching: find.text('C组')),
-    );
+    await tester.tap(find.descendant(of: sheet, matching: find.text('C组')));
     await tester.pump();
     await tester.tap(find.text('完成(2)'));
     await tester.pumpAndSettle();
@@ -437,7 +567,10 @@ void main() {
     await tester.pump();
     await tester.tap(find.text('保存'));
     await tester.pumpAndSettle();
-    expect(api.directory.updateGroupCalls.last['user_create_group_ids'], isEmpty);
+    expect(
+      api.directory.updateGroupCalls.last['user_create_group_ids'],
+      isEmpty,
+    );
   });
 
   // A4:组表单建组态 — 开关开+选目标组 → 提交体携带所选集合。
@@ -491,13 +624,13 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(api.directory.createGroupCalls.single['name'], 'D组');
-    expect(api.directory.createGroupCalls.single['user_create_group_ids'], ['ga']);
+    expect(api.directory.createGroupCalls.single['user_create_group_ids'], [
+      'ga',
+    ]);
   });
 
   // A5:admin 不回归 — 用户/用户组磁贴都在。
-  testWidgets('A5:admin 磁贴 — admin home 用户/用户组都在,我的页管理后台磁贴在', (
-    tester,
-  ) async {
+  testWidgets('A5:admin 磁贴 — admin home 用户/用户组都在,我的页管理后台磁贴在', (tester) async {
     _install();
     session.me = _adminMe();
     await tester.pumpWidget(const MaterialApp(home: AdminHomePage()));
