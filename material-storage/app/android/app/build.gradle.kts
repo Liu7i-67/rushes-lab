@@ -95,4 +95,9 @@ dependencies {
     // P8 flutter_local_notifications:配套 desugaring 库(与上方
     // isCoreLibraryDesugaringEnabled 成对;插件官方要求)
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+    // 小米官方「动态照片 SDK」(docs/qdev/2026-11-16-xiaomi-motionphoto-sdk.md §4.2):
+    // 无条件编译进 APK(D4:净增≈AAR 61KB + xmpcore ~200KB ≈ 0.26MB 量级,
+    // appcompat 传递依赖走冲突解析取高;运行期由 Dart 侧 probe 门控,非小米机型不触达)
+    implementation("com.xiaomi.camera:livephoto:1.0.3")
+    implementation("com.adobe.xmp:xmpcore:5.1.3") // POM 已传递声明,显式钉版双保险
 }
