@@ -2,7 +2,8 @@
 /// 用户列表/建号(一次性临时密码)/详情/组列表(五组级 flag)/组成员。
 library;
 
-/// DirectoryUserOut(用户列表行;login_locked 仅 user 维度回显,W1)。
+/// DirectoryUserOut(用户列表行;login_locked 仅 user 维度回显,W1;
+/// createdByName = 账号创建人姓名,存量回填无来源时 NULL → UI 显示「—」)。
 class DirectoryUser {
   DirectoryUser({
     required this.id,
@@ -14,6 +15,7 @@ class DirectoryUser {
     required this.createdAt,
     this.resignedAt,
     this.loginLocked = false,
+    this.createdByName,
   });
 
   factory DirectoryUser.fromJson(Map<String, dynamic> j) => DirectoryUser(
@@ -26,6 +28,7 @@ class DirectoryUser {
         createdAt: (j['created_at'] ?? '') as String,
         resignedAt: j['resigned_at'] as String?,
         loginLocked: (j['login_locked'] ?? false) as bool,
+        createdByName: j['created_by_name'] as String?,
       );
 
   final String id;
@@ -39,6 +42,9 @@ class DirectoryUser {
 
   /// 连续登录失败触发的 user 维度锁定(仅回显;IP 维度不在此列)。
   final bool loginLocked;
+
+  /// 账号创建人姓名(users.created_by → 姓名批量回显;NULL = 无来源,UI 显示「—」)。
+  final String? createdByName;
 }
 
 /// DirectoryUsersPageOut(分页包装;total=同条件 count 不含 limit/offset)。
@@ -70,6 +76,7 @@ class DirectoryUserCreated extends DirectoryUser {
     required super.createdAt,
     super.resignedAt,
     super.loginLocked,
+    super.createdByName,
     required this.temporaryPassword,
   });
 
@@ -84,6 +91,7 @@ class DirectoryUserCreated extends DirectoryUser {
         createdAt: (j['created_at'] ?? '') as String,
         resignedAt: j['resigned_at'] as String?,
         loginLocked: (j['login_locked'] ?? false) as bool,
+        createdByName: j['created_by_name'] as String?,
         temporaryPassword: (j['temporary_password'] ?? '') as String,
       );
 
@@ -102,6 +110,7 @@ class DirectoryUserDetail extends DirectoryUser {
     required super.createdAt,
     super.resignedAt,
     super.loginLocked,
+    super.createdByName,
     required this.groupIds,
     required this.groupNames,
   });
@@ -117,6 +126,7 @@ class DirectoryUserDetail extends DirectoryUser {
         createdAt: (j['created_at'] ?? '') as String,
         resignedAt: j['resigned_at'] as String?,
         loginLocked: (j['login_locked'] ?? false) as bool,
+        createdByName: j['created_by_name'] as String?,
         groupIds: ((j['group_ids'] ?? const []) as List).map((e) => e as String).toList(),
         groupNames: ((j['group_names'] ?? const []) as List)
             .map((e) => e as String)
@@ -127,7 +137,8 @@ class DirectoryUserDetail extends DirectoryUser {
   final List<String> groupNames;
 }
 
-/// DirectoryGroupOut(组列表行;五组级 flag 按 FGA tuple 真实态回显)。
+/// DirectoryGroupOut(组列表行;五组级 flag 按 FGA tuple 真实态回显;
+/// userCreateGroupIds = 用户模块授权目标组(空 = 未开放用户模块)。
 class DirectoryGroup {
   DirectoryGroup({
     required this.id,
@@ -140,6 +151,7 @@ class DirectoryGroup {
     this.canManageFolderTemplates = false,
     this.canCreateArtistAccount = false,
     this.canDeleteFiles = false,
+    this.userCreateGroupIds = const [],
   });
 
   factory DirectoryGroup.fromJson(Map<String, dynamic> j) => DirectoryGroup(
@@ -154,6 +166,9 @@ class DirectoryGroup {
             (j['can_manage_folder_templates'] ?? false) as bool,
         canCreateArtistAccount: (j['can_create_artist_account'] ?? false) as bool,
         canDeleteFiles: (j['can_delete_files'] ?? false) as bool,
+        userCreateGroupIds: ((j['user_create_group_ids'] ?? const []) as List)
+            .map((e) => e as String)
+            .toList(),
       );
 
   final String id;
@@ -166,6 +181,10 @@ class DirectoryGroup {
   final bool canManageFolderTemplates;
   final bool canCreateArtistAccount;
   final bool canDeleteFiles;
+
+  /// 用户模块组级授权(2026-11-15 方案 §5.2):该组新建用户时可选择的
+  /// 目标组 id 集合;非空 = 已对组开放用户模块,空 = 未授权。
+  final List<String> userCreateGroupIds;
 }
 
 /// GroupMemberOut(组内成员行)。

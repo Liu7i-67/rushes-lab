@@ -1,8 +1,10 @@
 /// DirectoryApi — /api/v1/admin/directory 族薄封装(B8;directory.py 实码):
 /// 用户列表(搜索/分页/is_active)、建号(带组+一次性临时密码)、详情、
 /// 编辑(name/email 显式 null 清空/group_ids 全量同步)、启停/重置/解锁、
-/// 组列表(五组级 flag)、组建/编/删(tri-state PATCH:None=字段省略不动)、
-/// 组成员列表/加/移。require_system_admin 全族。
+/// 组列表(五组级 flag + 用户模块授权目标组)、组建/编/删
+/// (tri-state PATCH:None=字段省略不动)、组成员列表/加/移。
+/// 用户模块组级授权开放(2026-11-15):list/create/detail/reset-password
+/// 放宽到被授权非 admin(后端弱门;列表/建号组范围服务端收紧),其余仍管理员。
 library;
 
 import '../../models/models.dart';
@@ -127,7 +129,8 @@ class DirectoryApi {
         .toList();
   }
 
-  /// POST /groups — 建组(409 重名透传;web 建组态不带 can_delete_project)。
+  /// POST /groups — 建组(409 重名透传;web 建组态不带 can_delete_project;
+  /// userCreateGroupIds = 用户模块授权目标组,空 = 不开放)。
   Future<DirectoryGroup> createGroup({
     required String name,
     String? description,
@@ -135,6 +138,7 @@ class DirectoryApi {
     bool canManageFolderTemplates = false,
     bool canCreateArtistAccount = false,
     bool canDeleteFiles = false,
+    List<String> userCreateGroupIds = const [],
   }) async {
     final r = await _api.http.post('/api/v1/admin/directory/groups', data: {
       'name': name,
@@ -143,6 +147,7 @@ class DirectoryApi {
       'can_manage_folder_templates': canManageFolderTemplates,
       'can_create_artist_account': canCreateArtistAccount,
       'can_delete_files': canDeleteFiles,
+      'user_create_group_ids': userCreateGroupIds,
     });
     if (r.statusCode != 201) throw _api.err(r, '创建用户组失败');
     return DirectoryGroup.fromJson(r.data as Map<String, dynamic>);
@@ -150,7 +155,8 @@ class DirectoryApi {
 
   /// PATCH /groups/{id} — 编辑:flag 三态(bool?=null 即字段省略不动,
   /// directory.py tri-state 防「仅改名保存」静默撤权);description 恒携带
-  /// (web 同款;后端 None 不改)。
+  /// (web 同款;后端 None 不改);userCreateGroupIds 同款 tri-state
+  /// (null=不动 / list=全量替换终态 / []=撤销授权,web GroupUpdateIn 同口径)。
   Future<DirectoryGroup> updateGroup(
     String groupId, {
     String? name,
@@ -160,6 +166,7 @@ class DirectoryApi {
     bool? canManageFolderTemplates,
     bool? canCreateArtistAccount,
     bool? canDeleteFiles,
+    List<String>? userCreateGroupIds,
   }) async {
     final r = await _api.http.patch('/api/v1/admin/directory/groups/$groupId',
         data: {
@@ -170,6 +177,7 @@ class DirectoryApi {
           'can_manage_folder_templates': ?canManageFolderTemplates,
           'can_create_artist_account': ?canCreateArtistAccount,
           'can_delete_files': ?canDeleteFiles,
+          'user_create_group_ids': ?userCreateGroupIds,
         });
     if (r.statusCode != 200) throw _api.err(r, '保存用户组失败');
     return DirectoryGroup.fromJson(r.data as Map<String, dynamic>);

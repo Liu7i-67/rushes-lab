@@ -1,5 +1,7 @@
-/// 用户行(B8 功能点 2 拆件):头像 + 姓名 + 邮箱 + 状态徽标行 + 操作菜单
-/// (编辑/启停/重置密码/解锁——解锁仅 login_locked 行渲染,web W1 同口径);
+/// 用户行(B8 功能点 2 拆件):头像 + 姓名 + 邮箱 + 创建人行 + 状态徽标行 +
+/// 操作菜单(编辑/启停/重置密码/解锁——解锁仅 login_locked 行渲染,web W1
+/// 同口径;§13 增量 2026-11-16:非 admin(被授权组成员,列表只有自建行)放开
+/// 编辑/停用/启用,仅「解锁」仍 admin-only D12;归属越权由后端 404/403 兜底);
 /// 确认 → 调端点 → toast/一次性密码回显 → 刷新;409/422 detail 透传。
 library;
 
@@ -24,6 +26,13 @@ class AdminUserRow extends StatelessWidget {
   final VoidCallback onChanged;
 
   Future<void> _openActions(BuildContext context) async {
+    // §13 增量(2026-11-16):编辑/停用/启用对非 admin(被授权组成员,列表
+    // 只有自建行)放开——canManage=isUserManager(admin 恒 true,Me 构造缺省
+    // 回落 is_system_admin);仅「解锁」仍 admin-only(D12,canUnlock=
+    // is_system_admin);自建归属越权由后端 404/403 兜底。
+    final me = session.me;
+    final canManage = me?.isUserManager ?? false;
+    final canUnlock = me?.isSystemAdmin ?? false;
     final action = await showModalBottomSheet<String>(
       context: context,
       showDragHandle: true,
@@ -31,19 +40,20 @@ class AdminUserRow extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: const Icon(Icons.edit_outlined),
-              title: const Text('编辑'),
-              onTap: () => Navigator.of(context).pop('edit'),
-            ),
-            if (user.isActive)
+            if (canManage)
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('编辑'),
+                onTap: () => Navigator.of(context).pop('edit'),
+              ),
+            if (canManage && user.isActive)
               ListTile(
                 leading: const Icon(Icons.block_outlined),
                 title: const Text('停用'),
                 subtitle: const Text('撤销全部权限并禁止登录'),
                 onTap: () => Navigator.of(context).pop('disable'),
               )
-            else
+            else if (canManage)
               ListTile(
                 leading: const Icon(Icons.check_circle_outline),
                 title: const Text('启用'),
@@ -55,7 +65,7 @@ class AdminUserRow extends StatelessWidget {
               subtitle: const Text('生成新临时密码,仅回显一次'),
               onTap: () => Navigator.of(context).pop('reset'),
             ),
-            if (user.loginLocked)
+            if (canUnlock && user.loginLocked)
               ListTile(
                 leading: const Icon(Icons.lock_open_outlined),
                 title: const Text('解锁'),
@@ -195,6 +205,14 @@ class AdminUserRow extends StatelessWidget {
                           const SizedBox(height: 2),
                           Text(
                             subtitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+                          ),
+                          const SizedBox(height: 2),
+                          // 账号创建人(F2):无来源(存量回填落空)显示「—」
+                          Text(
+                            '创建人：${user.createdByName ?? '—'}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),

@@ -105,9 +105,16 @@ export function AppHeader({ me }: Props) {
           {/* #150/W2b: 本地用户/组管理与审计 — 仅系统管理员可见
               (审计数据面 require_system_admin,入口此前全员可见点进去 403,收敛进本块) */}
           {me.is_system_admin && (
+            <NavChip to="/admin/audit" label="审计" navigate={navigate} />
+          )}
+          {/* 用户模块组级授权开放(2026-11-15 方案 F5):「用户」chip 改弱门 — 系统管理员
+              ∨ 被授权 user_manager 组成员可见(旧后端无字段回落 is_system_admin,照目录
+              模板三态门先例);用户组/审计/权限模板等其余管理 chip 仍仅系统管理员 */}
+          {(me.is_user_manager ?? me.is_system_admin) && (
+            <NavChip to="/admin/users" label="用户" navigate={navigate} />
+          )}
+          {me.is_system_admin && (
             <>
-              <NavChip to="/admin/audit" label="审计" navigate={navigate} />
-              <NavChip to="/admin/users" label="用户" navigate={navigate} />
               <NavChip to="/admin/groups" label="用户组" navigate={navigate} />
               {/* 权限模板(方案 §4.4)— 仅系统管理员可见 */}
               <NavChip to="/admin/grant-templates" label="权限模板" navigate={navigate} />

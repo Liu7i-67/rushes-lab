@@ -20,10 +20,11 @@ from typing import Any
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db
-from app.db.tables import User
+from app.db.tables import Group, GroupMembership, User, UserCreateGrant
 from app.deps import (
     CurrentUser,
     _org_stats_sub_allowed,  # 统计面板子 flag 合取单一事实源(方案 §3.2;/me 内联复用)
@@ -260,6 +261,27 @@ async def me(
                 is_admin=is_system_admin, parent_check=stats_r, sub_check=upload_r,
             )
 
+    # 用户模块组级授权开放(2026-11-15 user-delegation §5.4):DB 直查放 FGA
+    # gather 块之后单独一次查询(勿动上方既有 flag 逻辑)—— admin 恒 true 且
+    # 组列表回 [];非 admin 一条 join 出授权目标组集合,集合非空 = is_user_manager
+    is_user_manager = is_system_admin
+    user_create_groups: list[dict[str, str]] = []
+    if not is_system_admin:
+        grant_rows = (
+            await db.execute(
+                select(UserCreateGrant.target_group_id, Group.name)
+                .join(GroupMembership, GroupMembership.group_id == UserCreateGrant.group_id)
+                .join(Group, Group.id == UserCreateGrant.target_group_id)
+                .where(GroupMembership.user_id == user.id)
+                .order_by(Group.name)
+                .distinct()
+            )
+        ).all()
+        user_create_groups = [
+            {"id": str(target_id), "name": name} for target_id, name in grant_rows
+        ]
+        is_user_manager = bool(user_create_groups)
+
     return {
         "id": str(user.id),
         # #154:open_id/union_id 保留只读(历史对照),不再参与登录与权限
@@ -293,6 +315,12 @@ async def me(
         # 组级「文件上传数量统计」子权限(2026-11-06 统计面板方案 §3.2):合取
         # 口径同上;前端闸门用
         "is_upload_stats_viewer": is_upload_stats_viewer,
+        # 用户模块组级授权开放(2026-11-15 user-delegation §5.4):is_user_manager
+        # admin 恒 true、非 admin = 授权目标组集合非空;user_create_groups =
+        # 目标组集合(非 admin 被授权时,建号表单组选项;admin 返回 [],走
+        # directory groups 接口取全量选项);前端菜单闸门用
+        "is_user_manager": is_user_manager,
+        "user_create_groups": user_create_groups,
         # #149:本地认证字段(加在 /me 供前端路由守卫用)。
         # password_set = 是否已设本地密码;must_change_password 仅在已设密码时生效
         # (存量飞书用户无本地密码,must_change_password 对他们是假值,不会误跳改密页)

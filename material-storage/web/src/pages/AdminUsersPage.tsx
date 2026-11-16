@@ -5,6 +5,19 @@
  * backend 对目录接口 enforce system admin;前端仅做体验提示。
  * 管理后台优化:新建用户可选用户组(F3.1)、行内编辑姓名/邮箱/用户组(F4.1)、
  * 服务端分页 + 总数(F5.2)。
+ * 用户模块组级授权开放(2026-11-15 方案 F2/F5/F7-F10):页内 gate 改弱门
+ * (is_user_manager ?? is_system_admin);行卡片显示「创建人」(created_by_name);
+ * 被授权非管理员仅见自己创建的用户(后端过滤)、行内仅保留「重置密码」
+ * (编辑/停用/启用/解锁仍管理员专属,后端 403 兜底)、新建用户的组选项 =
+ * me.user_create_groups(授权目标组);管理员路径完全不变。
+ * §12 增量(2026-11-16 ②):管理员建号组多选与编辑用户组多选换 GroupSearchSelect
+ * (服务端检索防抖,修复「组超 50 条后搜不到」);被授权非管理员的建号组选项仍走
+ * me.user_create_groups 静态集合,不动。
+ * §13 增量(2026-11-16 ③):非管理员可停用/编辑自建用户 — 行内「编辑 / 停用(启用)」
+ * 对非管理员放开(后端守门 = 弱门 ∧ created_by==自己;非 admin 行列表本就只含自建),
+ * 仅「解锁」仍 admin-only;EditUserModal 组选项非 admin 改走 me.user_create_groups
+ * 静态集合(GroupSearchSelect 打的 /admin/directory/groups 对非 admin 403),
+ * 回显/全量同步提交体不变。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Pagination, Popconfirm, Select, Skeleton, Tooltip,
@@ -12,13 +25,14 @@ import {
 import { KeyRound, LockOpen, Pencil, Power, RotateCcw, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import dayjs from 'dayjs';
-import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail, useDirectoryGroups,
+import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail,
          useDisableUser, useEnableUser, useDirectoryUsers, useResetUserPassword, useUnlockUser,
          USERS_PAGE_SIZE } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
 import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryUser, DirectoryUserCreateOut } from '../api/types';
+import { GroupSearchSelect } from '../components/GroupSearchSelect';
 
 export default function AdminUsersPage() {
   const { data: me } = useMe();
@@ -31,14 +45,20 @@ export default function AdminUsersPage() {
   });
   const handleQ = (v: string) => { setQ(v); setPage(1); };
   const handleIsActive = (v: boolean | undefined) => { setIsActive(v); setPage(1); };
+  // §13(2026-11-16 ③):编辑/停用/启用对非管理员放开(行列表对非 admin 只含自建,
+  // 后端按 created_by==自己 兜底);仅「解锁」仍 admin-only。
+  // me 未加载期间 isSystemAdmin 按管理员渲染(与下方 gate 同口径),数据权限由后端过滤兜底
+  const isSystemAdmin = me?.is_system_admin ?? true;
 
-  if (me && !me.is_system_admin) {
+  // F5: 页内 gate 改弱门 — 系统管理员 ∨ 被授权组成员(旧后端无字段回落 is_system_admin,
+  // 照目录模板三态门先例);未授权者不出现 403 死页
+  if (me && !(me.is_user_manager ?? me.is_system_admin)) {
     return (
       <div className="ms-enter" style={{ maxWidth: 520 }}>
         <Alert
           type="warning" showIcon
-          message="只有系统管理员可以管理用户"
-          description="如需创建本地账号,请联系系统管理员。"
+          message="没有用户模块访问权限"
+          description="用户模块已开放给被授权的用户组;如需访问,请联系系统管理员为所在用户组开通授权。"
         />
       </div>
     );
@@ -67,7 +87,7 @@ export default function AdminUsersPage() {
       ) : (
         <div className="ms-enter-stagger"
              style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {data.items.map(u => <UserRow key={u.id} user={u} />)}
+          {data.items.map(u => <UserRow key={u.id} user={u} canUnlock={isSystemAdmin} />)}
         </div>
       )}
       {data && data.total > USERS_PAGE_SIZE && (
@@ -145,7 +165,9 @@ function FilterBar({ q, setQ, isActive, setIsActive, total }: {
   );
 }
 
-function UserRow({ user }: { user: DirectoryUser }) {
+// §13(2026-11-16 ③):权限拆两档 — 编辑/停用/启用对任何能进入本页者(弱门)放开
+// (非 admin 的行列表由后端过滤为自建,越权由 403/404 兜底),仅「解锁」仍系统 admin。
+function UserRow({ user, canUnlock }: { user: DirectoryUser; canUnlock: boolean }) {
   const { message } = App.useApp();
   const disable = useDisableUser();
   const enable = useEnableUser();
@@ -229,8 +251,13 @@ function UserRow({ user }: { user: DirectoryUser }) {
         flexBasis: compact ? '100%' : undefined,
       }}>
         创建于 {dayjs(user.created_at).format('YYYY-MM-DD')}
+        {/* 用户模块组级授权开放(2026-11-15 方案 F2):账号创建人;无来源(NULL)显示「—」 */}
+        {` · 创建人 ${user.created_by_name ?? '—'}`}
       </span>
       <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+        {/* §13(2026-11-16 ③):编辑/停用/启用对非管理员放开(仅操作自建行,后端
+            PATCH/disable/enable 按 弱门 ∧ created_by==自己 守门);停用/启用确认弹层
+            与成功提示照旧(D10:启用随停出对称开放,否则非管理员停用后无人可恢复) */}
         <Button size="small" icon={<Pencil size={12} strokeWidth={2} />}
                 onClick={() => setEditOpen(true)}>
           编辑
@@ -250,8 +277,9 @@ function UserRow({ user }: { user: DirectoryUser }) {
                 loading={busy} onClick={doReset}>
           重置密码
         </Button>
-        {/* W1: 解锁 — 仅登录锁定行渲染(Popconfirm 二次确认;同 AdminGroupsPage 删除先例) */}
-        {user.login_locked && (
+        {/* W1: 解锁 — 仅登录锁定行渲染(Popconfirm 二次确认;同 AdminGroupsPage 删除先例)。
+            §13/D12: 解锁仍 admin-only(未在开放需求内,后端对 unlock 强制 403 兜底) */}
+        {canUnlock && user.login_locked && (
           <Popconfirm
             title={`解锁 ${user.name} 的登录锁定?`}
             description="清除用户名维度锁定与失败计数,并连带清近 24h 失败 IP 的锁;完成后即可重新登录。"
@@ -317,8 +345,19 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   const [form] = Form.useForm();
   const { message } = App.useApp();
   const [created, setCreated] = useState<DirectoryUserCreateOut | null>(null);
-  // F3.1: 用户组多选(可搜索;不选可提交)
-  const { data: groups } = useDirectoryGroups('');
+  // F7(2026-11-15 用户模块组级授权开放):非管理员(被授权组成员)建号的组选项 =
+  // me.user_create_groups(授权目标组);不再调 useDirectoryGroups(组接口仍仅系统
+  // 管理员,管理员路径不变)。me 未加载期间按管理员渲染(与页内 gate 同口径)。
+  const { data: me } = useMe();
+  const isDelegated = !!me && me.is_system_admin === false;
+  // §11(2026-11-15 用户模块组级授权开放,增量 2026-11-16):「姓名」预填 =
+  // 当前操作者姓名去末段的前缀(来源=me.name 而非 username:组长姓名格式
+  // 一般为「xxx部_yy组_zz」,取前缀后新号与操作者同部门/组)。含 `_` →
+  // slice(0, lastIndexOf('_')+1)(`素材部_一组_张三`→`素材部_一组_`);
+  // 不含 `_` → 空串(与现状一致)。用户可改可清,空仍走必填校验,提交逻辑零改动。
+  const namePrefix = me?.name && me.name.includes('_')
+    ? me.name.slice(0, me.name.lastIndexOf('_') + 1)
+    : '';
 
   const submit = async () => {
     try {
@@ -343,7 +382,8 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
     <>
       <Modal title="新建本地用户" open={open} onCancel={onClose} destroyOnClose
              confirmLoading={create.isPending} onOk={submit} okText="创建">
-        <Form form={form} layout="vertical">
+        {/* §11:destroyOnClose 每次打开重新挂载 Form,initialValues 即「每次新增触发一次」的预填 */}
+        <Form form={form} layout="vertical" initialValues={{ name: namePrefix }}>
           <Form.Item name="username" label="登录名(拼音 / 工号,登录用)"
                      rules={[
                        { required: true, min: 2, max: 64 },
@@ -358,18 +398,25 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
           <Form.Item name="email" label="邮箱(可选)">
             <Input placeholder="zhangsan@example.com" />
           </Form.Item>
-          <Form.Item name="group_ids" label="用户组(可选)"
-                     extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
-            <Select
-              mode="multiple"
-              showSearch
-              optionFilterProp="label"
-              allowClear
-              placeholder="选择用户组(可多选)"
-              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
-              notFoundContent="无用户组"
-            />
-          </Form.Item>
+          {/* F7: 组选项按身份切换(条件挂载,两分支 Form.Item 同名 group_ids,提交逻辑不变):
+              被授权非管理员 = me.user_create_groups(授权目标组,静态集合);
+              管理员 = AdminGroupIdsSelect(useDirectoryGroups 全量,既有行为不变) */}
+          {isDelegated ? (
+            <Form.Item name="group_ids" label="用户组(可选)"
+                       extra="仅可选择管理员授权的用户组;可不选">
+              <Select
+                mode="multiple"
+                showSearch
+                optionFilterProp="label"
+                allowClear
+                placeholder="选择用户组(可多选)"
+                options={(me.user_create_groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+                notFoundContent="无可用用户组"
+              />
+            </Form.Item>
+          ) : (
+            <AdminGroupIdsSelect />
+          )}
           <Alert type="info" showIcon style={{ marginBottom: 8 }}
                  message="创建成功后会显示一次性临时密码,用户首次登录需改密。" />
         </Form>
@@ -381,6 +428,19 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   );
 }
 
+/** 管理员路径的建号组多选(F3.1 全量组选项)。独立子组件隔离 useDirectoryGroups:
+ *  被授权非管理员态不挂载、不发 /admin/directory/groups 请求(隔离在 GroupSearchSelect
+ *  内部,同样不挂载)。§12:选项来源升级为服务端检索(GroupSearchSelect 内部自挂
+ *  useDirectoryGroups(词, 200)),Form.Item name/extra 与提交体不变。 */
+function AdminGroupIdsSelect() {
+  return (
+    <Form.Item name="group_ids" label="用户组(可选)"
+               extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
+      <GroupSearchSelect />
+    </Form.Item>
+  );
+}
+
 // ─── 编辑用户(F4.1:姓名 / 邮箱 / 所属用户组)──────────────────────────────
 /** 条件挂载(行内仅在打开时 render):detail/groups 请求只在弹窗打开时发出。*/
 function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => void }) {
@@ -388,8 +448,13 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
   const { message } = App.useApp();
   // 回显:GET /admin/directory/users/{id}(含 group_ids,§2)
   const { data: detail } = useDirectoryUserDetail(user.id);
-  const { data: groups } = useDirectoryGroups('');
   const update = useUpdateUser();
+  // §13(2026-11-16 ③):编辑弹窗对非 admin 可达后,组选项按身份切换 — 被授权非管理员
+  // 不挂 GroupSearchSelect(其内部 useDirectoryGroups 打 admin-only 的
+  // /admin/directory/groups,非 admin 403),改用 me.user_create_groups 静态集合
+  // (照 CreateUserModal isDelegated 分支;两分支 Form.Item 同名 group_ids,提交体不变)。
+  const { data: me } = useMe();
+  const isDelegated = !!me && me.is_system_admin === false;
 
   // 回显走 initialValues 数据驱动,不用 setFieldsValue:本组件按次开关条件挂载
   // (每次打开都是新 Form 实例),缓存命中时 detail 首帧即到,useEffect 里的
@@ -444,19 +509,32 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
                      extra="留空提交 = 清空邮箱">
             <Input placeholder="zhangsan@example.com" />
           </Form.Item>
-          <Form.Item name="group_ids" label="所属用户组"
-                     extra="保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限">
-            <Select
-              mode="multiple"
-              showSearch
-              optionFilterProp="label"
-              allowClear
-              placeholder="选择用户组(可多选)"
-              loading={!groups}
-              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
-              notFoundContent="无用户组"
-            />
-          </Form.Item>
+          {/* §13: 组选项按身份切换(条件挂载,两分支 Form.Item 同名 group_ids,提交体不变):
+              被授权非管理员 = me.user_create_groups(授权目标组,静态集合);
+              管理员 = GroupSearchSelect(§12 服务端检索,既有行为不变)。
+              回显 initialValues=detail.group_ids 不变 — 越界组 id 无对应选项时
+              antd Select 显示 id 原文(已知边界,§13 已记) */}
+          {isDelegated ? (
+            <Form.Item name="group_ids" label="所属用户组"
+                       extra="仅可选择管理员授权的用户组;保存按此处勾选全量同步,移出组将立即失去该组授予的全部权限">
+              <Select
+                mode="multiple"
+                showSearch
+                optionFilterProp="label"
+                allowClear
+                placeholder="选择用户组(可多选)"
+                options={(me.user_create_groups ?? []).map(g => ({ value: g.id, label: g.name }))}
+                notFoundContent="无可用用户组"
+              />
+            </Form.Item>
+          ) : (
+            <Form.Item name="group_ids" label="所属用户组"
+                       extra="保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限">
+              {/* §12: 选项来源升级为 GroupSearchSelect(服务端检索防抖),Form.Item
+                  name/extra 与全量同步提交体不变 */}
+              <GroupSearchSelect />
+            </Form.Item>
+          )}
         </Form>
       )}
     </Modal>

@@ -80,6 +80,12 @@ class User(Base, TimestampMixin):
     organization_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("organizations.id", ondelete="SET NULL")
     )
+    # 账号创建人(user-delegation,2026-11-15):provision_local_user 三链路统一落
+    # actor;列先加、存量由迁移 0021 按 audit user_created 最新 actor 回填;
+    # 创建人被删 SET NULL(照审计列惯例,不能 CASCADE/RESTRICT)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL")
+    )
 
 
 class Project(Base, TimestampMixin):
@@ -360,6 +366,29 @@ class GroupMembership(Base):
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UserCreateGrant(Base):
+    """用户模块组级授权(user-delegation,2026-11-15)— 组对组关系,落 DB 不进 FGA
+    (方案 D2:org-level relation 表达不了组对组集合)。
+
+    - (B, T) 行语义 = B 组成员拥有用户模块访问权,且新建用户时可把用户加入 T 组
+    - 授权态 = B 存在 ≥1 行(无独立 bool 开关;空集合 = 未授权,方案 D1)
+    - 复合主键天然防重;双 FK CASCADE:授权组 / 目标组任一删除即级联清行(F13)
+    - 判定查询唯一入口 services/user_module_access.py(一条 SQL join
+      group_memberships);组 CRUD 写侧在 routers/directory.py(diff 加删)
+    """
+    __tablename__ = "user_create_grants"
+
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
+    )
+    target_group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("groups.id", ondelete="CASCADE"), primary_key=True
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

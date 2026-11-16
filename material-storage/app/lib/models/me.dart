@@ -1,6 +1,9 @@
 /// Me — /api/v1/auth/me 契约(auth.py 实际返回;B6 补三组级旗标,
-/// B8 补 is_folder_template_manager 管理入口例外闸门)。
+/// B8 补 is_folder_template_manager 管理入口例外闸门;
+/// 用户模块组级授权开放补 is_user_manager + user_create_groups)。
 library;
+
+import 'user.dart';
 
 class Me {
   Me({
@@ -13,10 +16,13 @@ class Me {
     bool? isProjectDeleter,
     bool? isArtistAccountCreator,
     bool? isFolderTemplateManager,
+    bool? isUserManager,
+    this.userCreateGroups = const [],
   })  : isProjectCreator = isProjectCreator ?? isSystemAdmin,
         isProjectDeleter = isProjectDeleter ?? isSystemAdmin,
         isArtistAccountCreator = isArtistAccountCreator ?? isSystemAdmin,
-        isFolderTemplateManager = isFolderTemplateManager ?? isSystemAdmin;
+        isFolderTemplateManager = isFolderTemplateManager ?? isSystemAdmin,
+        isUserManager = isUserManager ?? isSystemAdmin;
 
   factory Me.fromJson(Map<String, dynamic> j) {
     final sysAdmin = (j['is_system_admin'] ?? false) as bool;
@@ -34,6 +40,19 @@ class Me {
       // B8:目录模板入口独立闸门(web AppHeader `?? is_system_admin` 同口径;
       // auth.py 恒回填,持组 flag 非 admin 亦为 true;缺省回落 sysAdmin)。
       isFolderTemplateManager: j['is_folder_template_manager'] as bool?,
+      // 用户模块组级授权开放(2026-11-15 方案 §5.4):「用户」入口闸门
+      // (web `(me.is_user_manager ?? me.is_system_admin)` 同口径;admin 恒
+      // true;缺省回落 sysAdmin 照 isFolderTemplateManager 先例)。
+      isUserManager: j['is_user_manager'] as bool?,
+      // 非 admin 被授权时 = 新建用户可选的目标组集合(含名称);admin 恒 []
+      // (admin 走 directory groups 接口取全量选项;缺省 [] 照 web `?? []`)。
+      userCreateGroups: [
+        for (final g in (j['user_create_groups'] ?? const []) as List)
+          GroupBrief(
+            id: (g as Map<String, dynamic>)['id'] as String,
+            name: (g['name'] ?? '') as String,
+          ),
+      ],
     );
   }
 
@@ -64,6 +83,14 @@ class Me {
   /// 目录模板入口独立闸门(B8;`is_folder_template_manager ?? is_system_admin`
   /// web 同口径;持组 flag 非 admin 仅见目录模板入口,见不到其余管理子页)。
   final bool isFolderTemplateManager;
+
+  /// 「用户」模块入口闸门(用户模块组级授权开放;admin 恒 true,非 admin =
+  /// 持 user_create_grants 授权组成员;构造时缺省回落 [isSystemAdmin])。
+  final bool isUserManager;
+
+  /// 非 admin 被授权时新建用户可选的目标组集合(含名称;admin 恒 [],
+  /// admin 建号表单走 directory groups 接口取全量选项)。
+  final List<GroupBrief> userCreateGroups;
 
   String get roleLabel => isSystemAdmin ? '系统管理员' : '成员';
 }

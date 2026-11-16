@@ -146,6 +146,9 @@ async def provision_local_user(
         must_change_password=True,
         is_active=True,
         organization_id=org_id,
+        # 账号创建人(user-delegation,2026-11-15):admin / 组长内嵌 / 受托建号
+        # 三链路统一落 actor,不加新参数(F8)
+        created_by=actor_user_id,
     )
     db.add(new_user)
     await db.commit()
@@ -173,7 +176,8 @@ async def provision_local_user(
         actor_user_id=actor_user_id,
         details={"user_id": str(new_user.id), "username": username,
                  "name": name, "group_ids": [str(g.id) for g in groups],
-                 "source": source},
+                 "source": source,
+                 "created_by": str(actor_user_id)},
         **ctx,
     )
     log.info("user created id=%s username=%s by admin=%s groups=%d",

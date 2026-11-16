@@ -697,6 +697,9 @@ class DirectoryUserOut(BaseModel):
     # 显示,前端 pill 文案需标注「用户名维度」);列表端点批量 pipeline MGET 三形态
     # 锁 key,详情/建号/编辑响应单查真实值;锁定状态以实时查 Redis 为准,不从审计推断
     login_locked: bool = False
+    # 账号创建人姓名(user-delegation,2026-11-15):列表端点按 created_by 一次
+    # join 批量回显(勿 N+1);NULL(无来源,如存量未回填/创建人被删)→ 前端显示「—」
+    created_by_name: str | None = None
 
 
 class UserCreateIn(BaseModel):

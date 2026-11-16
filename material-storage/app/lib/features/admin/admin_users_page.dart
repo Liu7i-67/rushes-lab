@@ -2,7 +2,9 @@
 /// 列表(q/is_active 筛选 + 服务端分页)+ 建号入口(带组,一次性临时密码
 /// 回显可复制);行操作(编辑/启停/重置密码/解锁)拆见 admin_user_row.dart,
 /// 表单拆件见 user_form_sheets/user_edit_sheet/temp_password_sheet。
-/// require_system_admin。视觉:PageHeader + 搜索/筛选 chip 轨 + SectionCard 行卡。
+/// 守门(2026-11-15 用户模块组级授权开放):后端弱门 admin ∨ 被授权组成员,
+/// 本页无页面级闸;深链兜底 = 列表 403 detail 透传。
+/// 视觉:PageHeader + 搜索/筛选 chip 轨 + SectionCard 行卡。
 library;
 
 import 'dart:async';

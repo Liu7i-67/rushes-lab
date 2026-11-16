@@ -1,21 +1,27 @@
 """directory router — 本地用户/组管理后台(ADR-0007 / issue #150)。
 
-仅 system admin(require_system_admin)。成员变更复用 permissions.add_user_to_group /
-remove_user_from_group 直接同步 OpenFGA tuple(不再经过飞书通讯录)。
+组管理全族 + 用户 unlock 仅 system admin(require_system_admin);用户模块
+七端点(list / create / detail / PATCH / disable / enable / reset-password)
+自 user-delegation 放宽为登录用户 + services/user_module_access.resolve 判定
+(2026-11-15 §5.1 先放宽四端点;2026-11-16 §13 增 PATCH/停启用):系统 admin
+直通,被授权组成员可看/建/重置/编辑/停启用自己创建的用户(编辑 group_ids 须
+⊆ 授权目标组;enable 与 disable 对称开放,D10;unlock 仍 admin-only,D12)。
+成员变更复用 permissions.add_user_to_group / remove_user_from_group 直接同步
+OpenFGA tuple(不再经过飞书通讯录)。
 
 endpoints:
-  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active 筛选;login_locked[W1,仅 user 维度]仅作响应回显,非筛选参数)
-  POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning)
-  GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序)
-  PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3)
-  POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit
-  POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple)
-  POST   /api/v1/admin/directory/users/{id}/reset-password  — admin 重置密码(新临时密码;顺带清登录锁 W1)
-  POST   /api/v1/admin/directory/users/{id}/unlock          — 重置登录锁定(user 维度 + 审计反查 IP 连带清,W1)
-  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account + 统计父/子 flag 读回)
-  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats)
-  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats(tri-state)
-  DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清)
+  GET    /api/v1/admin/directory/users                      — 用户列表(分页 {items,total,limit,offset};+ q / is_active 筛选;login_locked[W1,仅 user 维度]仅作响应回显,非筛选参数;非 admin 只见 created_by=自己,F6)
+  POST   /api/v1/admin/directory/users                      — 创建用户(临时密码 + 可选 group_ids 同时入组;建号主体在 services/user_provisioning;非 admin group_ids 须 ⊆ 授权目标组,F7)
+  GET    /api/v1/admin/directory/users/{id}                 — 用户详情(基础字段 + 所属组 ids/names 同序;非 admin 仅自建用户,F10)
+  PATCH  /api/v1/admin/directory/users/{id}                 — 编辑用户(name/email/group_ids 全量同步,D3;非 admin 仅自建用户且 group_ids ⊆ 授权目标组,§13)
+  POST   /api/v1/admin/directory/users/{id}/disable         — 禁用 = revoke_user_completely + is_active=false + audit(非 admin 仅自建用户,§13)
+  POST   /api/v1/admin/directory/users/{id}/enable          — 启用(恢复 org 成员 tuple;非 admin 仅自建用户,§13/D10)
+  POST   /api/v1/admin/directory/users/{id}/reset-password  — 重置密码(新临时密码;顺带清登录锁 W1;非 admin 仅自建用户,F9)
+  POST   /api/v1/admin/directory/users/{id}/unlock          — 重置登录锁定(user 维度 + 审计反查 IP 连带清,W1;仍仅 admin)
+  GET    /api/v1/admin/directory/groups                     — 组列表(+ q / limit / offset;creator/deleter/delete-files/folder-template/artist-account + 统计父/子 flag + 用户模块授权目标组读回)
+  POST   /api/v1/admin/directory/groups                     — 创建组(可置 can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats / user_create_group_ids)
+  PATCH  /api/v1/admin/directory/groups/{id}                — 改组名 / 描述 / can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats(tri-state)/ user_create_group_ids(None=不动 / list=全量替换 / []=撤销)
+  DELETE /api/v1/admin/directory/groups/{id}                — 删组(成员关系一并清;user_create_grants 靠 FK CASCADE 级联)
   GET    /api/v1/admin/directory/groups/{id}/members        — 组内成员列表
   POST   /api/v1/admin/directory/groups/{id}/members        — 加成员(写 group_memberships + group#member tuple)
   DELETE /api/v1/admin/directory/groups/{id}/members/{user_id} — 移除成员
@@ -31,12 +37,14 @@ from openfga_sdk.client.models import ClientTuple, ClientWriteRequest
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.db.session import get_db
-from app.db.tables import AuditEvent, Group, GroupMembership, User
+from app.db.tables import AuditEvent, Group, GroupMembership, User, UserCreateGrant
 from app.deps import (
     CurrentUser,
     get_audit,
+    get_current_user,
     get_local_auth,
     get_permissions,
     get_request_context,
@@ -59,6 +67,7 @@ from app.services.permissions import (
     is_already_exists_error,
 )
 from app.services.tokens import revoke_user_tokens
+from app.services.user_module_access import resolve_user_module_access
 from app.services.user_provisioning import add_user_to_group_audited, provision_local_user
 
 log = logging.getLogger(__name__)
@@ -143,15 +152,21 @@ async def list_directory_users(
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  FastAPI DI,repo 全量同款
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUsersPageOut:
     """用户列表分页(F5/D4/D5):total=同条件(q/is_active)count,不含 limit/offset。
 
     W1:当页用户批量回显 login_locked(pipeline 一次往返 MGET 三形态锁 key;
     **只反映 user 维度**,IP 维度命中时登录照样 429 但不在此显示)。
+    用户模块放宽(user-delegation §5.1):非 granted 403;非 admin 追加
+    created_by=自己 过滤(count 与列表同 conds,total 同步,F6)。
     """
     _ = user.id
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     term = q.strip()
     conds = []
     if term:
@@ -163,6 +178,9 @@ async def list_directory_users(
         ))
     if is_active is not None:
         conds.append(User.is_active.is_(is_active))
+    if not access.is_system_admin:
+        # F6 数据权限:非 admin 只看自己创建的(total 同口径)
+        conds.append(User.created_by == user.id)
     count_stmt = select(func.count()).select_from(User)
     stmt = select(User)
     if conds:
@@ -173,6 +191,16 @@ async def list_directory_users(
     res = await db.execute(stmt)
     users = list(res.scalars().all())
     locked_map = await local_auth.users_login_locked(users)
+    # F2 创建人批量回显:一次 join(users 别名)取 created_by 姓名,勿 N+1;
+    # created_by 无对应行(创建人被删 SET NULL)→ None,前端显示「—」
+    creator = aliased(User)
+    creator_ids = {u.created_by for u in users if u.created_by is not None}
+    creator_names: dict[uuid.UUID, str] = {}
+    if creator_ids:
+        c_res = await db.execute(
+            select(creator.id, creator.name).where(creator.id.in_(creator_ids))
+        )
+        creator_names = {cid: cname for cid, cname in c_res.all()}
     return DirectoryUsersPageOut(
         items=[
             DirectoryUserOut(
@@ -180,6 +208,9 @@ async def list_directory_users(
                 is_active=u.is_active, must_change_password=u.must_change_password,
                 created_at=u.created_at, resigned_at=u.resigned_at,
                 login_locked=locked_map.get(u.id, False),
+                created_by_name=(
+                    creator_names.get(u.created_by) if u.created_by is not None else None
+                ),
             )
             for u in users
         ],
@@ -192,7 +223,7 @@ async def create_directory_user(
     payload: UserCreateIn,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
@@ -210,8 +241,15 @@ async def create_directory_user(
     "user_create",入组审计 source 原值不变。除 user_created 增补 source 键与
     lower 预检修复(case 变体从 201 变 409,方案 §4.1 阶段 3)外行为与错误码
     零变化;壳内预检与 provision 内部预检双查无害(竞态兜底)。
+    用户模块放宽(user-delegation §5.1):非 granted 403;非 admin 的 group_ids
+    须 ⊆ 授权目标组(越权组 422,与不存在组同 invalid_group_ids marker、消息
+    注明成因区分,F7);非 admin 链路 source="delegated_create"(仅审计区分,
+    行为无差);created_by 统一在 provision 内落 actor(F8)。
     """
     _ = request, user.id
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     # 壳内前置预检:lower 匹配 + limit(1)+first(与登录口径/服务内预检同款;
     # 勿 scalar_one_or_none —— 存量 evan/Evan 大小写共存对会 MultipleResultsFound 500)
     dup = (
@@ -226,6 +264,16 @@ async def create_directory_user(
 
     # F3.3 原子性:用户落库前先全量校验组存在(组加载留在路由层,方案 B4)
     want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
+    # F7:非 admin 建号 group_ids ⊆ 授权目标组;越权组 422 与不存在组同款
+    # invalid_group_ids marker(括注成因),空组可建(方案 D3)
+    if not access.is_system_admin:
+        unallowed = [gid for gid in want_ids if gid not in access.allowed_group_ids]
+        if unallowed:
+            raise HTTPException(
+                422,
+                f"invalid_group_ids:{','.join(str(g) for g in unallowed)}"
+                "(无权限使用的用户组)",
+            )
 
     new_user, temp_pw = await provision_local_user(
         db, permissions, audit,
@@ -235,7 +283,7 @@ async def create_directory_user(
         groups=[groups[gid] for gid in want_ids],
         actor_user_id=user.id,
         ctx=ctx,
-        source="admin_create",
+        source="admin_create" if access.is_system_admin else "delegated_create",
     )
     return UserCreateOut(
         id=new_user.id, username=new_user.username, name=new_user.name,
@@ -243,6 +291,7 @@ async def create_directory_user(
         created_at=new_user.created_at, resigned_at=None,
         # W1:真实态单查(新号一般未锁,但 name 形态 key 跨同名用户共享,可能带出)
         login_locked=(await local_auth.users_login_locked([new_user]))[new_user.id],
+        created_by_name=user.name,
         temporary_password=temp_pw,
     )
 
@@ -251,14 +300,24 @@ async def create_directory_user(
 async def get_directory_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  FastAPI DI,repo 全量同款
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> DirectoryUserDetailOut:
-    """用户详情(§2):基础字段 + 所属组(group_names 与 group_ids 同序,按组名排序)+ W1 登录锁定态。"""
+    """用户详情(§2):基础字段 + 所属组(group_names 与 group_ids 同序,按组名排序)+ W1 登录锁定态。
+
+    用户模块放宽(user-delegation §5.1):非 granted 403;非 admin 仅可看自己
+    创建的用户(target 不存在仍 404 优先,F10)。
+    """
     _ = user.id
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user_not_found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权查看该用户(仅可查看自己创建的用户)")
     res = await db.execute(
         select(GroupMembership, Group)
         .join(Group, Group.id == GroupMembership.group_id)
@@ -266,12 +325,19 @@ async def get_directory_user(
         .order_by(Group.name)
     )
     rows = res.all()
+    # 创建人姓名单查(NULL → None,前端显示「—」)
+    creator_name: str | None = None
+    if target.created_by is not None:
+        creator_name = (
+            await db.execute(select(User.name).where(User.id == target.created_by))
+        ).scalar_one_or_none()
     return DirectoryUserDetailOut(
         id=target.id, username=target.username, name=target.name,
         email=target.email, is_active=target.is_active,
         must_change_password=target.must_change_password,
         created_at=target.created_at, resigned_at=target.resigned_at,
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
+        created_by_name=creator_name,
         group_ids=[g.id for _gm, g in rows],
         group_names=[g.name for _gm, g in rows],
     )
@@ -283,7 +349,7 @@ async def update_directory_user(
     payload: UserUpdateIn,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
@@ -294,16 +360,36 @@ async def update_directory_user(
     先校验(用户存在 / 组 id 全存在,任一无效 422 且不变更)→ name/email 落库
     → 组 diff:added 走加成员双写、removed 走移成员双写(各记成员审计);
     总审计 user_updated(details.changes 含 old/new)。
+    用户模块放宽(user-delegation §13):非 granted 403;非 admin 仅可编辑自己
+    创建的用户(404 优先,归属不符 403),且 group_ids ⊆ 授权目标组(越权组
+    422,与建号端点同款 invalid_group_ids marker+括注);全量同步语义不变 ——
+    自建用户当前持有的越界组(如 admin 后加的)随本次同步移除,以提交终态为准;
+    审计事件仍 user_updated(actor 已天然区分身份)。
     """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user_not_found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权编辑该用户(仅可编辑自己创建的用户)")
 
     # F4.3 原子性:组 id 全量预校验,任一无效 → 422,不做任何变更
     want_ids: list[uuid.UUID] | None = None
     groups: dict[uuid.UUID, Group] = {}
     if payload.group_ids is not None:
         want_ids, groups = await _load_groups_for_ids(db, payload.group_ids)
+        # §13:非 admin 编辑的 group_ids ⊆ 授权目标组(越权组 422,与建号端点
+        # 同款 invalid_group_ids marker+括注;404/归属 403 先于此)
+        if not access.is_system_admin:
+            unallowed = [gid for gid in want_ids if gid not in access.allowed_group_ids]
+            if unallowed:
+                raise HTTPException(
+                    422,
+                    f"invalid_group_ids:{','.join(str(g) for g in unallowed)}"
+                    "(无权限使用的用户组)",
+                )
 
     # name / email:email 显式 null=清空(D6),以 model_fields_set 区分「未传」
     changes: dict[str, object] = {}
@@ -354,12 +440,19 @@ async def update_directory_user(
     )
     log.info("user updated id=%s by admin=%s added=%d removed=%d",
              user_id, user.id, len(groups_added), len(groups_removed))
+    # created_by_name 回显:created_by 不随编辑变更,单查姓名(NULL → None)
+    creator_name: str | None = None
+    if target.created_by is not None:
+        creator_name = (
+            await db.execute(select(User.name).where(User.id == target.created_by))
+        ).scalar_one_or_none()
     return DirectoryUserOut(
         id=target.id, username=target.username, name=target.name,
         email=target.email, is_active=target.is_active,
         must_change_password=target.must_change_password,
         created_at=target.created_at, resigned_at=target.resigned_at,
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
+        created_by_name=creator_name,
     )
 
 
@@ -377,14 +470,24 @@ async def disable_directory_user(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> dict[str, object]:
-    """禁用(离职=手动禁用):revoke_user_completely 撤全部 tuple + is_active=false + audit。"""
+    """禁用(离职=手动禁用):revoke_user_completely 撤全部 tuple + is_active=false + audit。
+
+    用户模块放宽(user-delegation §13):非 granted 403;非 admin 仅可停用自己
+    创建的用户(404 优先,归属不符 403);revoke 全部 tuple + 吊销 PAT + 审计
+    逻辑零改动。
+    """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user not found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权停用该用户(仅可停用自己创建的用户)")
     if not target.is_active:
         raise HTTPException(409, "用户已处于禁用状态")
 
@@ -429,7 +532,7 @@ async def enable_directory_user(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> dict[str, object]:
@@ -438,10 +541,18 @@ async def enable_directory_user(
     禁用时 revoke_user_completely 撤掉了全部 tuple(含 group#member),但
     group_memberships 表行保留 —— 启用必须逐条重建,否则 UI 显示还在组里、
     OpenFGA 里没有 tuple,组带来的项目权限静默失效。
+    用户模块放宽(user-delegation §13/D10):与 disable 对称开放,否则非管理员
+    停用后无人可恢复;非 granted 403;非 admin 仅可启用自己创建的用户
+    (404 优先,归属不符 403 且先于状态 409);恢复逻辑零改动。
     """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await db.get(User, user_id)
     if target is None:
         raise HTTPException(404, f"user not found:{user_id}")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权启用该用户(仅可启用自己创建的用户)")
     if target.is_active:
         raise HTTPException(409, "用户已是启用状态")
 
@@ -496,7 +607,8 @@ async def reset_directory_user_password(
     user_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(require_system_admin),
+    user: CurrentUser = Depends(get_current_user),
+    permissions: PermissionsService = Depends(get_permissions),  # noqa: B008  FastAPI DI,repo 全量同款
     audit: AuditService = Depends(get_audit),
     local_auth: LocalAuthService = Depends(get_local_auth),  # noqa: B008  FastAPI DI,repo 全量同款
 ) -> UserResetPasswordOut:
@@ -504,8 +616,15 @@ async def reset_directory_user_password(
 
     W1(决策 2):重置密码语义上伴随解锁 —— 顺带清三形态 user 维度登录锁与
     失败计数(与 unlock 端点共用 clear_locks;IP 维度不在此连带清)。
+    用户模块放宽(user-delegation §5.1):非 granted 403;非 admin 仅可重置
+    自己创建的用户(target 不存在仍 404 优先,F9)。
     """
+    access = await resolve_user_module_access(db, permissions, user.id)
+    if not access.granted:
+        raise HTTPException(403, "无用户模块权限")
     target = await _get_active_user(db, user_id, "reset")
+    if not access.is_system_admin and target.created_by != user.id:
+        raise HTTPException(403, "无权重置该用户密码(仅可重置自己创建的用户)")
     temp_pw = generate_temp_password()
     target.password_hash = hash_password(temp_pw)
     target.must_change_password = True
@@ -638,6 +757,11 @@ class DirectoryGroupOut(BaseModel):
     can_view_usage_stats: bool = False
     # 组级「文件上传数量统计」子开关(第 8 个 flag);守门口径同上合取
     can_view_upload_stats: bool = False
+    # 用户模块组级授权(user-delegation,2026-11-15):本组被授权的目标组集合,
+    # 读接口按 user_create_grants 真实态回显;ids 与 names 同序,按目标组名排序。
+    # 空集合 = 未开放用户模块(授权态 = 集合非空,方案 D1 无独立 bool 开关)
+    user_create_group_ids: list[uuid.UUID] = []
+    user_create_group_names: list[str] = []
 
 
 class GroupCreateIn(BaseModel):
@@ -659,6 +783,10 @@ class GroupCreateIn(BaseModel):
     can_view_usage_stats: bool = False
     # 2026-11-06:置位 = 写 organization#upload_stats_viewer tuple(文件上传数量统计子开关)
     can_view_upload_stats: bool = False
+    # 用户模块组级授权(user-delegation §5.2):新建用户时可选择的目标组集合,
+    # 落 user_create_grants 行(非 FGA,方案 D2);空 = 不开放用户模块。
+    # 目标组存在性 / ≤50 校验在路由层(_load_groups_for_ids,422 带 invalid_group_ids)
+    user_create_group_ids: list[uuid.UUID] = []
 
 
 class GroupUpdateIn(BaseModel):
@@ -682,6 +810,9 @@ class GroupUpdateIn(BaseModel):
     can_view_usage_stats: bool | None = None
     # 2026-11-06:tri-state 同 can_delete_project(None=不动 / true=写 / false=删)
     can_view_upload_stats: bool | None = None
+    # 用户模块组级授权(user-delegation §5.2)tri-state(None=不动 / list=全量
+    # 替换终态 / []=撤销授权);无 tri-state bool —— 授权态即集合非空(方案 D1)
+    user_create_group_ids: list[uuid.UUID] | None = None
 
 
 class GroupMemberOut(BaseModel):
@@ -784,6 +915,79 @@ async def _sync_group_org_flag(
         )
 
 
+# ─── 用户模块组级授权 ↔ user_create_grants 表(user-delegation,2026-11-15)────
+async def _read_user_create_grants(
+    db: AsyncSession,
+    *,
+    group_id: uuid.UUID | None = None,
+) -> dict[uuid.UUID, list[tuple[uuid.UUID, str]]]:
+    """读 user_create_grants 真实态:{授权组 id: [(目标组 id, 目标组名), ...]}。
+
+    join groups 取目标组名,ORDER BY 目标组名(出参 user_create_group_ids 与
+    user_create_group_names 同序契约);目标组被删由 FK CASCADE 保证无孤儿行。
+    group_id 传则只读该组(PATCH 响应),不传全量(组列表)。
+    """
+    stmt = (
+        select(UserCreateGrant.group_id, UserCreateGrant.target_group_id, Group.name)
+        .join(Group, Group.id == UserCreateGrant.target_group_id)
+        .order_by(Group.name)
+    )
+    if group_id is not None:
+        stmt = stmt.where(UserCreateGrant.group_id == group_id)
+    res = await db.execute(stmt)
+    out: dict[uuid.UUID, list[tuple[uuid.UUID, str]]] = {}
+    for gid, tid, tname in res.all():
+        out.setdefault(gid, []).append((tid, tname))
+    return out
+
+
+async def _apply_user_create_grants(
+    db: AsyncSession,
+    *,
+    group: Group,
+    want_ids: list[uuid.UUID],
+    targets: dict[uuid.UUID, Group],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """把 group 的 user_create_grants 全量同步为 want_ids(diff 加删;终态=入参)。
+
+    调用方先经 _load_groups_for_ids 校验(422 invalid_group_ids),本函数只做
+    纯 DB 行加删、**不 commit**(组 create/PATCH 与组行同事务提交);返回
+    (added, removed),元素 {"group_id","group_name"} 仿 user_updated 的
+    groups_added 结构(group_updated 审计 diff 用,F12)。
+    """
+    res = await db.execute(
+        select(UserCreateGrant.target_group_id)
+        .where(UserCreateGrant.group_id == group.id)
+    )
+    current = set(res.scalars().all())
+    want_set = set(want_ids)
+    added = [
+        {"group_id": str(tid), "group_name": targets[tid].name}
+        for tid in want_ids if tid not in current
+    ]
+    for tid in want_ids:
+        if tid not in current:
+            db.add(UserCreateGrant(group_id=group.id, target_group_id=tid))
+    removed: list[dict[str, str]] = []
+    to_remove = current - want_set
+    if to_remove:
+        names_res = await db.execute(
+            select(Group.id, Group.name).where(Group.id.in_(to_remove))
+        )
+        name_map: dict[uuid.UUID, str] = {g_id: g_name for g_id, g_name in names_res.all()}
+        removed = [
+            {"group_id": str(tid), "group_name": name_map.get(tid, str(tid))}
+            for tid in sorted(to_remove, key=lambda t: name_map.get(t, str(t)))
+        ]
+        await db.execute(
+            delete(UserCreateGrant).where(
+                UserCreateGrant.group_id == group.id,
+                UserCreateGrant.target_group_id.in_(to_remove),
+            )
+        )
+    return added, removed
+
+
 @router.get("/groups", response_model=list[DirectoryGroupOut])
 async def list_directory_groups(
     q: str = Query("", description="name / description 模糊"),
@@ -795,7 +999,8 @@ async def list_directory_groups(
 ) -> list[DirectoryGroupOut]:
     """组列表(带成员数)+ creator/deleter/delete-files/folder-template/artist-account
     + 统计父/子三 flag 读回(定向 read,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/
-    2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3)。
+    2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3)+ 用户模块授权目标组
+    (user_create_grants 一次全量读,ids/names 同序按目标组名排序,F4)。
 
     编辑弹窗数据来自列表行(无组详情路由),flag 按 FGA tuple 真实态回显;
     read 异常时尽力而为回 False,不阻塞列表。
@@ -829,6 +1034,7 @@ async def list_directory_groups(
     stats_ids = await _read_flag_group_ids(permissions, db, "stats_viewer")
     usage_stats_ids = await _read_flag_group_ids(permissions, db, "usage_stats_viewer")
     upload_stats_ids = await _read_flag_group_ids(permissions, db, "upload_stats_viewer")
+    grants_map = await _read_user_create_grants(db)
     return [
         DirectoryGroupOut(
             id=g.id, name=g.name, description=g.description,
@@ -841,6 +1047,8 @@ async def list_directory_groups(
             can_view_stats=g.id in stats_ids,
             can_view_usage_stats=g.id in usage_stats_ids,
             can_view_upload_stats=g.id in upload_stats_ids,
+            user_create_group_ids=[t for t, _n in grants_map.get(g.id, [])],
+            user_create_group_names=[n for _t, n in grants_map.get(g.id, [])],
         )
         for g, cnt in rows
     ]
@@ -855,12 +1063,21 @@ async def create_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3)。"""
+    """创建本地组(name unique);置位 flag 时写对应 org tuple(尽力而为,§2.2/F6.2/§4.3/艺人账号内嵌方案 §4.3/2026-10-16 组删除授权/2026-11-06 统计面板方案 §3.3);user_create_group_ids 同步 user_create_grants 行(同事务,user-delegation §5.2)。"""
     dup = await db.execute(select(Group).where(Group.name == payload.name))
     if dup.scalar_one_or_none() is not None:
         raise HTTPException(409, f"组名已存在:{payload.name}")
+    # 用户模块授权:目标组存在性 / ≤50 校验在任何落库前(422 原子性惯例,
+    # 复用 _load_groups_for_ids);组行与授权行同事务提交
+    grant_target_ids, grant_targets = await _load_groups_for_ids(
+        db, payload.user_create_group_ids,
+    )
     g = Group(name=payload.name, description=payload.description or None)
     db.add(g)
+    # flush 拿 g.id(uuid7 default 在 flush 才赋值),授权行与组行同事务落库
+    await db.flush()
+    for tid in grant_target_ids:
+        db.add(UserCreateGrant(group_id=g.id, target_group_id=tid))
     await db.commit()
     await db.refresh(g)
     # tuple 写在 DB 提交后,尽力而为不 500(方案 §2.2;响应按入参 flag 回填,
@@ -898,6 +1115,8 @@ async def create_directory_group(
         await _sync_group_org_flag(
             permissions, db, g.id, relation="upload_stats_viewer", enable=True,
         )
+    # 出参/审计的目标组序:按目标组名排序(与列表读回口径一致)
+    ordered_grant_ids = sorted(grant_target_ids, key=lambda t: grant_targets[t].name)
     await audit.write(
         event_type="group_created",
         actor_user_id=user.id,
@@ -909,19 +1128,20 @@ async def create_directory_group(
                  "can_create_artist_account": payload.can_create_artist_account,
                  "can_view_stats": payload.can_view_stats,
                  "can_view_usage_stats": payload.can_view_usage_stats,
-                 "can_view_upload_stats": payload.can_view_upload_stats},
+                 "can_view_upload_stats": payload.can_view_upload_stats,
+                 "user_create_group_ids": [str(t) for t in ordered_grant_ids]},
         request_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
     )
     log.info("group created id=%s name=%s by admin=%s creator=%s deleter=%s "
              "file_deleter=%s folder_tmpl=%s artist=%s stats=%s usage_stats=%s "
-             "upload_stats=%s",
+             "upload_stats=%s user_create_grants=%d",
              g.id, g.name, user.id, payload.can_create_project,
              payload.can_delete_project, payload.can_delete_files,
              payload.can_manage_folder_templates,
              payload.can_create_artist_account,
              payload.can_view_stats, payload.can_view_usage_stats,
-             payload.can_view_upload_stats)
+             payload.can_view_upload_stats, len(ordered_grant_ids))
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=0, created_at=g.created_at,
@@ -933,6 +1153,8 @@ async def create_directory_group(
         can_view_stats=payload.can_view_stats,
         can_view_usage_stats=payload.can_view_usage_stats,
         can_view_upload_stats=payload.can_view_upload_stats,
+        user_create_group_ids=ordered_grant_ids,
+        user_create_group_names=[grant_targets[t].name for t in ordered_grant_ids],
     )
 
 
@@ -946,7 +1168,7 @@ async def update_directory_group(
     permissions: PermissionsService = Depends(get_permissions),
     audit: AuditService = Depends(get_audit),
 ) -> DirectoryGroupOut:
-    """改组名 / 描述;can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats tri-state(None=不动 / true=写 / false=删)。"""
+    """改组名 / 描述;can_create_project / can_delete_project / can_delete_files / can_manage_folder_templates / can_create_artist_account / can_view_stats / can_view_usage_stats / can_view_upload_stats tri-state(None=不动 / true=写 / false=删);user_create_group_ids tri-state(None=不动 / list=全量替换终态 / []=撤销,user-delegation §5.2)。"""
     g = await db.get(Group, group_id)
     if g is None:
         raise HTTPException(404, f"group not found:{group_id}")
@@ -957,6 +1179,17 @@ async def update_directory_group(
         g.name = payload.name
     if payload.description is not None:
         g.description = payload.description or None
+    # 用户模块授权 tri-state:校验在任何落库前(422 原子性惯例,复用
+    # _load_groups_for_ids);diff 行加删与 name/desc 同事务提交
+    grants_added: list[dict[str, str]] = []
+    grants_removed: list[dict[str, str]] = []
+    if payload.user_create_group_ids is not None:
+        grant_want_ids, grant_targets = await _load_groups_for_ids(
+            db, payload.user_create_group_ids,
+        )
+        grants_added, grants_removed = await _apply_user_create_grants(
+            db, group=g, want_ids=grant_want_ids, targets=grant_targets,
+        )
     await db.commit()
     await db.refresh(g)
     # tri-state:仅改名的不带字段 PATCH(None)→ tuple 不动,防静默撤权(§2.2)
@@ -1070,6 +1303,11 @@ async def update_directory_group(
     ):
         details["can_view_upload_stats"] = {"old": upload_stats_old,
                                             "new": payload.can_view_upload_stats}
+    if payload.user_create_group_ids is not None:
+        # F12:授权变更落审计 diff(仿 user_updated 的 groups_added 结构);
+        # 传 [] 时 added=[]、removed=旧授权清单(撤销授权可追溯)
+        details["user_create_group_ids_added"] = grants_added
+        details["user_create_group_ids_removed"] = grants_removed
     await audit.write(
         event_type="group_updated",
         actor_user_id=user.id,
@@ -1126,6 +1364,10 @@ async def update_directory_group(
         select(func.count()).select_from(GroupMembership)
         .where(GroupMembership.group_id == group_id)
     )).scalar_one()
+    # 授权出参读 DB 真实态(与组列表口径一致,ids/names 同序按目标组名排序)
+    out_grant_pairs = (await _read_user_create_grants(db, group_id=group_id)).get(
+        group_id, [],
+    )
     return DirectoryGroupOut(
         id=g.id, name=g.name, description=g.description,
         member_count=cnt, created_at=g.created_at,
@@ -1137,6 +1379,8 @@ async def update_directory_group(
         can_view_stats=out_stats,
         can_view_usage_stats=out_usage_stats,
         can_view_upload_stats=out_upload_stats,
+        user_create_group_ids=[t for t, _n in out_grant_pairs],
+        user_create_group_names=[n for _t, n in out_grant_pairs],
     )
 
 
