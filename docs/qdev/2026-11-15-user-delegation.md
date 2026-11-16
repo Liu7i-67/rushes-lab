@@ -198,3 +198,10 @@ Web：pnpm lint + pnpm build 绿（无测试框架）。
 - **P2 组选择器服务端搜索**(用户反馈:搜「运营」无结果,实有该组):根因=useDirectoryGroups 未传 limit(服务端默认 50 条,dev 实有 76 组)+Select 仅客户端过滤已加载条目。修法=新建可复用组件 GroupSearchSelect(Select multiple+showSearch+**防抖 onSearch→useDirectoryGroups(关键词,limit=200)** 服务端检索),三处同病同修:组表单目标组多选/建号弹窗管理员组选择/编辑用户组多选;hooks.ts useDirectoryGroups 增可选 limit 参数(默认 200,向后兼容)。
 - 范围:仅 Web;后端(App 已支持 limit≤200)与 App 零改动。验证:lint+build+dev 浏览器实测(抽屉布局/开关行为不回归/搜索「运营」命中「运营/运营助理」/tri-state 不动→PATCH 不携带)。
 
+
+## 13. 增量(2026-11-16 ③):非管理员可停用/编辑自建用户
+
+- **行为**:被授权组成员对**自己创建的**用户新增两项操作:编辑(PATCH name/email/group_ids)与停用/启用;解锁(unlock)与一切他人用户操作仍仅管理员。守门=现有弱门(granted)∧ target.created_by==自己(404 优先,403 归属);非 admin 编辑的 group_ids ⊆ 授权目标组(违者 422 invalid_group_ids,与建号同款);编辑全量同步语义不变——自建用户当前持有的越界组(如管理员后加的)会被本次同步移除,以编辑者提交的终态为准。
+- **决策**:D10 启用随停出开放(开关两侧对称,否则非管理员停用后无人可恢复);D11 编辑组范围与建号同规;D12 解锁仍 admin-only(未在需求内)。
+- **改动面**:后端 directory.py 三端点(PATCH/disable/enable)守门放宽+组校验,审计复用既有事件;Web AdminUsersPage 行按钮放开(编辑/停用/启用,解锁仍 admin)+EditUserModal 组选项非 admin 走 me.user_create_groups(编辑弹窗现在用的 GroupSearchSelect 打的是 admin-only 接口,非 admin 会 403);App admin_user_row 菜单放开+user_edit_sheet 组字段非 admin 走受限本地选项。无迁移、无 /me 变化、无新事件。
+- **测试**:后端 T9 断言翻转(PATCH/disable/enable 200)+新增越权编辑 422/他人 403/停启用往返;App A2 断言更新(菜单=编辑/停用|启用/重置密码,无解锁);Web 浏览器实测。
