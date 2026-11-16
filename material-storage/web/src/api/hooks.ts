@@ -824,11 +824,16 @@ export const useUnlockUser = () => {
   });
 };
 
-export const useDirectoryGroups = (q = '') =>
+// §12 增量(2026-11-16 ②):增可选 limit(默认 200,向后兼容)——此前未传,服务端
+// 默认 50 条,组多于 50 时「运营」等组在选择器里搜不到(服务端检索也进不了已加载
+// 集合);后端 limit 上限即 200(directory.py Query(50, ge=1, le=200))。既有调用点
+// (页面列表搜索等)随默认值一并放宽到「最多 200 条」,属修复性放宽。
+export const useDirectoryGroups = (q = '', limit = 200) =>
   useQuery({
-    queryKey: ['directory-groups', q],
+    queryKey: ['directory-groups', q, limit],
     queryFn: async () =>
-      (await http.get<DirectoryGroup[]>('/api/v1/admin/directory/groups', { params: { q } })).data,
+      (await http.get<DirectoryGroup[]>('/api/v1/admin/directory/groups', { params: { q, limit } }))
+        .data,
   });
 
 // PR-2: can_create_project = 组级「新建项目」权限(Create bool,缺省 False 服务端兜底)

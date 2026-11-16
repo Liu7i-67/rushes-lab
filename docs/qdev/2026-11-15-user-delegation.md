@@ -182,7 +182,7 @@ Web：pnpm lint + pnpm build 绿（无测试框架）。
 
 ## 10. 不涉及
 
-- FGA model（store.fga.yaml）零改动；不新增审计 event_type（复用 user_created/group_updated/user_password_reset，labels.ts 无新 key）；iOS 端逻辑与 Android 同包，本周期只验 Android 测试包；prod 部署不在本周期（dev 验收后等指令）。
+- FGA model(store.fga.yaml)零改动;不新增审计 event_type(复用既有,labels.ts 无新 key);iOS 端逻辑与 Android 同包,本周期只验 Android 测试包;prod 部署不在本周期(dev 验收后等指令)。
 
 ## 11. 增量(2026-11-16):建号表单姓名前缀自动回填
 
@@ -191,3 +191,10 @@ Web：pnpm lint + pnpm build 绿（无测试框架）。
 - **适用对象**:任何打开建号表单的人(管理员/被授权组长统一;Evan/王组长等无下划线姓名→行为与现状完全一致,零影响面)。
 - **除外**:项目创建艺人账号(NewProjectModal/App 项目流艺人账号区)不涉及——本改动只碰用户模块建号表单,该路径天然不含。
 - **实现**:纯前端两文件;后端/接口/类型零改动。测试:App 侧 flutter test 补预填断言(含无下划线回落/带下划线前缀/清空可提交由既有校验覆盖);Web 无测试框架走 lint+build+浏览器实测。
+
+## 12. 增量(2026-11-16 ②):组表单改抽屉 + 组选择器服务端搜索
+
+- **P1 组表单 Modal→Drawer**(用户反馈:可配置权限太多弹窗过高):GroupFormModal 改 antd Drawer,PC 宽 640(小屏自动全宽);布局重组为分区紧凑行——分区标题(项目/内容/统计/用户模块),每行=左侧标题+问号提示+右侧 Switch,子项(艺人账号/统计两子项/目标组多选)缩进挂父项下;**tri-state touched/级联复位/initialValues/校验逻辑零变化**(纯展示层重构);关闭回调与复位照搬到 Drawer afterOpenChange。
+- **P2 组选择器服务端搜索**(用户反馈:搜「运营」无结果,实有该组):根因=useDirectoryGroups 未传 limit(服务端默认 50 条,dev 实有 76 组)+Select 仅客户端过滤已加载条目。修法=新建可复用组件 GroupSearchSelect(Select multiple+showSearch+**防抖 onSearch→useDirectoryGroups(关键词,limit=200)** 服务端检索),三处同病同修:组表单目标组多选/建号弹窗管理员组选择/编辑用户组多选;hooks.ts useDirectoryGroups 增可选 limit 参数(默认 200,向后兼容)。
+- 范围:仅 Web;后端(App 已支持 limit≤200)与 App 零改动。验证:lint+build+dev 浏览器实测(抽屉布局/开关行为不回归/搜索「运营」命中「运营/运营助理」/tri-state 不动→PATCH 不携带)。
+

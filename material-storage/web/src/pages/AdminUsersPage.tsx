@@ -10,6 +10,9 @@
  * 被授权非管理员仅见自己创建的用户(后端过滤)、行内仅保留「重置密码」
  * (编辑/停用/启用/解锁仍管理员专属,后端 403 兜底)、新建用户的组选项 =
  * me.user_create_groups(授权目标组);管理员路径完全不变。
+ * §12 增量(2026-11-16 ②):管理员建号组多选与编辑用户组多选换 GroupSearchSelect
+ * (服务端检索防抖,修复「组超 50 条后搜不到」);被授权非管理员的建号组选项仍走
+ * me.user_create_groups 静态集合,不动。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Pagination, Popconfirm, Select, Skeleton, Tooltip,
@@ -17,13 +20,14 @@ import {
 import { KeyRound, LockOpen, Pencil, Power, RotateCcw, UserPlus } from 'lucide-react';
 import { useState } from 'react';
 import dayjs from 'dayjs';
-import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail, useDirectoryGroups,
+import { useMe, useCreateUser, useUpdateUser, useDirectoryUserDetail,
          useDisableUser, useEnableUser, useDirectoryUsers, useResetUserPassword, useUnlockUser,
          USERS_PAGE_SIZE } from '../api/hooks';
 import { errorMessage } from '../api/client';
 import { copyToClipboard } from '../utils/copy';
 import { useCompactViewport } from '../lib/use-viewports';
 import type { DirectoryUser, DirectoryUserCreateOut } from '../api/types';
+import { GroupSearchSelect } from '../components/GroupSearchSelect';
 
 export default function AdminUsersPage() {
   const { data: me } = useMe();
@@ -416,22 +420,15 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   );
 }
 
-/** 管理员路径的建号组多选(F3.1 全量组选项,既有行为不变)。独立子组件隔离
- *  useDirectoryGroups:被授权非管理员态不挂载、不发 /admin/directory/groups 请求。 */
+/** 管理员路径的建号组多选(F3.1 全量组选项)。独立子组件隔离 useDirectoryGroups:
+ *  被授权非管理员态不挂载、不发 /admin/directory/groups 请求(隔离在 GroupSearchSelect
+ *  内部,同样不挂载)。§12:选项来源升级为服务端检索(GroupSearchSelect 内部自挂
+ *  useDirectoryGroups(词, 200)),Form.Item name/extra 与提交体不变。 */
 function AdminGroupIdsSelect() {
-  const { data: groups } = useDirectoryGroups('');
   return (
     <Form.Item name="group_ids" label="用户组(可选)"
                extra="创建后直接加入所选组并即时生效;可不选,之后在用户组里再加">
-      <Select
-        mode="multiple"
-        showSearch
-        optionFilterProp="label"
-        allowClear
-        placeholder="选择用户组(可多选)"
-        options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
-        notFoundContent="无用户组"
-      />
+      <GroupSearchSelect />
     </Form.Item>
   );
 }
@@ -443,7 +440,6 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
   const { message } = App.useApp();
   // 回显:GET /admin/directory/users/{id}(含 group_ids,§2)
   const { data: detail } = useDirectoryUserDetail(user.id);
-  const { data: groups } = useDirectoryGroups('');
   const update = useUpdateUser();
 
   // 回显走 initialValues 数据驱动,不用 setFieldsValue:本组件按次开关条件挂载
@@ -501,16 +497,9 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
           </Form.Item>
           <Form.Item name="group_ids" label="所属用户组"
                      extra="保存按此处勾选全量同步;移出组将立即失去该组授予的全部权限">
-            <Select
-              mode="multiple"
-              showSearch
-              optionFilterProp="label"
-              allowClear
-              placeholder="选择用户组(可多选)"
-              loading={!groups}
-              options={(groups ?? []).map(g => ({ value: g.id, label: g.name }))}
-              notFoundContent="无用户组"
-            />
+            {/* §12: 选项来源升级为 GroupSearchSelect(服务端检索防抖),Form.Item
+                name/extra 与全量同步提交体不变 */}
+            <GroupSearchSelect />
           </Form.Item>
         </Form>
       )}
