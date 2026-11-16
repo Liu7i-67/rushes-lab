@@ -183,3 +183,11 @@ Web：pnpm lint + pnpm build 绿（无测试框架）。
 ## 10. 不涉及
 
 - FGA model（store.fga.yaml）零改动；不新增审计 event_type（复用 user_created/group_updated/user_password_reset，labels.ts 无新 key）；iOS 端逻辑与 Android 同包，本周期只验 Android 测试包；prod 部署不在本周期（dev 验收后等指令）。
+
+## 11. 增量(2026-11-16):建号表单姓名前缀自动回填
+
+- **行为**:创建用户表单(Web AdminUsersPage CreateUserModal / App user_form_sheets 建号 sheet)打开时,「姓名」字段预填=当前操作者姓名去末段的前缀:姓名含 `_` → `name.slice(0, name.lastIndexOf('_') + 1)`(如 `素材部_一组_张三`→`素材部_一组_`、`adad_asda_xqsda`→`adad_asda_`);不含 `_` → 预填空(与现状一致)。每次打开表单重新回填一次(表单销毁重建,天然满足);用户可改可清,提交校验不变(空=必填报错)。
+- **来源字段=操作者姓名 me.name**(非 username;用户原文明示「小组长的姓名格式一般是 xxx部_yy组_zz」,ascii 例仅为示意)。
+- **适用对象**:任何打开建号表单的人(管理员/被授权组长统一;Evan/王组长等无下划线姓名→行为与现状完全一致,零影响面)。
+- **除外**:项目创建艺人账号(NewProjectModal/App 项目流艺人账号区)不涉及——本改动只碰用户模块建号表单,该路径天然不含。
+- **实现**:纯前端两文件;后端/接口/类型零改动。测试:App 侧 flutter test 补预填断言(含无下划线回落/带下划线前缀/清空可提交由既有校验覆盖);Web 无测试框架走 lint+build+浏览器实测。

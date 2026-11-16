@@ -3,7 +3,8 @@
 /// 一次性临时密码,交调用方经 TempPasswordSheet 回显一次。
 /// 用户模块组级授权开放(2026-11-15):非 admin 组字段数据源切换——仅
 /// me.userCreateGroups 范围内本地选择(禁远程搜索;授权列表为空则字段不可选),
-/// 提交体不变(后端 422 invalid_group_ids 兜底,F7)。
+/// 提交体不变(后端 422 invalid_group_ids 兜底,F7)。§11 增量(2026-11-16):
+/// 建号 sheet 打开时「姓名」预填操作者姓名去末段前缀(无 `_` 预填空=现状)。
 library;
 
 import 'package:flutter/material.dart';
@@ -41,7 +42,11 @@ class _CreateUserSheet extends StatefulWidget {
 
 class _CreateUserSheetState extends State<_CreateUserSheet> {
   final _username = TextEditingController();
-  final _name = TextEditingController();
+  // 建号表单姓名前缀自动回填(§11 增量 2026-11-16):姓名预填=操作者姓名
+  // (me.name)去末段前缀——含 `_` 截到最后一个 `_`(`素材部_一组_张三`→
+  // `素材部_一组_`),不含 `_` 预填空(=现状);sheet 每次打开都新建 State,
+  // 天然重新回填。用户可改可清,提交校验不变。
+  late final _name = TextEditingController(text: _operatorNamePrefix());
   final _email = TextEditingController();
   // 用户模块组级授权开放:非 admin 仅在授权目标组范围内选择(数据源/交互
   // 双切换;admin 走 GroupMultiSelect 远程搜索现状不变)。
@@ -51,6 +56,15 @@ class _CreateUserSheetState extends State<_CreateUserSheet> {
   var _picked = <GroupBrief>[]; // 非 admin 选择值(受限本地多选)
   String? _error;
   var _submitting = false;
+
+  /// 操作者姓名去末段前缀(§11 口径):含 `_` →
+  /// `name.substring(0, name.lastIndexOf('_') + 1)`;不含 `_` → 空串。
+  static String _operatorNamePrefix() {
+    final name = session.me?.name ?? '';
+    return name.contains('_')
+        ? name.substring(0, name.lastIndexOf('_') + 1)
+        : '';
+  }
 
   Future<void> _submit() async {
     final username = _username.text.trim();

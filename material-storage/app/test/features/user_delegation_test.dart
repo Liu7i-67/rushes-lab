@@ -4,6 +4,8 @@
 /// A3 建号表单组选项=me.userCreateGroups(受限态禁远程搜索)与提交体、
 /// A4 组表单用户模块开关+目标组多选(编辑态预填/不动不携带/开关关→[]/建组
 /// 态携带)、A5 admin 不回归(全磁贴/全菜单/建号组选项走远程搜索)。
+/// §11 增量(2026-11-16):建号 sheet 姓名预填=操作者姓名去末段前缀
+/// (含 `_` 截前缀/无 `_` 预填空)。
 ///
 /// 假 API 族本文件自持(照 admin_pages_test.dart 记录式桩风格),directory 桩
 /// 按 §5.2/§5.3 契约扩展(created_by_name / user_create_group_ids);Me 经
@@ -596,5 +598,59 @@ void main() {
 
     expect(api.directory.createCalls.single['group_ids'], ['ga']);
     expect(find.text('Tmp-Pass-001'), findsOneWidget);
+  });
+
+  // §11 增量(2026-11-16):建号表单姓名前缀自动回填 — 操作者姓名含 `_`
+  // (如 `素材部_一组_张三`)→ 打开 sheet 时姓名字段初始值=去末段前缀
+  // `素材部_一组_`(来源 me.name;每次打开重新回填,可改可清)。
+  testWidgets('§11:建号姓名前缀回填 — 操作者姓名含下划线,预填去末段前缀', (tester) async {
+    final api = _install();
+    // 独立注入:被授权组长(§11 场景主角),姓名含两个 `_`
+    session.me = Me.fromJson({
+      'id': 'u7',
+      'name': '素材部_一组_张三',
+      'is_system_admin': false,
+      'is_user_manager': true,
+      'user_create_groups': [
+        {'id': 'ga', 'name': 'A组'},
+      ],
+    });
+    api.directory.usersStaged = DirectoryUsersPage(items: const [], total: 0);
+    await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.person_add_alt_1));
+    await tester.pumpAndSettle();
+
+    // sheet 文本字段序:登录名(0)/姓名(1)/邮箱(2),姓名初始值=前缀
+    expect(
+      tester.widget<TextField>(_sheetFields.at(1)).controller!.text,
+      '素材部_一组_',
+    );
+  });
+
+  // §11 增量:操作者姓名不含 `_`(如 Evan/王组长)→ 预填空,行为与现状
+  // 完全一致(零影响面)。
+  testWidgets('§11:建号姓名前缀回填 — 操作者姓名无下划线,预填空', (tester) async {
+    final api = _install();
+    // 独立注入:无下划线姓名
+    session.me = Me.fromJson({
+      'id': 'u8',
+      'name': '王组长',
+      'is_system_admin': false,
+      'is_user_manager': true,
+      'user_create_groups': [
+        {'id': 'ga', 'name': 'A组'},
+      ],
+    });
+    api.directory.usersStaged = DirectoryUsersPage(items: const [], total: 0);
+    await tester.pumpWidget(const MaterialApp(home: AdminUsersPage()));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.person_add_alt_1));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester.widget<TextField>(_sheetFields.at(1)).controller!.text,
+      isEmpty,
+    );
   });
 }

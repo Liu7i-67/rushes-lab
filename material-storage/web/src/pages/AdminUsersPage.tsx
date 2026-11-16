@@ -338,6 +338,14 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
   // 管理员,管理员路径不变)。me 未加载期间按管理员渲染(与页内 gate 同口径)。
   const { data: me } = useMe();
   const isDelegated = !!me && me.is_system_admin === false;
+  // §11(2026-11-15 用户模块组级授权开放,增量 2026-11-16):「姓名」预填 =
+  // 当前操作者姓名去末段的前缀(来源=me.name 而非 username:组长姓名格式
+  // 一般为「xxx部_yy组_zz」,取前缀后新号与操作者同部门/组)。含 `_` →
+  // slice(0, lastIndexOf('_')+1)(`素材部_一组_张三`→`素材部_一组_`);
+  // 不含 `_` → 空串(与现状一致)。用户可改可清,空仍走必填校验,提交逻辑零改动。
+  const namePrefix = me?.name && me.name.includes('_')
+    ? me.name.slice(0, me.name.lastIndexOf('_') + 1)
+    : '';
 
   const submit = async () => {
     try {
@@ -362,7 +370,8 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
     <>
       <Modal title="新建本地用户" open={open} onCancel={onClose} destroyOnClose
              confirmLoading={create.isPending} onOk={submit} okText="创建">
-        <Form form={form} layout="vertical">
+        {/* §11:destroyOnClose 每次打开重新挂载 Form,initialValues 即「每次新增触发一次」的预填 */}
+        <Form form={form} layout="vertical" initialValues={{ name: namePrefix }}>
           <Form.Item name="username" label="登录名(拼音 / 工号,登录用)"
                      rules={[
                        { required: true, min: 2, max: 64 },
