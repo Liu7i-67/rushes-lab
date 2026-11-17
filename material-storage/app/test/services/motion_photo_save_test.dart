@@ -9,7 +9,10 @@
 /// 映射:首段完成 0.95、补抓恒 0.95、无时刻 >0.95 且无回跳 / 临时清理 /
 /// 取消透传(fetch 后取消删临时)/ 同名走 photo_manager(断言不触
 /// media_store_plus 入相册)/ 权限拒绝→D1 / 残缺临时不进 D1 / 大小闸门
-/// >150MB 直接 D1 / 回落不重入 motion 分流(capable 机回落无二次分流)。
+/// >150MB 直接 D1 / 回落不重入 motion 分流(capable 机回落无二次分流)/
+/// 小米 composer 分流(2026-11-16 方案 §6 第二段:步骤 -1 null→flm 回归锚 /
+/// supported=false→D1 双落盘 / supported=true→假产物入相册 / oracle=false→
+/// D1 / 顺序钉:oracle 先于字节三段,T3 矛盾信号标记)。
 library;
 
 import 'dart:convert';
@@ -24,6 +27,9 @@ import 'package:ms_app/models/models.dart';
 import 'package:ms_app/services/downloads.dart';
 import 'package:ms_app/services/media_save.dart';
 import 'package:ms_app/services/motion_photo_save.dart';
+import 'package:ms_app/services/motion_photo_xiaomi.dart' show XiaomiComposer;
+
+import '../core/session_restore_log_test.dart' show captureLogs;
 
 Asset _asset(
   String filename, {
@@ -239,6 +245,18 @@ class FakeGenerate {
   }
 }
 
+/// supported=true 的小米 composer 假件(§4.5 步骤 -1 注入缝):generate/
+/// verifyProduct 显式注入,编排层 xiaomi.generate 优先于 flm 注入参。
+XiaomiComposer xiaomiSupported({
+  required Future<String> Function({
+    required String imagePath,
+    required String videoPath,
+  })
+  gen,
+  required Future<bool> Function(String productPath) verify,
+}) =>
+    () async => (supported: true, generate: gen, verifyProduct: verify);
+
 void main() {
   late FakeIo io;
   late FakeSavers savers;
@@ -248,24 +266,30 @@ void main() {
   Object? saveImageError;
   late FakeGenerate generate;
 
-  Future<void> run({Asset? withAsset}) => runMotionPhotoDownload(
-    asset:
-        withAsset ?? _asset('IMG_0001.livp', size: 1000, ct: 'application/zip'),
-    onProgress: progress.add,
-    token: CancelToken(),
-    io: io.bundle(savers),
-    generate: ({required imagePath, required videoPath}) => generate.call(
-      imagePath: imagePath,
-      videoPath: videoPath,
-      root: io._root,
-    ),
-    ensureGalleryPermission: () async => granted,
-    saveImage: (path, title) async {
-      if (saveImageError != null) throw saveImageError!;
-      saved.add((path, title));
-      return null;
-    },
-  );
+  Future<void> run({Asset? withAsset, XiaomiComposer? xiaomiComposer}) =>
+      runMotionPhotoDownload(
+        asset:
+            withAsset ??
+            _asset('IMG_0001.livp', size: 1000, ct: 'application/zip'),
+        onProgress: progress.add,
+        token: CancelToken(),
+        io: io.bundle(savers),
+        generate: ({required imagePath, required videoPath}) => generate.call(
+          imagePath: imagePath,
+          videoPath: videoPath,
+          root: io._root,
+        ),
+        // 步骤 -1 桩:null=非 xiaomi(不依赖宿主平台门巧合,Windows/Android
+        // 宿主断言一致);经 runDownloadJob 的「回落不重入」用例无此参数,
+        // 依赖缺省 probe fail-safe 兜底(见该用例)。
+        xiaomiComposer: xiaomiComposer ?? () async => null,
+        ensureGalleryPermission: () async => granted,
+        saveImage: (path, title) async {
+          if (saveImageError != null) throw saveImageError!;
+          saved.add((path, title));
+          return null;
+        },
+      );
 
   setUp(() async {
     io = FakeIo(
@@ -623,6 +647,130 @@ void main() {
         reason: '解包失败的 D1 收尾复用原始档临时(零二次下载);重入分流会再探测再下载',
       );
       expect(savers.galleryCalls, [GalleryAction.saveLivpPair]);
+    });
+  });
+
+  group('小米 composer 分流(步骤 -1,2026-11-16 方案 §6 第二段)', () {
+    test('composer 返回 null → 照旧 flm 缺省链(回归锚:flm 假件被调)', () async {
+      var composerCalls = 0;
+      await run(
+        xiaomiComposer: () async {
+          composerCalls += 1;
+          return null;
+        },
+      );
+      expect(composerCalls, 1, reason: '步骤 -1 恰一次 probe');
+      expect(generate.calls, hasLength(1), reason: 'null → 一切照旧 flm 缺省');
+      expect(saved.single.$2, 'IMG_0001.jpg');
+      expect(io.toasts.single, contains('实况图已存入相册'));
+    });
+
+    test('supported=false → D1 双落盘(解包双存+Downloads 原档),flm 假件零调用', () async {
+      await run(
+        xiaomiComposer: () async =>
+            (supported: false, generate: null, verifyProduct: null),
+      );
+      expect(generate.calls, isEmpty, reason: 'MIUI/旧相册不进合成链(D2)');
+      expect(savers.galleryCalls, [
+        GalleryAction.saveLivpPair,
+      ], reason: 'D1 收尾:gallery 解包双存');
+      expect(
+        savers.downloadsCalls,
+        hasLength(1),
+        reason: 'D1 收尾:原档写 Downloads',
+      );
+      expect(saved, isEmpty, reason: '无合成产物入相册');
+      expect(io.toasts.single, contains('已存入相册'), reason: '回落走现状 legacy 全流程');
+    });
+
+    test('supported=true+假 generate+假 verifyProduct → saveImage 收到假产物路径,'
+        'finishOk 文案不变', () async {
+      String? fakeProduct;
+      await run(
+        xiaomiComposer: xiaomiSupported(
+          gen: ({required String imagePath, required String videoPath}) async {
+            fakeProduct = await generate.call(
+              imagePath: imagePath,
+              videoPath: videoPath,
+              root: io._root,
+            );
+            return fakeProduct!;
+          },
+          verify: (_) async => true,
+        ),
+      );
+      expect(
+        generate.calls,
+        hasLength(1),
+        reason: '假 generate 恰一次(产物构造沿用既有假件)',
+      );
+      expect(
+        saved.single.$1,
+        fakeProduct,
+        reason: 'saveImageWithPath 收到 xiaomi.generate 产物路径',
+      );
+      expect(saved.single.$2, 'IMG_0001.jpg');
+      expect(io.toasts.single, contains('实况图已存入相册'), reason: 'finishOk 文案不变');
+      expect(savers.galleryCalls, isEmpty, reason: '成功路径不走 runSavePlan');
+      expect(savers.downloadsCalls, isEmpty, reason: '成功路径不写 Downloads');
+    });
+
+    test('oracle=false → D1 收尾(reason=小米产物语义校验未过,字节校验未到)', () async {
+      final (lines, restore) = captureLogs();
+      addTearDown(restore);
+      await run(
+        xiaomiComposer: xiaomiSupported(
+          gen: ({required String imagePath, required String videoPath}) =>
+              generate.call(
+                imagePath: imagePath,
+                videoPath: videoPath,
+                root: io._root,
+              ),
+          verify: (_) async => false,
+        ),
+      );
+      expect(generate.calls, hasLength(1), reason: '产物已合成,oracle 拦在入相册前');
+      final d1Lines = lines.where((l) => l.contains('降级 D1')).toList();
+      expect(d1Lines, hasLength(1));
+      expect(d1Lines.single, contains('小米产物语义校验未过(SDK oracle)'));
+      expect(saved, isEmpty);
+      expect(savers.galleryCalls, [GalleryAction.saveLivpPair]);
+      expect(savers.downloadsCalls, hasLength(1));
+    });
+
+    test('顺序钉:oracle 先于字节三段——oracle 放行同时截断产物尾(字节必败),'
+        'D1 reason 含 T3 矛盾信号标记', () async {
+      final (lines, restore) = captureLogs();
+      addTearDown(restore);
+      await run(
+        xiaomiComposer: xiaomiSupported(
+          gen: ({required String imagePath, required String videoPath}) =>
+              generate.call(
+                imagePath: imagePath,
+                videoPath: videoPath,
+                root: io._root,
+              ),
+          verify: (productPath) async {
+            // 副作用法:oracle 返回 true 的同时截断产物文件尾 64B——后跑的
+            // 字节三段校验必败;若实现倒序(字节先跑)则字节校验通过、oracle
+            // 截尾无从触发本标记,顺序由此钉死(字节校验是真函数非注入件,
+            // 调用序断言法不可行)。
+            final f = File(productPath);
+            final bytes = await f.readAsBytes();
+            await f.writeAsBytes(bytes.sublist(0, bytes.length - 64));
+            return true;
+          },
+        ),
+      );
+      final d1Lines = lines.where((l) => l.contains('降级 D1')).toList();
+      expect(d1Lines, hasLength(1), reason: '截尾使字节校验失败 → D1(oracle 已放行)');
+      expect(
+        d1Lines.single,
+        contains('(SDK oracle 已过——字节校验形态分歧,T3 校准点)'),
+        reason: 'oracle 先跑才有机会截尾;实现倒序则无标记',
+      );
+      expect(saved, isEmpty, reason: '可疑产物不落盘');
+      expect(savers.downloadsCalls, hasLength(1), reason: 'D1 收尾发生');
     });
   });
 

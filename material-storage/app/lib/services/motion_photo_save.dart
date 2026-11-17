@@ -1,6 +1,6 @@
 /// 安卓实况图(Motion Photo)下载编排(2026-11-02 方案 §5.4,步骤号即文档步骤):
 /// 独立于 D1 矩阵(「单产物多级降级链」形状不同,planSaveRoutes 不动,回滚面最小)。
-/// 0/1 大小/空间闸门(不过→D1 回落 runLegacyDownloadJob,不经 runDownloadJob 顶部
+/// -1 小米机型分流(composer:null→照旧 flm/false→fallbackLegacyDownload D1 双落盘/true→SDK 通道合成)→ 0/1 大小/空间闸门(不过→D1 回落 runLegacyDownloadJob,不经 runDownloadJob 顶部
 /// motion 分流防 capable 机重入死循环)→ 2 下载原始档(进度映射 [0,0.95];fetch 网络
 /// 异常=任务失败外溢,残缺临时不进 D1)→ 3 解包分诊(jpg+mp4 快路径 / heic/mov/png
 /// 补抓 variant=unpacked(仅 404 走 D1,motion_photo_refetch.dart 拆件)/ 无视频或
@@ -21,7 +21,7 @@ import '../core/transfers/transfer_task.dart' show TransferKind;
 import '../models/models.dart';
 import 'app_log.dart';
 import 'downloads.dart' show DownloadIo;
-import 'legacy_download.dart' show finishDownloadSave, runLegacyDownloadJob;
+import 'legacy_download.dart' show fallbackLegacyDownload, finishDownloadSave;
 import 'livp.dart' show LivpService;
 import 'media_save.dart';
 import 'motion_photo_refetch.dart'
@@ -32,6 +32,7 @@ import 'motion_photo_refetch.dart'
         motionFirstSegmentProgress,
         refetchUnpackedInputs;
 import 'motion_photo_verify.dart';
+import 'motion_photo_xiaomi.dart';
 import 'notifier.dart';
 
 /// 大小闸门(镜像上传侧 150MB):flm 原生 ≈2-3× 原件常驻,OutOfMemoryError 非 Exception 不可捕获 → 超限直接 D1 不进合成链。
@@ -77,10 +78,17 @@ Future<void> runMotionPhotoDownload({
   required CancelToken token,
   required DownloadIo io,
   MotionPhotoGenerator? generate,
+  XiaomiComposer? xiaomiComposer,
   Future<bool> Function()? ensureGalleryPermission,
   Future<AssetEntity?> Function(String path, String title)? saveImage,
 }) async {
-  final doGenerate = generate ?? defaultMotionPhotoGenerator();
+  // ── 步骤 -1:小米分流(null=非 xiaomi/非 Android/通道异常→照旧 flm;false→D1 双落盘;true→换通道合成)──
+  final xiaomi = await (xiaomiComposer ?? defaultXiaomiComposer())();
+  if (xiaomi != null && !xiaomi.supported) {
+    return fallbackLegacyDownload(asset, onProgress, token, io);
+  }
+  final doGenerate =
+      xiaomi?.generate ?? generate ?? defaultMotionPhotoGenerator();
   final ensurePerm = ensureGalleryPermission ?? defaultEnsureGalleryPermission;
   final doSaveImage = saveImage ?? defaultSaveMotionImage;
   final total = asset.sizeBytes.toInt();
@@ -96,7 +104,7 @@ Future<void> runMotionPhotoDownload({
       'motion',
       '${asset.filename} 超过 ${fmtBytes(kMotionMaxSourceBytes)},不进合成链',
     );
-    return _fallbackLegacy(asset, onProgress, token, io);
+    return fallbackLegacyDownload(asset, onProgress, token, io);
   }
 
   // ── 步骤 1:空间分档(4× 现状预检不足→现状中止;[4×,6×) 放弃合成直接 D1;free=null 沿现状 unknown 语义放行)──
@@ -112,7 +120,7 @@ Future<void> runMotionPhotoDownload({
       'motion',
       '${asset.filename} 剩余空间不足 $kMotionComposeSpaceFactor×,放弃合成走 D1',
     );
-    return _fallbackLegacy(asset, onProgress, token, io);
+    return fallbackLegacyDownload(asset, onProgress, token, io);
   }
 
   // ── 步骤 2:下载原始档(fetch 网络异常=任务失败外溢,残缺临时不进 D1)──
@@ -260,6 +268,13 @@ Future<void> runMotionPhotoDownload({
   }
   final product = File(productPath);
   flmProduct = product;
+  // 步骤 4b(xiaomi 支路):SDK oracle 先于字节三段(倒序=oracle 死代码;oracle 过+字节败=T3 分歧信号,见下 reason 追加)
+  final xiaomiOracle = xiaomi?.generate != null
+      ? xiaomi?.verifyProduct ?? defaultVerifyXiaomiProduct
+      : null;
+  if (xiaomiOracle != null && !await xiaomiOracle(product.path)) {
+    return d1('小米产物语义校验未过(SDK oracle)');
+  }
   // 自校验(下沉件 verifyMotionProductWithInputs):校验不过 → D1
   final verifyFailReason = await verifyMotionProductWithInputs(
     product: product,
@@ -267,7 +282,8 @@ Future<void> runMotionPhotoDownload({
     composeVideo: composeVideo,
   );
   if (verifyFailReason != null) {
-    return d1(verifyFailReason);
+    return d1(xiaomi == null ? verifyFailReason
+        : '$verifyFailReason(SDK oracle 已过——字节校验形态分歧,T3 校准点)');
   }
   // 入相册:title 基名必须 .jpg 结尾(MIME 推断),DISPLAY_NAME/MIME 取自 title,产物随机名不影响落地名;不传 relativePath(缺省=MediaStore Images 默认
   // Pictures/ 根,同 D1 静图路落点);同名系统自动加后缀(刻意不用 media_store_plus:其同名=先删后插覆盖替换,跨夹同名先后下载会静默丢旧文件)
@@ -279,20 +295,4 @@ Future<void> runMotionPhotoDownload({
     return d1('实况图入相册失败:$e');
   }
   return finishOk('实况图已存入相册');
-}
-
-/// 步骤 0/1 的 D1 回落:直调现状主体(勿回调 runDownloadJob——顶部就是 motion 分流,capable 机重入死循环;platform 定参 android 短路)。
-Future<void> _fallbackLegacy(
-  Asset asset,
-  void Function(int) onProgress,
-  CancelToken token,
-  DownloadIo io,
-) {
-  return runLegacyDownloadJob(
-    asset: asset,
-    onProgress: onProgress,
-    token: token,
-    io: io,
-    platform: SavePlatform.android,
-  );
 }

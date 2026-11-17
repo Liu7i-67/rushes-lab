@@ -119,3 +119,21 @@ Future<void> finishDownloadSave({
     detail: saveSummary(outcomes),
   );
 }
+
+/// motion_photo_save.dart 步骤 0/1 与小米步骤 -1 的 D1 回落(自该文件迁入并
+/// 改公开名,供跨库调用;勿回调 runDownloadJob——顶部就是 motion 分流,capable
+/// 机重入死循环;platform 定参 android 短路)。
+Future<void> fallbackLegacyDownload(
+  Asset asset,
+  void Function(int) onProgress,
+  CancelToken token,
+  DownloadIo io,
+) {
+  return runLegacyDownloadJob(
+    asset: asset,
+    onProgress: onProgress,
+    token: token,
+    io: io,
+    platform: SavePlatform.android,
+  );
+}

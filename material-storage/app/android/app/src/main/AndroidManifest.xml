@@ -94,5 +94,10 @@
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="https"/>
         </intent>
+        <!-- feat/xiaomi-motionphoto-sdk:livephoto SDK 的 isDeviceSupportLivePhoto() 要读
+             com.miui.gallery 的 versionCode;targetSdk≥30 包可见性过滤下,livephoto AAR
+             自带 manifest 无任何 queries 声明,不在主清单声明则 getPackageInfo 必
+             NameNotFoundException → isSupported 恒 false、功能静默失效(方案 §4.6) -->
+        <package android:name="com.miui.gallery" />
     </queries>
 </manifest>
