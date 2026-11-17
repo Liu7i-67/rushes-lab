@@ -2,7 +2,9 @@
  * /admin/usage — 客户端使用统计页(F5;docs/qdev/2026-10-27-usage-analytics.md §3.3)。
  *
  * 三端占比(web / Android App / iOS App)+ 内外网占比,依托审计日志聚合:
- * - 日期范围默认近 30 天(与后端双缺省时间规则同口径,前端显式传参便于窗口回显);
+ * - 日期范围默认近 30 天整日(2026-11-17 需求 F2:纯日期选择,自动补 00:00 / 23:59:59.999;
+ *   前端显式传参便于窗口回显);
+ * - 占比展示支持条形 / 饼图切换(view 内存态,默认条形;2026-11-17 需求 F1);
  * - metric 切换 active_users(默认)/ logins;
  * - daily 开关控制日趋势取数(false 时后端 daily=[],趋势节自动不渲染);
  * - 页面纯展示:不做二次解析 / 二次去重;daily 的 users 跨维度不可加,前端不求和;
@@ -17,7 +19,7 @@ import { useMemo, useState } from 'react';
 import dayjs, { type Dayjs } from 'dayjs';
 import { useAdminUsageStats, useMe } from '../api/hooks';
 import type { UsageMetric, UsageStatsParams } from '../api/hooks';
-import { UsageStatBars } from '../components/admin/UsageStatBars';
+import { UsageProportion } from '../components/admin/UsageProportion';
 import { UsageStatsTable } from '../components/admin/UsageStatsTable';
 import { useCompactViewport } from '../lib/use-viewports';
 
@@ -34,8 +36,9 @@ const METRIC_HINT: Record<UsageMetric, string> = {
   logins: '口径:仅统计登录成功事件(local_login_success),UA 缺失不计。',
 };
 
-// 默认窗口:近 30 天([today-29d 00:00, now];后端双缺省为 now-30d ~ now,口径一致)
-const defaultRange = (): Range => [dayjs().subtract(29, 'day').startOf('day'), dayjs()];
+// 默认窗口:近 30 天整日([today-29d 00:00, today 23:59:59.999];2026-11-17 F2 改整日语义,
+// 数据等价于 [today-29d 00:00, now]——未来无事件,窗口回显即自证自动补时)
+const defaultRange = (): Range => [dayjs().subtract(29, 'day').startOf('day'), dayjs().endOf('day')];
 
 // ─── 汇总卡 ─────────────────────────────────────────────────────────────────
 function SummaryCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -64,6 +67,8 @@ export default function AdminUsageStatsPage() {
   const compact = useCompactViewport();
   const [range, setRange] = useState<Range>(defaultRange);
   const [metric, setMetric] = useState<UsageMetric>('active_users');
+  // 占比展示视图:条形(默认)/ 饼图,仅内存态、不进 URL 不持久化(2026-11-17 F1.6)
+  const [view, setView] = useState<'bar' | 'pie'>('bar');
   const [daily, setDaily] = useState(true);
 
   // from/to 传 tz-aware ISO(照 AdminAuditPage toISOString 惯例);参数整体进 queryKey
@@ -109,23 +114,30 @@ export default function AdminUsageStatsPage() {
         </div>
       </div>
 
-      {/* 控制栏:日期范围 + metric 切换 + daily 开关 */}
+      {/* 控制栏:日期范围 + metric 切换 + 占比视图切换 + daily 开关 */}
       <div style={{
         display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center',
         marginBottom: 10,
       }}>
         <DatePicker.RangePicker
           value={range}
-          // compact 无 showTime 时 end 是当日 00:00,后端窗口 [from, to) 独占会整日丢末日数据 → 对齐到 endOf('day')(照 AdminAuditPage)
-          onChange={(v) => { if (v && v[0] && v[1]) setRange(compact ? [v[0], v[1].endOf('day')] : [v[0], v[1]]); }}
+          // 纯日期选择,自动补 00:00:00/23:59:59.999,后端窗口 [from,to) 独占须 endOf 覆盖末日全天
+          onChange={(v) => { if (v && v[0] && v[1]) setRange([v[0].startOf('day'), v[1].endOf('day')]); }}
           allowClear={false}
-          // compact 收时间面板(照 AdminAuditPage:showTime 双月面板手机不可用)
-          showTime={!compact}
         />
         <Segmented
           value={metric}
           onChange={(v) => setMetric(v as UsageMetric)}
           options={METRIC_OPTIONS}
+        />
+        {/* 占比展示条形 / 饼图切换(2026-11-17 F1:全局一个切换,三处占比展示联动) */}
+        <Segmented
+          value={view}
+          onChange={(v) => setView(v as 'bar' | 'pie')}
+          options={[
+            { value: 'bar', label: '条形图' },
+            { value: 'pie', label: '饼图' },
+          ]}
         />
         <span style={{
           display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -183,7 +195,7 @@ export default function AdminUsageStatsPage() {
               sub="服务端回显窗口(默认近 30 天)"
             />
           </div>
-          <UsageStatBars stats={data} />
+          <UsageProportion stats={data} view={view} />
           <div style={{ marginTop: 16 }}>
             <UsageStatsTable stats={data} />
           </div>
