@@ -7,7 +7,7 @@
  *   分组可加;daily 的 users 是分组内 count(DISTINCT),**跨行求和无意义,禁止求和**,
  *   故日趋势不做 users 展示(按日 users 只允许单一完整维度切片,本页不提供);
  *   daily=false 时响应 daily 为 [],本组件自动不渲染趋势节;
- * - 不引图表库:条形自绘(同 UsageStatBars 视觉语言)。
+ * - 不引图表库:条形自绘(同 UsageProportion 视觉语言)。
  */
 import { Table } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
