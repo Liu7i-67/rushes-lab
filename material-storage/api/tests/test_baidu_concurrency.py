@@ -79,6 +79,7 @@ test_admission_three_queued_top2_deterministic 的隐含前提一致。
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -105,6 +106,7 @@ from app.services.baidu_client import (
     BaiduApiError,
     BaiduTokenPair,
 )
+from app.services.permissions import PermissionsService
 from app.settings import get_settings
 from app.workers.main import WorkerSettings
 from tests.test_baidu_integration import (  # 既有集成基建(helper 与被测惯例同源)
@@ -241,6 +243,18 @@ class LaneFactory:
     def __init__(self, w: World) -> None:
         self.w = w
         self.created: list[Lane] = []
+        self._fga_user_ids: list[str] = []   # 获项目授权的 lane 用户(FGA tuple 收尾撤销)
+
+    async def grant_project_uploader(self, lane: Lane) -> None:
+        """给 lane 用户授 project-level uploader(worker 每文件 can_upload 复查
+        需要;world.member 由 world fixture 授权、lane 用户默认无 —— 真实导入
+        用例 R11/R13 的前置,同 integration 准入用例给 outsider 授权的先例)。
+        FGA tuple 由 cleanup 撤销(对齐 world fixture 收尾口径,防残留污染)。"""
+        perms = PermissionsService(get_settings())
+        await perms.add_project_subject(project_id=str(self.w.project.id),
+                                        subject=f"user:{lane.user.id}", role="uploader")
+        await perms.close()
+        self._fga_user_ids.append(str(lane.user.id))
 
     async def add(self, *, vip_type: int | None = None) -> Lane:
         tag = uuid.uuid4().hex[:8]
@@ -271,7 +285,14 @@ class LaneFactory:
         return lane
 
     async def cleanup(self) -> None:
-        """tasks(binding FK RESTRICT)→ files → tasks → bindings → users。"""
+        """tasks(binding FK RESTRICT)→ files → tasks → bindings → users;被授权
+        lane 用户的 FGA tuple 随后撤销(用户行删除后 tuple 残留防污染,同 world)。"""
+        if self._fga_user_ids:
+            perms = PermissionsService(get_settings())
+            for uid in self._fga_user_ids:
+                with contextlib.suppress(Exception):
+                    await perms.revoke_user_completely(uid)
+            await perms.close()
         if not self.created:
             return
         binding_ids = [ln.binding.id for ln in self.created]
@@ -415,6 +436,7 @@ async def test_r11_same_binding_parallel_running_no_belt_churn(
     (原 belt 撞索引回排队点),定格后 _running_ids() 含 3 条 —— 同绑定 running
     数上限的唯一防线 = 参数化准入门控(D8)。"""
     lane = await lanes.add(vip_type=1)
+    await lanes.grant_project_uploader(lane)   # worker 每文件 can_upload 复查的前置
 
     # ① 3 个会员任务(同绑定)逐一驱动:枚举 → 收尾置 running → 导入循环 → 终态
     tasks: list[BaiduBackupTask] = []
@@ -430,11 +452,13 @@ async def test_r11_same_binding_parallel_running_no_belt_churn(
         async with _db() as db:
             assert await dispatch_baidu_task(db, t.id, sweeper=True)
         res = await _claim_and_run(t.id)
-        assert res["status"] == "completed", \
-            f"同绑定第 {i + 1} 个任务必须经枚举收尾直达终态(无 belt 回排队): {res}"
+        t_after = await _get_task(t.id)
+        assert res["status"] == "completed" and t_after.status == "completed", \
+            f"同绑定第 {i + 1} 个任务必须经枚举收尾直达终态(无 belt 回排队): {res} " \
+            f"fail_reason={t_after.fail_reason}"
         rows = await _files_of(t.id)
-        assert len(rows) == 1 and rows[0].status == "success", "导入循环真实走完"
-        assert (await _get_task(t.id)).status == "completed"
+        assert len(rows) == 1 and rows[0].status == "success", \
+            f"导入循环真实走完: row={rows[0].status} last_error={rows[0].last_error}"
     assert baidu_spy.list_calls == 3, \
         "3 任务各真实枚举恰 1 次 list(全程零 belt churn 重放,原 T4 的重派重放已无)"
 
@@ -450,9 +474,11 @@ async def test_r11_same_binding_parallel_running_no_belt_churn(
     async with _db() as db:
         assert await dispatch_baidu_task(db, third.id, sweeper=True)
     res = await _claim_and_run(third.id)
-    assert res["status"] == "completed", (
+    third_after = await _get_task(third.id)
+    assert res["status"] == "completed" and third_after.status == "completed", (
         "2 条同绑定 running 在场时,第 3 条必须照常过枚举收尾进导入循环 "
-        f"(原 uq_baidu_task_running 下此处必为 queued): {res}"
+        f"(原 uq_baidu_task_running 下此处必为 queued): {res} "
+        f"fail_reason={third_after.fail_reason}"
     )
     assert baidu_spy.list_calls == 4, "第 3 条真实枚举恰 1 次(总计 3+1,零重放)"
 
@@ -768,7 +794,10 @@ def test_t9_settings_defaults_and_red_lines() -> None:
     s.validate_baidu_settings()   # 默认配置必须通过
 
     make_settings(baidu_admission_limit=4, baidu_nonvip_admission_limit=2).validate_baidu_settings()
-    make_settings(baidu_admission_limit=3, baidu_nonvip_admission_limit=1).validate_baidu_settings()
+    # ADMISSION=3 组合:会员并发新增红线 vip_par ≤ limit-1(默认 3 会 3≤2 假),
+    # 显式带兼容值 2(该红线的专项覆盖归 R10,此处不削弱既有三向红线断言)
+    make_settings(baidu_admission_limit=3, baidu_nonvip_admission_limit=1,
+                  baidu_vip_parallel_per_binding=2).validate_baidu_settings()
 
     with pytest.raises(AssertionError):
         make_settings(baidu_nonvip_admission_limit=0).validate_baidu_settings()
@@ -1576,8 +1605,8 @@ async def test_r3_vip_three_reps_nonvip_two_bindings_tightened_to_one(
 
     picked = await _admission()
     assert len(picked) == 4, "总 picked 恰 4(I1)"
-    assert set(vip) <= set(picked), "会员绑定 3 rep 全部入选"
-    assert set(picked) - set(vip) == {nv1.id}, \
+    assert {t.id for t in vip} <= set(picked), "会员绑定 3 rep 全部入选"
+    assert set(picked) - {t.id for t in vip} == {nv1.id}, \
         "非会员道收紧到 1:两绑定代表仅最老者入选(非会员 ≤ nonvip_limit,I2;" \
         "会员占 3 槽后非会员仍有 1 槽,I5)"
     assert nv2.id not in picked, "较年轻的非会员代表被二次收紧挤出 picked"
@@ -1854,12 +1883,18 @@ async def test_r13_worker_gate_reads_vip_parallel_settings_rollback_lever(
     monkeypatch: pytest.MonkeyPatch, stack,
 ) -> None:
     """R13(设计正本 §5 R13):worker 接线端到端 —— settings 单例置
-    baidu_vip_parallel_per_binding=1(= 回滚杆 env 语义),会员绑定 3 个候选仅
-    最老代表 1 个过认领后门控,其余 2 个 queue out(枚举前安静回队,零 list
-    调用)。钉住 worker 调用点真读 settings(接线声明 I6),兼作回滚杆验收
-    回归网:env=1 时行为与改造前逐位等价。"""
+    baidu_vip_parallel_per_binding=1(= 回滚杆 env 语义),会员绑定下仅 1 个任务
+    过认领后门控,其余 queue out。钉住 worker 调用点真读 settings(接线声明 I6),
+    兼作回滚杆验收回归网:env=1 时行为与改造前逐位等价。
+
+    构造(仿 T12 占坑法;法证:认领置 round_started_at=now,窗口序 round 非空恒
+    排前 → 刚认领者必然 rn=1 自我准入,休眠兄弟不占坑压不住它 —— 生产回滚杆
+    语义正确靠 sweeper 预算=1 每拍只派最老候选,门控兜「同拍多派」):预置 1 条
+    round 更早的 running 占坑任务 → vip_par=1 下 dispatch+claim 后到候选
+    (round 更晚 → rn=2 > 1)必 queue out;清掉占坑任务后最老候选过门控直达终态。"""
     monkeypatch.setattr(get_settings(), "baidu_vip_parallel_per_binding", 1, raising=False)
     lane = await lanes.add(vip_type=1)
+    await lanes.grant_project_uploader(lane)   # tasks[0] 真实导入的 can_upload 前置
     tasks = []
     for i in range(3):
         tasks.append(await _mk_task(
@@ -1868,24 +1903,28 @@ async def test_r13_worker_gate_reads_vip_parallel_settings_rollback_lever(
             created_at=NOW - timedelta(minutes=30 - 10 * i),
             source_dir=f"/it-r13-{i}",
         ))
+    pit = await _seed_running_rep(world, lane, created_min_ago=5.0)   # round 更早,占坑
 
-    # 年轻两条先认领:vip_par=1 → picked 只含最老代表 → queue out
+    # 占坑在场:后到候选认领(round=now 晚于 pit)→ rn=2 > vip_par=1 → queue out
     for i in (1, 2):
         async with _db() as db:
             assert await dispatch_baidu_task(db, tasks[i].id, sweeper=True)
         res = await _claim_and_run(tasks[i].id)
         assert res["status"] == "queued", \
-            f"vip_par=1 下同绑定第 {i + 1} 候选必须 queue out(worker 真读 settings): {res}"
+            f"vip_par=1 + 占坑在场,同绑定第 {i + 1} 候选必须 queue out(worker 真读 settings): {res}"
         t = await _get_task(tasks[i].id)
         assert t.status == "enumerating" and t.round_started_at is None, \
             "门控退出安静回队:不落终态、复位轮起点"
     assert baidu_spy.list_calls == 0, "queue out 发生在枚举前:零 list API 调用"
 
-    # 最老代表过门控:真实枚举进导入循环直至终态(回滚杆语义 = 每绑定 1 路)
+    # 清占坑 → 最老候选成唯一 round 非空行 → rn=1 ≤ vip_par 过门控:真实枚举
+    # 进导入循环直至终态(回滚杆语义 = 每绑定 1 路)
+    await _touch_task(pit.id, status="completed")
     _seed_listing(baidu_spy, tasks[0].source_dir, {"r13.mp4": b"r13-bytes"})
     async with _db() as db:
         assert await dispatch_baidu_task(db, tasks[0].id, sweeper=True)
     res = await _claim_and_run(tasks[0].id)
-    assert res["status"] == "completed", \
-        f"回滚杆 vip_par=1 下最老代表照常准入并执行至终态: {res}"
-    assert baidu_spy.list_calls == 1, "仅最老代表真实枚举 1 次"
+    t0 = await _get_task(tasks[0].id)
+    assert res["status"] == "completed" and t0.status == "completed", \
+        f"回滚杆 vip_par=1 下最老候选照常准入并执行至终态: {res} fail_reason={t0.fail_reason}"
+    assert baidu_spy.list_calls == 1, "仅过门控的最老候选真实枚举 1 次"
