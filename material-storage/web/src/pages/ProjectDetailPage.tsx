@@ -1146,7 +1146,9 @@ export default function ProjectDetailPage() {
       <Layout.Sider width={260} theme="light" style={{
         background: 'var(--ms-surface)',
         borderRight: '1px solid var(--ms-hairline)',
-        overflow: 'auto',
+        // Sider 只圈高度不滚(auto → hidden):Y 轴滚动收敛到 FolderTree 树区(fillHeight)。
+        // 高度链 Layout 固高 → Sider → antd sider-children(默认 height:100%)→ 根容器已通
+        overflow: 'hidden',
       }}>
         <FolderTree
           folders={folders}
@@ -1162,6 +1164,8 @@ export default function ProjectDetailPage() {
           onMoveFolder={setMoveTarget}
           enableDrag
           onMoveDrop={handleMoveDrop}
+          // 头部固定 + 树区独立滚动(仅 PC 桌面;compact Drawer/弹窗使用方不启用)
+          fillHeight
         />
       </Layout.Sider>
 
