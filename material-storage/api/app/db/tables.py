@@ -15,6 +15,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -577,6 +578,11 @@ class BaiduBackupTask(Base, TimestampMixin):
     )
     target_auto_created: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
+    )
+    # 创建同名文件夹开关(F2):开启且显式目标夹 B 时导入落 B/<source 末段名>;
+    # 项目根模式创建时静默归一 false(承接夹名=末段名,行为已等价勾选态,F4)
+    create_same_name_folder: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=sa.false(), nullable=False
     )
     status: Mapped[str] = mapped_column(
         String(16), default="enumerating", server_default="enumerating", nullable=False,

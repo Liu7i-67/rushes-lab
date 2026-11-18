@@ -175,8 +175,8 @@ export default function AdminBaiduTasksPage() {
       width: 200,
       ellipsis: { showTitle: false },
       render: (_v, row) => {
-        // 夹已删 target_folder 为 null(SET NULL),显示「已删」
-        const text = `${row.project.name} / ${row.target_folder?.name ?? '已删'}`;
+        // 夹已删 target_folder 为 null(SET NULL),显示「已删」;同名夹口径见 sameNameLeaf
+        const text = `${row.project.name} / ${row.target_folder?.name ?? '已删'}${sameNameLeaf(row)}`;
         return (
           <Tooltip title={text} placement="topLeft">
             <span style={{
@@ -437,7 +437,7 @@ function TaskDetailDrawer({ taskId, onClose }: { taskId: string; onClose: () => 
               {task.user.name}{task.user.username ? `(${task.user.username})` : ''}
             </Field>
             <Field label="目标">
-              {task.project.name} / {task.target_folder?.name ?? '已删'}
+              {task.project.name} / {task.target_folder?.name ?? '已删'}{sameNameLeaf(task)}
             </Field>
             <Field label="失败原因">
               {task.fail_reason
@@ -529,6 +529,23 @@ function taskPct(t: Pick<AdminBaiduTask,
   const total = t.total_files;
   const processed = t.done_files + t.skipped_files + t.cancelled_files;
   return total > 0 ? Math.round((processed / total) * 100) : (t.status === 'completed' ? 100 : 0);
+}
+
+/** 网盘目录末段(与 BaiduNewTaskModal 的 dirName 同口径:先去尾斜杠再取末段)。 */
+function sourceLeafName(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  const idx = trimmed.lastIndexOf('/');
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+
+/** 同名夹展示口径(F6):开关开 ∧ 显式目标夹在(未删)→ 追加 /网盘目录末段名;
+ *  末段为空(source_dir 异常为整盘根「/」)不加后缀(UC-09 防御,与 App 端 _leafOf 同口径);夹已删/其余分支空串。 */
+function sameNameLeaf(t: Pick<AdminBaiduTask,
+  'create_same_name_folder' | 'target_folder' | 'source_dir'>): string {
+  const leaf = sourceLeafName(t.source_dir);
+  return t.create_same_name_folder && t.target_folder && leaf
+    ? `/${leaf}`
+    : '';
 }
 
 /** 进度条状态色(对齐用户侧口径;cancelled 用 normal 灰条,不再播 active 动画)。 */

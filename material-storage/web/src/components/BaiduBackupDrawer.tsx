@@ -244,8 +244,15 @@ function TaskItem({ task: t, onOpenDetail, onCancel, onRetryFailed, onDelete, ac
   const total = t.total_files ?? 0;
   const done = t.done_files ?? 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : (t.status === 'completed' ? 100 : 0);
+  // 同名夹展示口径(F6):开关开 ∧ 有显式目标夹 ∧ 夹未删 → 追加 /网盘目录末段名;
+  // 末段为空(source_dir 异常为整盘根「/」)不加后缀(UC-09 防御,与 App 端 _leafOf 同口径);
+  // 夹已删维持「(已删除)」不加后缀;auto 模式后端恒回 false,分支不受影响
+  const sourceLeaf = sourceLeafName(t.source_dir);
+  const sameNameLeaf = t.create_same_name_folder && t.target_folder_id && t.target_folder_name && sourceLeaf
+    ? `/${sourceLeaf}`
+    : '';
   const targetLabel = t.target_folder_name
-    ? `${t.project_name ?? t.project_id} / ${t.target_folder_name}`
+    ? `${t.project_name ?? t.project_id} / ${t.target_folder_name}${sameNameLeaf}`
     : t.target_auto_created
       ? `${t.project_name ?? t.project_id} / 项目根(自动创建承接夹)`
       : `${t.project_name ?? t.project_id} / (已删除)`;
@@ -322,6 +329,13 @@ function TaskItem({ task: t, onOpenDetail, onCancel, onRetryFailed, onDelete, ac
 }
 
 // ─── fmt helpers(与 TaskCenterDrawer 同口径)────────────────────────────────
+/** 网盘目录末段(与 BaiduNewTaskModal 的 dirName 同口径:先去尾斜杠再取末段)。 */
+function sourceLeafName(path: string): string {
+  const trimmed = path.replace(/\/+$/, '');
+  const idx = trimmed.lastIndexOf('/');
+  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
+}
+
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 ** 2) return `${(n / 1024).toFixed(1)} KB`;

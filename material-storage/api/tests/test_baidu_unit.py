@@ -201,6 +201,8 @@ class FakeTask:
         self.project_id = uuid.uuid4()
         self.target_folder_id: uuid.UUID | None = None
         self.target_auto_created = False
+        # 【创建同名文件夹】开关默认关 = 存量行为;worker 直读该属性(workers/baidu_backup.py:1006),替身必须带默认值
+        self.create_same_name_folder = False
         self.bound_baidu_uid = "100"          # 创建时快照
         self.status = "running"
         self.fail_reason: str | None = None

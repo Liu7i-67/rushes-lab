@@ -124,16 +124,21 @@ class BaiduApi {
   /// POST /backup/tasks — 创建任务(source_dir/project_id 必选,
   /// target_folder_id 不传 = 项目根自动创建承接夹;同名默认跳过,向导无覆盖
   /// 选项——覆盖导入是任务详情内逐文件后置操作)。201 返回任务。
+  /// [createSameNameFolder]=true(创建同名文件夹开关):导入内容落
+  /// `目标文件夹/<网盘目录末段名>`;仅显式传 targetFolderId 时生效,
+  /// targetFolderId 不传(项目根模式)后端静默归一 false。
   Future<BaiduTask> createTask({
     required String sourceDir,
     required String projectId,
     String? targetFolderId,
+    bool createSameNameFolder = false,
   }) async {
     final r = await _api.guard5xx(
         _api.http.post('/api/v1/baidu/backup/tasks', data: {
           'source_dir': sourceDir,
           'project_id': projectId,
           'target_folder_id': ?targetFolderId,
+          if (createSameNameFolder) 'create_same_name_folder': true,
         }),
         '创建任务失败');
     if (r.statusCode != 200 && r.statusCode != 201) {

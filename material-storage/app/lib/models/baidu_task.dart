@@ -73,6 +73,7 @@ class BaiduTask {
     this.targetFolderId,
     this.targetFolderName,
     this.targetAutoCreated = false,
+    this.createSameNameFolder = false,
     required this.status,
     this.queued = false,
     this.failReason,
@@ -100,6 +101,7 @@ class BaiduTask {
         targetFolderId: j['target_folder_id'] as String?,
         targetFolderName: j['target_folder_name'] as String?,
         targetAutoCreated: (j['target_auto_created'] ?? false) as bool,
+        createSameNameFolder: (j['create_same_name_folder'] ?? false) as bool,
         status: (j['status'] ?? '') as String,
         queued: (j['queued'] ?? false) as bool,
         failReason: j['fail_reason'] as String?,
@@ -129,6 +131,10 @@ class BaiduTask {
   final String? targetFolderId;
   final String? targetFolderName; // null = 目标夹已删除(显示「(已删除)」)
   final bool targetAutoCreated;
+
+  /// 创建同名文件夹开关:导入落 `目标文件夹/<网盘目录末段名>`;
+  /// 项目根模式后端归一 false(展示只看显式目标夹 + 夹未删)。
+  final bool createSameNameFolder;
   final String status; // enumerating/running/completed/cancelled/failed
   final bool queued; // 派生态:活动中但当前无 runner 实际推进(显示「排队中」)
   final String? failReason;
@@ -163,11 +169,24 @@ class BaiduTask {
     return total > 0 ? (done * 100 / total).round() : (status == 'completed' ? 100 : 0);
   }
 
-  /// 目标展示串(web TaskItem targetLabel 同款)。
+  /// 目标展示串(web TaskItem targetLabel 同款)。统一口径(需求 §8):
+  /// 开关开 ∧ 有显式目标夹 ∧ 夹未删 → 追加 `/网盘目录末段名`;其余分支
+  /// 维持现状(夹已删「(已删除)」不加后缀,auto 承接夹模式原样)。
   String get targetLabel {
     final p = projectName ?? projectId;
+    if (createSameNameFolder && targetFolderName != null) {
+      final leaf = _leafOf(sourceDir);
+      if (leaf.isNotEmpty) return '$p / $targetFolderName/$leaf';
+    }
     if (targetFolderName != null) return '$p / $targetFolderName';
     return targetAutoCreated ? '$p / 项目根(自动创建承接夹)' : '$p / (已删除)';
+  }
+
+  /// source_dir 末段名(空段过滤、去尾斜杠语义);根路径等空列表场景回退
+  /// 空串(此时展示不加后缀)。
+  static String _leafOf(String sourceDir) {
+    final parts = sourceDir.split('/').where((s) => s.isNotEmpty).toList();
+    return parts.isEmpty ? '' : parts.last;
   }
 
   /// 「全部重试失败」可用性(§3.1:failed 且存在可重试行;列表未回传行数时

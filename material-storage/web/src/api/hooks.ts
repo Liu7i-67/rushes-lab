@@ -1186,6 +1186,7 @@ export const useBaiduCreateTask = () => {
       source_dir: string;
       project_id: string;
       target_folder_id?: string;   // 不传 = 项目根(自动创建承接夹)
+      create_same_name_folder?: boolean; // 开启=导入落 目标夹/<网盘目录末段名>(仅显式目标夹生效)
     }) => (await http.post<BaiduBackupTask>(`${BAIDU_BACKUP_BASE}/tasks`, body)).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: ['baidu-tasks'] }),
   });

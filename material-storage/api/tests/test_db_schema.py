@@ -272,6 +272,24 @@ def test_baidu_task_file_reserved_key_column() -> None:
     assert col.type.length == 1024
 
 
+def test_baidu_task_create_same_name_folder_column() -> None:
+    """同名夹开关列(migration 20261118_0021,需求 F12):boolean NOT NULL DEFAULT false。
+
+    存量任务行由 DEFAULT 归 false = 现状行为(零数据迁移);ORM default=False 与
+    server_default 双侧一致(创建归一/worker 落点均按任务行值驱动,docs/qdev/
+    2026-11-18-baidu-backup-same-name-folder.md §6)。
+    """
+    from sqlalchemy import Boolean
+
+    col = BaiduBackupTask.__table__.c.create_same_name_folder
+    assert isinstance(col.type, Boolean), \
+        f"create_same_name_folder 列类型应为 BOOLEAN,实际 {col.type}"
+    assert col.nullable is False
+    assert col.default is not None and col.default.arg is False, "ORM default=False"
+    assert col.server_default is not None, "必须有 server_default(存量行归 false)"
+    assert str(col.server_default.arg).lower() == "false"
+
+
 # ─── 数据库层唯一约束(F3,容器测试)────────────────────────────────────────────
 async def test_live_db_unique_constraints_on_local_identity() -> None:
     """F3:username / oidc_sub 的 UNIQUE 必须真实存在于数据库层。
