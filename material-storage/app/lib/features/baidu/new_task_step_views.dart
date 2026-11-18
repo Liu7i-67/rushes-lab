@@ -1,7 +1,8 @@
 /// 新建备份任务·步骤二视图 + 创建成功结果卡(自 baidu_new_task_page 拆件:
 /// 页面只保留状态/导航/提交,本文件只做展示):
 /// 源目录回显 + 任务名称(AppTextField)+ 目标项目弹层选择 + 承接夹树
-/// (项目根/敏感夹禁选)+ 「仅备份新增与修改」固定开启说明。
+/// (项目根/敏感夹禁选)+ 创建同名文件夹开关(项目根模式置灰)+
+/// 「仅备份新增与修改」固定开启说明。
 library;
 
 import 'package:flutter/material.dart';
@@ -30,6 +31,8 @@ class NewTaskTargetStep extends StatelessWidget {
     required this.foldersLoading,
     required this.foldersError,
     required this.target,
+    required this.createSameName,
+    required this.onCreateSameNameChanged,
     required this.onReloadProjects,
     required this.onReloadFolders,
     required this.onPickProject,
@@ -47,6 +50,11 @@ class NewTaskTargetStep extends StatelessWidget {
   final bool foldersLoading;
   final String? foldersError;
   final BaiduTarget target;
+
+  /// 创建同名文件夹开关(开关开 ∧ 显式目标夹 → 导入落 `目标夹/<网盘目录名>`;
+  /// 项目根模式置灰不可开,提交侧强制不送,后端亦归一 false)。
+  final bool createSameName;
+  final ValueChanged<bool> onCreateSameNameChanged;
   final VoidCallback onReloadProjects;
   final VoidCallback onReloadFolders;
   final VoidCallback onPickProject;
@@ -141,6 +149,31 @@ class NewTaskTargetStep extends StatelessWidget {
               value: target,
               onChanged: onTargetChanged,
             ),
+          const SizedBox(height: Tk.spaceSm),
+          // 创建同名文件夹开关(项目根模式置灰;开→落 `目标夹/<网盘目录名>`,
+          // 选中态说明随模式切换)。activeColor 随主题 primary(tk.gold 令牌)。
+          AppCard(
+            padding: const EdgeInsets.symmetric(
+              horizontal: Tk.spaceMd,
+              vertical: Tk.spaceXs,
+            ),
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: Text(
+                '创建同名文件夹',
+                style: TextStyle(fontSize: Tk.fzBody, color: tk.ink),
+              ),
+              subtitle: Text(
+                target.isRoot
+                    ? '项目根模式本身以网盘目录名建承接夹'
+                    : '导入内容将存入「目标文件夹/网盘目录名」中',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),
+              ),
+              value: createSameName,
+              onChanged: target.isRoot ? null : onCreateSameNameChanged,
+            ),
+          ),
           const SizedBox(height: Tk.spaceSm),
           Text(
             '已选目标:${target.label}',

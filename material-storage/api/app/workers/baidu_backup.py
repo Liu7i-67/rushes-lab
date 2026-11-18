@@ -1000,6 +1000,12 @@ async def _import_one_file(db: AsyncSession, runner: Runner, row: TaskFile) -> s
     filename = row.rel_path.rpartition("/")[2]
     dir_parts = row.rel_path.split("/")[:-1]
 
+    # 【创建同名文件夹】(docs/qdev/2026-11-18-baidu-backup-same-name-folder.md F2):
+    # 开启且显式目标夹 B → 落点前插源目录末段(B/<末段>/...);auto 承接夹分支
+    # 创建期已归一 false(routers create_task F4),此处不会与承接夹命名叠加。
+    if task.create_same_name_folder:
+        dir_parts = [source_dir_leaf_name(task.source_dir), *dir_parts]
+
     # ── 步骤 1:建链先行(memoize 每轮仅首次写;结果写回 target_folder_id)──────
     target_folder_id = task.target_folder_id
     if target_folder_id is None:

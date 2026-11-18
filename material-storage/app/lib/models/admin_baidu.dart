@@ -40,6 +40,7 @@ class AdminBaiduTask {
     required this.sourceDir,
     required this.project,
     this.targetFolder,
+    this.createSameNameFolder = false,
     this.totalFiles = 0,
     this.doneFiles = 0,
     this.failedFiles = 0,
@@ -62,6 +63,7 @@ class AdminBaiduTask {
         targetFolder: j['target_folder'] == null
             ? null
             : AdminTaskRef.fromJson(j['target_folder'] as Map<String, dynamic>),
+        createSameNameFolder: (j['create_same_name_folder'] ?? false) as bool,
         totalFiles: (j['total_files'] ?? 0) as int,
         doneFiles: (j['done_files'] ?? 0) as int,
         failedFiles: (j['failed_files'] ?? 0) as int,
@@ -81,6 +83,10 @@ class AdminBaiduTask {
   final String sourceDir;
   final AdminTaskRef project;
   final AdminTaskRef? targetFolder;
+
+  /// 创建同名文件夹开关:导入落 `目标文件夹/<网盘目录末段名>`(展示口径
+  /// 与用户侧 BaiduTask.targetLabel 一致;项目根模式后端归一恒 false)。
+  final bool createSameNameFolder;
   final int totalFiles;
   final int doneFiles;
   final int failedFiles;
@@ -130,6 +136,7 @@ class AdminBaiduTaskDetail extends AdminBaiduTask {
     required super.sourceDir,
     required super.project,
     super.targetFolder,
+    super.createSameNameFolder = false,
     super.totalFiles = 0,
     super.doneFiles = 0,
     super.failedFiles = 0,
@@ -162,6 +169,7 @@ class AdminBaiduTaskDetail extends AdminBaiduTask {
         targetFolder: j['target_folder'] == null
             ? null
             : AdminTaskRef.fromJson(j['target_folder'] as Map<String, dynamic>),
+        createSameNameFolder: (j['create_same_name_folder'] ?? false) as bool,
         totalFiles: (j['total_files'] ?? 0) as int,
         doneFiles: (j['done_files'] ?? 0) as int,
         failedFiles: (j['failed_files'] ?? 0) as int,

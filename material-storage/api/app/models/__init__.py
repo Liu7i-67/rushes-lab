@@ -568,6 +568,13 @@ class BaiduTaskCreateIn(BaseModel):
     source_dir: str = Field(..., min_length=1, max_length=1024, description="网盘目录绝对路径")
     project_id: uuid.UUID
     target_folder_id: uuid.UUID | None = None
+    # 创建同名文件夹开关:开启后导入落 目标文件夹/<网盘目录末段名>(仅显式目标夹
+    # 生效);项目根模式(target_folder_id 不传)后端静默归一 false(F4)
+    create_same_name_folder: bool = Field(
+        False,
+        description="开启后导入内容落 目标文件夹/<网盘目录末段名>;"
+                    "target_folder_id 不传时后端静默归一 false(F4)",
+    )
 
 
 class BaiduTaskOut(BaseModel):
@@ -580,6 +587,9 @@ class BaiduTaskOut(BaseModel):
     target_folder_id: uuid.UUID | None = None
     target_folder_name: str | None = None      # NULL = 目标夹已删除(UI 显示「(已删除)」)
     target_auto_created: bool = False
+    # 创建同名文件夹开关(归一后的生效值):开启且显式目标夹时实际落点为
+    # 目标夹/<末段名>(F2/F6);项目根模式恒 false,前端据此决定目标串后缀
+    create_same_name_folder: bool = False
     # W1 创建时跨项目路径预警:目标前缀与其他项目文件夹重叠时回填对方项目名
     # (≤3,rtrim('/') 归一比较,不过滤归档/软删)。仅创建响应由 handler 后赋值
     # 回填,列表/详情侧不落库、保持默认(见 routers/baidu_backup.py create_task)。

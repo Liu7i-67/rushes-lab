@@ -31,6 +31,13 @@ Future<bool> showBaiduTaskDetailSheet(
   return ok ?? false;
 }
 
+/// source_dir 末段名(admin_baidu_tasks_page.dart _sourceLeafOf 同口径:
+/// split('/') 空段过滤取末段,等效去尾斜杠;整盘根等空列表回退空串)。
+String _sourceLeafOf(String sourceDir) {
+  final parts = sourceDir.split('/').where((s) => s.isNotEmpty).toList();
+  return parts.isEmpty ? '' : parts.last;
+}
+
 class _BaiduTaskDetailSheet extends StatefulWidget {
   const _BaiduTaskDetailSheet({required this.task});
 
@@ -163,6 +170,14 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
 
   Widget _summary(AdminBaiduTask t) {
     final tk = context.tk;
+    // 同名夹口径(需求 §8;列表页 _TaskRow 同款):开关开 ∧ 显式目标夹在
+    // (未删)→ 追加 /网盘目录末段名;夹已删/末段为空不加
+    final tf = t.targetFolder;
+    final leaf = _sourceLeafOf(t.sourceDir);
+    var target = tf?.name ?? '已删';
+    if (t.createSameNameFolder && tf != null && leaf.isNotEmpty) {
+      target = '$target/$leaf';
+    }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -203,7 +218,7 @@ class _BaiduTaskDetailSheetState extends State<_BaiduTaskDetailSheet> {
         Text(
           '${fmtBytes(t.doneBytes)}'
           '${t.totalBytes > 0 ? ' / ${fmtBytes(t.totalBytes)}' : ''}'
-          ' · ${t.project.name} / ${t.targetFolder?.name ?? '已删'}',
+          ' · ${t.project.name} / $target',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: TextStyle(fontSize: Tk.fzMd, color: tk.ink3),

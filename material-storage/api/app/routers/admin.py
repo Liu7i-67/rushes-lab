@@ -1249,6 +1249,9 @@ class AdminBaiduTaskOut(BaseModel):
     source_dir: str
     project: AdminBaiduTaskRefOut               # 项目行总在(FK RESTRICT)
     target_folder: AdminBaiduTaskRefOut | None = None
+    # 创建同名文件夹开关(归一后生效值):开且显式目标夹时落点为 目标夹/<末段名>,
+    # 前端目标列/详情据此追加 /末段名 后缀(F6)
+    create_same_name_folder: bool = False
     total_files: int = 0
     done_files: int = 0
     failed_files: int = 0
@@ -1353,6 +1356,7 @@ async def _serialize_admin_baidu_tasks(
             source_dir=t.source_dir,
             project=AdminBaiduTaskRefOut(id=t.project_id, name=project_names[t.project_id]),
             target_folder=target_folder,
+            create_same_name_folder=t.create_same_name_folder,
             total_files=t.total_files or 0,
             done_files=t.done_files or 0,
             failed_files=t.failed_files or 0,

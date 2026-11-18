@@ -6,13 +6,14 @@
  * sensitive 及其整棵子树禁选;选项目根 = 自动创建承接夹)。
  * 底部文案按 §3.3:限速 / 单轮上限 / 单文件上限 / 覆盖导入警示。
  */
-import { App, Alert, Button, Empty, Modal, Select, Space, Spin, Tree, Typography } from 'antd';
+import { App, Alert, Button, Empty, Modal, Select, Space, Spin, Switch, Tree, Typography } from 'antd';
 import type { TreeDataNode } from 'antd';
 import { File as FileIcon, FileText, Folder as FolderIcon, Image as ImageIcon, Play, RefreshCw } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { useBaiduCreateTask, useBaiduNetdiskFolders, useFolders, useProjects } from '../api/hooks';
 import type { BaiduNetdiskFolder, Me } from '../api/types';
+import { sourceLeafName } from '../lib/path';
 import { FolderTree } from './FolderTree';
 
 interface Props {
@@ -45,6 +46,9 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
   const [projectId, setProjectId] = useState<string | null>(null);
   const { data: folders } = useFolders(projectId ?? undefined);
   const [target, setTarget] = useState<Target>({ kind: 'root' });
+  // 创建同名文件夹开关(F10,默认不选):开启后导入内容落 目标夹/<网盘目录末段名>;
+  // 项目根模式本身以网盘目录名建承接夹(行为已等价勾选态),置灰不可选(F4)
+  const [sameName, setSameName] = useState(false);
 
   // destroyOnHidden:关闭即卸载,状态随重开复位,无需 effect 重置。
   // 首挂(rootLoading 初始 true)拉取网盘根目录;setState 均在异步回调内。
@@ -77,9 +81,11 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
     [folders],
   );
 
+  // 同名夹口径(F10):开关开且选了夹 → 预览落点追加 /网盘目录末段名;
+  // sourceDir 未选或末段为空(异常为整盘根「/」)不加,避免悬挂「/「」」(UC-09 防御)
   const targetLabel = target.kind === 'root'
-    ? `项目根(自动创建承接文件夹${sourceDir ? `「${dirName(sourceDir)}」` : ''})`
-    : `目录「${target.name}」`;
+    ? `项目根(自动创建承接文件夹${sourceDir ? `「${sourceLeafName(sourceDir)}」` : ''})`
+    : `目录「${target.name}」${sameName && sourceDir && sourceLeafName(sourceDir) ? `/「${sourceLeafName(sourceDir)}」` : ''}`;
 
   const submit = async () => {
     if (!sourceDir || sourceDir === '/') {
@@ -95,6 +101,8 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
         source_dir: sourceDir,
         project_id: projectId,
         ...(target.kind === 'folder' ? { target_folder_id: target.id } : {}),
+        // F10:仅显式目标夹 + 开关开才上送;项目根模式不上送(后端归一 false,语义等价)
+        ...(target.kind === 'folder' && sameName ? { create_same_name_folder: true } : {}),
       });
       // 排队预期管理(方案 §6-P2-b):前端不感知绑定是否已有任务在跑,无条件提示
       message.success('备份任务已创建,清单准备中;已有任务执行中时,新任务将排队,前序完成后约数分钟至一刻钟内自动开始');
@@ -249,6 +257,20 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
               </div>
             </div>
           )}
+          {/* 创建同名文件夹开关(F10):项目根模式置灰并提示自身语义(F4) */}
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <div style={{ paddingTop: 1 }}>
+              <Switch size="small" checked={sameName} disabled={target.kind === 'root'} onChange={setSameName} />
+            </div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, color: 'var(--ms-ink)' }}>创建同名文件夹</div>
+              <div style={{ fontSize: 11, color: 'var(--ms-ink-subtle)' }}>
+                {target.kind === 'root'
+                  ? '项目根模式本身以网盘目录名建承接夹'
+                  : '导入内容将存入「目标文件夹/网盘目录名」中'}
+              </div>
+            </div>
+          </div>
           <div style={{ fontSize: 11.5, color: 'var(--ms-ink-muted)' }}>
             已选目标:{targetLabel}
           </div>
@@ -370,13 +392,6 @@ function fmtBytes(n: number): string {
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(2)} GB`;
   return `${(n / 1024 ** 4).toFixed(2)} TB`;
-}
-
-/** 网盘目录末段(承接夹命名口径,§5.2:先 rstrip('/') 再取末段)。 */
-function dirName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '');
-  const idx = trimmed.lastIndexOf('/');
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
 function FieldLabel({ children }: { children: React.ReactNode }) {

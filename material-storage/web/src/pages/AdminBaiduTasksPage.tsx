@@ -31,6 +31,7 @@ import {
   BAIDU_TASK_STATUS_COLOR,
   BAIDU_TASK_STATUS_LABEL,
 } from '../lib/labels';
+import { sameNameSuffix } from '../lib/path';
 import { useCompactViewport } from '../lib/use-viewports';
 
 const PAGE_SIZE = 20;       // 列表页大小(对齐 AdminUsersPage 服务端分页口径)
@@ -175,8 +176,12 @@ export default function AdminBaiduTasksPage() {
       width: 200,
       ellipsis: { showTitle: false },
       render: (_v, row) => {
-        // 夹已删 target_folder 为 null(SET NULL),显示「已删」
-        const text = `${row.project.name} / ${row.target_folder?.name ?? '已删'}`;
+        // 夹已删 target_folder 为 null(SET NULL),显示「已删」;同名夹口径见 lib/path.ts sameNameSuffix
+        const text = `${row.project.name} / ${row.target_folder?.name ?? '已删'}${sameNameSuffix({
+          enabled: !!row.create_same_name_folder && !!row.target_folder,
+          folderName: row.target_folder?.name,
+          sourceDir: row.source_dir,
+        })}`;
         return (
           <Tooltip title={text} placement="topLeft">
             <span style={{
@@ -437,7 +442,11 @@ function TaskDetailDrawer({ taskId, onClose }: { taskId: string; onClose: () => 
               {task.user.name}{task.user.username ? `(${task.user.username})` : ''}
             </Field>
             <Field label="目标">
-              {task.project.name} / {task.target_folder?.name ?? '已删'}
+              {task.project.name} / {task.target_folder?.name ?? '已删'}{sameNameSuffix({
+                enabled: !!task.create_same_name_folder && !!task.target_folder,
+                folderName: task.target_folder?.name,
+                sourceDir: task.source_dir,
+              })}
             </Field>
             <Field label="失败原因">
               {task.fail_reason

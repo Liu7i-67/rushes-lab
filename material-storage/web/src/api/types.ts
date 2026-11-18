@@ -516,6 +516,7 @@ export interface BaiduBackupTask {
   target_folder_id: string | null;       // 被删后置 NULL(SET NULL),UI 显示「(已删除)」
   target_folder_name?: string | null;    // 后端 enrich;NULL=目标夹已删除
   target_auto_created?: boolean;         // true=自动创建的承接夹(项目根语义)
+  create_same_name_folder?: boolean;     // true=导入落 目标夹/<网盘目录末段名>(创建时开关;项目根模式恒 false)
   // 创建时刻检测:目标前缀与其他项目文件夹重叠(rtrim 归一比较,方案 W1)。创建响应恒返回;
   // 列表/详情侧为默认值 false/null(不回填),前端仅在创建流读用
   cross_project_prefix_overlap: boolean;
@@ -610,6 +611,7 @@ export interface AdminBaiduTask {
   source_dir: string;
   project: AdminBaiduTaskProject;
   target_folder: AdminBaiduTaskFolder | null;
+  create_same_name_folder?: boolean;     // true=导入落 目标夹/<网盘目录末段名>(创建时开关)
   total_files: number;
   done_files: number;
   failed_files: number;
@@ -640,6 +642,7 @@ export interface AdminBaiduTaskDetail extends AdminBaiduTask {
   bound_baidu_uid: string | null;      // 创建时从 binding 快照(换绑甄别锚点)
   binding: AdminBaiduTaskBinding | null;
   cancel_reason: string | null;        // user_cancel / binding_replaced
+  // (create_same_name_folder 继承自 AdminBaiduTask,此处不重声明)
   // ── 调度观测字段(BaiduBackupTask 列,均可空)──
   retry_count: number;                 // 复活次数
   enum_done: boolean;                  // 枚举完成标记(复活时复位 false 重枚举)

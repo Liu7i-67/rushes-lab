@@ -32,6 +32,13 @@ import 'baidu_task_labels.dart';
 /// 列表页大小(web PAGE_SIZE 同款)。
 const kAdminTasksPageSize = 20;
 
+/// source_dir 末段名(用户侧 baidu_task.dart BaiduTask._leafOf 同口径:
+/// split('/') 空段过滤取末段,等效去尾斜杠;整盘根等空列表回退空串)。
+String _sourceLeafOf(String sourceDir) {
+  final parts = sourceDir.split('/').where((s) => s.isNotEmpty).toList();
+  return parts.isEmpty ? '' : parts.last;
+}
+
 class AdminBaiduTasksPage extends StatefulWidget {
   const AdminBaiduTasksPage({super.key});
 
@@ -249,7 +256,13 @@ class _TaskRow extends StatelessWidget {
     final t = task;
     // enumerating 阶段清单未就绪(聚合列 NULL→0),不渲染进度(web 同款改进)
     final progress = t.status == 'enumerating' ? '清单准备中' : '${t.progressPct}%';
-    final target = t.targetFolder?.name ?? '已删';
+    var target = t.targetFolder?.name ?? '已删';
+    // 同名夹口径(需求 §8;web AdminBaiduTasksPage.sameNameLeaf 同款):
+    // 开关开 ∧ 显式目标夹在(未删)→ 追加 /网盘目录末段名;末段为空不加
+    final leaf = _sourceLeafOf(t.sourceDir);
+    if (t.createSameNameFolder && t.targetFolder != null && leaf.isNotEmpty) {
+      target = '$target/$leaf';
+    }
     return AppRow(
       leading: const Icon(Icons.cloud_outlined),
       title: t.user.name,

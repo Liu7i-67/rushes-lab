@@ -22,6 +22,7 @@ import {
   BAIDU_TASK_STATUS_LABEL,
   baiduTaskDisplayStatus,
 } from '../lib/labels';
+import { sameNameSuffix } from '../lib/path';
 
 const PAGE_SIZE = 20;
 
@@ -221,6 +222,13 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
   const done = task.done_files ?? 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : (task.status === 'completed' ? 100 : 0);
   const terminal = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed';
+  // 同名夹展示口径(F6,正本见 lib/path.ts):开关开 ∧ 有显式目标夹 ∧ 夹未删 → /网盘目录末段名,
+  // 末段空/夹已删/auto 均为空串,维持基线分支
+  const sameNameLeaf = sameNameSuffix({
+    enabled: !!task.create_same_name_folder && !!task.target_folder_id && !!task.target_folder_name,
+    folderName: task.target_folder_name,
+    sourceDir: task.source_dir,
+  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
@@ -244,7 +252,7 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
         <div style={{ fontSize: 12, color: 'var(--ms-ink-muted)', marginBottom: 6 }}>
           目标:{task.project_name ?? task.project_id}
           {task.target_folder_name
-            ? ` / ${task.target_folder_name}`
+            ? ` / ${task.target_folder_name}${sameNameLeaf}`
             : task.target_auto_created ? ' / 项目根(自动创建承接夹)' : ' / (已删除)'}
         </div>
         <Progress

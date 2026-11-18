@@ -50,6 +50,8 @@ class _BaiduNewTaskPageState extends State<BaiduNewTaskPage> {
   var _foldersLoading = false;
   String? _foldersError;
   var _target = const BaiduTarget.root();
+  // 创建同名文件夹开关(默认不选;项目根模式提交时强制不送,后端亦归一 false)
+  var _createSameName = false;
   var _submitting = false;
 
   @override
@@ -182,6 +184,8 @@ class _BaiduNewTaskPageState extends State<BaiduNewTaskPage> {
         sourceDir: source,
         projectId: projectId,
         targetFolderId: _target.isRoot ? null : _target.folder!.id,
+        // 开关仅显式目标夹模式生效(项目根模式不上送语义,后端归一 false)
+        createSameNameFolder: !_target.isRoot && _createSameName,
       );
       RefreshBus.I.invalidate('baidu-tasks');
       if (!mounted) return;
@@ -232,6 +236,9 @@ class _BaiduNewTaskPageState extends State<BaiduNewTaskPage> {
                     foldersLoading: _foldersLoading,
                     foldersError: _foldersError,
                     target: _target,
+                    createSameName: _createSameName,
+                    onCreateSameNameChanged: (v) =>
+                        setState(() => _createSameName = v),
                     onReloadProjects: _loadProjects,
                     onReloadFolders: () {
                       final id = _projectId;

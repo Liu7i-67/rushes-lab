@@ -683,6 +683,7 @@ async def _build_task_outs(
             target_folder_id=t.target_folder_id,
             target_folder_name=folder_names.get(t.target_folder_id) if t.target_folder_id else None,
             target_auto_created=t.target_auto_created,
+            create_same_name_folder=t.create_same_name_folder,
             status=t.status,
             queued=derive_queued(
                 status=t.status, speed_bps=t.speed_bps,
@@ -786,6 +787,10 @@ async def create_task(
         )
         return HTTPException(403, "no permission(目标目录不可用或权限不足)")
 
+    # ── F4 归一:开关仅在显式目标夹模式生效;项目根模式(承接夹名=source 末段名)
+    # 行为已等价勾选态,静默归一 false(不报错,前端在该模式置灰开关)
+    effective = bool(payload.create_same_name_folder) and payload.target_folder_id is not None
+
     # ── 目标解析(§5.2):显式目录 / 项目根自动承接夹 ─────────────────────────
     if payload.target_folder_id is not None:
         folder = await db.get(Folder, payload.target_folder_id)
@@ -806,7 +811,32 @@ async def create_task(
                               payload.project_id)
         target_folder_id: uuid.UUID | None = folder.id
         target_auto_created = False
-        target_prefix = folder.minio_prefix
+        leaf_name = source_dir_leaf_name(source_dir)
+        if effective:
+            # F5 快速失败两条(显式 B + 开关开,权限校验通过后才做,防无权限者借
+            # 报错探测;文案与 auto 分支同口径,不含「敏感」字样):
+            # 1) 末段名超 255 无法作为 B 的子夹名(folders.name String(255))
+            if len(leaf_name) > 255:
+                raise HTTPException(400, "网盘目录名过长,无法作为目标文件夹名")
+            # 2) B 的直接子夹已有同名敏感夹 → 拦;非敏感同名不拦(worker 建链
+            #    ensure_folder_chain 复用既有夹继续导入,F3)
+            same_name = (
+                await db.execute(
+                    select(Folder).where(
+                        Folder.project_id == project.id,
+                        Folder.parent_folder_id == folder.id,
+                        Folder.name == leaf_name,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if same_name is not None and same_name.is_sensitive:
+                raise HTTPException(400, "目标文件夹名不可用,请改名或另选目标")
+        # F8 W1:开关开启时实际落点为 B/<末段名>/,overlap 比较前缀须取真实落点
+        # (裸 B 前缀会误报/漏报);auto 分支承接夹前缀已含末段名,不受影响
+        target_prefix = (
+            f"{folder.minio_prefix.rstrip('/')}/{leaf_name}/"
+            if effective else folder.minio_prefix
+        )
     else:
         allowed = await _is_org_admin() or await permissions.check(
             user_subject=user.subject, relation="can_upload",
@@ -880,6 +910,7 @@ async def create_task(
         project_id=project.id,
         target_folder_id=target_folder_id,
         target_auto_created=target_auto_created,
+        create_same_name_folder=effective,
         status=STATUS_ENUMERATING,
     )
     db.add(task)
@@ -906,7 +937,8 @@ async def create_task(
         details={
             "task_id": str(task.id), "source_dir": source_dir,
             "target_folder_id": str(target_folder_id) if target_folder_id else None,
-            "target_auto_created": target_auto_created, "dispatch_seq": outcome.seq,
+            "target_auto_created": target_auto_created,
+            "create_same_name_folder": effective, "dispatch_seq": outcome.seq,
         },
         request_ip=ctx.get("request_ip"),
         user_agent=ctx.get("user_agent"),
@@ -1000,15 +1032,21 @@ async def list_task_files(
         )
         prefixes = {row.id: row.minio_prefix for row in prows}
     task_base = prefixes.get(task.target_folder_id) if task.target_folder_id else None
+    # F7:同名夹任务回退路径要插的末段名段(函数外算一次,task_base 同级)
+    task_leaf_name = source_dir_leaf_name(task.source_dir)
 
     def _target_path(f: BaiduBackupTaskFile) -> str | None:
         """预计导入路径两级回退(§5.2):行级 folder prefix → 任务级 target prefix
         → None(前端显示源路径并标注「(目标已删除)」)。"""
         prefix = prefixes.get(f.target_folder_id) if f.target_folder_id else None
         if prefix is None:
+            if task_base is None:
+                return None
+            # F7:行未落位回退任务级 base 时插末段名段(实际落点 B/<末段>/<rel_path>);
+            # 行级 prefix 已落位的天然含末段名,维持现状
+            if task.create_same_name_folder:
+                return f"{task_base.rstrip('/')}/{task_leaf_name}/{f.rel_path}"
             prefix = task_base
-        if prefix is None:
-            return None
         return f"{prefix.rstrip('/')}/{f.rel_path}"
 
     items = [
