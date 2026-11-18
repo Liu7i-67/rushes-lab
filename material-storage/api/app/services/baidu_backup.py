@@ -441,10 +441,11 @@ async def release_for_queueing(
 ) -> bool:
     """并发门控退出(§6 确定性准入):复位 round_started_at=NULL 并清 runner/租约;
     门控退出统一降级(并发方案 §2.3):status='running' 的行同步降为 enumerating
-    (enum_done 保留)—— 门控退出若留「无租约的 running 行」,既占
-    uq_baidu_task_running 唯一坑位,又会让更老的 enumerating 兄弟在枚举收尾时
-    反复撞索引(绑定级活锁);降级后的行经 §2.5 enum_done 短路(已枚举完)或
-    重枚举恢复,无损。注意仅本路径(门控退出)降级 —— §2.4 belt 路径不降级。
+    (enum_done 保留)—— 门控退出行未获准入,留「无租约的 running 行」= 假占
+    运行态(sweeper 反复重派空转;原「占 uq_baidu_task_running 唯一坑位/绑定级
+    撞索引活锁」顾虑已随迁移 0022 删索引消失);降级后的行经 §2.5 enum_done
+    短路(已枚举完)或重枚举恢复,无损。注意仅本路径(门控退出)降级 ——
+    §2.4 belt 路径不降级。
 
     UPDATE 带 CAS 谓词(与全篇守卫风格一致);不留半租约干扰计数与接管判定。
     """
@@ -466,11 +467,12 @@ async def release_for_queueing(
 
 
 async def admission_top_task_ids(
-    db: AsyncSession, *, limit: int, nonvip_limit: int,
+    db: AsyncSession, *, limit: int, nonvip_limit: int, vip_par: int,
 ) -> list[uuid.UUID]:
-    """VIP 分道准入(并发方案 §2.3 + §3.1):活动中任务先按绑定取最老代表
-    (DISTINCT ON binding_id),再 vip/nrm 双道各自按代表序截流后并集 —— 语义
-    红线:总 picked ≤ limit 且其中非会员 ≤ nonvip_limit ⇒ 会员恒有 ≥2 槽可用。
+    """VIP 分道准入(并发方案 §2.3 + §3.1;会员并发方案 §3.3):活动中任务先按
+    绑定窗口编号取代表(每绑定至多 vip_par 个,代表序不变),会员绑定至多占
+    vip_par 坑、非会员绑定恒 1 坑,再 vip/nrm 双道各自按代表序截流后并集 ——
+    语义红线:总 picked ≤ limit 且其中非会员 ≤ nonvip_limit ⇒ 会员恒有 ≥2 槽可用。
 
     - is_vip = COALESCE(bindings.vip_type, 0) >= 1:NULL/0 = 未知或普通 → 非会员道
       (保守归类保护会员槽位,§3.1/D9)
@@ -479,47 +481,50 @@ async def admission_top_task_ids(
       UNION ALL;裸写臂级 LIMIT 会作用于整个并集(会员代表数 ≥ 总限时把 picked
       截到 0,含会员在内谁都不被准入)
     - 接线声明(§3.1):认领后校验(workers gate 的成员判定)的判定集合必须
-      就是本函数返回的 picked 集合;limit/nonvip_limit 来自 Settings
+      就是本函数返回的 picked 集合;limit/nonvip_limit/vip_par 来自 Settings
     """
-    # 每绑定最老代表 + 分道标记(round 非空的 running 任务恒为该绑定代表 → 稳态
-    # 下槽位 = 不同绑定;单用户多任务只占一个并发坑)。CTE 形态(与 §3.1 SQL 草样
-    # 一致):vip/nrm/count 三臂共用,PG 引用多次时物化一次,免 tasks 三重扫描
+    # 每绑定按代表序窗口编号 rn + 分道标记(round 非空的 running 任务恒排该绑定
+    # 前列 → 稳态下每绑定前 vip_par 个代表 = 正在跑的任务优先占坑,后续按创建序
+    # 排队;会员绑定至多占 vip_par 坑、非会员绑定恒 1 坑)。CTE 形态(与 §3.1 SQL
+    # 草样一致):vip/nrm/count 三臂共用,PG 引用多次时物化一次,免 tasks 三重扫描
+    rn = func.row_number().over(
+        partition_by=Task.binding_id,
+        order_by=(Task.round_started_at.nulls_last(), Task.created_at, Task.id),
+    ).label("rn")
     reps = (
         select(
             Task.id,
             Task.round_started_at,
             Task.created_at,
             (func.coalesce(BaiduBinding.vip_type, 0) >= 1).label("is_vip"),
+            rn,
         )
         .join(BaiduBinding, BaiduBinding.id == Task.binding_id)
         .where(Task.status.in_(ACTIVE_STATUSES))
-        .distinct(Task.binding_id)
-        .order_by(
-            Task.binding_id, Task.round_started_at.nulls_last(), Task.created_at, Task.id,
-        )
         .cte("reps")
     )
     rep_order = (reps.c.round_started_at.nulls_last(), reps.c.created_at, reps.c.id)
-    # 会员道:代表序截前 limit 条
+    # 会员道:rn ≤ vip_par 后代表序截前 limit 条
     vip_pick = (
         select(
             reps.c.id.label("id"),
             reps.c.round_started_at.label("round_started_at"),
             reps.c.created_at.label("created_at"),
         )
-        .where(reps.c.is_vip)
+        .where(reps.c.is_vip, reps.c.rn <= vip_par)
         .order_by(*rep_order)
         .limit(limit)
         .subquery("vip_pick")
     )
-    # 非会员道:先按道内上限截流(非会员 ≤ nonvip_limit)
+    # 非会员道:每绑定恒 1 代表(rn ≤ 1 硬编码 = 原语义,不设参数)+ 道内上限截流
+    # (非会员 ≤ nonvip_limit)
     nrm_pick = (
         select(
             reps.c.id.label("id"),
             reps.c.round_started_at.label("round_started_at"),
             reps.c.created_at.label("created_at"),
         )
-        .where(~reps.c.is_vip)
+        .where(~reps.c.is_vip, reps.c.rn <= 1)
         .order_by(*rep_order)
         .limit(nonvip_limit)
         .subquery("nrm_pick")

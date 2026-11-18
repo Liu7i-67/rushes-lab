@@ -166,41 +166,22 @@ def test_baidu_binding_unique_user() -> None:
     assert col.nullable is False  # NOT NULL 防线:uinfo 失败 → 绑定整体失败
 
 
-def test_baidu_task_running_partial_unique_index() -> None:
-    """同绑定 running 唯一兜底(uq_baidu_task_running,并发方案 §2.2 第 2 条/T7)。
+def test_baidu_task_running_unique_index_absent() -> None:
+    """uq_baidu_task_running 必须已从模型元数据删除(会员同绑定 3 路并发,迁移 0022/R12)。
 
-    原 uq_baidu_task_active(全活动唯一)已随迁移 0017 删除(多任务排队,§2.5);
-    新兜底恰好护住最危险的「同绑定双下载循环」,枚举期互斥由 VIP 分道准入层负责
-    (D3:DB 护下载互斥、准入护执行互斥)。断言口径 = 模型元数据。
+    原「同绑定 running 唯一兜底」(并发方案 §2.2 第 2 条)随 2026-11-18 会员 3 路
+    并发方案移除:partial 唯一谓词只能引用本表行内列、无法表达 vip 维度,保留即
+    钉死会员 1 路 —— belt 职责移交参数化准入门控(会员 ≤ vip_par、非会员恒 1,
+    设计正本 §3.2/D8);迁移 0022 删实库索引,模型元数据同步删该 Index。
+    原 uq_baidu_task_active(全活动唯一)已随迁移 0017 删除,一并守防。
     """
     indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
     assert "uq_baidu_task_active" not in indices, (
         "旧全活动唯一索引必须已删(并发方案 §2.2 第 1 条,否则第二个任务建不出来)"
     )
-    idx = indices.get("uq_baidu_task_running")
-    assert idx is not None, "缺 uq_baidu_task_running(并发方案 §2.2 第 2 条)"
-    assert idx.unique is True
-    # partial 谓词:WHERE status = 'running'
-    where_sql = str(idx.dialect_options["postgresql"]["where"])
-    assert "running" in where_sql
-    # 谓词列含 binding_id(UNIQUE(binding_id) WHERE ...)
-    assert [c.name for c in idx.columns] == ["binding_id"]
-
-
-def test_baidu_task_running_index_predicate_is_deliberate_subset() -> None:
-    """uq_baidu_task_running 的 partial 谓词恰为 {'running'}(D3 刻意子集,T7)。
-
-    防回归:谓词被「顺手」改回 ACTIVE_STATUSES 全集会让枚举期第二个任务建不出来
-    (多任务排队语义被静默拆除);只应护 running 下载互斥。
-    """
-    import re
-
-    indices = {i.name: i for i in BaiduBackupTask.__table__.indexes}
-    idx = indices["uq_baidu_task_running"]
-    where_sql = str(idx.dialect_options["postgresql"]["where"])
-    statuses_in_predicate = set(re.findall(r"'([a-z_]+)'", where_sql))
-    assert statuses_in_predicate == {"running"}, (
-        f"uq_baidu_task_running 谓词状态集应为刻意子集 {{'running'}}(D3),实际 {sorted(statuses_in_predicate)}"
+    assert "uq_baidu_task_running" not in indices, (
+        "running-only 唯一兜底必须已删(会员同绑定 3 路并发,迁移 0022;"
+        "同绑定 running 数上限的唯一防线 = 参数化准入门控,D8)"
     )
 
 

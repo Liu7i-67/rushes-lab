@@ -60,7 +60,7 @@ skip;进程级故障注入类另需 Settings 级百度端点注入,未就绪时�
 | 入队失败/Redis 队列丢失 → sweeper 下一轮必须接管【集成】     | test_enqueue_failure_queue_loss_sweeper_takeover_next_round |
 | 入队返回 None 分支(不重试派发步,交 sweeper)【集成】         | test_enqueue_returns_none_branch |
 | sweeper 对 cancel_requested+无租约直接终态化【集成】          | test_sweeper_cancel_requested_direct_finalize |
-| 同绑定多任务排队:创建放行 + running-only 唯一兜底(并发方案 §2.5)【集成】 | test_same_binding_multi_task_queue_running_unique_backstop |
+| 同绑定多任务排队:创建放行 + 可多条 running 直插(运行由准入门控约束;并发方案 §2.5/会员 3 路并发迁移 0022)【集成】 | test_same_binding_multi_task_queue_multi_running_admission_gated |
 | ≥3 排队任务跨道准入:4 槽+分道下全部入队运行、互不挤占【集成】 | test_admission_three_queued_lanes_all_admitted_deterministic |
 | multipart 断点续传真实恢复(bytes_done 偏移续传)【集成】      | test_multipart_breakpoint_real_resume_from_bytes_done |
 | 死会话(NoSuchUpload)自动清零重传【集成】                     | test_dead_session_no_such_upload_resets_retransmit |
@@ -2628,14 +2628,13 @@ async def test_sweeper_cancel_requested_direct_finalize(world: World, stack) -> 
     assert _list_parts_sync(world.project.minio_bucket, key, up) is None
 
 
-async def test_same_binding_multi_task_queue_running_unique_backstop(
+async def test_same_binding_multi_task_queue_multi_running_admission_gated(
     world: World, client, enable_baidu, stack,
 ) -> None:
-    """同绑定多任务排队(并发方案 §2.5/T1/T10):创建不再因「有活动任务」409,
-    第二个任务 201 入队;DB 硬兜底降级为 running-only 唯一(uq_baidu_task_running),
-    enumerating 排队行不再受唯一索引限制。【集成】P1"""
-    from sqlalchemy.exc import IntegrityError
-
+    """同绑定多任务排队(并发方案 §2.5/T1/T10;会员 3 路并发重做):创建不再因
+    「有活动任务」409,第二个任务 201 入队;uq_baidu_task_running 唯一兜底已随
+    迁移 0022 删除 —— 同绑定多条 running 可直插成功,运行行为由准入门控约束
+    (会员 ≤ vip_par、非会员恒 1,设计正本 §3.2/D8)。【集成】P1"""
     await _mk_task(world, status="running")
     r = await client.post(f"{BA}/tasks", json={
         "source_dir": "/it-src-2", "project_id": str(world.project.id),
@@ -2645,15 +2644,14 @@ async def test_same_binding_multi_task_queue_running_unique_backstop(
         f"同绑定第二个任务必须可创建(排队语义,§2.5),实际 {r.status_code}: {r.text}"
     assert r.json()["status"] == "enumerating", "创建即 enumerating(排队,dormant)"
 
-    # 新硬兜底:绕过应用层直插同绑定第二条 running → 撞 uq_baidu_task_running
-    # (§2.2 第 2 条:恰好护住最危险的「同绑定双下载循环」)
-    with pytest.raises(IntegrityError):
-        await _mk_task(world, status="running", source_dir="/it-src-4")
-
-    # enumerating(排队)行不再受唯一索引限制(§2.2:枚举期互斥由准入层负责)
-    queued = await _mk_task(world, status="enumerating", enum_done=False,
-                            source_dir="/it-src-5")
-    assert queued.id is not None, "同绑定 dormant 排队行必须可直插(旧 uq_baidu_task_active 已删)"
+    # belt 已删:绕过应用层直插同绑定第二/三条 running 必须成功 —— 并发上限的
+    # 唯一防线 = 准入门控 picked 集合(认领时点判定,§3.2 残余风险接受并记录)
+    second = await _mk_task(world, status="running", source_dir="/it-src-4")
+    third = await _mk_task(world, status="enumerating", enum_done=False,
+                           source_dir="/it-src-5")
+    assert second.id is not None and third.id is not None, \
+        "同绑定多条 running/排队行必须可直插(uq_baidu_task_running 已随迁移 0022 删除;" \
+        "枚举期与运行期互斥均由准入层负责)"
 
 
 async def test_admission_three_queued_lanes_all_admitted_deterministic(
@@ -2695,9 +2693,11 @@ async def test_admission_three_queued_lanes_all_admitted_deterministic(
         tasks.append(t)
 
     # 分道准入(并发方案 §3.1):3 绑定各取最老代表,2 非会员(≤nonvip_limit)+ 1 会员
-    # ≤ 总限 4 → 全部进 picked;每绑定恰一条(去重,§2.3)
+    # ≤ 总限 4 → 全部进 picked;每绑定恰一条(去重,§2.3)。vip_par=1:本用例语义
+    # 依赖「每绑定 1 代表」旧口径(会员 3 路并发后 vip_par 为必选参数,依赖旧语义
+    # 的直呼点固定传 1 保断言有效,见实施文档模糊点 4)
     async with _db() as db:
-        picked = await admission_top_task_ids(db, limit=4, nonvip_limit=2)
+        picked = await admission_top_task_ids(db, limit=4, nonvip_limit=2, vip_par=1)
     assert set(picked) == {t.id for t in tasks}, "3 绑定代表全部准入、互不挤占"
 
     # 依创建序逐个认领并完成(跨绑定并发照旧的回归口径;每条都真实走完导入循环)
