@@ -12,7 +12,7 @@ import { ArrowLeft } from 'lucide-react';
 import { useState } from 'react';
 import { errorMessage } from '../api/client';
 import { useBaiduFileRandomSuffix, useBaiduOverwriteFile, useBaiduRetryFile, useBaiduTask, useBaiduTaskFiles } from '../api/hooks';
-import type { BaiduBackupTask, BaiduTaskFile } from '../api/types';
+import type { BaiduTaskFile } from '../api/types';
 import {
   BAIDU_FAIL_REASON_LABEL,
   BAIDU_FILE_ERROR_LABEL,
@@ -22,6 +22,7 @@ import {
   BAIDU_TASK_STATUS_LABEL,
   baiduTaskDisplayStatus,
 } from '../lib/labels';
+import { sameNameSuffix } from '../lib/path';
 
 const PAGE_SIZE = 20;
 
@@ -221,6 +222,13 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
   const done = task.done_files ?? 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : (task.status === 'completed' ? 100 : 0);
   const terminal = task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed';
+  // 同名夹展示口径(F6,正本见 lib/path.ts):开关开 ∧ 有显式目标夹 ∧ 夹未删 → /网盘目录末段名,
+  // 末段空/夹已删/auto 均为空串,维持基线分支
+  const sameNameLeaf = sameNameSuffix({
+    enabled: !!task.create_same_name_folder && !!task.target_folder_id && !!task.target_folder_name,
+    folderName: task.target_folder_name,
+    sourceDir: task.source_dir,
+  });
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
@@ -244,7 +252,7 @@ export function BaiduTaskDetail({ taskId, onBack }: Props) {
         <div style={{ fontSize: 12, color: 'var(--ms-ink-muted)', marginBottom: 6 }}>
           目标:{task.project_name ?? task.project_id}
           {task.target_folder_name
-            ? ` / ${task.target_folder_name}${sameNameLeaf(task)}`
+            ? ` / ${task.target_folder_name}${sameNameLeaf}`
             : task.target_auto_created ? ' / 项目根(自动创建承接夹)' : ' / (已删除)'}
         </div>
         <Progress
@@ -336,23 +344,6 @@ function fmtEta(seconds: number): string {
 const tlabelTask = (s: string) => BAIDU_TASK_STATUS_LABEL[s] ?? s;
 const tlabelFile = (s: string) => BAIDU_FILE_STATUS_LABEL[s] ?? s;
 const tlabelFail = (s: string) => BAIDU_FAIL_REASON_LABEL[s] ?? s;
-
-/** 网盘目录末段(与 BaiduNewTaskModal 的 dirName 同口径:先去尾斜杠再取末段)。 */
-function sourceLeafName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '');
-  const idx = trimmed.lastIndexOf('/');
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
-}
-
-/** 同名夹展示口径(F6):开关开 ∧ 有显式目标夹 ∧ 夹未删 → 追加 /网盘目录末段名;
- *  末段为空(source_dir 异常为整盘根「/」)不加后缀(UC-09 防御,与 App 端 _leafOf 同口径);其余分支空串。 */
-function sameNameLeaf(t: Pick<BaiduBackupTask,
-  'create_same_name_folder' | 'target_folder_id' | 'target_folder_name' | 'source_dir'>): string {
-  const leaf = sourceLeafName(t.source_dir);
-  return t.create_same_name_folder && t.target_folder_id && t.target_folder_name && leaf
-    ? `/${leaf}`
-    : '';
-}
 
 /** key_conflict 失败行(F1 格式:last_error 以 `key_conflict:` 开头,点名占用者)。 */
 function isKeyConflictRow(f: BaiduTaskFile): boolean {

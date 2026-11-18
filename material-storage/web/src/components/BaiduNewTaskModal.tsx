@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { errorMessage } from '../api/client';
 import { useBaiduCreateTask, useBaiduNetdiskFolders, useFolders, useProjects } from '../api/hooks';
 import type { BaiduNetdiskFolder, Me } from '../api/types';
+import { sourceLeafName } from '../lib/path';
 import { FolderTree } from './FolderTree';
 
 interface Props {
@@ -83,8 +84,8 @@ export function BaiduNewTaskModal({ open, onClose, me }: Props) {
   // 同名夹口径(F10):开关开且选了夹 → 预览落点追加 /网盘目录末段名;
   // sourceDir 未选或末段为空(异常为整盘根「/」)不加,避免悬挂「/「」」(UC-09 防御)
   const targetLabel = target.kind === 'root'
-    ? `项目根(自动创建承接文件夹${sourceDir ? `「${dirName(sourceDir)}」` : ''})`
-    : `目录「${target.name}」${sameName && sourceDir && dirName(sourceDir) ? `/「${dirName(sourceDir)}」` : ''}`;
+    ? `项目根(自动创建承接文件夹${sourceDir ? `「${sourceLeafName(sourceDir)}」` : ''})`
+    : `目录「${target.name}」${sameName && sourceDir && sourceLeafName(sourceDir) ? `/「${sourceLeafName(sourceDir)}」` : ''}`;
 
   const submit = async () => {
     if (!sourceDir || sourceDir === '/') {
@@ -391,13 +392,6 @@ function fmtBytes(n: number): string {
   if (n < 1024 ** 3) return `${(n / 1024 ** 2).toFixed(1)} MB`;
   if (n < 1024 ** 4) return `${(n / 1024 ** 3).toFixed(2)} GB`;
   return `${(n / 1024 ** 4).toFixed(2)} TB`;
-}
-
-/** 网盘目录末段(承接夹命名口径,§5.2:先 rstrip('/') 再取末段)。 */
-function dirName(path: string): string {
-  const trimmed = path.replace(/\/+$/, '');
-  const idx = trimmed.lastIndexOf('/');
-  return idx >= 0 ? trimmed.slice(idx + 1) : trimmed;
 }
 
 function FieldLabel({ children }: { children: React.ReactNode }) {

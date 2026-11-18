@@ -15,7 +15,6 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -54,7 +53,7 @@ class Organization(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     feishu_tenant_key: Mapped[str | None] = mapped_column(String(64), unique=True)
 
-    projects: Mapped[list["Project"]] = relationship(back_populates="organization")
+    projects: Mapped[list[Project]] = relationship(back_populates="organization")
 
 
 class User(Base, TimestampMixin):
@@ -114,7 +113,7 @@ class Project(Base, TimestampMixin):
     )
 
     organization: Mapped[Organization] = relationship(back_populates="projects")
-    folders: Mapped[list["Folder"]] = relationship(back_populates="project")
+    folders: Mapped[list[Folder]] = relationship(back_populates="project")
 
 
 class Folder(Base, TimestampMixin):
@@ -134,7 +133,7 @@ class Folder(Base, TimestampMixin):
     is_sensitive: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     project: Mapped[Project] = relationship(back_populates="folders")
-    assets: Mapped[list["Asset"]] = relationship(back_populates="folder")
+    assets: Mapped[list[Asset]] = relationship(back_populates="folder")
 
     __table_args__ = (
         UniqueConstraint("project_id", "minio_prefix", name="uq_folder_project_prefix"),
@@ -582,7 +581,7 @@ class BaiduBackupTask(Base, TimestampMixin):
     # 创建同名文件夹开关(F2):开启且显式目标夹 B 时导入落 B/<source 末段名>;
     # 项目根模式创建时静默归一 false(承接夹名=末段名,行为已等价勾选态,F4)
     create_same_name_folder: Mapped[bool] = mapped_column(
-        Boolean, default=False, server_default=sa.false(), nullable=False
+        Boolean, default=False, server_default="false", nullable=False
     )
     status: Mapped[str] = mapped_column(
         String(16), default="enumerating", server_default="enumerating", nullable=False,
