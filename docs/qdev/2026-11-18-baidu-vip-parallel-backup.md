@@ -39,7 +39,7 @@
 | F8 | 一用户一绑定：`uq_baidu_binding_user` | `api/app/db/tables.py:545` |
 | F9 | 改 env 后 `docker compose restart` 不重读 env_file，须按消费方 `up -d --force-recreate` | `api/app/settings.py:148-152` docblock |
 | F10 | **DB 层 belt**：`uq_baidu_task_running` = `UNIQUE(binding_id) WHERE status='running'`（partial 唯一索引），注释明示「恰好护住最危险的『同绑定双下载循环』」——把同绑定 running 数钉死在 1，是 2026-10-19 方案的刻意设计 | `api/app/db/tables.py:628-635` |
-| F11 | belt 的创建与守护：迁移 0017 创建（`2026_10_19_0017_baidu_multi_task_concurrency.py:41-45`）；`test_db_schema.py:169-187` 断言索引存在（`:190-204` 另有谓词子集断言测试）；worker 枚举收尾是全系统唯一置 `status='running'` 的点（:600-653），撞索引即 `IntegrityError` → belt 回排队（`enum_done=true` 保留）；T4 用例（`test_baidu_concurrency.py:386-444`）钉死该行为；T18（`test_baidu_concurrency.py:1470-1475`）断言 pg_indexes 中索引存在；迁移 head=**`20261115_0021`**（用户模块组级授权，**prod 已于 2026-11-16 应用**） | 同左 |
+| F11 | belt 的创建与守护：迁移 0017 创建（`2026_10_19_0017_baidu_multi_task_concurrency.py:41-45`）；`test_db_schema.py:169-187` 断言索引存在（`:190-204` 另有谓词子集断言测试）；worker 枚举收尾是全系统唯一置 `status='running'` 的点（:600-653），撞索引即 `IntegrityError` → belt 回排队（`enum_done=true` 保留）；T4 用例（`test_baidu_concurrency.py:386-444`）钉死该行为；T18（`test_baidu_concurrency.py:1470-1475`）断言 pg_indexes 中索引存在；迁移 head=**`20261118_0021`**（同名夹开关周期新增，接 `20261115_0021` 用户模块单头；**dev/prod 双端已于 2026-11-18 升至该版**） | 同左 |
 
 **推论**：同绑定串行是**三个点**的叠加——① 准入 SQL 每绑定 1 代表（F1）；② sweeper 每绑定每拍派 1 job（F3）；③ DB 层 running 唯一索引（F10/F11）。**三处必须同步处理**：只改①②不改③，3 个任务都会过门控、各自枚举，但在枚举收尾置 running 时第 2/3 个必撞索引 → belt 回排队 → sweeper ≤600s 重派 → 短路直达收尾 → 再撞 → 无限 churn、并行收益为零。
 
@@ -66,7 +66,7 @@ baidu_vip_parallel_per_binding: int = Field(
 
 ### 3.2 DB 层 belt 索引移除（迁移 0022，P0 前置）
 
-新增 Alembic 迁移 `2026_11_18_0022_baidu_vip_parallel.py`（`down_revision = "20261115_0021"`；0021 已被用户模块组级授权占用且 prod 已应用，head 即 `20261115_0021`）：
+新增 Alembic 迁移 `2026_11_18_0022_baidu_vip_parallel.py`（`down_revision = "20261118_0021"`；0021 编号已被两代占用——`20261115_0021` 用户模块组级授权、`20261118_0021` 同名夹开关周期（接 20261115_0021 单头，dev/prod 双端已升），head 即 `20261118_0021`）：
 
 - `upgrade`：`DROP INDEX uq_baidu_task_running`。仅此一项，无数据变更，秒级完成。
 - `downgrade`：重建该索引（保持可逆；down 后语义 = 回到 0017 时点行为）。**downgrade 前置条件**：库中存在同绑定多条 running 时重建唯一索引会直接失败——runbook：先回滚杆 env=1 或等任务排空，确保每绑定 ≤1 running 再 downgrade；否则先终态化多余 running 行。
@@ -151,7 +151,7 @@ rn = func.row_number().over(
 
 | # | 文件 | 改动 | 完成标准 |
 |---|---|---|---|
-| C0 | `api/app/db/migrations/versions/2026_11_18_0022_baidu_vip_parallel.py`（新增，down_revision=`20261115_0021`） | `DROP INDEX uq_baidu_task_running`；downgrade 重建（runbook 见 §3.2 前置条件）；模型元数据同步删该 Index 定义 | dev/prod upgrade 后 R12 过；可逆 |
+| C0 | `api/app/db/migrations/versions/2026_11_18_0022_baidu_vip_parallel.py`（新增，down_revision=`20261118_0021`） | `DROP INDEX uq_baidu_task_running`；downgrade 重建（runbook 见 §3.2 前置条件）；模型元数据同步删该 Index 定义 | dev/prod upgrade 后 R12 过；可逆 |
 | C1 | `api/app/settings.py` | 新增 `baidu_vip_parallel_per_binding=3` + 断言 `1 ≤ x ≤ admission_limit-1`；docblock 注明「运行时消费=ms-worker；启动校验=ms-api+ms-worker 双容器」 | 非法值启动报错；默认 3 生效 |
 | C2 | `api/app/services/baidu_backup.py` | `admission_top_task_ids` 加必选参数 `vip_par`（无默认值）；reps 改 `ROW_NUMBER() OVER (PARTITION BY binding_id ...)`；vip 道 `rn ≤ vip_par`、非会员道 `rn ≤ 1`；docstring/红线注释同步 | I1-I6 成立；语法红线注释保留；生产调用点全适配 |
 | C3 | `api/app/workers/baidu_backup.py` | `_run_claimed` 调用点传 `vip_par=settings.baidu_vip_parallel_per_binding`；sweeper 候选 join bindings 带出 is_vip；`seen_bindings` → 预算 Counter（VIP=vip_par / 非会员=1）；belt 分支保留为通用兜底；注释更新 | sweeper 派发预算用例过；取消支不变 |
@@ -185,8 +185,8 @@ rn = func.row_number().over(
 
 ## 6. 部署与回滚
 
-1. **dev 先行**：**第一步对账 `alembic current` vs head（dev 预期 `20261115_0021`），落后先 `upgrade head`（落 0022）再动代码**；部署 dev（ms-api-dev / ms-worker-dev force-recreate）→ 用 dev 环境（dev FGA=8189 入口）实测同绑定会员 3 路并发：3 任务同时 running、总准入 ≤4、非会员行为不变。
-2. **prod**：**第一步必对账 alembic current vs head（prod 预期 `20261115_0021`），落后先 upgrade（落 0022）再 restart**（deploy_lan 无 alembic 步骤，历史已多次人工补，最近一次 2026-11-16 落 0021）。部署代码（默认 vip_par=3 生效，无需设 env）；force-recreate 顺序 = 先 ms-api 后 ms-worker，若 ms-api 容器 IP 变化则连带 `docker restart poc-nginx`（静态 proxy_pass 持旧解析全站 502 的既有坑）。观察窗口 ≥ 半个任务周期。
+1. **dev 先行**：**第一步对账 `alembic current` vs head（dev 预期 `20261118_0021`），落后先 `upgrade head`（落 0022）再动代码**；部署 dev（ms-api-dev / ms-worker-dev force-recreate）→ 用 dev 环境（dev FGA=8189 入口）实测同绑定会员 3 路并发：3 任务同时 running、总准入 ≤4、非会员行为不变。
+2. **prod**：**第一步必对账 alembic current vs head（prod 预期 `20261118_0021`），落后先 upgrade（落 0022）再 restart**（deploy_lan 无 alembic 步骤，历史已多次人工补，最近一次为同名夹开关周期双端升 20261118_0021）。部署代码（默认 vip_par=3 生效，无需设 env）；force-recreate 顺序 = 先 ms-api 后 ms-worker，若 ms-api 容器 IP 变化则连带 `docker restart poc-nginx`（静态 proxy_pass 持旧解析全站 502 的既有坑）。观察窗口 ≥ 半个任务周期。
 3. **观察项**（生产实测，兼作百度限速口径判别）：
    - 同绑定 3 路并行时各任务流内速率：若单流速率 ≈ 并行前的 1/3（≈账号级限速）→ 聚合收益存疑，向用户汇报数据后再定去留；若单流速率基本不变（≈连接级限速）→ 收益成立。
    - 31045 出现频率对比部署前（log/audit 检索 `31045`）：显著放大且伴随重试风暴 → 回滚杆先拉。
