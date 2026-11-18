@@ -62,9 +62,15 @@ export function errorMessage(err: unknown, fallback = '请求失败'): string {
         .filter(Boolean);
       if (msgs.length) return msgs.join('; ');
     }
-    // 其余非字符串/非数组 detail(如艺人账号内嵌 409 的结构化 {code,username,project_id})
-    // 原样返回会被全局 mutationCache toast 渲染 → React「Objects are not valid as a
-    // React child」崩溃;一律落到下方 fallback 文案(艺人账号方案 §4.1)
+    // 结构化 detail 对象:优先透出后端给的人类可读 message(百度备份 409/429 族
+    // {code,message},如「该绑定排队任务已达上限」——此前被吞成兜底文案,用户看不到
+    // 真实原因);无 message 字段的(艺人账号内嵌 409 的 {code,username,project_id})
+    // 继续落 fallback——对象直塞全局 mutationCache toast 会触发 React
+    // 「Objects are not valid as a React child」崩溃,返回值必须恒为 string
+    if (d?.detail && typeof d.detail === 'object') {
+      const m = (d.detail as { message?: unknown }).message;
+      if (typeof m === 'string' && m) return m;
+    }
     if (err.response?.status) return `${fallback}(HTTP ${err.response.status})`;
     if (err.message) return err.message;
   }
