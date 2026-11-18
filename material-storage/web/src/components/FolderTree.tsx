@@ -47,6 +47,9 @@ interface Props {
   enableDrag?: boolean;
   /** 拖拽落点确认:调用方弹确认框后调 useMoveFolder(parent_folder_id=null = 项目根) */
   onMoveDrop?: (args: { folder: Folder; newParentId: string | null }) => void;
+  /** 填满父容器高度:头部区固定、树区独立 Y 轴滚动(PC 桌面左栏用)。
+   *  默认关闭 → Drawer/弹窗等既有使用方布局零变化。 */
+  fillHeight?: boolean;
 }
 
 interface TreeNode {
@@ -132,7 +135,7 @@ function buildTree(
 export function FolderTree({
   folders, projectName, activeFolderId, onSelect, onCreateChild, onCreateRoot, canUpload,
   selectMode, disabledIds, disabledSelfIds, nodeActions, onRenameFolder, onMoveFolder,
-  enableDrag, onMoveDrop,
+  enableDrag, onMoveDrop, fillHeight,
 }: Props) {
   const disabledSet = useMemo(() => new Set(disabledIds ?? []), [disabledIds]);
   const selfDisabledSet = useMemo(() => new Set(disabledSelfIds ?? []), [disabledSelfIds]);
@@ -214,12 +217,28 @@ export function FolderTree({
     return path;
   }, [activeFolderId, folders]);
 
+  // ── fillHeight 布局骨架:头部钉住不滚,滚动收敛到树区(纯容器 style,逻辑层零改动)──
+  // 默认 undefined → 根容器/头部/树区 style 与旧版逐字节一致(既有使用方零变化)。
+  const fill = fillHeight === true;
+  const rootFill: React.CSSProperties | undefined = fill
+    ? { height: '100%', display: 'flex', flexDirection: 'column' }
+    : undefined;
+  // 头部不缩放 + 显式不透明背景:固定后下层树节点会从底下穿过,背景必须与 Sider 同色遮住
+  const headerFill: React.CSSProperties | undefined = fill
+    ? { flexShrink: 0, background: 'var(--ms-surface)' }
+    : undefined;
+  // minHeight:0 是 flex 子项自身可滚的关键,漏掉则树区被内容撑开、头部照样被推走
+  const scrollFill: React.CSSProperties | undefined = fill
+    ? { flex: 1, minHeight: 0, overflowY: 'auto' }
+    : undefined;
+
   const Header = (
     <div style={{
       display: 'flex', alignItems: 'center',
       padding: '12px 14px 10px',
       gap: 6,
       borderBottom: '1px solid var(--ms-hairline-soft)',
+      ...headerFill,
     }}>
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{
@@ -273,9 +292,12 @@ export function FolderTree({
 
   if (tree.length === 0) {
     return (
-      <div>
+      <div style={rootFill}>
         {Header}
-        <div style={{ padding: '40px 16px', textAlign: 'center', color: 'var(--ms-ink-subtle)' }}>
+        <div style={{
+          padding: '40px 16px', textAlign: 'center', color: 'var(--ms-ink-subtle)',
+          ...scrollFill,
+        }}>
           <FolderIcon size={28} strokeWidth={1.4}
                       style={{ color: 'var(--ms-hairline)', marginBottom: 12 }} />
           <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>
@@ -306,9 +328,9 @@ export function FolderTree({
   }
 
   return (
-    <div>
+    <div style={rootFill}>
       {Header}
-      <div className="ms-folder-tree" style={{ padding: '6px 4px 12px' }}>
+      <div className="ms-folder-tree" style={{ padding: '6px 4px 12px', ...scrollFill }}>
         <Tree
           treeData={tree}
           defaultExpandAll={tree.length < 30}
