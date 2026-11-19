@@ -10,6 +10,7 @@ import '../../core/api/ms_api.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
+import '../../services/app_log.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/app_card.dart';
@@ -125,8 +126,9 @@ class _FoldersPageState extends State<FoldersPage> {
     }
   }
 
-  /// 并行预取「默认收拢全部文件夹」偏好(F9):失败全静默按 false 兜底
-  /// (现状全展开),不产生未捕获异步异常;取到开启且首屏数据已就绪时立即
+  /// 并行预取「默认收拢全部文件夹」偏好(F9):失败按 false 兜底
+  /// (现状全展开,UI 静默语义不变,但按 AppLog 留痕,P2-4——不再全吞零
+  /// 日志),不产生未捕获异步异常;取到开启且首屏数据已就绪时立即
   /// 补预填(数据先到、偏好后到的次序同样生效;数据未到则由 _reload 落树
   /// 时统一预填)。
   Future<void> _loadCollapsePref() async {
@@ -134,7 +136,8 @@ class _FoldersPageState extends State<FoldersPage> {
     try {
       final p = await session.api!.prefs.getPrefs();
       on = p.folderTreeDefaultCollapsed;
-    } catch (_) {
+    } catch (e) {
+      AppLog.error('folders', '收拢偏好加载失败,按全展开兜底', e);
       return; // 静默兜底:开关视同关闭,行为与现状一致
     }
     _collapseDefault = on;

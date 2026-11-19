@@ -22,6 +22,7 @@ import 'package:ms_app/core/api/notifications_api.dart';
 import 'package:ms_app/core/api/prefs_api.dart';
 import 'package:ms_app/core/api/projects_api.dart';
 import 'package:ms_app/core/api/share_api.dart';
+import 'package:ms_app/core/api/tokens_api.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/models/models.dart';
 
@@ -561,6 +562,13 @@ class FakePrefsApi extends PrefsApi {
   Object? getStaged;
   Object? updateStaged;
 
+  /// P2-3 代际用例:逐次排队编排(命中优先;队列空则回落既有
+  /// [updateStaged] 行为,不改既有桩断言)。元素语义同
+  /// FakeApprovalOpsApi.listStaged 队列:`UserPrefs` / `Exception` /
+  /// `Completer<UserPrefs>`(挂起该次响应,由用例控制放行次序,
+  /// 编排「慢请求先发、快请求后发」的代际守卫场景)。
+  final updateStagedQueue = <Object?>[];
+
   @override
   Future<UserPrefs> getPrefs() async {
     getPrefsCalls++;
@@ -571,6 +579,12 @@ class FakePrefsApi extends PrefsApi {
   @override
   Future<UserPrefs> updatePrefs({bool? folderTreeDefaultCollapsed}) async {
     updateCalls.add(folderTreeDefaultCollapsed);
+    final staged = updateStagedQueue.isNotEmpty
+        ? updateStagedQueue.removeAt(0)
+        : null;
+    if (staged is Completer<UserPrefs>) return staged.future;
+    if (staged is Exception) throw staged;
+    if (staged is UserPrefs) return staged;
     if (updateStaged is Exception) throw updateStaged!;
     return settleStaged(
       updateStaged,
@@ -578,6 +592,51 @@ class FakePrefsApi extends PrefsApi {
         folderTreeDefaultCollapsed: folderTreeDefaultCollapsed ?? false,
       ),
     );
+  }
+}
+
+/// MCP PAT 假 API(对应 MsApi.tokens;settings-mcp P2 批新增):listTokens
+/// 记录 includeRevoked 实参且逐次排队编排(listStaged 队列:`List<PatToken>` /
+/// `Exception`,空则回 [listResult]);create/revoke 最小记录桩。
+class FakeTokensApi extends TokensApi {
+  FakeTokensApi(super.api);
+
+  final listCalls = <bool>[]; // includeRevoked 实参逐次记录
+  final createCalls = <({String name, int expiresInDays})>[];
+  final revokeCalls = <String>[];
+  List<PatToken> listResult = const [];
+  final listStaged = <Object?>[];
+  Object? createStaged;
+  Object? revokeStaged;
+
+  @override
+  Future<List<PatToken>> listTokens({bool includeRevoked = false}) async {
+    listCalls.add(includeRevoked);
+    final staged = listStaged.isNotEmpty ? listStaged.removeAt(0) : null;
+    if (staged is Exception) throw staged;
+    return (staged as List<PatToken>?) ?? listResult;
+  }
+
+  @override
+  Future<PatTokenCreated> createToken({
+    required String name,
+    int expiresInDays = 90,
+  }) async {
+    createCalls.add((name: name, expiresInDays: expiresInDays));
+    if (createStaged is Exception) throw createStaged!;
+    return PatTokenCreated(
+      id: 'created-1',
+      name: name,
+      token: 'mspat_new_plaintext_once',
+      tokenPrefix: 'mspat_new',
+      expiresAt: '2027-02-17T08:00:00Z',
+    );
+  }
+
+  @override
+  Future<void> revokeToken({required String id}) async {
+    revokeCalls.add(id);
+    if (revokeStaged is Exception) throw revokeStaged!;
   }
 }
 
@@ -597,6 +656,7 @@ class FakeMsApi extends MsApi {
   late final _notifications = FakeNotificationsApi(this);
   late final _projects = FakeProjectsApi(this);
   late final _prefs = FakePrefsApi(this);
+  late final _tokens = FakeTokensApi(this);
 
   @override
   FakeAssetsApi get assets => _assets;
@@ -636,4 +696,7 @@ class FakeMsApi extends MsApi {
 
   @override
   FakePrefsApi get prefs => _prefs;
+
+  @override
+  FakeTokensApi get tokens => _tokens;
 }

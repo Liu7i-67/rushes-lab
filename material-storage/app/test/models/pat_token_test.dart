@@ -53,6 +53,41 @@ void main() {
     expect(expired.isActive, isFalse);
   });
 
+  test('P2-1:expired=false 完全信任后端(expires_at 本地已过仍 active)', () {
+    final t = PatToken.fromJson(const {
+      'id': 'id-trust',
+      'name': 'n',
+      'token_prefix': 'p',
+      'created_at': '2020-01-01T10:00:00Z',
+      'expires_at': '2021-01-01T10:00:00Z', // 本地时钟早已越过
+      'expired': false, // 后端派生列在场:false 即信任,不做本地兜底
+    });
+    expect(t.expired, isFalse);
+    expect(
+      t.status,
+      PatTokenStatus.active,
+      reason: 'expired 非 null 时完全信任后端(web token-status.ts 同源)',
+    );
+    expect(t.isActive, isTrue);
+    expect(t.statusLabel, '有效');
+  });
+
+  test('P2-1:expired 键缺失(旧响应)才按 expires_at 本地兜底派生', () {
+    final j = <String, dynamic>{
+      'id': 'id-fallback',
+      'name': 'n',
+      'token_prefix': 'p',
+      'created_at': '2020-01-01T10:00:00Z',
+      'expires_at': '2021-01-01T10:00:00Z',
+    };
+    expect(j.containsKey('expired'), isFalse, reason: '样本即契约:键缺失');
+    final t = PatToken.fromJson(j);
+    expect(t.expired, isNull, reason: 'expired 键缺失才为 null');
+    expect(t.status, PatTokenStatus.expired, reason: '仅缺失时本地时钟兜底');
+    expect(t.statusLabel, '已过期');
+    expect(t.isActive, isFalse);
+  });
+
   test('PatTokenCreated.fromJson:明文 token 只在此响应出现,字段齐备', () {
     final c = PatTokenCreated.fromJson(const {
       'id': 'id-3',

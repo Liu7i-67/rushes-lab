@@ -3,8 +3,10 @@
 /// 过期/状态)、创建入口(名称+有效期档位,弹层见 mcp_token_create_sheet)、
 /// 一次性明文展示、吊销(showAppConfirm → DELETE → Toast)、
 /// 「显示已吊销/已过期」开关(include_revoked 重拉)、活跃上限 5 到顶禁用
-/// 创建并提示、MCP 端点说明段(当前 API base origin + /mcp,整段可复制)。
+/// 创建并提示、MCP 端点说明段(收拢至 mcp_shared [McpGuideCard])。
 /// 空态 EmptyState / 加载 ListSkeleton / 下拉刷新 + 错误重试。
+/// P2 批:缓存后刷新失败给列表顶部行内错误条(点击重试,不再静默滞留);
+/// _reload 挂请求代际守卫(旧响应后到一律丢弃)。
 ///
 /// **契约:导出 [McpTokensPage](无参构造),路由注册(`/mcp-tokens`)归并行包。**
 library;
@@ -12,6 +14,7 @@ library;
 import 'package:flutter/material.dart' hide Badge;
 
 import '../../core/api/ms_api.dart';
+import '../../core/fmt.dart' show fmtIsoLong;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
@@ -19,12 +22,12 @@ import '../../theme/tokens.dart';
 import '../../widgets/app_card.dart';
 import '../../widgets/app_confirm.dart';
 import '../../widgets/badge.dart';
-import '../../widgets/copy_button.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
 import '../../widgets/list_skeleton.dart';
 import '../../widgets/page_header.dart';
 import '../../widgets/toast.dart';
+import 'mcp_shared.dart';
 import 'mcp_token_create_sheet.dart';
 
 class McpTokensPage extends StatefulWidget {
@@ -39,6 +42,10 @@ class _McpTokensPageState extends State<McpTokensPage> {
   String? _error;
   var _includeRevoked = false;
   String? _revokingId;
+
+  /// 单调递增请求代际(P2-3):await 后校验代际,旧响应后到一律丢弃
+  /// (成功不覆盖新值、失败不误落错误态),只认最新一次查询。
+  int _reqGen = 0;
 
   @override
   void initState() {
@@ -58,18 +65,20 @@ class _McpTokensPageState extends State<McpTokensPage> {
   bool get _full => _activeCount >= kMaxActiveTokens;
 
   /// 拉列表落态(下拉刷新/重试/开关重拉同路);返回真 future 供 RefreshIndicator。
+  /// 代际守卫:仅最新一次请求可落态,慢到的旧响应被丢弃。
   Future<void> _reload() async {
+    final gen = ++_reqGen;
     try {
       final rows = await session.api!.tokens.listTokens(
         includeRevoked: _includeRevoked,
       );
-      if (!mounted) return;
+      if (!mounted || gen != _reqGen) return;
       setState(() {
         _data = rows;
         _error = null;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _reqGen) return;
       setState(() => _error = errorMessage(e, '令牌列表加载失败'));
     }
   }
@@ -77,7 +86,7 @@ class _McpTokensPageState extends State<McpTokensPage> {
   Future<void> _toggleHistory(bool v) async {
     if (v == _includeRevoked) return;
     setState(() => _includeRevoked = v);
-    await _reload(); // 失败落 _error(有旧数据时保留列表,行内可见)
+    await _reload(); // 失败落 _error:有旧数据时行内错误条可见,列表保留
   }
 
   Future<void> _create() async {
@@ -185,7 +194,10 @@ class _McpTokensPageState extends State<McpTokensPage> {
         Tk.space2xl,
       ),
       children: [
-        const _RiskCard(),
+        // 刷新失败但已有缓存数据:行内错误条(P2-2,一条紧凑提示+点击重试,
+        // 旧列表不再静默滞留;重试成功后自动消失)
+        if (_error != null) _ErrorBar(onRetry: _reload),
+        const PatRiskCard(),
         if (_full) ...[
           const SizedBox(height: Tk.spaceMd),
           Text(
@@ -249,49 +261,47 @@ class _McpTokensPageState extends State<McpTokensPage> {
           ),
         ),
         const SizedBox(height: Tk.spaceSm),
-        _GuideCard(endpoint: _endpoint),
+        McpGuideCard(endpoint: _endpoint),
       ],
     );
   }
 }
 
-/// D15 强制文案:令牌管理页必须明示账号级全权限 + 内网明文 http 风险。
-class _RiskCard extends StatelessWidget {
-  const _RiskCard();
+/// 刷新失败行内错误条(P2-2):紧凑一条,danger 配色文案「刷新失败,当前为
+/// 缓存数据」+「点击重试」,点击整条 = 重试当前查询(复用既有配色,无新依赖)。
+class _ErrorBar extends StatelessWidget {
+  const _ErrorBar({required this.onRetry});
+
+  final VoidCallback onRetry;
 
   @override
   Widget build(BuildContext context) {
     final tk = context.tk;
-    return AppCard(
-      padding: const EdgeInsets.all(Tk.spaceLg),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+    final danger = TextStyle(fontSize: Tk.fzMd, color: tk.danger);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: Tk.spaceMd),
+      child: InkWell(
+        onTap: onRetry,
+        borderRadius: BorderRadius.circular(Tk.rSm),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: Tk.spaceSm, vertical: 8),
+          child: Row(
             children: [
-              Icon(Icons.warning_amber_rounded, size: 18, color: tk.warn),
+              Icon(Icons.error_outline, size: 16, color: tk.danger),
               const SizedBox(width: Tk.spaceSm),
               Expanded(
                 child: Text(
-                  '令牌=账号级全权限凭证,等同你的密码',
-                  style: TextStyle(
-                    fontSize: Tk.fzRowTitle,
-                    fontWeight: FontWeight.w600,
-                    color: tk.warn,
-                  ),
+                  '刷新失败,当前为缓存数据',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: danger,
                 ),
               ),
+              const SizedBox(width: Tk.spaceSm),
+              Text('点击重试', style: danger.copyWith(fontWeight: FontWeight.w600)),
             ],
           ),
-          const SizedBox(height: Tk.spaceSm),
-          Text(
-            '内网入口为明文 http,勿配置到不可信机器。持有令牌即可调用本账号'
-            '可访问的全部 API(含上传与下载),请勿粘贴到聊天工具、截图或代码'
-            '仓库。怀疑泄露时立即吊销,并修改密码(改密会自动吊销该账号全部'
-            '令牌)。',
-            style: TextStyle(fontSize: Tk.fzMd, height: 1.6, color: tk.ink2),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -404,74 +414,6 @@ class _TokenRow extends StatelessWidget {
       maxLines: 1,
       overflow: TextOverflow.ellipsis,
       style: TextStyle(fontSize: Tk.fzMd, height: 1.5, color: context.tk.ink3),
-    );
-  }
-}
-
-/// MCP 端点说明段:端点(origin + /mcp)行内复制 + 整段可复制使用说明
-/// (占位版;含明文的完整版在创建成功弹层给出)。
-class _GuideCard extends StatelessWidget {
-  const _GuideCard({required this.endpoint});
-
-  final String endpoint;
-
-  @override
-  Widget build(BuildContext context) {
-    final tk = context.tk;
-    final guide = buildMcpGuide(endpoint: endpoint);
-    return AppCard(
-      padding: const EdgeInsets.all(Tk.spaceLg),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  'MCP 端点',
-                  style: TextStyle(
-                    fontSize: Tk.fzRowTitle,
-                    fontWeight: FontWeight.w600,
-                    color: tk.ink,
-                  ),
-                ),
-              ),
-              CopyButton(text: endpoint, tooltip: '复制端点'),
-            ],
-          ),
-          const SizedBox(height: Tk.spaceSm),
-          AppCard(
-            radius: Tk.rSm,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            child: SelectableText(
-              endpoint,
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
-            ),
-          ),
-          const SizedBox(height: Tk.spaceMd),
-          Text(
-            '在支持 MCP(HTTP 传输)的客户端按以下说明接入;身份=令牌所属用户'
-            '本人,权限与网页登录一致。含令牌明文的完整配置说明会在创建令牌成功'
-            '时给出,可整段复制。',
-            style: TextStyle(fontSize: Tk.fzMd, height: 1.6, color: tk.ink2),
-          ),
-          const SizedBox(height: Tk.spaceMd),
-          CopyButton(text: guide, label: '复制使用说明'),
-          const SizedBox(height: Tk.spaceSm),
-          AppCard(
-            radius: Tk.rSm,
-            padding: const EdgeInsets.all(12),
-            child: SelectableText(
-              guide,
-              style: const TextStyle(
-                fontFamily: 'monospace',
-                fontSize: 12,
-                height: 1.7,
-              ),
-            ),
-          ),
-        ],
-      ),
     );
   }
 }

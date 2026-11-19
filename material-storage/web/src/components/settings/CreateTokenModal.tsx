@@ -69,6 +69,9 @@ export function CreateTokenModal({ open, onClose, activeCount, onCreated }: {
       keyboard={!create.isPending}
       cancelButtonProps={{ disabled: create.isPending }}
       destroyOnHidden
+      // WEB-21 兜底:与 TokenCreatedModal 显式 zIndex 排序(结果弹窗 1010 在上),
+      // 万一未来编排被改动导致两弹窗同帧叠加,层叠与关闭行为仍确定
+      zIndex={1000}
     >
       {/* D15 强制文案:创建页必须明示令牌的全权限与内网明文 http 风险 */}
       <Alert

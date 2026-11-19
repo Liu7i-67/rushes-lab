@@ -4,9 +4,10 @@
 /// - id 为 UUID → Dart String(吊销 DELETE /{id} 直接拼路径);
 /// - 明文 token 只在 [PatTokenCreated](POST 响应,Cache-Control: no-store)
 ///   回显一次,列表 [PatToken] 永不含明文 / token_hash,仅 token_prefix 识别;
-/// - `expired` 为后端响应期派生列(expires_at <= now);字段缺失(旧响应)时
-///   前端按 expires_at 自行派生兜底,口径与后端活跃定义一致
-///   (revoked_at IS NULL AND expires_at > now;web token-status.ts 同源)。
+/// - `expired` 为后端响应期派生列:键在即**完全信任后端**(web
+///   token-status.ts 同源——expired 为 boolean 时不再本地比对时钟,false 即
+///   active);仅键缺失(旧响应,null)时才按 expires_at 与本地时钟派生兜底
+///   (口径与后端活跃定义一致:revoked_at IS NULL AND expires_at > now)。
 library;
 
 /// 列表项(GET /api/v1/auth/tokens;永不含明文)。
@@ -19,7 +20,7 @@ class PatToken {
     required this.expiresAt,
     this.lastUsedAt,
     this.revokedAt,
-    this.expired = false,
+    this.expired,
   });
 
   factory PatToken.fromJson(Map<String, dynamic> j) => PatToken(
@@ -30,7 +31,7 @@ class PatToken {
         expiresAt: (j['expires_at'] ?? '') as String,
         lastUsedAt: j['last_used_at'] as String?,
         revokedAt: j['revoked_at'] as String?,
-        expired: (j['expired'] ?? false) as bool,
+        expired: j['expired'] as bool?,
       );
 
   final String id;
@@ -47,13 +48,18 @@ class PatToken {
   /// 非 null = 已吊销(吊销时间)。
   final String? revokedAt;
 
-  /// 后端响应期派生列(expires_at <= now);缺省按 [status] 自行派生。
-  final bool expired;
+  /// 后端响应期派生列:键在即信任后端(false 即 active,不做本地时钟兜底);
+  /// null = 键缺失(旧响应),仅此时按 [expiresAt] 本地兜底派生(web 同源)。
+  final bool? expired;
 
-  /// 展示三态:吊销优先于过期(web patTokenStatus 同口径)。
+  /// 展示三态:吊销优先;`expired` 键在即完全信任后端派生列;仅键缺失
+  /// (null)时按 [expiresAt] 与本地时钟派生兜底(web patTokenStatus 同口径)。
   PatTokenStatus get status {
     if (revokedAt != null) return PatTokenStatus.revoked;
-    if (expired) return PatTokenStatus.expired;
+    final backend = expired;
+    if (backend != null) {
+      return backend ? PatTokenStatus.expired : PatTokenStatus.active;
+    }
     final t = DateTime.tryParse(expiresAt);
     if (t != null && t.isBefore(DateTime.now())) return PatTokenStatus.expired;
     return PatTokenStatus.active;

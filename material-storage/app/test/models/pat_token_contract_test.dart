@@ -55,8 +55,38 @@ void main() {
       });
       expect(t.lastUsedAt, isNull);
       expect(t.revokedAt, isNull);
-      expect(t.expired, isFalse, reason: 'expired 缺省 false(后端默认)');
-      expect(t.isActive, isTrue);
+      expect(t.expired, isNull, reason: 'expired 键缺失=null(P2-1:仅缺失时本地派生)');
+      expect(t.isActive, isTrue, reason: 'expires_at 未到,本地兜底同为 active');
+    });
+
+    test('P2-1 派生口径:expired 键在=信任后端(false 即 active);键缺失=本地兜底', () {
+      // 同一已越过 expires_at 的令牌:派生列在场与缺失给出不同终态。
+      final trustBackend = PatToken.fromJson(const {
+        'id': 'aaaa0000-0000-0000-0000-000000000005',
+        'name': '信任后端',
+        'token_prefix': 'mspat_trust',
+        'created_at': '2026-01-01T00:00:00Z',
+        'expires_at': '2026-06-01T00:00:00Z',
+        'expired': false,
+      });
+      expect(
+        trustBackend.status,
+        PatTokenStatus.active,
+        reason: 'expired=false 完全信任后端,不做本地时钟兜底(web 同源)',
+      );
+      final missingKey = PatToken.fromJson(const {
+        'id': 'aaaa0000-0000-0000-0000-000000000006',
+        'name': '本地兜底',
+        'token_prefix': 'mspat_fallback',
+        'created_at': '2026-01-01T00:00:00Z',
+        'expires_at': '2026-06-01T00:00:00Z',
+      });
+      expect(missingKey.expired, isNull, reason: 'expired 键缺失才为 null');
+      expect(
+        missingKey.status,
+        PatTokenStatus.expired,
+        reason: '仅键缺失时按 expires_at 与本地时钟派生',
+      );
     });
 
     test('列表响应永不含明文:无 token 键解析不炸(仅 token_prefix 识别)', () {

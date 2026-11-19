@@ -37,7 +37,9 @@ export function TokensSection() {
 
   const { data, isLoading, isFetching, isError, error, refetch } = useTokens(includeRevoked);
   const revoke = useRevokeToken();
-  const [createOpen, setCreateOpen] = useState(false);
+  // WEB-21/P2:单一编排状态 —— 表单弹窗(creating)与结果弹窗(created)互斥,
+  // 任意时刻至多一个 modal 开,杜绝「结果弹窗未关再点创建 → 弹窗叠开关不掉」。
+  const [creating, setCreating] = useState(false);
   const [created, setCreated] = useState<PatTokenCreated | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
 
@@ -194,7 +196,12 @@ export function TokensSection() {
           type="primary"
           icon={<Plus size={14} strokeWidth={2} />}
           disabled={full}
-          onClick={() => setCreateOpen(true)}
+          onClick={() => {
+            // WEB-21:结果弹窗(一次性明文)开着时再点「创建令牌」会叠开两个 modal、
+            // 遮罩互相挡住关闭入口 —— 先关结果弹窗再开表单,保证任意时刻至多一个 modal
+            setCreated(null);
+            setCreating(true);
+          }}
         >
           创建令牌
         </Button>
@@ -250,11 +257,13 @@ export function TokensSection() {
       </p>
 
       <CreateTokenModal
-        open={createOpen}
-        onClose={() => setCreateOpen(false)}
+        open={creating}
+        onClose={() => setCreating(false)}
         activeCount={activeCount}
         onCreated={(t) => {
-          setCreateOpen(false);
+          // WEB-22:成功路径确定性编排 —— 先收表单再开结果弹窗(同一次渲染内切换),
+          // 表单不残留在结果弹窗下层
+          setCreating(false);
           setCreated(t);
         }}
       />
