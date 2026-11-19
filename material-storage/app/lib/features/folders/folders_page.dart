@@ -54,6 +54,11 @@ class _FoldersPageState extends State<FoldersPage> {
   String? _error;
   final _collapsed = <String>{};
 
+  /// 本次会话内被用户手工展开过的节点 id(F9 修正):_prefillCollapsed 跳过
+  /// 这些 id,重拉(下拉刷新/失效总线/返回重拉)不覆盖手工展开态。首次展开
+  /// 即记,重复无害;手工收拢不回删(收拢态已在 _collapsed,语义本就是收拢)。
+  final _manualOpened = <String>{};
+
   /// 「默认收拢全部文件夹」偏好(2026-11-19 settings-mcp-collapse F9):
   /// initState 与 folders 拉取并行预取;失败全静默按 false 兜底(=现状全
   /// 展开)。只影响本次进入的建树初值,开关切换对下一次进入生效(D4)。
@@ -139,14 +144,17 @@ class _FoldersPageState extends State<FoldersPage> {
   }
 
   /// 把所有「含子级」节点 id 并入 _collapsed(F9:默认全收拢,点箭头逐层
-  /// 展开)。只并不清:下拉刷新/失效重拉后保留用户手工展开过的状态;
-  /// 开关关闭时零变化(现状全展开)。
+  /// 展开)。只并不清;但跳过 _manualOpened——本次会话内用户手工展开过的
+  /// 节点不被预填覆盖,下拉刷新/失效重拉后保持展开态。手工收拢的节点不
+  /// 特殊处理(默认收拢语义本就是收拢);开关关闭时零变化(现状全展开)。
   void _prefillCollapsed() {
     if (!_collapseDefault || _all.isEmpty) return;
     final byId = {for (final f in _all) f.id: f};
     for (final f in _all) {
       final p = f.parentFolderId;
-      if (p != null && byId.containsKey(p)) _collapsed.add(p);
+      if (p == null || !byId.containsKey(p)) continue;
+      if (_manualOpened.contains(p)) continue; // 手工展开过:保留展开态
+      _collapsed.add(p);
     }
   }
 
@@ -281,9 +289,11 @@ class _FoldersPageState extends State<FoldersPage> {
                 depth: depth,
                 expanded: !_collapsed.contains(node.folder.id),
                 onToggle: () => setState(() {
-                  _collapsed.contains(node.folder.id)
-                      ? _collapsed.remove(node.folder.id)
-                      : _collapsed.add(node.folder.id);
+                  if (_collapsed.remove(node.folder.id)) {
+                    _manualOpened.add(node.folder.id); // 手工展开即记(重复无害)
+                  } else {
+                    _collapsed.add(node.folder.id);
+                  }
                 }),
                 onOpen: () => _open(node.folder),
               ),

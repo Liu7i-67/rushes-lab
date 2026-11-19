@@ -6,7 +6,9 @@
 /// - prefs 关:默认全展开(回归 folders_page_title_test 既有口径,折叠/
 ///   再展开行为不变);
 /// - prefs 接口异常:文件夹页正常渲染且按未收拢兜底(ErrorView 不出现);
-/// - 开关切换对下一次进入生效(D4):重挂载(路由重进同构)按新值渲染。
+/// - 开关切换对下一次进入生效(D4):重挂载(路由重进同构)按新值渲染;
+/// - prefs 开 + 手工展开后失效重拉(RefreshBus 'folders'):手工展开态保持
+///   不被预填覆盖,其余含子级节点仍收拢(默认收拢只并不清且跳过手工展开)。
 ///
 /// 打桩:helpers/api_harness 的 FakeMsApi(prefs 域=FakePrefsApi,folders/
 /// projects 域照既有假件);widget 测试 FakeAsync 区真实 socket 永不推进,
@@ -17,6 +19,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ms_app/core/api/ms_api.dart';
+import 'package:ms_app/core/refresh_bus.dart';
 import 'package:ms_app/core/session.dart';
 import 'package:ms_app/features/folders/folder_row.dart';
 import 'package:ms_app/features/folders/folders_page.dart';
@@ -197,6 +200,46 @@ void main() {
         reason: 'prefs 失败静默,不落整页错误态',
       );
       expect(find.byType(PageHeader), findsOneWidget);
+    });
+  });
+
+  group('重拉不覆盖手工展开态(F9 修正)', () {
+    testWidgets('开关开启→手工展开根→RefreshBus 失效重拉:根仍展开,其余含子级仍收拢',
+        (tester) async {
+      await _pumpPage(tester, folders: _tree(), collapsed: true);
+      expect(find.text('子夹A1'), findsNothing, reason: '前置:初载全收拢');
+
+      // 手工展开根夹A(逐层:子级 A1 自身仍收拢)
+      await tester.tap(_rowIcon('根夹A', Icons.chevron_right));
+      await tester.pumpAndSettle();
+      expect(find.text('子夹A1'), findsOneWidget, reason: '前置:手工展开生效');
+      expect(find.text('孙夹A11'), findsNothing, reason: '子级 A1 仍收拢');
+
+      // 失效总线重拉(下拉刷新/返回重拉同路):预填跳过手工展开过的节点
+      RefreshBus.I.invalidate('folders');
+      await tester.pumpAndSettle();
+
+      expect(find.text('根夹A'), findsOneWidget, reason: '重拉后顶层行仍在');
+      expect(
+        find.text('子夹A1'),
+        findsOneWidget,
+        reason: '手工展开态不被重拉预填覆盖',
+      );
+      expect(
+        find.text('孙夹A11'),
+        findsNothing,
+        reason: 'A1 未手工展开,重拉后仍收拢(孙级不渲染)',
+      );
+      expect(
+        _rowIcon('根夹A', Icons.expand_more),
+        findsOneWidget,
+        reason: '根夹A 保持展开态箭头',
+      );
+      expect(
+        _rowIcon('子夹A1', Icons.chevron_right),
+        findsOneWidget,
+        reason: '其余含子级节点重拉后仍收拢',
+      );
     });
   });
 }
