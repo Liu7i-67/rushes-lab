@@ -19,6 +19,7 @@ import 'package:ms_app/core/api/assets_ops_api.dart';
 import 'package:ms_app/core/api/folders_api.dart';
 import 'package:ms_app/core/api/ms_api.dart';
 import 'package:ms_app/core/api/notifications_api.dart';
+import 'package:ms_app/core/api/prefs_api.dart';
 import 'package:ms_app/core/api/projects_api.dart';
 import 'package:ms_app/core/api/share_api.dart';
 import 'package:ms_app/core/session.dart';
@@ -548,6 +549,38 @@ FakeMsApi installFakeApi([FakeMsApi? override]) {
   return api;
 }
 
+/// 用户偏好假 API(对应 MsApi.prefs;2026-11-19 settings-mcp-collapse
+/// 最小补桩):缺省回默认值(folderTreeDefaultCollapsed=false),folders
+/// 既有「默认全展开」用例零变化;getStaged/updateStaged 可编排(UserPrefs /
+/// Exception)供开关收拢与失败兜底用例。
+class FakePrefsApi extends PrefsApi {
+  FakePrefsApi(super.api);
+
+  int getPrefsCalls = 0;
+  final updateCalls = <bool?>[];
+  Object? getStaged;
+  Object? updateStaged;
+
+  @override
+  Future<UserPrefs> getPrefs() async {
+    getPrefsCalls++;
+    if (getStaged is Exception) throw getStaged!;
+    return settleStaged(getStaged, const UserPrefs());
+  }
+
+  @override
+  Future<UserPrefs> updatePrefs({bool? folderTreeDefaultCollapsed}) async {
+    updateCalls.add(folderTreeDefaultCollapsed);
+    if (updateStaged is Exception) throw updateStaged!;
+    return settleStaged(
+      updateStaged,
+      UserPrefs(
+        folderTreeDefaultCollapsed: folderTreeDefaultCollapsed ?? false,
+      ),
+    );
+  }
+}
+
 class FakeMsApi extends MsApi {
   FakeMsApi() : super(baseUrl: 'http://b5.test.local');
 
@@ -563,6 +596,7 @@ class FakeMsApi extends MsApi {
   late final _approvalsOps = FakeApprovalOpsApi(this);
   late final _notifications = FakeNotificationsApi(this);
   late final _projects = FakeProjectsApi(this);
+  late final _prefs = FakePrefsApi(this);
 
   @override
   FakeAssetsApi get assets => _assets;
@@ -599,4 +633,7 @@ class FakeMsApi extends MsApi {
 
   @override
   FakeProjectsApi get projects => _projects;
+
+  @override
+  FakePrefsApi get prefs => _prefs;
 }

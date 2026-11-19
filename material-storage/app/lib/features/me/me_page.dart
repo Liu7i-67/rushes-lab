@@ -103,7 +103,9 @@ class MePage extends StatelessWidget {
                 title: '网盘与传输',
                 children: [BaiduBackupTile(), TransferNotifyTile()],
               ),
-              const MeGroup(title: '偏好', children: [AppearanceRow()]),
+              // 2026-11-19 settings-mcp-collapse F7:偏好分组「外观」行后
+              // 追加「设置」行(进 /settings;外观行与弹层原地保留不变)
+              const MeGroup(title: '偏好', children: [AppearanceRow(), SettingsRow()]),
               // B8:管理区——管理后台仅 is_system_admin;目录模板独立闸门
               if (adminTiles.isNotEmpty)
                 MeGroup(title: '管理', children: adminTiles),

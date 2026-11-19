@@ -179,12 +179,17 @@ void main() {
     await tester.pump();
 
     // 小调注释:E5 精修后页面为分组卡片列表,退出登录行在 600dp 测试视口
-    // 惰性构建窗口外,先滚到底再点(交互语义不变)
+    // 惰性构建窗口外,先滚到底再点(交互语义不变)。
+    // 2026-11-19 settings-mcp-collapse:偏好分组新增「设置」行后列表更长,
+    // dragUntilVisible 惰性构建即停、行可仍落在视口外缘致 tap 落空——改用
+    // ensureVisible 滚到完全可见(断言与交互语义零变化)。
     await tester.dragUntilVisible(
       find.text('退出登录'),
       find.byType(ListView),
       const Offset(0, -200),
     );
+    await tester.ensureVisible(find.text('退出登录'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('退出登录'));
     await tester.pump();
     await tester.pump();
