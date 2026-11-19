@@ -3,9 +3,12 @@
  *
  * 未登录用户统一被 AppShell / client.ts 401 拦截器带 `?next=` 引导到这里;
  * 登录成功回 next(首登强制改密 → /change-password)。
+ * WEB-06(P2):回跳前先等 useMe 反查完成(否则 AppShell 仍按未登录渲染会把
+ * 页面整页弹回 login 丢掉 next);next 经 parseNext 防 open redirect 校验。
  */
 import { App, Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { KeyRound, User as UserIcon } from 'lucide-react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../api/client';
 import { useLocalLogin } from '../api/hooks';
@@ -13,17 +16,35 @@ import { useCompactViewport } from '../lib/use-viewports';
 
 const BASENAME = '/ms-static/web';
 
-/** next 参数(window.location 级完整路径)→ react-router basename 相对路径。 */
+/**
+ * WEB-06(P2):解析并安全校验 `next` 查询参数 → react-router basename 相对路径。
+ *
+ * useSearchParams 已解码一层;这里再 decodeURIComponent 兜底一次以消除双重编码
+ * (编码残缺如裸 % 时保留一层解码结果继续校验,不抛错)。随后按防 open redirect
+ * 规则校验:仅接受「以单个 / 开头且不以 // 开头、不含协议与域名」的本站相对路径,
+ * 反斜杠按可疑一并拒绝。不合法 / 缺失一律回落 '/'(既有默认落点);合法且带
+ * basename 时剥掉 basename,query 与 hash 原样保留 —— 落点必须是原页面
+ * (如 /settings/mcp?include_revoked=1 的「URL 即状态」不丢)。
+ */
 function parseNext(raw: string | null): string {
-  let n = (raw || '').split('#')[0].split('?')[0];
+  let n = raw ?? '';
+  if (!n) return '/';
+  try {
+    n = decodeURIComponent(n);
+  } catch {
+    // 编码残缺:不再二次解码,用一层解码结果继续做安全校验
+  }
+  if (!n.startsWith('/') || n.startsWith('//') || n.includes('\\')) return '/';
+  // 显式挡协议头(https: / javascript: 等);以 / 开头时正常不会命中,兜底防御
+  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(n)) return '/';
   if (n.startsWith(BASENAME)) n = n.slice(BASENAME.length);
-  if (!n.startsWith('/')) n = '/';
-  return n || '/';
+  return n.startsWith('/') ? n : '/';
 }
 
 export default function LoginPage() {
   const navigate = useNavigate();
   const { message } = App.useApp();
+  const queryClient = useQueryClient();
   const [params] = useSearchParams();
   const login = useLocalLogin();
   const [form] = Form.useForm();
@@ -34,6 +55,11 @@ export default function LoginPage() {
     try {
       const res = await login.mutateAsync(values);
       message.success(`欢迎,${res.name || '已登录'}`);
+      // WEB-06:先等 useMe 反查完成再跳转。mutation onSuccess 里的 invalidate
+      // 是异步的,直接 navigate 时 AppShell 仍按未登录(isError)渲染,会在受保护
+      // 路由上整页 assign 回 login?next=…(此时 next 已指向 /login 自身),重载后
+      // 走已登录 /login 分支落首页 —— 表现为「登录后一律落首页不回跳」。
+      await queryClient.refetchQueries({ queryKey: ['me'] });
       if (res.must_change_password) {
         navigate('/change-password', { replace: true });
       } else {

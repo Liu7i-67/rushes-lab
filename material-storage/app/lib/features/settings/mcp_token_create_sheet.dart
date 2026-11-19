@@ -8,21 +8,23 @@
 /// - 结果:明文**唯一一次**展示(web 同语义)——弹层禁下拉/遮罩关闭,
 ///   只有「我已保存,关闭」一途;附整段可复制的 MCP 使用说明
 ///   ([buildMcpGuide],含明文,随弹层同生命周期,不落任何存储)。
+/// P2 批:D15 风险文案 / 复制块 / 使用说明段收拢至 mcp_shared,
+/// fmtIsoLong 归位 core/fmt.dart,本文件只保留表单与结果弹层编排。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart';
+import '../../core/fmt.dart' show fmtIsoLong;
 import '../../core/session.dart';
 import '../../models/models.dart';
 import '../../theme/context_tk.dart';
 import '../../theme/tokens.dart';
-import '../../widgets/app_card.dart';
 import '../../widgets/app_segmented.dart';
 import '../../widgets/buttons.dart';
-import '../../widgets/copy_button.dart';
 import '../../widgets/form_text_field.dart';
 import '../../widgets/sheet_scaffold.dart';
+import 'mcp_shared.dart';
 
 /// 每账号活跃令牌上限(web MAX_ACTIVE_TOKENS / 后端 enforce 同值)。
 const int kMaxActiveTokens = 5;
@@ -114,10 +116,9 @@ class _CreateTokenSheetState extends State<_CreateTokenSheet> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // D15 强制文案:创建页必须明示令牌的全权限与内网明文 http 风险
+            // (统一正本 mcp_shared.kPatRiskNotice,与令牌页风险卡同源)
             Text(
-              '令牌=账号级全权限凭证,等同你的密码;内网入口为明文 http,'
-              '勿配置到不可信机器。持有令牌即可调用本账号可访问的全部 API'
-              '(含上传与下载),请勿粘贴到聊天工具、截图或代码仓库。',
+              kPatRiskNotice,
               style: TextStyle(
                 fontSize: Tk.fzMd,
                 height: 1.6,
@@ -259,53 +260,21 @@ class _TokenCreatedSheet extends StatelessWidget {
           style: TextStyle(fontSize: Tk.fzMd, height: 1.6, color: tk.warn),
         ),
         const SizedBox(height: Tk.spaceMd),
-        // 明文行:mono + 就地复制
-        AppCard(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: SelectableText(
-                  token.token,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 13,
-                    height: 1.4,
-                  ),
-                ),
-              ),
-              const SizedBox(width: Tk.spaceSm),
-              CopyButton(text: token.token, label: '复制'),
-            ],
-          ),
+        // 明文行:mono + 就地复制(P2-6 单行卡形态,视觉同原实现)
+        MonoCopyBlock(
+          inline: true,
+          text: token.token,
+          copyLabel: '复制',
+          monoHeight: 1.4,
         ),
         const SizedBox(height: Tk.spaceLg),
-        Row(
-          children: [
-            Expanded(
-              child: Text(
-                'MCP 使用说明',
-                style: TextStyle(
-                  fontSize: Tk.fzRowTitle,
-                  fontWeight: FontWeight.w600,
-                  color: tk.ink,
-                ),
-              ),
-            ),
-            CopyButton(text: guide, label: '复制说明'),
-          ],
-        ),
-        const SizedBox(height: Tk.spaceSm),
-        AppCard(
-          padding: const EdgeInsets.all(12),
-          child: SelectableText(
-            guide,
-            style: const TextStyle(
-              fontFamily: 'monospace',
-              fontSize: 12,
-              height: 1.7,
-            ),
-          ),
+        MonoCopyBlock(
+          title: 'MCP 使用说明',
+          text: guide,
+          copyLabel: '复制说明',
+          monoFontSize: 12,
+          monoHeight: 1.7,
+          blockPadding: const EdgeInsets.all(12),
         ),
         const SizedBox(height: Tk.spaceMd),
         Text(
@@ -321,64 +290,4 @@ class _TokenCreatedSheet extends StatelessWidget {
       ],
     );
   }
-}
-
-/// MCP 使用说明整段文本(信息要素对齐 web TokenCreatedModal.buildMcpGuide)。
-/// [token] 传实际明文(创建成功弹层);null = 占位版(令牌页接入说明段用,
-/// 提示先创建令牌再替换占位)。包含明文时调用方须保证随展示即弃、不落存储。
-String buildMcpGuide({required String endpoint, String? token}) {
-  final t = token ?? '<你的访问令牌>';
-  final origin = endpoint.replaceAll(RegExp(r'/mcp$'), '');
-  final buf = StringBuffer()
-    ..writeln('【素材库 MCP 配置】')
-    ..writeln('MCP 地址:$endpoint')
-    ..writeln('认证头:Authorization: Bearer $t')
-    ..writeln('传输:Streamable HTTP(单副本;服务重启后客户端需重新 initialize)');
-  if (token == null) {
-    buf.writeln('认证头中的 <你的访问令牌> 请替换为在「MCP 访问令牌」页'
-        '创建的令牌明文(仅创建成功时展示一次)。');
-  }
-  buf
-    ..writeln()
-    ..writeln('【客户端配置示例(支持 HTTP MCP 的客户端;字段名以客户端文档为准)】')
-    ..writeln('{')
-    ..writeln('  "mcpServers": {')
-    ..writeln('    "material-storage": {')
-    ..writeln('      "type": "http",')
-    ..writeln('      "url": "$endpoint",')
-    ..writeln('      "headers": {')
-    ..writeln('        "Authorization": "Bearer $t"')
-    ..writeln('      }')
-    ..writeln('    }')
-    ..writeln('  }')
-    ..writeln('}')
-    ..writeln()
-    ..writeln('【给 AI 的使用提示】')
-    ..writeln('你是素材库(Material Storage)助手,已通过上面的 MCP 地址与令牌接入;'
-        '身份=令牌所属用户本人,权限与网页登录一致。')
-    ..writeln('挑素材主路径:先 search_assets 搜索,再 get_thumbnail 看缩略图'
-        '(先 size="small" 看构图,需要细节再 size="large")。')
-    ..writeln('下载:get_download_url 返回 15 分钟有效的直链,'
-        '请由客户端自行 HTTP GET 取字节,勿反复续签。')
-    ..writeln('上传:create_upload → 客户端 PUT 直传(URL 15 分钟内有效,'
-        'ETag 取自 PUT 响应头)→ complete_upload;单文件 ≤5GiB,'
-        '同文件夹同名会 409。')
-    ..writeln('complete_upload 超时后先 search_assets / list_files 确认资产'
-        '是否已入库,再决定重试或 abort_upload。');
-  if (token != null) {
-    buf
-      ..writeln()
-      ..writeln('【自检(可选)】')
-      ..write('curl -H "Authorization: Bearer $t" $origin/api/v1/auth/me');
-  }
-  return buf.toString();
-}
-
-/// ISO → 'YYYY-MM-DD HH:mm'(本地时区;令牌有效期展示用,带年份)。
-String fmtIsoLong(String iso) {
-  final t = DateTime.tryParse(iso)?.toLocal();
-  if (t == null) return iso;
-  String two(int v) => v.toString().padLeft(2, '0');
-  return '${t.year}-${two(t.month)}-${two(t.day)} '
-      '${two(t.hour)}:${two(t.minute)}';
 }

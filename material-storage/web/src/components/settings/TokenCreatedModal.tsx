@@ -77,6 +77,9 @@ export function TokenCreatedModal({ token, onClose }: {
       maskClosable={false}
       keyboard={false}
       width={680}
+      // WEB-21 兜底:显式高于 CreateTokenModal(1000),一次性明文弹窗永远在最上层,
+      // 页脚关闭入口不被其它弹窗遮罩挡住
+      zIndex={1010}
       styles={{ body: { maxHeight: '68vh', overflowY: 'auto' } }}
       footer={<Button type="primary" onClick={onClose}>我已保存,关闭</Button>}
     >

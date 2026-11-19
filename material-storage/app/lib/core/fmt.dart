@@ -25,6 +25,17 @@ String fmtIsoShort(String iso) {
       '${t.hour.toString().padLeft(2, '0')}:${t.minute.toString().padLeft(2, '0')}';
 }
 
+/// ISO → 'YYYY-MM-DD HH:mm'(本地时区;带年份——MCP 令牌创建/过期/吊销
+/// 时间展示用;settings-mcp P2-7 自 mcp_token_create_sheet 归位于此,
+/// 与 fmtDate/fmtIsoShort 同家;解析失败原样返回)。
+String fmtIsoLong(String iso) {
+  final t = DateTime.tryParse(iso)?.toLocal();
+  if (t == null) return iso;
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${t.year}-${two(t.month)}-${two(t.day)} '
+      '${two(t.hour)}:${two(t.minute)}';
+}
+
 /// 相对时间(app-polish E6):通知等列表行的人类化时间。
 /// 规则:刚刚(<1 分钟)/ N 分钟前(<1 小时)/ N 小时前(今日)/
 /// 昨天 HH:mm / 前天 HH:mm / N 天前(3~7 天)/ MM-DD(同年)/
