@@ -133,6 +133,7 @@ V3 自签名(ACS3-HMAC-SHA256,POST+query+空 body)一次通过,无 SDK 依赖,�
 | 6 | `QuerySendStatistics` | 参数校验即拒:`IsGlobe=0` 报 not valid(**正确口径:1=国内 2=国际/港澳台**),`endDate` 格式不认(日期串与毫秒时间戳均试,CLI 口径为 `yyyyMMdd`) | 该接口拿不到单条失败原因,放弃 |
 | 7 | **回执定位(2026-11-19 修正日期格式后)** | `SendStatus=2`,**`ErrCode=PORT_NOT_REGISTERED`**,Content=【成都讨喜未来文化传媒】您的动态码为：641869… | **失败根因=短信端口未完成运营商企业实名制报备,被运营商拦截**;签名 2026-11-18 才审核通过,报备平均 **5-7 个工作日**(部分 7-10,运营商不承诺时效);报备完成前任何发送都会同错,与代码/参数无关 |
 | 8 | `QuerySmsSignList`(PageIndex/PageSize) | 2 条签名均 `AUDIT_STATE_PASS`(成都讨喜未来文化传媒/…有限公司),但**列表接口不返回运营商报备明细**(技能文档的 `SignIspRegisterDetailList` 在 `get-sms-sign` 单查接口) | 实测时 aliyun CLI 未装,单查未跑;按官方口径报备进度以发送结果为准或开工单查 |
+| 9 | **报备生效后复测(移动号 13458569667,2026-11-19 14:18)** | 提交 `Code=OK`+`BizId=453222295069092492^0` → 5 秒后回执 **`SendStatus=3`,`ErrCode=DELIVERED`** | **端到端全通**:控制台报备状态与实测一一对应(移动报备成功→移动号送达;电信「已报备待验证」→此前 15390410330 电信号 `PORT_NOT_REGISTERED` 吻合,待验证完成后才可发电信号码);重发验证项**已完成(移动侧)** |
 
 **实测钉子:**
 
@@ -140,8 +141,8 @@ V3 自签名(ACS3-HMAC-SHA256,POST+query+空 body)一次通过,无 SDK 依赖,�
 - `QuerySmsTemplateList` 分页参数是 `PageIndex`/`PageSize`(不是 CurrentPage);`QuerySendStatistics` 是 `PageIndex` 且 `IsGlobe` 必填但 0 被拒——两接口文档与实现有出入,遇到逐参数试错即可。
 - **MNS 403 `SignatureDoesNotMatch` 可能掩盖 `ServiceNotEnabled`**:签名比对失败与服务未开通都走 403,自签名调试时先用官方 SDK 交叉验证再怀疑算法。
 - **`QuerySendDetails` 的 `SendDate` 必须 `yyyyMMdd`**(如 `20261119`);传错格式接口不报错、静默返回空列表——空结果先查格式再下「没进流水」的结论。
-- **新签名发送失败 `PORT_NOT_REGISTERED`=端口未完成运营商实名制报备**(5-7 个工作日,部分 7-10),属于开通期固有现象,代码侧无解,等报备完成重试即可;官方自查文档 help.aliyun.com/document_detail/2984016。
-- 待补:端口报备完成后(预计 2026-11-24±)用同一脚本重发验证 `SendStatus=3`;aliyun CLI(技能要求 ≥3.3.3)本机未装,后续如按技能流程走需先安装。
+- **新签名发送失败 `PORT_NOT_REGISTERED`=端口未完成运营商实名制报备**(5-7 个工作日,部分 7-10),属于开通期固有现象,代码侧无解,等报备完成重试即可;官方自查文档 help.aliyun.com/document_detail/2984016。**2026-11-19 当天移动/联通报备即生效(复测 DELIVERED),电信「已报备待验证」仍会拦**——报备生效节奏比官方口径快得多,逐运营商生效。
+- 复测已完成(移动侧 DELIVERED,2026-11-19 14:18);**电信侧待「已报备待验证」完成后用 15390410330 复测**;aliyun CLI(技能要求 ≥3.3.3)本机未装,后续如按技能流程走需先安装。
 
 ## 8. 与本仓库的潜在衔接点(调研观察,未拍板)
 
