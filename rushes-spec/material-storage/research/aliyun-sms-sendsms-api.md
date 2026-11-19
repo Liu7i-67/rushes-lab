@@ -128,16 +128,20 @@ V3 自签名(ACS3-HMAC-SHA256,POST+query+空 body)一次通过,无 SDK 依赖,�
 | 1 | `SendSms` 不带 `TemplateParam` | HTTP 200,`Code=isv.SMS_TEMPLATE_ILLEGAL`,Message=「请检查模板内容与模板参数是否匹配」 | **模板含变量时缺 TemplateParam = 提交被拒**,但签名/鉴权/参数序列化(中文签名 UTF-8 百分号编码)全部正确;此失败不产生回执 |
 | 2 | `QuerySmsTemplateList`(PageIndex/PageSize) | `Code=OK`,3 个模板全 `AUDIT_STATE_PASS` | 目标模板 `SMS_512523885`「密码重置」,内容=`您的动态码为：${code}…`,单变量 `${code}`,绑定签名=成都讨喜未来文化传媒 |
 | 3 | `SendSms` 带 `{"code":"641869"}` | **`Code=OK`,`BizId=744611395060321845^0`**,RequestId=`01A1F1EE-CE09-…` | 实发成功(提交层);BizId 果然带 `^0` 后缀,与 §5 预判一致 |
-| 4 | `QuerySendDetails`(号码+当天,±BizId) | `Code=OK` 但 `TotalCount=0`(发出后 8s/33s/12min 三查) | **该条发送没进可查询明细流水**;控制台却显示「发送失败」→ 失败发生在进入回执/明细之前 |
-| 5 | MNS 回执队列 `Alicom-Queue-1903317001079316-SmsReport` | 自签名 403 `SignatureDoesNotMatch`(误导);**官方 SDK 实错=`ServiceNotEnabled`「OwnerId…has not enabled」** | 该阿里云账号**未开通消息服务 SMQ(原 MNS)**,短信服务自动建的回执队列不可 API 访问;签名实现已与官方 SDK 逐字符对齐验证,非签名问题 |
-| 6 | `QuerySendStatistics` | 参数校验即拒:`IsGlobe=0` 报 not valid(=1 才放行)、`endDate` 格式不认(日期串与毫秒时间戳均试) | 该接口拿不到单条失败原因,放弃 |
+| 4 | `QuerySendDetails`(号码+当天,±BizId) | `Code=OK` 但 `TotalCount=0`(发出后 8s/33s/12min 三查)→**后查明是我把 `SendDate` 传成 `2026-11-19`,接口要 `yyyyMMdd` 且对错格式宽松吞掉不报错**;改传 `20261119` 后一次命中 | **QuerySendDetails 的 `SendDate` 必须 `yyyyMMdd`**;`SendStatus` 1=发送中 2=失败 3=成功,单条明细带 `ErrCode`/`Content`(含签名括号全文)/`SendDate`/`ReceiveDate`(回执通常 ~35s 落地) |
+| 5 | MNS 回执队列 `Alicom-Queue-1903317001079316-SmsReport` | 自签名 403 `SignatureDoesNotMatch`(误导);**官方 SDK 实错=`ServiceNotEnabled`「OwnerId…has not enabled」**;回执配置生效后重试仍同错 | 该阿里云账号**未开通消息服务 SMQ(原 MNS)**;短信控制台「回执队列配置」生效 ≠ SMQ 服务开通,要用 API 读队列须单独在 SMQ 控制台开通;签名实现已与官方 SDK 逐字符对齐验证,非签名问题 |
+| 6 | `QuerySendStatistics` | 参数校验即拒:`IsGlobe=0` 报 not valid(**正确口径:1=国内 2=国际/港澳台**),`endDate` 格式不认(日期串与毫秒时间戳均试,CLI 口径为 `yyyyMMdd`) | 该接口拿不到单条失败原因,放弃 |
+| 7 | **回执定位(2026-11-19 修正日期格式后)** | `SendStatus=2`,**`ErrCode=PORT_NOT_REGISTERED`**,Content=【成都讨喜未来文化传媒】您的动态码为：641869… | **失败根因=短信端口未完成运营商企业实名制报备,被运营商拦截**;签名 2026-11-18 才审核通过,报备平均 **5-7 个工作日**(部分 7-10,运营商不承诺时效);报备完成前任何发送都会同错,与代码/参数无关 |
+| 8 | `QuerySmsSignList`(PageIndex/PageSize) | 2 条签名均 `AUDIT_STATE_PASS`(成都讨喜未来文化传媒/…有限公司),但**列表接口不返回运营商报备明细**(技能文档的 `SignIspRegisterDetailList` 在 `get-sms-sign` 单查接口) | 实测时 aliyun CLI 未装,单查未跑;按官方口径报备进度以发送结果为准或开工单查 |
 
 **实测钉子:**
 
 - 中文 SignName 走 RFC3986 percent-encoding(UTF-8)签名即可,无需特殊处理;`TemplateParam` 传 dict 时须先序列化为 JSON 字符串再入签名(嵌套引号转义易错,脚本内统一序列化最稳)。
 - `QuerySmsTemplateList` 分页参数是 `PageIndex`/`PageSize`(不是 CurrentPage);`QuerySendStatistics` 是 `PageIndex` 且 `IsGlobe` 必填但 0 被拒——两接口文档与实现有出入,遇到逐参数试错即可。
 - **MNS 403 `SignatureDoesNotMatch` 可能掩盖 `ServiceNotEnabled`**:签名比对失败与服务未开通都走 403,自签名调试时先用官方 SDK 交叉验证再怀疑算法。
-- 待补:失败根因(等控制台失败行的错误码,或账号开通 SMQ 后读回执队列);手机端是否实际收到 641869 短信待确认。
+- **`QuerySendDetails` 的 `SendDate` 必须 `yyyyMMdd`**(如 `20261119`);传错格式接口不报错、静默返回空列表——空结果先查格式再下「没进流水」的结论。
+- **新签名发送失败 `PORT_NOT_REGISTERED`=端口未完成运营商实名制报备**(5-7 个工作日,部分 7-10),属于开通期固有现象,代码侧无解,等报备完成重试即可;官方自查文档 help.aliyun.com/document_detail/2984016。
+- 待补:端口报备完成后(预计 2026-11-24±)用同一脚本重发验证 `SendStatus=3`;aliyun CLI(技能要求 ≥3.3.3)本机未装,后续如按技能流程走需先安装。
 
 ## 8. 与本仓库的潜在衔接点(调研观察,未拍板)
 
