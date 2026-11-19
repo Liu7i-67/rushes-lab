@@ -8,8 +8,9 @@
 /// 的徽标语义,避免同一数字双写)。
 ///
 /// 结构语义保持:按深度每级 16px 缩进 + 2px 竖直参考线(tk.line)、
-/// 有子级可展开/折叠(默认全展开)、整行可点进宫格、行尾无 chevron
-/// (E4 定稿);图标实心仍按子树含文件(subtree>0)点亮。
+/// 有子级可展开/折叠(默认展开;用户开启「默认收拢全部文件夹」后由页面
+/// 预填收拢,2026-11-19 settings-mcp-collapse F9)、整行可点进宫格、
+/// 行尾无 chevron(E4 定稿);图标实心仍按子树含文件(subtree>0)点亮。
 library;
 
 import 'package:flutter/material.dart' hide Badge;

@@ -46,6 +46,8 @@ def test_all_tables_in_metadata() -> None:
         "system_flags",
         # 0021:用户模块组级授权(组对组关系落 DB 不进 FGA,D2)
         "user_create_grants",
+        # 0023:用户级偏好(设置页「默认收拢全部文件夹」;JSONB 存已知键全集)
+        "user_prefs",
     }
 
 

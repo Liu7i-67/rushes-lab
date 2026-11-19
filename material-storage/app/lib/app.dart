@@ -35,6 +35,8 @@ import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
 import 'features/permissions/my_permissions_page.dart';
+import 'features/settings/mcp_tokens_page.dart';
+import 'features/settings/settings_page.dart';
 import 'features/projects/deleted_projects_page.dart';
 import 'features/shell/home_shell.dart';
 import 'theme/app_theme.dart';
@@ -168,6 +170,14 @@ class _MsAppState extends State<MsApp> {
               return MaterialPageRoute(
                 builder: (_) => const MyPermissionsPage(),
               );
+            case '/settings':
+              // 2026-11-19 settings-mcp-collapse F7:App 设置页
+              // (偏好开关【默认收拢全部文件夹】+ MCP / AI 接入入口)
+              return MaterialPageRoute(builder: (_) => const SettingsPage());
+            case '/mcp-tokens':
+              // 同批 F8:MCP 访问令牌管理页(创建/列表/吊销/端点说明;
+              // 页面归并行包,契约 = McpTokensPage 无参构造)
+              return MaterialPageRoute(builder: (_) => const McpTokensPage());
             case '/deleted-projects':
               // B6:已删除项目回收站(列表+恢复;入口闸门 is_project_deleter)
               return MaterialPageRoute(

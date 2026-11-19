@@ -26,11 +26,13 @@ import 'directory_api.dart';
 import 'folders_api.dart';
 import 'folders_ops_api.dart';
 import 'notifications_api.dart';
+import 'prefs_api.dart';
 import 'projects_api.dart';
 import 'projects_ops_api.dart';
 import 'request_links_api.dart';
 import 'risk_api.dart';
 import 'share_api.dart';
+import 'tokens_api.dart';
 import 'usage_api.dart';
 import 'user_agent.dart';
 import 'users_api.dart';
@@ -225,6 +227,8 @@ class MsApi {
   late final adminBaidu = AdminBaiduApi(this); // B8:备份任务 admin 观测+文件三操作
   late final risk = RiskApi(this); // 风控:锁定快照+单 IP 解锁(2026-10-28)
   late final usage = UsageApi(this); // 使用统计(消费既有 usage/stats 端点)
+  late final tokens = TokensApi(this); // MCP PAT 自助三端点(2026-11-19)
+  late final prefs = PrefsApi(this); // 用户偏好读写(2026-11-19)
 
   InterceptorsWrapper _logInterceptor({
     bool withQuery = true,

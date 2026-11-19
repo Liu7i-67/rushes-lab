@@ -184,7 +184,7 @@ export function AppHeader({ me }: Props) {
         </Badge>
 
         {/* 账号设置 / 访问令牌(MCP 素材服务 D15) */}
-        <IconButton title="设置 / 访问令牌" onClick={() => navigate('/settings')}>
+        <IconButton title="设置" onClick={() => navigate('/settings')}>
           <SettingsIcon size={16} strokeWidth={1.8} />
         </IconButton>
 

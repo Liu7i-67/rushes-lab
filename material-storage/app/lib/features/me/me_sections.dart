@@ -1,6 +1,7 @@
 /// me_sections — 「我的」页分组与状态行(§6 F12):
 /// - [MeGroup]:SectionLabel + SectionCard 分组容器;
 /// - [AppearanceRow]:偏好「外观」行(副标题=当前模式,打开设置面板);
+/// - [SettingsRow]:偏好「设置」行(进入 /settings 设置页,2026-11-19 新增);
 /// - [MeLogoutRow]:红字退出登录行(确认逻辑在页面层);
 /// - [BaiduBackupTile]/[TransferNotifyTile]:原 me_page 内的实时状态行,
 ///   行为不变,仅换成 AppRow 视觉。
@@ -65,6 +66,23 @@ class AppearanceRow extends StatelessWidget {
         ),
         onTap: () => showAppearanceSheet(context),
       ),
+    );
+  }
+}
+
+/// 偏好 · 设置:进入 App 设置页(2026-11-19 settings-mcp-collapse F7):
+/// 设置页承载偏好开关【默认收拢全部文件夹】+ MCP / AI 接入入口;
+/// 「外观」行与外观弹层原地保留不变(D3),本行在其后追加。
+class SettingsRow extends StatelessWidget {
+  const SettingsRow({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return AppRow(
+      key: const Key('me_settings'),
+      leading: const Icon(Icons.settings_outlined),
+      title: '设置',
+      onTap: () => Navigator.of(context).pushNamed('/settings'),
     );
   }
 }

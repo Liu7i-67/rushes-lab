@@ -53,6 +53,16 @@ class _FoldersPageState extends State<FoldersPage> {
   var _loading = true; // 仅首轮整页骨架;刷新在旧数据上原地等
   String? _error;
   final _collapsed = <String>{};
+
+  /// 本次会话内被用户手工展开过的节点 id(F9 修正):_prefillCollapsed 跳过
+  /// 这些 id,重拉(下拉刷新/失效总线/返回重拉)不覆盖手工展开态。首次展开
+  /// 即记,重复无害;手工收拢不回删(收拢态已在 _collapsed,语义本就是收拢)。
+  final _manualOpened = <String>{};
+
+  /// 「默认收拢全部文件夹」偏好(2026-11-19 settings-mcp-collapse F9):
+  /// initState 与 folders 拉取并行预取;失败全静默按 false 兜底(=现状全
+  /// 展开)。只影响本次进入的建树初值,开关切换对下一次进入生效(D4)。
+  var _collapseDefault = false;
   var _code = '';
 
   bool get _canCreate =>
@@ -70,6 +80,7 @@ class _FoldersPageState extends State<FoldersPage> {
     // 数据新鲜度:上传等写操作成功后失效 'folders',本页自动重拉子树计数
     RefreshBus.I.addListener('folders', _reload);
     _reload();
+    _loadCollapsePref(); // F9:偏好与 folders 并行取,失败全静默
     _loadCode();
   }
 
@@ -88,6 +99,7 @@ class _FoldersPageState extends State<FoldersPage> {
         _all = folders;
         _error = null;
         _loading = false;
+        _prefillCollapsed(); // F9:数据+建树完成后按开关预填收拢(幂等只并)
       });
     } catch (e) {
       if (!mounted) return;
@@ -110,6 +122,39 @@ class _FoldersPageState extends State<FoldersPage> {
       }
     } catch (_) {
       // 静默:code 非关键数据
+    }
+  }
+
+  /// 并行预取「默认收拢全部文件夹」偏好(F9):失败全静默按 false 兜底
+  /// (现状全展开),不产生未捕获异步异常;取到开启且首屏数据已就绪时立即
+  /// 补预填(数据先到、偏好后到的次序同样生效;数据未到则由 _reload 落树
+  /// 时统一预填)。
+  Future<void> _loadCollapsePref() async {
+    bool on;
+    try {
+      final p = await session.api!.prefs.getPrefs();
+      on = p.folderTreeDefaultCollapsed;
+    } catch (_) {
+      return; // 静默兜底:开关视同关闭,行为与现状一致
+    }
+    _collapseDefault = on;
+    if (on && mounted && _all.isNotEmpty) {
+      setState(_prefillCollapsed);
+    }
+  }
+
+  /// 把所有「含子级」节点 id 并入 _collapsed(F9:默认全收拢,点箭头逐层
+  /// 展开)。只并不清;但跳过 _manualOpened——本次会话内用户手工展开过的
+  /// 节点不被预填覆盖,下拉刷新/失效重拉后保持展开态。手工收拢的节点不
+  /// 特殊处理(默认收拢语义本就是收拢);开关关闭时零变化(现状全展开)。
+  void _prefillCollapsed() {
+    if (!_collapseDefault || _all.isEmpty) return;
+    final byId = {for (final f in _all) f.id: f};
+    for (final f in _all) {
+      final p = f.parentFolderId;
+      if (p == null || !byId.containsKey(p)) continue;
+      if (_manualOpened.contains(p)) continue; // 手工展开过:保留展开态
+      _collapsed.add(p);
     }
   }
 
@@ -244,9 +289,11 @@ class _FoldersPageState extends State<FoldersPage> {
                 depth: depth,
                 expanded: !_collapsed.contains(node.folder.id),
                 onToggle: () => setState(() {
-                  _collapsed.contains(node.folder.id)
-                      ? _collapsed.remove(node.folder.id)
-                      : _collapsed.add(node.folder.id);
+                  if (_collapsed.remove(node.folder.id)) {
+                    _manualOpened.add(node.folder.id); // 手工展开即记(重复无害)
+                  } else {
+                    _collapsed.add(node.folder.id);
+                  }
                 }),
                 onOpen: () => _open(node.folder),
               ),
