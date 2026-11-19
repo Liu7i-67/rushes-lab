@@ -17,6 +17,7 @@ type TreeAllowDrop = NonNullable<TreeProps['allowDrop']>;
 type TreeOnDrop = NonNullable<TreeProps['onDrop']>;
 import { Ellipsis, Folder as FolderIcon, FolderInput, Pencil, Plus } from 'lucide-react';
 import { useCallback, useMemo } from 'react';
+import { useUserPreferences } from '../api/prefs';
 import type { Folder } from '../api/types';
 import { renderFolderNode } from './folderNodeTitle';
 
@@ -137,6 +138,12 @@ export function FolderTree({
   selectMode, disabledIds, disabledSelfIds, nodeActions, onRenameFolder, onMoveFolder,
   enableDrag, onMoveDrop, fillHeight,
 }: Props) {
+  // 偏好【默认收拢全部文件夹】(settings-mcp-collapse F4):queryKey ['me','preferences'],
+  // 4 处使用方共享 react-query 缓存只发一次请求。加载中走下方早退分支(Tree 不挂载)——
+  // 非受控 defaultExpandAll 在挂载时一次性求值,必须等 prefs 就绪才能吃到真实值;
+  // isError 按 false 兜底 = 既有「<30 全展开」行为,不阻塞树渲染
+  const { prefs, isLoading: prefsLoading, isError: prefsError } = useUserPreferences();
+  const collapsed = prefsError ? false : !!prefs?.folder_tree_default_collapsed;
   const disabledSet = useMemo(() => new Set(disabledIds ?? []), [disabledIds]);
   const selfDisabledSet = useMemo(() => new Set(disabledSelfIds ?? []), [disabledSelfIds]);
   const tree = useMemo(
@@ -290,7 +297,9 @@ export function FolderTree({
     </div>
   );
 
-  if (tree.length === 0) {
+  // prefs 加载早退并入空态分支(同一骨架:Header + 居中提示),Tree 不挂载;
+  // 树数据已就绪而偏好未到时文案单独区分,避免误显「还没有文件夹」
+  if (prefsLoading || tree.length === 0) {
     return (
       <div style={rootFill}>
         {Header}
@@ -298,29 +307,35 @@ export function FolderTree({
           padding: '40px 16px', textAlign: 'center', color: 'var(--ms-ink-subtle)',
           ...scrollFill,
         }}>
-          <FolderIcon size={28} strokeWidth={1.4}
-                      style={{ color: 'var(--ms-hairline)', marginBottom: 12 }} />
-          <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>
-            {projectName ?? '项目'}<br/>还没有文件夹
-          </div>
-          {onCreateRoot && (
-            <button
-              onClick={onCreateRoot}
-              style={{
-                marginTop: 16,
-                padding: '6px 12px',
-                background: 'var(--ms-accent)',
-                color: '#fff',
-                border: 0,
-                borderRadius: 'var(--ms-radius-sm)',
-                fontFamily: 'inherit',
-                fontSize: 12.5,
-                fontWeight: 500,
-                cursor: 'pointer',
-              }}
-            >
-              + 新建文件夹
-            </button>
+          {prefsLoading && tree.length > 0 ? (
+            <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>加载偏好中…</div>
+          ) : (
+            <>
+              <FolderIcon size={28} strokeWidth={1.4}
+                          style={{ color: 'var(--ms-hairline)', marginBottom: 12 }} />
+              <div style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+                {projectName ?? '项目'}<br/>还没有文件夹
+              </div>
+              {onCreateRoot && (
+                <button
+                  onClick={onCreateRoot}
+                  style={{
+                    marginTop: 16,
+                    padding: '6px 12px',
+                    background: 'var(--ms-accent)',
+                    color: '#fff',
+                    border: 0,
+                    borderRadius: 'var(--ms-radius-sm)',
+                    fontFamily: 'inherit',
+                    fontSize: 12.5,
+                    fontWeight: 500,
+                    cursor: 'pointer',
+                  }}
+                >
+                  + 新建文件夹
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -333,7 +348,8 @@ export function FolderTree({
       <div className="ms-folder-tree" style={{ padding: '6px 4px 12px', ...scrollFill }}>
         <Tree
           treeData={tree}
-          defaultExpandAll={tree.length < 30}
+          // 偏好开关只关「默认展开全部」;defaultExpandedKeys 祖先链定位展开(深链)不受影响
+          defaultExpandAll={tree.length < 30 && !collapsed}
           defaultExpandedKeys={defaultExpanded}
           selectedKeys={activeFolderId ? [activeFolderId] : []}
           onSelect={(keys) => keys[0] && onSelect(keys[0] as string)}

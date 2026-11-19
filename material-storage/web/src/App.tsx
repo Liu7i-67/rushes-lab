@@ -40,7 +40,9 @@ const AdminUploadStatsPage = lazy(() => import('./pages/AdminUploadStatsPage'));
 // 风控模块(2026-10-28):登录风控(被锁账号/被锁 IP + 解锁处置;仅系统管理员,后端 require_system_admin)
 const AdminRiskPage = lazy(() => import('./pages/AdminRiskPage'));
 // MCP 素材服务(2026-10-30):/settings 自助访问令牌 + /admin/mcp-settings 管理后台
+// 设置页 MCP 收拢(2026-11-19 方案 F1/F2):/settings 改入口面板,/settings/mcp 承载令牌管理
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
+const SettingsMcpPage = lazy(() => import('./pages/SettingsMcpPage'));
 const AdminMcpSettingsPage = lazy(() => import('./pages/AdminMcpSettingsPage'));
 const MyPermissionsPage = lazy(() => import('./pages/MyPermissionsPage'));
 const SearchPage = lazy(() => import('./pages/SearchPage'));
@@ -106,6 +108,8 @@ const RouterRoutes = () => (
       <Route path="/change-password" element={<ChangePasswordPage />} />
       {/* 账号设置(MCP 素材服务 D15:Web 端自助创建/吊销个人访问令牌) */}
       <Route path="/settings" element={<SettingsPage />} />
+      {/* MCP 二级页(2026-11-19 设置页收拢 F2):令牌管理本体,/settings 只留入口 */}
+      <Route path="/settings/mcp" element={<SettingsMcpPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   </Suspense>
