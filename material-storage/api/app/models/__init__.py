@@ -956,3 +956,25 @@ class UploadStatsOut(BaseModel):
 
     rows: list[UploadStatsRowOut] = []
     summary: UploadStatsTotalsOut
+
+
+# ─── 用户级偏好(GET/PUT /api/v1/me/preferences;2026-11-19 设置页收拢包)──────
+class PreferenceUpdateIn(BaseModel):
+    """PUT /api/v1/me/preferences 入参 —— **部分更新语义**。
+
+    None 字段跳过(不覆盖已存值);未知键照 pydantic 默认忽略。加新偏好键时
+    在此补字段(None 默认)+ ``PreferencesOut`` 补字段 + 路由模块
+    ``DEFAULT_PREFS`` 补默认值,端点与合并逻辑零改动。
+    """
+
+    folder_tree_default_collapsed: bool | None = None
+
+
+class PreferencesOut(BaseModel):
+    """GET/PUT /api/v1/me/preferences 响应 —— 永远返回已知键全集。
+
+    缺省补默认值(无偏好行用户全 false,F11);PUT 返回合并后的全集,
+    Web/App 双端读同一份。
+    """
+
+    folder_tree_default_collapsed: bool = False

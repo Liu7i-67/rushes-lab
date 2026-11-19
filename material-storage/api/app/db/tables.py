@@ -765,3 +765,25 @@ class SystemFlag(Base, TimestampMixin):
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+
+class UserPref(Base):
+    """用户级偏好 KV — 设置页「默认收拢全部文件夹」等(2026-11-19,迁移 0023)。
+
+    每 user 恰一行,prefs JSONB 存**已知偏好键的全集**(缺键由读侧按
+    ``app/routers/user_preferences.py::DEFAULT_PREFS`` 补默认,不存则隐式默认);
+    读写一律经 GET/PUT ``/api/v1/me/preferences``(写侧行级 upsert:
+    SELECT ... FOR UPDATE → 无则 INSERT 有则合并 UPDATE)。纯 UI 偏好,
+    不写审计事件(方案 D6);用户物理删除由 FK CASCADE 兜底。
+    """
+    __tablename__ = "user_prefs"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    prefs: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )

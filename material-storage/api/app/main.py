@@ -33,6 +33,7 @@ from app.routers import (
     share,
     upload_stats,
     usage_stats,
+    user_preferences,
     users,
 )
 from app.services.mcp_gate import mcp_gate, validate_gate_routes
@@ -157,6 +158,12 @@ def create_app() -> FastAPI:
         approvals.router, prefix="/api/v1/approvals", tags=["approvals"], dependencies=gate,
     )
     app.include_router(users.router, prefix="/api/v1/users", tags=["users"], dependencies=gate)
+    # 用户级偏好(2026-11-19 设置页「默认收拢全部文件夹」;鉴权与 /auth/me 同源,
+    # PAT 可直调 → 照惯例挂并发闸,避免出现「不过并发闸的 PAT 通道」)
+    app.include_router(
+        user_preferences.router, prefix="/api/v1/me/preferences", tags=["me"],
+        dependencies=gate,
+    )
     app.include_router(groups.router, prefix="/api/v1/groups", tags=["groups"], dependencies=gate)
     app.include_router(share.router, prefix="/api/v1/share", tags=["share"], dependencies=gate)
     app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"], dependencies=gate)
