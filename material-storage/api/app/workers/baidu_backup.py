@@ -18,8 +18,8 @@ in-progress TTL 按**全部注册 function 的最大超时**计算,注册 172800
   → multipart 断点/死会话/head 快捷路径(overwrite 禁用)/md5 单段旁证 → asset
   落库(全谓词 + 预检 + baidu_file_imported 审计)→ 缩略图三分派 → 收尾完整谓词;
 - sweeper cron:timeout=300、NULL/派发超时谓词、cancel_requested/flag 感知直
-  终态化、48h 兜底、30d 孤儿清理逐行 try/except、派发候选按绑定代表去重
-  (终态化支不去重,并发方案 §2.3/D12)
+  终态化、48h 兜底、30d 孤儿清理逐行 try/except、派发候选按绑定预算计数
+  (VIP=vip_par/非会员 1;终态化支不受预算压制,会员并发方案 §3.4)
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import mimetypes
 import secrets
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -256,16 +256,18 @@ async def _run_claimed(db: AsyncSession, runner: Runner) -> str:
             db, runner, fail_reason=FAIL_FEATURE_DISABLED, reason_row="feature_disabled",
         )
 
-    # 确定性准入(VIP 分道,并发方案 §3.1):非「picked 集合」成员 → 复位轮钟并
-    # 清租约(status='running' 同步降级回 enumerating,§2.3),安静退出交 sweeper
-    # 重派(10min 节流);不可由 job 侧自派发(会形成认领→退出→再拾取的自旋热循环)。
-    # 接线声明(§3.1):判定集合必须就是 admission_top_task_ids 返回的 picked 集合
-    # —— 若误接无分道 top-N,「2 非会员 running + 第 3 dormant 非会员」纯顺序执行
-    # 就会击穿「非会员 ≤ nonvip_limit」不变量(T11 防接错线)
+    # 确定性准入(VIP 分道,并发方案 §3.1;会员并发方案 §3.3):非「picked 集合」
+    # 成员 → 复位轮钟并清租约(status='running' 同步降级回 enumerating,§2.3),
+    # 安静退出交 sweeper 重派(10min 节流);不可由 job 侧自派发(会形成认领→退出→
+    # 再拾取的自旋热循环)。接线声明(§3.1):判定集合必须就是
+    # admission_top_task_ids 返回的 picked 集合 —— 若误接无分道 top-N,「2 非会员
+    # running + 第 3 dormant 非会员」纯顺序执行就会击穿「非会员 ≤ nonvip_limit」
+    # 不变量(T11 防接错线);vip_par 与 sweeper 预算同源 settings,两侧口径一致
     top = await admission_top_task_ids(
         db,
         limit=settings.baidu_admission_limit,
         nonvip_limit=settings.baidu_nonvip_admission_limit,
+        vip_par=settings.baidu_vip_parallel_per_binding,
     )
     if runner.task_id not in top:
         await release_for_queueing(
@@ -600,11 +602,12 @@ async def _ensure_enum_target_folder(
 async def _finalize_enum_and_enter_import(db: AsyncSession, runner: Runner) -> str:
     """枚举收尾公共步(_enumerate 与 §2.5 enum_done 短路共用):聚合 → 空目录
     判定 → 置 running 收尾 UPDATE → 进导入循环。全系统仅此一处置 running
-    (并发方案 §2.5.3),§2.4 belt 就在本收尾 UPDATE 上。
+    (并发方案 §2.5.3),唯一约束兜底分支就在本收尾 UPDATE 上。
 
-    §2.4 belt(撞 uq_baidu_task_running 的处置序,顺序有讲究):瞬态窗口下同绑定
-    另一任务短暂占 running,收尾 UPDATE 撞唯一索引后事务已中止(25P02),不能在
-    原事务继续执行 release ——
+    收尾 UPDATE 唯一约束兜底(原 §2.4 belt:撞 uq_baidu_task_running 回排队;
+    该索引已随迁移 0022 删,同绑定 running 上限移交准入门控,本分支不改行为、
+    原样保留为通用唯一约束兜底,防未来其他唯一约束冲突无归处),处置序有讲究:
+    一旦撞唯一约束,事务已中止(25P02),不能在原事务继续执行 release ——
       1. except IntegrityError → rollback(仅丢弃本 UPDATE 与其后的聚合重算;
          manifest 行早已逐目录提交,无损失)。rollback 会 expire 会话内全部 ORM
          对象 —— 后续只做纯 CAS UPDATE,不得再读会话内 task 等对象属性;
@@ -648,7 +651,7 @@ async def _finalize_enum_and_enter_import(db: AsyncSession, runner: Runner) -> s
             runner_id=runner.runner_id,
         )
         await db.commit()
-        log.info("baidu enum finish hit uq_baidu_task_running task=%s(belt 回排队)",
+        log.info("baidu enum finish hit unique constraint task=%s(兜底回排队)",
                  runner.task_id)
         return "queued"
     log.info("baidu enum done task=%s total_files=%d → import loop",
@@ -2040,9 +2043,13 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
     async with store, get_sessionmaker()() as db:
             # 候选批量查询的排序键 = 准入代表序(并发方案 §2.3/D12:round 非空的
             # 崩溃行恒压过 NULL 休眠行,接管对象恒优先;只按 created_at 截批会把
-            # 创建较晚的崩溃 running 行挡在 SWEEP_BATCH 外,接管被休眠行无限推迟)
+            # 创建较晚的崩溃 running 行挡在 SWEEP_BATCH 外,接管被休眠行无限推迟)。
+            # join BaiduBinding 带出 is_vip(coalesce(vip_type,0) >= 1,与准入 SQL
+            # 同口径,会员并发方案 §3.4);binding_id 是指向 PK 的 NOT NULL FK,
+            # join 不改变行数
             candidates = (await db.execute(
-                select(Task)
+                select(Task, (func.coalesce(BaiduBinding.vip_type, 0) >= 1).label("is_vip"))
+                .join(BaiduBinding, BaiduBinding.id == Task.binding_id)
                 .where(
                     Task.status.in_(ACTIVE_STATUSES),
                     Task.lease_until.is_(None) | (Task.lease_until < now),   # NULL 显式
@@ -2054,18 +2061,18 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
                     Task.round_started_at.nulls_last(), Task.created_at, Task.id,
                 )
                 .limit(SWEEP_BATCH)
-            )).scalars().all()
+            )).all()
             stats["candidates"] = len(candidates)
             # 候选处理拆两段(并发方案 §2.3/D12):
             #   第一段 —— 终态化支(flag/cancel_requested/48h)处理**全量候选不去重**
-            #   (这两支是终态化、不占准入槽,提前处理只降低竞争;若把去重加在整个
+            #   (这两支是终态化、不占准入槽,提前处理只降低竞争;若把预算压到整个
             #   候选集上,「带取消位的休眠非代表行」将永远不被 cancel 支选中,用户会
             #   看到「点了取消却一直排队」直至同绑定前序任务跑完);
-            #   第二段 —— 剩余派发候选按 DISTINCT ON(binding_id) 语义取每绑定最老
-            #   代表(每绑定每拍 ≤1 job,排队任务「认领→门控退出」churn 压到每绑定
-            #   每拍恰 1 条,且不挤占 SWEEP_BATCH 候选位)
-            dispatch_candidates: list[Task] = []
-            for task in candidates:
+            #   第二段 —— 剩余派发候选按绑定预算计数派发(会员并发方案 §3.4):
+            #   VIP 绑定每拍 ≤ settings.baidu_vip_parallel_per_binding 个 job、
+            #   非会员绑定恒 1(原语义,原每绑定每拍 ≤1 job 的参数化推广)
+            dispatch_candidates: list[tuple[Task, bool]] = []
+            for task, is_vip in candidates:
                 if not settings.baidu_backup_enabled:
                     stats["flag_off"] += 1
                     await _sweep_finalize_failed(
@@ -2082,12 +2089,23 @@ async def sweep_stalled_baidu_tasks(ctx: dict[str, Any]) -> dict[str, int]:
                         db, task, fail_reason=FAIL_TIMEOUT, reason_row="task_timeout",
                     )
                     continue
-                dispatch_candidates.append(task)
-            seen_bindings: set[uuid.UUID] = set()
-            for task in dispatch_candidates:
-                if task.binding_id in seen_bindings:
-                    continue   # 非代表行:被同绑定代表压制,顺延一拍(≤10min)语义无损
-                seen_bindings.add(task.binding_id)
+                dispatch_candidates.append((task, is_vip))
+            # 派发预算(会员并发方案 §3.4):VIP 绑定预算 = vip_par、非会员绑定 = 1;
+            # 预算耗尽的绑定其非代表行照旧顺延一拍(≤10min)语义无损。churn 口径
+            # (D5 接受不优化):门控退出行 dispatched_at 不复位,受 600s 派发节流
+            # 压制 —— 每行每 600s ≤1 次、每绑定每 cron 拍(5min)≤3 次(≈每 600s
+            # ≤6 次)门控退出 job(原每绑定每拍 1 个),每个 job 成本 = 一次认领
+            # CAS + 一次准入 SELECT + 一次释放 UPDATE,短命常数级;瞬态在途 job
+            # 上限 = 4 准入 + ≤3 churn + cron(sweep timeout=300),
+            # worker_max_jobs=8 仍够用(观察期勿把缩略图瞬时延迟误判为回归)
+            dispatch_budget: Counter[uuid.UUID] = Counter()
+            for task, is_vip in dispatch_candidates:
+                budget = (
+                    settings.baidu_vip_parallel_per_binding if is_vip else 1
+                )
+                if dispatch_budget[task.binding_id] >= budget:
+                    continue   # 预算耗尽:非代表行顺延一拍(≤10min)语义无损
+                dispatch_budget[task.binding_id] += 1
                 # 派发步(CAS;接管分支同事务复位在途行;不复位 round_started_at ——
                 # 轮起点跨接管累计,否则反复崩溃可无限重置 48h 时钟,§6)
                 await reset_importing_rows(db, task_id=task.id)

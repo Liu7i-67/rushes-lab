@@ -2,6 +2,8 @@
 
 唯一需求依据:rushes-spec/material-storage/baidu-backup-multi-task-concurrency-plan.md
 §4 T1-T18(qplan 定稿;断言口径与构造方式逐字取自方案,含 T5a 与各条目内子断言)。
+会员同绑定 3 路并发增补依据(设计正本):docs/qdev/2026-11-18-baidu-vip-parallel-backup.md
+§5 R1-R13 矩阵(T4 重做为 R11、T18 断言翻转;断言口径逐条取自正本)。
 运行方式与门控同 test_baidu_integration.py:PG/Redis/MinIO 任一不可达 → 模块级 skip
 (经复用的 stack fixture);**本阶段只写不跑**,验收由 PM 在隔离栈执行(需求 §7/§8)。
 
@@ -22,7 +24,7 @@ test_admission_three_queued_top2_deterministic 的隐含前提一致。
 | T1   | test_t1_same_binding_second_task_201_and_sixth_soft_cap_409          |
 | T2   | test_t2_admission_dedup_per_binding_and_running_representative       |
 | T3   | test_t3_slots_full_dormant_not_admitted_gate_exit                    |
-| T4   | test_t4_belt_enum_finish_unique_hit_requeue_zero_list_on_redispatch  |
+| T4   | test_r11_same_binding_parallel_running_no_belt_churn(T4 重做为 R11) |
 | T5   | test_t5_first_terminal_then_sibling_admitted                         |
 | T5a  | test_t5a_gate_exit_degrades_running_then_short_circuit_recover       |
 | T6   | test_t6_revival_queues_under_soft_cap                                |
@@ -56,10 +58,28 @@ test_admission_three_queued_top2_deterministic 的隐含前提一致。
 | T17  | test_t17_sweep_batch_boundary_crash_row_latest_created_still_taken   |
 | T17  | test_t17_cancel_branch_not_deduped_non_representative_finalized      |
 | T18  | test_t18_migration_smoke_legacy_rows_untouched                       |
+
+■ 会员同绑定 3 路并发 ↔ 测试函数映射(设计正本 2026-11-18-baidu-vip-parallel-backup.md
+§5 R1-R13;断言口径逐条对齐正本)
+| R1   | test_r1_vip_binding_five_tasks_picked_oldest_three                   |
+| R2   | test_r2_two_vip_bindings_three_plus_one_total_four                   |
+| R3   | test_r3_vip_three_reps_nonvip_two_bindings_tightened_to_one          |
+| R4   | test_r4_nonvip_binding_five_tasks_picked_oldest_one                  |
+| R5   | test_r5_vip_par_one_aligns_with_distinct_on_legacy_semantics         |
+| R6   | test_r6_same_binding_four_vip_reps_plus_second_vip_binding           |
+| R7   | test_r7_nonvip_multiple_bindings_still_capped_at_two                 |
+| R8   | test_r8_sweeper_dispatch_budget_vip_three_nonvip_one                 |
+| R9   | test_r9_budget_exhausted_cancel_requested_row_still_finalized        |
+| R10  | test_r10_settings_vip_parallel_red_lines(离线)                      |
+| R11  | test_r11_same_binding_parallel_running_no_belt_churn(原 T4 重做)    |
+| R12  | tests/test_db_schema.py(模型元数据)+ 本文件 T18(实库 pg_indexes)   |
+|      | 双口径联动,不另设函数                                               |
+| R13  | test_r13_worker_gate_reads_vip_parallel_settings_rollback_lever      |
 """
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import uuid
 from dataclasses import dataclass
@@ -86,6 +106,7 @@ from app.services.baidu_client import (
     BaiduApiError,
     BaiduTokenPair,
 )
+from app.services.permissions import PermissionsService
 from app.settings import get_settings
 from app.workers.main import WorkerSettings
 from tests.test_baidu_integration import (  # 既有集成基建(helper 与被测惯例同源)
@@ -95,6 +116,7 @@ from tests.test_baidu_integration import (  # 既有集成基建(helper 与被�
     _crypto,
     _db,
     _dispatch_claim_run,
+    _files_of,
     _get_file,
     _get_task,
     _h,
@@ -221,6 +243,18 @@ class LaneFactory:
     def __init__(self, w: World) -> None:
         self.w = w
         self.created: list[Lane] = []
+        self._fga_user_ids: list[str] = []   # 获项目授权的 lane 用户(FGA tuple 收尾撤销)
+
+    async def grant_project_uploader(self, lane: Lane) -> None:
+        """给 lane 用户授 project-level uploader(worker 每文件 can_upload 复查
+        需要;world.member 由 world fixture 授权、lane 用户默认无 —— 真实导入
+        用例 R11/R13 的前置,同 integration 准入用例给 outsider 授权的先例)。
+        FGA tuple 由 cleanup 撤销(对齐 world fixture 收尾口径,防残留污染)。"""
+        perms = PermissionsService(get_settings())
+        await perms.add_project_subject(project_id=str(self.w.project.id),
+                                        subject=f"user:{lane.user.id}", role="uploader")
+        await perms.close()
+        self._fga_user_ids.append(str(lane.user.id))
 
     async def add(self, *, vip_type: int | None = None) -> Lane:
         tag = uuid.uuid4().hex[:8]
@@ -251,7 +285,14 @@ class LaneFactory:
         return lane
 
     async def cleanup(self) -> None:
-        """tasks(binding FK RESTRICT)→ files → tasks → bindings → users。"""
+        """tasks(binding FK RESTRICT)→ files → tasks → bindings → users;被授权
+        lane 用户的 FGA tuple 随后撤销(用户行删除后 tuple 残留防污染,同 world)。"""
+        if self._fga_user_ids:
+            perms = PermissionsService(get_settings())
+            for uid in self._fga_user_ids:
+                with contextlib.suppress(Exception):
+                    await perms.revoke_user_completely(uid)
+            await perms.close()
         if not self.created:
             return
         binding_ids = [ln.binding.id for ln in self.created]
@@ -277,10 +318,12 @@ async def lanes(world: World):
     await factory.cleanup()
 
 
-async def _admission(limit: int = 4, nonvip: int = 2) -> list[uuid.UUID]:
-    """直呼分道准入(默认参数 = Settings 默认 4/2;独立短会话)。"""
+async def _admission(limit: int = 4, nonvip: int = 2, vip_par: int = 3) -> list[uuid.UUID]:
+    """直呼分道准入(默认参数 = Settings 默认 4/2/3;vip_par 必选透传,会员道
+    rn ≤ vip_par —— 会员同绑定 3 路并发契约;独立短会话)。"""
     async with _db() as db:
-        return await admission_top_task_ids(db, limit=limit, nonvip_limit=nonvip)
+        return await admission_top_task_ids(db, limit=limit, nonvip_limit=nonvip,
+                                            vip_par=vip_par)
 
 
 async def _running_ids() -> set[uuid.UUID]:
@@ -382,66 +425,69 @@ async def test_t3_slots_full_dormant_not_admitted_gate_exit(
         "门控退出必须复位轮起点并清租约(不留半租约干扰计数与接管判定)"
 
 
-# ════════════════════════════ T4:belt 回排队(§2.4)════════════════════════════
-async def test_t4_belt_enum_finish_unique_hit_requeue_zero_list_on_redispatch(
-    world: World, baidu_spy, enable_baidu, stack,
+# ══════════ R11:T4 重做 —— 同绑定 2/3 任务并发达 running(§5 R11)════════════
+async def test_r11_same_binding_parallel_running_no_belt_churn(
+    world: World, lanes: LaneFactory, baidu_spy, enable_baidu, stack,
 ) -> None:
-    """T4(§2.4,DB 直 seed 构造钉死):同绑定 seed「status='running' 且
-    round_started_at IS NULL」脏行(旧代码时代残留,占住 uq_baidu_task_running)+
-    一条已认领 enumerating 兄弟(round 非空成为代表)→ 代表枚举收尾 UPDATE 撞索引
-    → rollback(不炸 25P02)→ 新事务置 enum_done=true + release → "queued",
-    不终态化、不进导入循环;脏行经代表序被接管清场后,重派兄弟零 list 调用直达
-    收尾 UPDATE(勿依赖提交乱序竞态构造 —— 不可重复,方案明令)。"""
-    dirty = await _mk_task(world, status="running", enum_done=True,
-                           round_started_at=None, runner_id=None, lease_until=None,
-                           created_at=NOW - timedelta(minutes=5),
-                           source_dir="/it-src-dirty")
-    sibling = await _mk_task(world, status="enumerating", enum_done=False,
-                             created_at=NOW - timedelta(minutes=1),
-                             source_dir="/it-src")
-    fs = random_fsid()
-    content = b"belt-bytes"
-    baidu_spy.add(fs, content)
-    row = await _mk_file(sibling, "belt.mp4", size=len(content), fs_id=fs)
-    _seed_listing(baidu_spy, "/it-src", {"belt.mp4": content})
+    """R11(设计正本 §5,原 T4 重做:uq_baidu_task_running 已随迁移 0022 删除,
+    DB belt 回排队行为不复存在):① 同绑定会员 3 个任务逐一驱动,全部通过枚举
+    收尾进入导入循环直至终态,全程无一返回 queued(无 belt churn、无 list 重放);
+    ② 并发形态定格仿 T12 DB seed:seed 2 条 running + 驱动第 3 条过枚举收尾
+    (原 belt 撞索引回排队点),定格后 _running_ids() 含 3 条 —— 同绑定 running
+    数上限的唯一防线 = 参数化准入门控(D8)。"""
+    lane = await lanes.add(vip_type=1)
+    await lanes.grant_project_uploader(lane)   # worker 每文件 can_upload 复查的前置
 
+    # ① 3 个会员任务(同绑定)逐一驱动:枚举 → 收尾置 running → 导入循环 → 终态
+    tasks: list[BaiduBackupTask] = []
+    for i in range(3):
+        tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=3 - i),
+            source_dir=f"/it-r11-{i}",
+        ))
+    for i, t in enumerate(tasks):
+        _seed_listing(baidu_spy, t.source_dir, {f"r11-{i}.mp4": f"r11-bytes-{i}".encode()})
+        async with _db() as db:
+            assert await dispatch_baidu_task(db, t.id, sweeper=True)
+        res = await _claim_and_run(t.id)
+        t_after = await _get_task(t.id)
+        assert res["status"] == "completed" and t_after.status == "completed", \
+            f"同绑定第 {i + 1} 个任务必须经枚举收尾直达终态(无 belt 回排队): {res} " \
+            f"fail_reason={t_after.fail_reason}"
+        rows = await _files_of(t.id)
+        assert len(rows) == 1 and rows[0].status == "success", \
+            f"导入循环真实走完: row={rows[0].status} last_error={rows[0].last_error}"
+    assert baidu_spy.list_calls == 3, \
+        "3 任务各真实枚举恰 1 次 list(全程零 belt churn 重放,原 T4 的重派重放已无)"
+
+    # ② 并发形态定格仿 T12 DB seed:2 条 running(原索引下第 2 条连直插都会
+    # IntegrityError)+ 第 3 条过枚举收尾 —— 原 belt 在收尾 UPDATE 处必回排队
+    r1 = await _seed_running_rep(world, lane, created_min_ago=6.0)
+    r2 = await _seed_running_rep(world, lane, created_min_ago=5.0)
+    third = await _mk_task(world, status="enumerating", enum_done=False,
+                           user_id=lane.user.id, binding_id=lane.binding.id,
+                           created_at=NOW - timedelta(minutes=1),
+                           source_dir="/it-r11-third")
+    _seed_listing(baidu_spy, third.source_dir, {"r11-third.mp4": b"r11-third-bytes"})
     async with _db() as db:
-        assert await dispatch_baidu_task(db, sibling.id, sweeper=True)
-    res = await _claim_and_run(sibling.id)
-    assert res["status"] == "queued", \
-        f"收尾 UPDATE 撞 uq_baidu_task_running 必须 belt 回排队而非崩 job: {res}"
+        assert await dispatch_baidu_task(db, third.id, sweeper=True)
+    res = await _claim_and_run(third.id)
+    third_after = await _get_task(third.id)
+    assert res["status"] == "completed" and third_after.status == "completed", (
+        "2 条同绑定 running 在场时,第 3 条必须照常过枚举收尾进导入循环 "
+        f"(原 uq_baidu_task_running 下此处必为 queued): {res} "
+        f"fail_reason={third_after.fail_reason}"
+    )
+    assert baidu_spy.list_calls == 4, "第 3 条真实枚举恰 1 次(总计 3+1,零重放)"
 
-    t = await _get_task(sibling.id)
-    assert t.status == "enumerating", "belt 不终态化失败(status 保持 enumerating)"
-    assert t.enum_done is True, "仅 belt 路径置 enum_done=true(§2.4 第 2 步)"
-    assert t.runner_id is None and t.lease_until is None and t.round_started_at is None, \
-        "belt 处置序第 2 步:新事务 release_for_queueing 清租约/轮钟"
-    assert t.fail_reason is None, "belt 不是失败路径"
-    assert (await _get_file(row.id)).status == "pending", \
-        "manifest 已逐目录提交,pending 原样;本轮不进导入循环"
-    dirty_after = await _get_task(dirty.id)
-    assert dirty_after.status == "running" and dirty_after.lease_seq == 0, "脏行未被误伤"
-    assert baidu_spy.list_calls == 1, "首轮真实枚举恰 1 次 list(收尾 UPDATE 前完成)"
-
-    # 脏行清场:两行 round 均 NULL 后,更早创建的脏行成为代表 → sweeper 派它 →
-    # 0 行 manifest 直接 completed,uq_baidu_task_running 坑位释放(§2.3「崩溃残留
-    # 行 ≤~15min 有界」自愈路径的直呼形态)
-    await _touch_task(sibling.id, dispatched_at=NOW - timedelta(minutes=11))
-    stats = await _sweep_now()
-    assert stats["dispatched"] == 1, "代表去重:每绑定每拍恰 1 条(此刻代表=更早的脏行)"
-    dirty_seq = (await _get_task(dirty.id)).lease_seq
-    assert dirty_seq == 1, "sweep 接管派发 seq+1"
-    res = await _claim_and_run(dirty.id)
-    assert res["status"] == "completed", "脏行(0 行 manifest)接管后直接 completed 清场"
-
-    # 重派兄弟:enum_done 短路直达收尾 UPDATE —— 零 list API 重放(§2.4 第 2 步)
-    await _touch_task(sibling.id, dispatched_at=NOW - timedelta(minutes=11))
-    await _sweep_now()
-    res = await _claim_and_run(sibling.id)
-    assert res["status"] == "completed"
-    assert baidu_spy.list_calls == 1, \
-        "重派后零 list 调用(enum_done=true 短路直达收尾 UPDATE,再撞也只是纯 DB churn)"
-    assert (await _get_file(row.id)).status == "success", "收尾 UPDATE 成功后进导入循环"
+    # 定格(T12 置换窗同款 _touch_task 口径):回拨 running 钉死「同绑定 3 条
+    # running 并存」形态 —— DB 层不再拦,唯一防线=准入门控(§3.2 残余风险记录)
+    await _touch_task(third.id, status="running",
+                      round_started_at=NOW - timedelta(seconds=30))
+    assert await _running_ids() == {r1.id, r2.id, third.id}, \
+        "同绑定 3 条 running 并存(迁移 0022 后 DB 无 belt;D8)"
 
 
 # ════════════════════════════ T5:首任务终态后接力准入 ═════════════════════════
@@ -748,7 +794,10 @@ def test_t9_settings_defaults_and_red_lines() -> None:
     s.validate_baidu_settings()   # 默认配置必须通过
 
     make_settings(baidu_admission_limit=4, baidu_nonvip_admission_limit=2).validate_baidu_settings()
-    make_settings(baidu_admission_limit=3, baidu_nonvip_admission_limit=1).validate_baidu_settings()
+    # ADMISSION=3 组合:会员并发新增红线 vip_par ≤ limit-1(默认 3 会 3≤2 假),
+    # 显式带兼容值 2(该红线的专项覆盖归 R10,此处不削弱既有三向红线断言)
+    make_settings(baidu_admission_limit=3, baidu_nonvip_admission_limit=1,
+                  baidu_vip_parallel_per_binding=2).validate_baidu_settings()
 
     with pytest.raises(AssertionError):
         make_settings(baidu_nonvip_admission_limit=0).validate_baidu_settings()
@@ -844,7 +893,8 @@ async def test_t10_rebind_cancels_multiple_active_tasks(
                         created_at=NOW - timedelta(minutes=2))
     t2 = await _mk_task(world, status="enumerating", enum_done=False)
     # 第三条:带活跃租约的在途任务(回落路径)—— 同绑定仅此一条 running
-    # (uq_baidu_task_running 每绑定恰一);租约必须取测试执行时刻的未来值
+    # (非会员绑定准入门控恒 1 路;uq_baidu_task_running 唯一兜底已随迁移 0022
+    # 删除,同绑定 running 上限由准入门控约束);租约必须取测试执行时刻的未来值
     # (模块级 NOW 全量跑时已陈旧数分钟,NOW+60s 会成过期租约被无租约快路径直
     # 终态化假红,同 test_cancel_fast_path 注释口径)
     t3 = await _mk_task(world, status="running", enum_done=True,
@@ -1274,7 +1324,7 @@ async def test_t16_revive_funnel_zero_list_and_target_folder_precheck(
     assert r.json()["status"] == "enumerating"
     b_after = await _get_task(task_b.id)
     assert b_after.status == "enumerating" and b_after.enum_done is True, \
-        "B 落 enumerating 排队(enum_done 保留),不撞 uq_baidu_task_running"
+        "B 落 enumerating 排队(enum_done 保留,运行由准入门控约束;uq_baidu_task_running 已删)"
 
     # C_auto / C_exp:排队期间目标夹被删的两个子用例(先入队、后删夹)
     task_c_auto = await _mk_task(world, status="failed", enum_done=True,
@@ -1440,9 +1490,10 @@ def _alembic_upgrade_head() -> None:
 async def test_t18_migration_smoke_legacy_rows_untouched(
     world: World, lanes: LaneFactory, stack,
 ) -> None:
-    """T18:对「每绑定恰 1 条活动行」的存量形态,`alembic upgrade head` 重入幂等
-    且不动数据;DB 内索引/列形态与 §2.2 一致(模型元数据口径归 T7;downgrade 重建
-    唯一索引的失败路径不自动化,按 §5.4 runbook 人工把关)。"""
+    """T18:对存量形态,`alembic upgrade head` 重入幂等且不动数据;DB 内索引/列
+    形态与会员 3 路并发契约一致(uq_baidu_task_running 已随迁移 0022 删除;
+    模型元数据口径归 T7/R12;downgrade 重建唯一索引的失败路径不自动化,按 §3.2
+    runbook 人工把关)。"""
     lane = await lanes.add(vip_type=None)
     legacy_running = await _mk_task(world, status="running", enum_done=True,
                                     round_started_at=NOW - timedelta(minutes=1))
@@ -1468,11 +1519,9 @@ async def test_t18_migration_smoke_legacy_rows_untouched(
         ))).all()
     by_name = {name: definition for name, definition in idx_rows}
     assert "uq_baidu_task_active" not in by_name, "旧全活动唯一索引已删(§2.2 第 1 条)"
-    running_def = by_name.get("uq_baidu_task_running", "")
-    assert "uq_baidu_task_running" in by_name \
-        and "UNIQUE" in running_def \
-        and "status='running'" in _pg_index_predicate(running_def), \
-        "running-only 唯一兜底在 DB 内真实存在(§2.2 第 2 条;谓词按规范化口径断言)"
+    assert "uq_baidu_task_running" not in by_name, \
+        "running-only 唯一兜底已随迁移 0022 删除(会员同绑定 3 路并发,§3.2;" \
+        "同绑定 running 上限唯一防线 = 参数化准入门控)"
     active_binding_def = by_name.get("idx_baidu_task_active_binding", "")
     active_binding_pred = _pg_index_predicate(active_binding_def)
     assert "idx_baidu_task_active_binding" in by_name \
@@ -1482,3 +1531,400 @@ async def test_t18_migration_smoke_legacy_rows_untouched(
         "准入查询非唯一 partial 索引在 DB 内真实存在(§2.2 第 3 条;谓词按规范化口径断言)"
     assert col_rows and col_rows[0][0] == "smallint" and col_rows[0][1] == "YES", \
         "vip_type smallint NULL 列在 DB 内真实存在(§2.2 第 4 条)"
+
+
+# ══════ 会员同绑定 3 路并发 R1-R13(设计正本 §5 矩阵;R11 见前/R12 见 schema)══════
+async def test_r1_vip_binding_five_tasks_picked_oldest_three(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R1(I4 边界):会员绑定 5 个活动任务 → picked 恰含该绑定最老 3 个
+    (rn 序 = round NULLS LAST, created_at, id;本组全 round NULL → 纯创建序),
+    其余 2 个不在 picked —— 同绑定并行路数上限 vip_par=3。"""
+    lane = await lanes.add(vip_type=1)
+    tasks = []
+    for i in range(5):
+        tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=50 - 10 * i),
+        ))
+
+    picked = await _admission()
+    assert len(picked) == 3, f"I4:会员绑定至多 vip_par=3 个代表,实际 {len(picked)}"
+    assert picked == [tasks[0].id, tasks[1].id, tasks[2].id], \
+        "picked 恰为该绑定最老 3 个(rn 序),更年轻的 2 个不在 picked"
+
+
+async def test_r2_two_vip_bindings_three_plus_one_total_four(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R2(I1/I4):会员绑定 3 rep + 另一会员绑定 1 任务 → 总 picked=4(恰满槽),
+    两绑定都入选、按代表序终排。"""
+    lane_a = await lanes.add(vip_type=1)
+    lane_b = await lanes.add(vip_type=1)
+    a = []
+    for i in range(3):
+        a.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane_a.user.id, binding_id=lane_a.binding.id,
+            created_at=NOW - timedelta(minutes=30 - 10 * i),
+        ))
+    b = await _mk_task(world, status="enumerating", enum_done=False,
+                       user_id=lane_b.user.id, binding_id=lane_b.binding.id,
+                       created_at=NOW - timedelta(minutes=5))
+
+    picked = await _admission()
+    assert len(picked) == 4, "I1:总 picked ≤ limit=4(3+1 恰满)"
+    assert picked == [a[0].id, a[1].id, a[2].id, b.id], \
+        "两会员绑定都入选(本绑定 3 + 他绑定 1),picked 按代表序终排"
+
+
+async def test_r3_vip_three_reps_nonvip_two_bindings_tightened_to_one(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R3(二次收紧 + I2/I5):会员绑定 3 rep + 非会员 2 绑定各 1 → vip_count=3
+    把非会员道二次收紧到 GREATEST(4-3,0)=1,总 picked=4;仅最老的非会员代表
+    入选(同 T12-mixed 口径);非会员道配额本身仍 ≤ nonvip_limit=2(I2),
+    会员恒有 ≥2 槽可用(I5)语义保持。"""
+    vip_lane = await lanes.add(vip_type=1)
+    nv1_lane = await lanes.add(vip_type=0)
+    nv2_lane = await lanes.add(vip_type=0)
+    vip = []
+    for i in range(3):
+        vip.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=vip_lane.user.id, binding_id=vip_lane.binding.id,
+            created_at=NOW - timedelta(minutes=40 - 10 * i),
+        ))
+    nv1 = await _mk_task(world, status="enumerating", enum_done=False,
+                         user_id=nv1_lane.user.id, binding_id=nv1_lane.binding.id,
+                         created_at=NOW - timedelta(minutes=10))
+    nv2 = await _mk_task(world, status="enumerating", enum_done=False,
+                         user_id=nv2_lane.user.id, binding_id=nv2_lane.binding.id,
+                         created_at=NOW - timedelta(minutes=5))
+
+    picked = await _admission()
+    assert len(picked) == 4, "总 picked 恰 4(I1)"
+    assert {t.id for t in vip} <= set(picked), "会员绑定 3 rep 全部入选"
+    assert set(picked) - {t.id for t in vip} == {nv1.id}, \
+        "非会员道收紧到 1:两绑定代表仅最老者入选(非会员 ≤ nonvip_limit,I2;" \
+        "会员占 3 槽后非会员仍有 1 槽,I5)"
+    assert nv2.id not in picked, "较年轻的非会员代表被二次收紧挤出 picked"
+
+
+async def test_r4_nonvip_binding_five_tasks_picked_oldest_one(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R4(I3 原语义回归):非会员绑定 5 个活动任务 → picked 恰含 1 个最老代表
+    (rn ≤ 1 硬编码,非会员并行度恒 1,与改造前逐位等价)。"""
+    lane = await lanes.add(vip_type=None)   # NULL = 未知按非会员道(保守归类)
+    tasks = []
+    for i in range(5):
+        tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=50 - 10 * i),
+        ))
+
+    picked = await _admission()
+    assert picked == [tasks[0].id], \
+        "非会员绑定恰 1 个最老代表(原语义回归,I3:每绑定 ≤1)"
+
+
+async def test_r5_vip_par_one_aligns_with_distinct_on_legacy_semantics(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R5(vip_par=1 回归网):与 DISTINCT ON 旧实现输出逐一对齐 —— 测试内以
+    纯 Python 等价计算作参照(每绑定最老代表 = DISTINCT ON;vip 道截前 limit、
+    非会员道截前 nonvip_limit 再 GREATEST(limit-vip_count,0) 收紧;并集按代表序
+    终排),多绑定多任务矩阵两轮抽样比对。env=1 回滚杆语义 = 完全恢复现状。"""
+    def _rep_key(t: BaiduBackupTask) -> tuple[Any, ...]:
+        # 代表序:round_started_at nulls_last(升序 NULL 恒最后), created_at, id
+        return (t.round_started_at is None,
+                t.round_started_at or NOW + timedelta(days=365),
+                t.created_at, t.id)
+
+    def _legacy_picked(groups: list[tuple[bool, list[BaiduBackupTask]]]) -> list[uuid.UUID]:
+        """旧实现(DISTINCT ON 每绑定 1 代表)参照:纯 Python 等价计算。"""
+        reps = [min(ts, key=_rep_key) for _, ts in groups]
+        vip = sorted((r for (is_vip, _), r in zip(groups, reps, strict=True) if is_vip),
+                     key=_rep_key)[:4]
+        nv = sorted((r for (is_vip, _), r in zip(groups, reps, strict=True) if not is_vip),
+                    key=_rep_key)[:2]
+        picked = vip + nv[:max(4 - len(vip), 0)]
+        return [t.id for t in sorted(picked, key=_rep_key)]
+
+    # 矩阵一轮:2 会员绑定(3+1 任务)+ 3 非会员绑定(3+2+1 任务)→ vip_count=2,
+    # 非会员收紧到 2;期望 = 两会员最老代表 + 两非会员最老代表(共 4)
+    v1, v2 = await lanes.add(vip_type=1), await lanes.add(vip_type=1)
+    n1, n2, n3 = (await lanes.add(vip_type=0), await lanes.add(vip_type=0),
+                  await lanes.add(vip_type=0))
+    groups_r1: list[tuple[bool, list[BaiduBackupTask]]] = []
+    for is_vip, lane, counts, base in (
+        (True, v1, 3, 40), (True, v2, 1, 30),
+        (False, n1, 3, 25), (False, n2, 2, 20), (False, n3, 1, 10),
+    ):
+        ts = [await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=base - j),
+        ) for j in range(counts)]
+        groups_r1.append((is_vip, ts))
+
+    assert await _admission(vip_par=1) == _legacy_picked(groups_r1), \
+        "vip_par=1 与 DISTINCT ON 旧实现逐一对齐(矩阵一轮)"
+
+    # 清场一轮(终态化,不参与下一矩阵),二轮补「round 非空代表恒压前」与
+    # vip 臂截 limit、GREATEST=0 两个方向
+    for _, ts in groups_r1:
+        for t in ts:
+            await _touch_task(t.id, status="completed")
+
+    v3, v4, v5 = (await lanes.add(vip_type=1), await lanes.add(vip_type=1),
+                  await lanes.add(vip_type=1))
+    n4, n5 = await lanes.add(vip_type=0), await lanes.add(vip_type=0)
+    running_v3 = await _mk_task(
+        world, status="running", enum_done=True,
+        user_id=v3.user.id, binding_id=v3.binding.id,
+        round_started_at=NOW - timedelta(minutes=1),
+        created_at=NOW - timedelta(minutes=8),
+    )
+    v3_dormant = await _mk_task(
+        world, status="enumerating", enum_done=False,
+        user_id=v3.user.id, binding_id=v3.binding.id,
+        created_at=NOW - timedelta(minutes=7),
+    )
+    v4_t = await _mk_task(world, status="enumerating", enum_done=False,
+                          user_id=v4.user.id, binding_id=v4.binding.id,
+                          created_at=NOW - timedelta(minutes=6))
+    v5_t = await _mk_task(world, status="enumerating", enum_done=False,
+                          user_id=v5.user.id, binding_id=v5.binding.id,
+                          created_at=NOW - timedelta(minutes=5))
+    n4_ts = [await _mk_task(world, status="enumerating", enum_done=False,
+                            user_id=n4.user.id, binding_id=n4.binding.id,
+                            created_at=NOW - timedelta(minutes=4 - j))
+             for j in range(2)]
+    n5_t = await _mk_task(world, status="enumerating", enum_done=False,
+                          user_id=n5.user.id, binding_id=n5.binding.id,
+                          created_at=NOW - timedelta(minutes=2))
+
+    groups_r2: list[tuple[bool, list[BaiduBackupTask]]] = [
+        (True, [running_v3, v3_dormant]), (True, [v4_t]), (True, [v5_t]),
+        (False, n4_ts), (False, [n5_t]),
+    ]
+    assert await _admission(vip_par=1) == _legacy_picked(groups_r2), \
+        "vip_par=1 与 DISTINCT ON 旧实现逐一对齐(矩阵二轮:round 非空代表 + " \
+        "vip 臂 3 < limit + GREATEST(4-3,0)=1)"
+
+
+async def test_r6_same_binding_four_vip_reps_plus_second_vip_binding(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R6(I4+I1 边界):同绑定 4 个会员任务 + 第二会员绑定 1 任务 → 本绑定恰取
+    最老 3 个(rn ≤ vip_par 截断第 4 个)+ 他绑定 1 个,总 picked=4。"""
+    lane_a = await lanes.add(vip_type=1)
+    lane_b = await lanes.add(vip_type=1)
+    a = []
+    for i in range(4):
+        a.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane_a.user.id, binding_id=lane_a.binding.id,
+            created_at=NOW - timedelta(minutes=40 - 10 * i),
+        ))
+    b = await _mk_task(world, status="enumerating", enum_done=False,
+                       user_id=lane_b.user.id, binding_id=lane_b.binding.id,
+                       created_at=NOW - timedelta(minutes=5))
+
+    picked = await _admission()
+    assert len(picked) == 4, "I1:总 picked ≤ 4(本绑定 3 + 他绑定 1)"
+    assert picked == [a[0].id, a[1].id, a[2].id, b.id], \
+        "本绑定恰最老 3(rn ≤ vip_par 截断第 4 个)+ 他绑定 1"
+    assert a[3].id not in picked, "第 4 个同绑定任务不在 picked(I4 上界)"
+
+
+async def test_r7_nonvip_multiple_bindings_still_capped_at_two(
+    world: World, lanes: LaneFactory, stack,
+) -> None:
+    """R7(I2 既有不变量回归):非会员多绑定(≥3 个)各有任务 → picked 仍 ≤ 2
+    (道内上限不动,取最老两绑定代表),vip_par 改造不放大非会员道。"""
+    lanes_nv = [await lanes.add(vip_type=0) for _ in range(3)]
+    reps = []
+    for i, ln in enumerate(lanes_nv):
+        for j in range(2):   # 每绑定 2 任务:非会员道 rn ≤ 1 只取最老代表
+            t = await _mk_task(
+                world, status="enumerating", enum_done=False,
+                user_id=ln.user.id, binding_id=ln.binding.id,
+                created_at=NOW - timedelta(minutes=30 - 10 * i - j),
+            )
+            if j == 0:
+                reps.append(t)   # 各绑定最老代表(创建序递减 → 前 2 个入选)
+
+    picked = await _admission()
+    assert len(picked) == 2, f"I2:非会员道 ≤ nonvip_limit=2,实际 {len(picked)}"
+    assert set(picked) == {reps[0].id, reps[1].id}, \
+        "恰取最老两绑定代表;第 3 绑定代表顺延(I2 收紧后按代表序截流)"
+
+
+async def test_r8_sweeper_dispatch_budget_vip_three_nonvip_one(
+    world: World, lanes: LaneFactory, enable_baidu, stack,
+) -> None:
+    """R8(设计正本 §3.4):sweeper 派发预算参数化 —— 会员绑定每拍预算
+    = vip_par(3)、非会员绑定每拍 = 1(seen_bindings 去重改预算 Counter);
+    预算耗尽的非代表行照旧顺延一拍(语义无损)。"""
+    # 会员道:5 候选 → 恰派 3(代表序最老 3),其余 2 条顺延
+    vip_lane = await lanes.add(vip_type=1)
+    vip_tasks = []
+    for i in range(5):
+        vip_tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=vip_lane.user.id, binding_id=vip_lane.binding.id,
+            created_at=NOW - timedelta(minutes=50 - 10 * i),
+        ))
+    stats = await _sweep_now()
+    assert stats["candidates"] == 5
+    assert stats["dispatched"] == 3, f"会员绑定预算 vip_par=3:每拍恰派 3 条,实际 {stats}"
+    for i, t in enumerate(vip_tasks):
+        if i < 3:
+            assert (await _get_task(t.id)).lease_seq == 1, "派发行 seq+1"
+            assert await _job_queued(t.id, 1), "派发行必须真实入队"
+        else:
+            assert (await _get_task(t.id)).lease_seq == 0, \
+                "预算耗尽:第 4/5 候选顺延一拍(语义无损,§3.4)"
+            assert not await _job_queued(t.id, 1), "顺延行不入队"
+
+    # 终态化会员行(离开候选池),再验非会员道
+    for t in vip_tasks:
+        await _touch_task(t.id, status="completed")
+
+    # 非会员道:3 候选 → 恰派 1(原语义逐位等价,预算=1)
+    nv_lane = await lanes.add(vip_type=0)
+    nv_tasks = []
+    for i in range(3):
+        nv_tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=nv_lane.user.id, binding_id=nv_lane.binding.id,
+            created_at=NOW - timedelta(minutes=30 - 10 * i),
+        ))
+    stats = await _sweep_now()
+    assert stats["candidates"] == 3
+    assert stats["dispatched"] == 1, f"非会员绑定预算恒 1:每拍恰派 1 条,实际 {stats}"
+    assert (await _get_task(nv_tasks[0].id)).lease_seq == 1, "最老代表被派发"
+    assert await _job_queued(nv_tasks[0].id, 1)
+    for t in nv_tasks[1:]:
+        assert (await _get_task(t.id)).lease_seq == 0, \
+            "非会员预算耗尽:非代表行顺延一拍(T17 每绑定每拍 ≤1 原语义)"
+
+
+async def test_r9_budget_exhausted_cancel_requested_row_still_finalized(
+    world: World, lanes: LaneFactory, enable_baidu, stack,
+) -> None:
+    """R9(设计正本 §3.4 终态化支不受预算压制):会员绑定 4 条普通候选恰派 3
+    (预算耗尽,第 4 条顺延),同拍第 5 条带 cancel_requested 的候选仍被 cancel
+    支立即终态化 —— 取消位行不占预算、不参与去重(T17-cancel 语义在预算化后
+    保持,「点了取消却一直排队」不回归)。"""
+    lane = await lanes.add(vip_type=1)
+    fillers = []
+    for i in range(4):
+        fillers.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=50 - 10 * i),
+        ))
+    cancel_row = await _mk_task(
+        world, status="enumerating", enum_done=False,
+        user_id=lane.user.id, binding_id=lane.binding.id,
+        created_at=NOW - timedelta(minutes=1),
+        cancel_requested=True, cancel_reason="user_cancel",
+    )
+
+    stats = await _sweep_now()
+    assert stats["candidates"] == 5
+    assert stats["dispatched"] == 3, f"预算恰 3:最老 3 条派发,实际 {stats}"
+    assert stats["cancelled"] >= 1, "cancel 支不受预算压制:取消位行同拍立即终态化"
+    c = await _get_task(cancel_row.id)
+    assert c.status == "cancelled" and c.cancel_reason == "user_cancel"
+    assert c.lease_seq == 0, "取消位行直接终态化、不被派发(不入队)"
+    assert (await _get_task(fillers[0].id)).lease_seq == 1, "普通候选按预算照常派发"
+    assert (await _get_task(fillers[3].id)).lease_seq == 0, \
+        "第 4 条普通候选因预算耗尽顺延(取消支不影响派发支预算)"
+
+
+def test_r10_settings_vip_parallel_red_lines() -> None:
+    """R10(设计正本 §3.1):baidu_vip_parallel_per_binding 校验红线 —— 默认 3;
+    回滚杆 1 与恰上界 limit-1 合法;0/负/恰 limit(4)/limit+1(5) 启动断言报错
+    (覆盖 ≤ limit-1 的两个边界方向;启动校验面 = ms-api + ms-worker 双容器)。"""
+    s = make_settings()
+    assert s.baidu_vip_parallel_per_binding == 3, "默认 3(不设 env 时生效)"
+    s.validate_baidu_settings()   # 默认配置必须通过
+
+    make_settings(baidu_vip_parallel_per_binding=1).validate_baidu_settings()
+    # ↑ 回滚杆 env=1:完全恢复原行为(合法下界)
+    make_settings(baidu_admission_limit=6,
+                  baidu_vip_parallel_per_binding=5).validate_baidu_settings()
+    # ↑ 恰上界 limit-1=5 合法(与 limit 联动)
+
+    with pytest.raises(AssertionError):
+        make_settings(baidu_vip_parallel_per_binding=0).validate_baidu_settings()
+    # ↑ 下限红线:0 会静默砖死会员准入
+    with pytest.raises(AssertionError):
+        make_settings(baidu_vip_parallel_per_binding=-1).validate_baidu_settings()
+    # ↑ 负值同方向
+    with pytest.raises(AssertionError):
+        make_settings(baidu_vip_parallel_per_binding=4).validate_baidu_settings()
+    # ↑ 恰 = limit(默认 4):配满会把 GREATEST(limit-vip_count,0) 配置性清零、
+    #   饿死全部非会员道且无启动报错(与 nonvip ≤ limit-2 红线同精神,方向相反)
+    with pytest.raises(AssertionError):
+        make_settings(baidu_vip_parallel_per_binding=5).validate_baidu_settings()
+    # ↑ limit+1:越界同侧再取一例
+
+
+async def test_r13_worker_gate_reads_vip_parallel_settings_rollback_lever(
+    world: World, lanes: LaneFactory, baidu_spy, enable_baidu,
+    monkeypatch: pytest.MonkeyPatch, stack,
+) -> None:
+    """R13(设计正本 §5 R13):worker 接线端到端 —— settings 单例置
+    baidu_vip_parallel_per_binding=1(= 回滚杆 env 语义),会员绑定下仅 1 个任务
+    过认领后门控,其余 queue out。钉住 worker 调用点真读 settings(接线声明 I6),
+    兼作回滚杆验收回归网:env=1 时行为与改造前逐位等价。
+
+    构造(仿 T12 占坑法;法证:认领置 round_started_at=now,窗口序 round 非空恒
+    排前 → 刚认领者必然 rn=1 自我准入,休眠兄弟不占坑压不住它 —— 生产回滚杆
+    语义正确靠 sweeper 预算=1 每拍只派最老候选,门控兜「同拍多派」):预置 1 条
+    round 更早的 running 占坑任务 → vip_par=1 下 dispatch+claim 后到候选
+    (round 更晚 → rn=2 > 1)必 queue out;清掉占坑任务后最老候选过门控直达终态。"""
+    monkeypatch.setattr(get_settings(), "baidu_vip_parallel_per_binding", 1, raising=False)
+    lane = await lanes.add(vip_type=1)
+    await lanes.grant_project_uploader(lane)   # tasks[0] 真实导入的 can_upload 前置
+    tasks = []
+    for i in range(3):
+        tasks.append(await _mk_task(
+            world, status="enumerating", enum_done=False,
+            user_id=lane.user.id, binding_id=lane.binding.id,
+            created_at=NOW - timedelta(minutes=30 - 10 * i),
+            source_dir=f"/it-r13-{i}",
+        ))
+    pit = await _seed_running_rep(world, lane, created_min_ago=5.0)   # round 更早,占坑
+
+    # 占坑在场:后到候选认领(round=now 晚于 pit)→ rn=2 > vip_par=1 → queue out
+    for i in (1, 2):
+        async with _db() as db:
+            assert await dispatch_baidu_task(db, tasks[i].id, sweeper=True)
+        res = await _claim_and_run(tasks[i].id)
+        assert res["status"] == "queued", \
+            f"vip_par=1 + 占坑在场,同绑定第 {i + 1} 候选必须 queue out(worker 真读 settings): {res}"
+        t = await _get_task(tasks[i].id)
+        assert t.status == "enumerating" and t.round_started_at is None, \
+            "门控退出安静回队:不落终态、复位轮起点"
+    assert baidu_spy.list_calls == 0, "queue out 发生在枚举前:零 list API 调用"
+
+    # 清占坑 → 最老候选成唯一 round 非空行 → rn=1 ≤ vip_par 过门控:真实枚举
+    # 进导入循环直至终态(回滚杆语义 = 每绑定 1 路)
+    await _touch_task(pit.id, status="completed")
+    _seed_listing(baidu_spy, tasks[0].source_dir, {"r13.mp4": b"r13-bytes"})
+    async with _db() as db:
+        assert await dispatch_baidu_task(db, tasks[0].id, sweeper=True)
+    res = await _claim_and_run(tasks[0].id)
+    t0 = await _get_task(tasks[0].id)
+    assert res["status"] == "completed" and t0.status == "completed", \
+        f"回滚杆 vip_par=1 下最老候选照常准入并执行至终态: {res} fail_reason={t0.fail_reason}"
+    assert baidu_spy.list_calls == 1, "仅过门控的最老候选真实枚举 1 次"

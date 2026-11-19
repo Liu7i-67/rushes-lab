@@ -631,16 +631,12 @@ class BaiduBackupTask(Base, TimestampMixin):
     fail_reason: Mapped[str | None] = mapped_column(String(512))
 
     __table_args__ = (
-        # 弱一级兜底(并发方案 §2.2):UNIQUE(binding_id) WHERE status='running',
-        # 恰好护住最危险的「同绑定双下载循环」;枚举期互斥由准入层负责(枚举走
-        # 单飞刷新,本身安全)。谓词为 ACTIVE_STATUSES 的刻意子集(D3/T7)。
-        Index(
-            "uq_baidu_task_running", "binding_id", unique=True,
-            postgresql_where=text("status = 'running'"),
-        ),
         # 准入查询索引(并发方案 §2.2):同绑定活动行非唯一 partial(原唯一索引
-        # uq_baidu_task_active 已随迁移 0017 删除);谓词状态集须与 ACTIVE_STATUSES
-        # 保持一致(防未来加状态档位两侧漂移,T7 谓词漂移断言口径=模型元数据)
+        # uq_baidu_task_active 已随迁移 0017 删除;running 唯一 belt
+        # uq_baidu_task_running 已随迁移 0022 删除 —— partial 唯一谓词无法表达
+        # vip 维度,会员多路并发下同绑定 running 上限改由参数化准入门控负责);
+        # 谓词状态集须与 ACTIVE_STATUSES 保持一致(防未来加状态档位两侧漂移,
+        # T7 谓词漂移断言口径=模型元数据)
         Index(
             "idx_baidu_task_active_binding", "binding_id",
             postgresql_where=text("status IN ('enumerating','running')"),

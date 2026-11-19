@@ -147,7 +147,9 @@ class Settings(BaseSettings):
     # ── 并发与排队参数(方案 baidu-backup-multi-task-concurrency-plan.md §3.2;
     # env 可调不发版。⚠ 调 .env 后 docker compose restart 不重读 env_file,须按
     # 消费方分别 up -d --force-recreate:前三个消费方是 ms-worker,软上限消费在
-    # ms-api,见方案 §3.2)──
+    # ms-api,见方案 §3.2;vip 会员并行路数运行时消费也在 ms-worker(准入与
+    # sweeper 均在 worker 进程),但启动校验 = ms-api + ms-worker 双容器,误配
+    # 排查勿只盯 worker,见会员并发方案 §3.1)──
     baidu_admission_limit: int = Field(
         4, description="全局准入并发槽总数(VIP 分道:会员恒有 ≥2 槽可用,方案 §3.1)",
     )
@@ -160,6 +162,10 @@ class Settings(BaseSettings):
     )
     baidu_max_active_tasks_per_binding: int = Field(
         5, description="同绑定活动任务软上限(§2.5 防滥用;check-then-insert 无 DB 兜底)",
+    )
+    baidu_vip_parallel_per_binding: int = Field(
+        3, description="同绑定会员(vip_type≥1)准入代表数上限,即同绑定并行路数;"
+                       "非会员绑定恒为 1(原语义);设 1 = 完全恢复原行为(回滚杆)",
     )
 
     def baidu_stream_backoff_steps(self) -> list[int]:
@@ -186,6 +192,10 @@ class Settings(BaseSettings):
           承诺(只校验 ≤ 总数则运维配 2/2 会把 VIP 保证静默清零),下限 ≥1 防 2/0
           把非会员道清零饿死(排队无超时,round 为 NULL 不受 48h 判停);隐含
           ADMISSION ≥ 3。软上限 ≥1(配 0/负值会静默砖死创建与复活、恒 409 无启动报错)
+        - VIP 并行路数(会员并发方案 §3.1):1 ≤ VIP_PARALLEL ≤ ADMISSION-1 ——
+          下限 0/负值会静默砖死会员准入;上限 = limit-1(默认 3=4-1),配满 limit
+          会令 GREATEST(limit - vip_count, 0)=0 配置性饿死全部非会员道且无启动
+          报错,与上方 nonvip ≤ limit-2 红线同精神(方向相反),断言拦截
         """
         assert self.baidu_relay_after_s + 300 <= 3600, (
             f"BAIDU_RELAY_AFTER_S={self.baidu_relay_after_s} 必须满足 +300 ≤ 3600"
@@ -217,6 +227,15 @@ class Settings(BaseSettings):
             f"1 ≤ nonvip ≤ BAIDU_ADMISSION_LIMIT-2(当前 ADMISSION="
             f"{self.baidu_admission_limit};上限守住「会员恒有 ≥2 槽」、下限防非会员道"
             "清零饿死,见并发方案 §3.2)"
+        )
+        assert (
+            1 <= self.baidu_vip_parallel_per_binding
+            <= self.baidu_admission_limit - 1
+        ), (
+            f"BAIDU_VIP_PARALLEL_PER_BINDING={self.baidu_vip_parallel_per_binding} "
+            f"必须满足 1 ≤ vip_parallel ≤ BAIDU_ADMISSION_LIMIT-1(当前 ADMISSION="
+            f"{self.baidu_admission_limit};下限防 0/负值静默砖死会员准入,上限防配满 "
+            "limit 后 GREATEST(limit-vip_count,0)=0 配置性饿死非会员道,见会员并发方案 §3.1)"
         )
         assert self.baidu_max_active_tasks_per_binding >= 1, (
             f"BAIDU_MAX_ACTIVE_TASKS_PER_BINDING="
