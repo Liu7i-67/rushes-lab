@@ -5,7 +5,47 @@ description: 内网 hh2 服务器（dev/prod）部署注意事项与踩坑手册
 
 # 内网 hh2 部署 —— 环境事实、标准流程与踩坑手册
 
-先读 `CLAUDE.md` 的「部署 D」一节。本技能是其展开版：收录已实踩过的坑和验证过的替代通道。动手前按 §1 预检，部署完按 §5 验证清单逐项过。
+先读 `CLAUDE.md` 的「部署 D」一节。本技能是其展开版：收录已实踩过的坑和验证过的替代通道。**prod 上线一律先过 §0 SOP 逐项打勾**（尤其第 3 步 SQL/迁移——deploy_lan.sh **不含** alembic 步骤，历史上 prod 两次事故均因迁移未执行/顺序错误）；dev 日常部署动手前按 §1 预检，部署完按 §5 验证清单逐项过。
+
+## 0. prod 上线 SOP（每次逐项打勾，防遗漏；2026-11-19 固化）
+
+> 背景：prod 曾因「跨版本上代码没带迁移」（0019 未落库→项目页 500）与「restart 先于迁移」两次事故；本节把顺序钉死。原则：**对账 → 代码落盘 → alembic upgrade →（手工 SQL）→ restart → 连带 poc-nginx → 双入口验证**。
+
+**① 方案对齐（写部署方案时逐条判定，别假设）**
+- [ ] 读 prod 当前版本：`ssh hh2-prod 'grep -E "git commit" ~/ms/DEPLOYED.md'`，列增量 `git log <prod当前commit>..HEAD --oneline`，逐条心里过；后端契约必须向后兼容（additive 可选参数/默认行为不变）才可直接上
+- [ ] 三问判定后续动作：**有新 migration？**（本地 `ls api/app/db/migrations/versions` 对比 prod DEPLOYED 版本）→ 必走 §0-③；**有 .env 变更？** → 必须 `--force-recreate`（restart 不重读 env_file）；**有依赖变更？**（pyproject.toml/constraints.txt diff）→ 必须 build+recreate（§2 第 6 条）
+- [ ] 有 FGA 模型变更？（store.fga.yaml diff 非空）→ 先走 §2.5 推模型，顺序：模型 → 代码 → 迁移 → restart
+- [ ] 有**迁移覆盖不了的手工 SQL**？（存量数据回填/订正）→ 写进部署方案，SQL 逐条备好且幂等，执行时点=alembic upgrade 之后、restart 之前（§0-③）
+- [ ] 部署窗口：涉及百度备份先确认活动任务清零；restart 有秒级不可用，提前告知真实用户
+- [ ] **验身份**：`ssh hh2-prod 'whoami'` 必须是 huanhua——prod 一律 `hh2-prod` 别名，`hh2`（msdev）无写权限必满屏 Permission denied
+
+**② 本地构建与推送**
+- [ ] `git branch --show-current` 核对在正确分支/worktree（曾因并行会话切走分支部署错代码）；工作区干净（有意未提交项写进 DEPLOYED.md）
+- [ ] web：无条件先 `pnpm --dir web install` → `pnpm --dir web build`，退出码独立判失败即停（坑 C 假绿推旧 SPA）；grep 本地指纹记录待比对
+- [ ] 打代码包+SPA 包两个 tar → **chunked-push 推 prod 必须用改过 HOST 的脚本副本**（`sed 's/^HOST=hh2$/HOST=hh2-prod/'`），md5 双侧核对
+- [ ] 远端解压→rsync `--inplace`（排除 .env/override/static/web/poc minio data）→ 先**不 restart**
+
+**③ ⚠ SQL/迁移（最容易漏的一步，铁律：alembic 在 restart 之前）**
+- [ ] **对账**：`docker exec ms-api alembic current` vs `docker exec ms-api alembic heads`——current 应=上一版本 head；**若 current 落后上一版本 head = 历史欠账，先补齐历史再上本次**（绝不跨版本连跳）
+- [ ] **upgrade**：`docker exec ms-api alembic upgrade head`（bind mount 已带新迁移脚本，旧进程不受影响）→ 复跑 `alembic current` 确认=本次新 head
+- [ ] **结构实证**：对本次迁移的新表/新列跑一条 `\d <表>`（或 information_schema 查询），确认真落库，不信迁移回显
+- [ ] 手工 SQL（如有）：此时逐条执行，每条后 SELECT 复核影响行数；⚠ `psql -c` 多语句=单隐式事务，核查 SELECT 与写 DELETE 别拼一条（曾「删了又复活」）
+- [ ] downgrade 只允许对临时库冒烟，**live 库严禁 downgrade**（曾毁表）
+
+**④ 重启与连带**
+- [ ] `.env` 有变更→ `docker compose up -d --force-recreate ms-api ms-worker`；无→ `docker compose restart ms-api ms-worker`；依赖变更过→ 先 build 再 recreate
+- [ ] **凡动 ms-api/ms-worker 容器（restart 也算、force-recreate 更算），必连带 `docker restart poc-nginx`**——容器 IP 变更后 poc-nginx 静态 proxy_pass 持旧解析=全站 502（已两次实踩）
+- [ ] `docker logs ms-api --tail 30` 看到 uvicorn startup complete 才算起
+
+**⑤ 上线验证（§5 全项 + prod 加码）**
+- [ ] DEPLOYED.md commit=预期；SPA 指纹**内网 `127.0.0.1:80` 与外网 `47.108.196.211:18080` 双入口**一致且=本地 build；`/api/v1/auth/me` 401；容器内 grep 新代码特征串
+- [ ] **业务级实测用真实账号登录**（prod `ENV=production`，X-User-Id dev 通道失效，仅 dev 可用；账号 evan）抽测本次变更核心路径一条+新端点/新表冒烟（如：GET 偏好默认值→PUT→GET）
+- [ ] 观察 5-10 分钟：`docker logs ms-api` 无异常堆栈、外网业务页 200 才收工
+
+**⑥ 收尾**
+- [ ] 回滚材料就位：`web.bak-<日期>` 保留至稳定；旧 commit 回滚路径=工作区切回旧 commit 重走分片通道+restart（§7），回滚后重过 §5 清单
+- [ ] 清 /tmp 残留包（上传方身份自清）；DEPLOYED.md 记录部署者/时间/变更/备份名；changelog 记账
+
 
 ## 1. 环境事实（先对号入座）
 
