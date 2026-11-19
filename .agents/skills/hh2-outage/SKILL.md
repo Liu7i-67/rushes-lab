@@ -10,7 +10,7 @@ description: 内网素材服务器(192.168.110.221)断电/失联/挂死/挂起�
 ```
 公网用户 ──→ 阿里云跳板机 aliyun-swas(47.108.196.211,不受公司断电影响)
               nginx :8080/:18080/:443 → 127.0.0.1:8081(dev)/18081(prod)
-                        ↑ 反向 SSH 隧道(账号 tunnel,msdev 的 ssh -N -R,10s 重试循环)
+                        ↑ 反向 SSH 隧道(账号 tunnel;**受管服务=msdev user 单元 jump-tunnel.service,Restart=always/RestartSec=10s+enabled+Linger=yes,断线 10s 自动重连**)
 内网用户 ──→ 内网服务器 192.168.110.221(:8090 dev / :80 prod,容器栈 ×24)
 ```
 
@@ -22,7 +22,7 @@ description: 内网素材服务器(192.168.110.221)断电/失联/挂死/挂起�
 ## 1. 一分钟判别(先跑这三条,别猜)
 
 ```bash
-# ① 公网入口(本机直接跑):502 = 跳板机活着但隧道死;超时 = 跳板机/网络问题
+# ① 公网入口(本机直接跑):502 = 跳板机 nginx 活着但上游断(隧道死 **或** hh2 侧 poc-nginx 旧解析/上游容器死——先做 §2.5 分层定位再下结论);超时 = 跳板机/网络问题
 curl -s -o /dev/null -m 8 -w "%{http_code}\n" http://47.108.196.211:8080/api/v1/auth/me   # 期望 401
 # ② 隧道端口(跳板机侧):三口全无监听 = 隧道不在
 ssh aliyun-swas 'ss -tln | grep -E ":(12222|8081|18081)\b"'
@@ -39,7 +39,7 @@ ssh hh2-prod 'sudo journalctl -b 0 -k --no-pager | grep -E "PM: suspend"'
 | ②三口全无 + ③零重连记录 | **整机没电 / 挂死 / 挂起假死**(电源灯亮≠系统活着) | 守护正常时必在 10s 重试;睡着/挂死时出站全停 |
 | 服务器可达 → ③b 有 `PM: suspend entry` 无 `exit` | **挂起假死**(按一下电源键/键盘通常能唤醒,但空闲超时未解除会再睡,唤醒后立刻做 §6.5 的 mask) | s2idle 入睡后无唤醒源 |
 | ②缺端口 + ③有重连刷屏 | 服务器活着,隧道进程/网络单独出问题 | 重试说明 OS 在跑 |
-| ①502 但 ②正常 | 跳板机 nginx 与隧道之间的问题 | 少见,查跳板机 nginx |
+| ①502 但 ②正常 | **不一定是隧道**——先做 §2.5 分层定位(502 错误页由哪层生成=故障在哪层);2026-11-19 实战:隧道正常,真凶=hh2 侧 poc-nginx-dev 持旧 IP 解析 | §2.5 |
 | 公网通、仅内网不通 | 本机网段/网卡选择问题(见下方"双网卡"事实) | — |
 
 **本机双网卡事实(2026-11-17 实测)**:运维机**常态下有线+WiFi 同时连接**——有线在 192.168.1.x 网段(**到不了服务器**),WiFi 拿 192.168.110.x(与服务器同段)。**直连内网服务器只能走 WiFi**,无需断开有线,显式绑定源地址已实测可通:`ping -S 192.168.110.14 192.168.110.221`。若 WiFi 拿到的地址不同,`ipconfig` 现查再绑。
@@ -48,6 +48,22 @@ ssh hh2-prod 'sudo journalctl -b 0 -k --no-pager | grep -E "PM: suspend"'
 `Reply from <本机IP>: Destination host unreachable` = **本机 ARP 解析失败,改网关/加路由无效,别动网络配置**。
 全网段扫一遍(`seq 1 254 | xargs -P 64 -I@ ping -n 1 -w 400 192.168.110.@ >/dev/null 2>&1; arp -a | grep 192.168.110`):
 百台主机有 MAC、唯独 .221 无条目 → 锁定服务器自身(挂死与挂起在此完全同貌,区分靠 ③b)。
+
+## 2.5 公网 502 分层定位(2026-11-19 实战新增)
+
+502 = 跳板机 nginx 活着、上游断,但**上游有四层**:跳板机 nginx → 隧道(8081/18081) → hh2 发布端口(8090 dev / 80 prod) → poc-nginx(±-dev) → ms-api(±-dev):8000。**先逐层 curl 拿应答码+错误页,别猜**:
+
+```bash
+# 跳板机→外网视角:同一端口不同路径分开测(nginx 按 location 分流,/ 正常 ≠ 全站正常)
+curl -sS -o /dev/null -w '%{http_code} %{size_download}B\n' http://47.108.196.211:8080/                  # 302=这条链活着
+curl -sS --max-time 8 http://47.108.196.211:8080/<故障路径> | head -c 200                                # 157B nginx 错误页=看下面三层
+# hh2 侧逐层(经 ssh hh2-prod):
+for p in 80 8080 8090; do printf "$p: "; curl -sS -o /dev/null -w '%{http_code} %{size_download}B' --max-time 6 http://127.0.0.1:$p/<同一故障路径>; echo; done
+```
+
+- **157B 的 nginx 502 页由哪台 nginx 生成 = 故障在它的上游**:跳板机错误页→隧道/hh2 断;`hh2:8090` 上的 157B 页=poc-nginx-dev 生成→它的上游(ms-api-dev)断。
+- **头号陷阱:poc-nginx(±-dev) 持旧 IP 解析**。nginx 静态 proxy_pass 在配置加载时解析一次;**ms-api(ms-api-dev) 容器 restart/force-recreate/重建都可能换 IP**(2026-11-19 实证:普通 restart 也换),47h 未重启的 poc-nginx-dev 就持旧 IP → 它代理的路径全 502,而它本地自答的路径(/ 302、/auth/me 403)看起来"半好半坏"。**处方:凡动 ms-api/ms-api-dev 容器,一律连带 `docker restart poc-nginx poc-nginx-dev`**(restart 本身秒级,无窗口顾虑)。
+- 隧道是否活的快速判据:跳板机 `ss -tln` 三口在 + hh2 发布端口有应答 = 隧道大概率没事;**隧道进程受 jump-tunnel.service 看护,断线 10s 自动重连——2026-11-19 的 502 事件中隧道从头到尾都是活的,勿条件反射怀疑隧道**。
 
 ## 3. 处置
 
@@ -148,3 +164,15 @@ done
 - 跳板机 nginx 的 access.log 未轮转(400MB+),大范围 grep 前先按日期过滤。
 - `kex_exchange_identification` 噪音 ≠ 隧道事件,判隧道只认 `Accepted publickey for tunnel` / session 行。
 - 断电后来电"看着开着"≠系统活着;判死活永远以 §1 探针为准,别被电源灯骗。
+
+## 8. 操作失误红线(2026-11-19 实战踩坑,禁止再犯)
+
+以下每条都是当天真实犯过并造成实际损失/排查绕路的,动手前对照:
+
+1. **杀隧道进程前必看归属——它就是你的 ssh 会话载体**。hh2 的唯一入站通道是反向隧道,`kill` 掉 `ssh -N -R` 子进程=当场切断自己(当天两次把会话杀断、把验收命令截断在 kill 处)。kill 前先 `cat /proc/<pid>/cgroup` 看归属;验证/断言命令一律放 kill **之前**或重连之后。
+2. **禁止用 `systemctl --user -M msdev@` 探查用户单元**——polkit 下**静默返回空列表**,据此断言"隧道无看护"是本次最大误诊(实际 jump-tunnel.service 看护完备)。正确姿势:`sudo -u msdev XDG_RUNTIME_DIR=/run/user/1003 systemctl --user ...`,或 `cat /proc/<pid>/cgroup` 直接判归属。**探查工具返回空 ≠ 东西不存在,先怀疑探查姿势**。
+3. **禁止未分层定位就动手换部件**。502 事件中没拿错误页定位就杀隧道(隧道全程正常),白制造一次真中断+绕路半小时。顺序:§2.5 逐层 curl → 定位层 → 处置。
+4. **测试/排查 SQL 一律打 ms-db-dev,生产集群 ms-db 只读**。两套 compose 的 DB 服务都叫 `ms-db`,**容器网络别名在各自己网络内解析**——ms-api-dev 容器里的 `ms-db` = ms-db-dev 容器。动手前先 `docker exec <api容器> env | grep DB_URL` 确认,再决定在哪个容器里跑 psql。
+5. **禁止 psql `-c` 多语句混排**:多条语句在单隐式事务里,**最后一句报错=整体回滚**(本次 DELETE+SELECT 报错→"删了又复活"假象,排查绕路)。清理/写入语句单独一个 `-c` 跑;确需多语句显式 `BEGIN;…COMMIT;`。
+6. **调试注入必须记收尾清单**:往共享容器文件里注入调试日志(当天 VIPDEBUG 行)、往测试库插临时数据(当天 repro 行污染出 22 failed 假象),都必须当场登记,收尾逐一剔除+md5 对账;"想着等下回滚"不算数。
+7. **修容器内 tests 必须整目录 docker cp**(先 `rm -rf` 再传完整目录)——只传改动文件会把整套测试弄残(当天 import 全炸)。
