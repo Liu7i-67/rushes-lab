@@ -24,6 +24,8 @@ const ApprovalsPage = lazy(() => import('./pages/ApprovalsPage'));
 const DevLoginPage = lazy(() => import('./pages/DevLoginPage'));
 const LoginPage = lazy(() => import('./pages/LoginPage'));
 const ChangePasswordPage = lazy(() => import('./pages/ChangePasswordPage'));
+// 短信找回密码三态页(2026-11-20 方案 §6.2/§6.3):认证页,未登录可直达
+const ForgotPasswordPage = lazy(() => import('./pages/ForgotPasswordPage'));
 const ShareLandingPage = lazy(() => import('./pages/ShareLandingPage'));
 const RequestLinkLandingPage = lazy(() => import('./pages/RequestLinkLandingPage'));
 const AdminAuditPage = lazy(() => import('./pages/AdminAuditPage'));
@@ -106,6 +108,8 @@ const RouterRoutes = () => (
       <Route path="/dev-login" element={<DevLoginPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/change-password" element={<ChangePasswordPage />} />
+      {/* 短信找回密码(2026-11-20 方案 §6.3):已登录也可访问,不回跳首页 */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       {/* 账号设置(MCP 素材服务 D15:Web 端自助创建/吊销个人访问令牌) */}
       <Route path="/settings" element={<SettingsPage />} />
       {/* MCP 二级页(2026-11-19 设置页收拢 F2):令牌管理本体,/settings 只留入口 */}
@@ -130,7 +134,9 @@ function AppShell() {
   }, [compact]);
 
   // #149: 本地登录 / 改密是独立页(无 AppShell),未登录时也放行(useLocation 为 basename 相对路径)
-  const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password';
+  // 2026-11-20: /forgot-password(短信找回密码)同列,未登录不套外壳、可直达
+  const onAuthPage = location.pathname === '/login' || location.pathname === '/change-password'
+    || location.pathname === '/forgot-password';
 
   if (location.pathname === '/dev-login') return <RouterRoutes />;
 

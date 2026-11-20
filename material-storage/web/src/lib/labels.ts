@@ -6,13 +6,15 @@
  * - 缺 key 时直接返回 raw token 不报错 — 兼容后端新增 event_type 没同步加 label 的情况
  * - keep mono 字体不变(advisor 决策:跟现有视觉一致性 > 中文渲染纯净)
  *
- * 后端 event_type 写入点全集共 64 种(2026-10-30 实数;MCP 素材服务批次 +3:
- * token_created / token_revoked / mcp_settings_changed)。本映射表 68 键 =
- * 64 真实 + 4 个历史死键(approval_card_updated / approval_notified /
- * asset_tag_updated / invite_notified —— 只用于历史行展示、不在过滤下拉,勿删)。
- * 口径演变:55(2026-10-14 及之前;原算式 22+33)→ 61(2026-10-30 实数),
- * 本批 +3 = 64。全集清单见 rushes-spec/material-storage/prod-observability-fix-plan.md
- * 附录 A(W1/W4/W5/W6、风控模块与 MCP 批次随后增补;旧口径「grep 全集 22 种
+ * 后端 event_type 写入点全集共 69 种(2026-11-20 实数;手机号绑定/短信找回密码
+ * 批次 +5:phone_code_sent / sms_send_failed / phone_bound / phone_reset_denied /
+ * password_reset_via_phone)。本映射表 73 键 = 69 真实 + 4 个历史死键
+ * (approval_card_updated / approval_notified / asset_tag_updated / invite_notified
+ * —— 只用于历史行展示、不在过滤下拉,勿删)。
+ * 口径演变:55(2026-10-14 及之前;原算式 22+33)→ 61(2026-10-28 风控)→
+ * 64(2026-10-30 MCP)→ 69 本批。全集清单见
+ * rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
+ * (W1/W4/W5/W6、风控/MCP/手机号批次随后增补;旧口径「grep 全集 22 种
  * 2026-05-18」已过时,勿按它裁剪映射)
  */
 
@@ -96,6 +98,15 @@ export const EVENT_TYPE_LABEL: Record<string, string> = {
   token_created: '访问令牌创建',
   token_revoked: '访问令牌吊销',
   mcp_settings_changed: 'MCP 通道设置变更',
+  // ── 手机号绑定/短信找回密码(2026-11-20):验证码发送/发送失败、绑定换绑、
+  //    找回拒发/重置;details 新键 scene / phone_masked / biz_id / template_code /
+  //    err_code / err_message / old_masked / new_masked / source 由 AdminAuditPage
+  //    DETAIL_KEY_LABEL 同步(后端契约/CSV 仍用英文原值)────────────────────────────
+  phone_code_sent: '手机验证码已发送',
+  sms_send_failed: '短信发送失败',
+  phone_bound: '手机号绑定/换绑',
+  phone_reset_denied: '找回密码验证码拒发',
+  password_reset_via_phone: '手机号找回重置密码',
 };
 
 /** 百度备份任务状态 → Tag 文案(queued 为接口派生显示态,非后端枚举,组件内单独处理)。 */

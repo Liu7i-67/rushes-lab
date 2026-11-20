@@ -23,10 +23,12 @@ import type { AuditEvent } from '../api/types';
 dayjs.extend(relativeTime);
 dayjs.locale('zh-cn');
 
-// event_type 过滤下拉 = 后端写入全集 64 项 + 「全部」,共 65 行。
-// (原注释「61 项/62 行」是 2026-10-28 风控模块时的实数;2026-10-30 MCP 素材服务
-// 批次 +3:token_created / token_revoked / mcp_settings_changed,按本数组实数同步。
-// 更早的「55 项/56 行」是 2026-10-14 口径,已作废;后续随包回填须同步本数。)
+// event_type 过滤下拉 = 后端写入全集 69 项 + 「全部」,共 70 行。
+// (原注释「64 项/65 行」是 2026-10-30 MCP 素材服务时的实数;2026-11-20 手机号绑定/
+// 短信找回密码批次 +5:phone_code_sent / sms_send_failed / phone_bound /
+// phone_reset_denied / password_reset_via_phone,按本数组实数同步。
+// 更早的「61 项/62 行」是 2026-10-28 风控模块口径、「55 项/56 行」是 2026-10-14
+// 口径,均已作废;后续随包回填须同步本数。)
 // 注意:Select 未开 tags 模式,showSearch 只能在既有选项里搜,输不了自定义值 —
 // 后端新增 event_type 写入点时须回来补选项(后端对 event_type 是任意字符串精确匹配,无白名单)。
 // 全集核对依据:rushes-spec/material-storage/prod-observability-fix-plan.md 附录 A
@@ -60,6 +62,10 @@ const EVENT_TYPES = [
   // 权限模板/目录/授权(4)
   'folder_grant_added', 'folder_grant_removed', 'grant_template_changed',
   'grant_revoked',
+  // 手机号绑定/短信找回密码(2026-11-20,5;与登录/密码事件相邻分组;
+  // labels.ts EVENT_TYPE_LABEL 两处同步)
+  'phone_code_sent', 'sms_send_failed', 'phone_bound',
+  'phone_reset_denied', 'password_reset_via_phone',
   // ── 六项优化(2026-10-17)逐包回填(硬约定:本数组 + labels.ts EVENT_TYPE_LABEL 两处同步)──
   // W1 登录锁定(本包);folder_renamed/folder_moved/asset_batch_moved 归 W4/W5/W6 包自行补,勿代填
   'user_login_unlocked', 'local_login_locked',
@@ -136,6 +142,17 @@ const DETAIL_KEY_LABEL: Record<string, string> = {
   token_prefix: '令牌前缀',
   token_id: '令牌 ID',
   actor: '操作来源',
+  // 手机号绑定/短信找回密码(2026-11-20):5 事件 details 键(source 与既有 via
+  // 同义分键:短信侧写入用 source,历史键 via 不动);App audit_labels.dart 同文案
+  scene: '场景',
+  phone_masked: '手机号',
+  biz_id: '短信 BizId',
+  template_code: '短信模板',
+  err_code: '错误码',
+  err_message: '错误信息',
+  old_masked: '原手机号',
+  new_masked: '新手机号',
+  source: '来源',
 };
 
 export default function AdminAuditPage() {

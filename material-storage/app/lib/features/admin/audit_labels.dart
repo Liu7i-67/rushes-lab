@@ -1,11 +1,13 @@
 /// 审计展示常量(B8;web AdminAuditPage EVENT_TYPES / labels.ts 映射对齐):
-/// 事件类型筛选全集(65 项含『全部』= 64 个事件类型,后端任意字符串精确匹配
+/// 事件类型筛选全集(70 项含『全部』= 69 个事件类型,后端任意字符串精确匹配
 /// 无白名单——新增写入点须回补)与粗分类配色(details 键中文 label 桌面已有,
-/// 移动端仅挑高频键,缺省回落裸键)。
-/// 计数注释 2026-10-30 MCP 素材服务批次 +3('token_created'/'token_revoked'/
-/// 'mcp_settings_changed')时按实数更正:web AdminAuditPage.tsx 同为 64 事件+
-/// 『全部』=65;两者映射键数不同(web labels.ts 多 4 个历史死键,App 无),勿互抄。
-/// 前值 2026-10-28 风控模块 +1('ip_login_unlocked')时更正为 61 事件+『全部』=62。
+/// 移动端挑高频键白名单,缺省回落裸键)。
+/// 计数注释 2026-11-20 手机号绑定/短信找回密码批次 +5('phone_code_sent'/
+/// 'sms_send_failed'/'phone_bound'/'phone_reset_denied'/'password_reset_via_phone')
+/// 时按实数更正:web AdminAuditPage.tsx 同为 69 事件+『全部』=70;两者事件映射键数
+/// 不同(web labels.ts 多 4 个历史死键,App 无),勿互抄。
+/// 前值 2026-10-30 MCP 素材服务 +3 时更正为 64 事件+『全部』=65;
+/// 2026-10-28 风控模块 +1 时更正为 61 事件+『全部』=62。
 library;
 
 import 'package:flutter/material.dart';
@@ -41,6 +43,9 @@ const kAuditEventTypes = <String>[
   // 权限模板/目录/授权(4)
   'folder_grant_added', 'folder_grant_removed', 'grant_template_changed',
   'grant_revoked',
+  // 手机号绑定/短信找回密码(5,2026-11-20;与登录/密码事件相邻分组)
+  'phone_code_sent', 'sms_send_failed', 'phone_bound',
+  'phone_reset_denied', 'password_reset_via_phone',
   // 六项优化(2026-10-17)与后续批次回填
   'user_login_unlocked', 'local_login_locked',
   // 风控模块(2026-10-28 §3.2):解 IP 登录锁审计写入点
@@ -122,6 +127,12 @@ const kAuditEventLabels = <String, String>{
   'token_created': '访问令牌创建',
   'token_revoked': '访问令牌吊销',
   'mcp_settings_changed': 'MCP 通道设置变更',
+  // 手机号绑定/短信找回密码(2026-11-20;web labels.ts 同文案)
+  'phone_code_sent': '手机验证码已发送',
+  'sms_send_failed': '短信发送失败',
+  'phone_bound': '手机号绑定/换绑',
+  'phone_reset_denied': '找回密码验证码拒发',
+  'password_reset_via_phone': '手机号找回重置密码',
 };
 
 /// event_type → 展示文案(F7 接入点共用):缺 key 回落 raw token。
@@ -159,6 +170,17 @@ const kAuditDetailKeyLabels = <String, String>{
   'token_prefix': '令牌前缀',
   'token_id': '令牌 ID',
   'actor': '操作来源',
+  // 手机号绑定/短信找回密码(2026-11-20):5 事件 details 键
+  // (web AdminAuditPage DETAIL_KEY_LABEL 同文案;source 与既有 via 同义分键)
+  'scene': '场景',
+  'phone_masked': '手机号',
+  'biz_id': '短信 BizId',
+  'template_code': '短信模板',
+  'err_code': '错误码',
+  'err_message': '错误信息',
+  'old_masked': '原手机号',
+  'new_masked': '新手机号',
+  'source': '来源',
 };
 
 /// event_type → 粗分类色(web eventColor 同规则;颜色随主题令牌)。

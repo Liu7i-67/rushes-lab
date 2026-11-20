@@ -105,13 +105,26 @@ class MePage extends StatelessWidget {
               ),
               // 2026-11-19 settings-mcp-collapse F7:偏好分组「外观」行后
               // 追加「设置」行(进 /settings;外观行与弹层原地保留不变)
-              const MeGroup(title: '偏好', children: [AppearanceRow(), SettingsRow()]),
+              const MeGroup(
+                title: '偏好',
+                children: [AppearanceRow(), SettingsRow()],
+              ),
               // B8:管理区——管理后台仅 is_system_admin;目录模板独立闸门
               if (adminTiles.isNotEmpty)
                 MeGroup(title: '管理', children: adminTiles),
               MeGroup(
                 title: '账号与安全',
                 children: [
+                  // 手机号绑定/换绑入口(phone-bind 批,§7.3):subtitle 随
+                  // session.me 实时显示完整号,未绑定「未绑定」;绑定/换绑页
+                  // 提交成功经 Session.refreshMe 的 notifyListeners 同步回显。
+                  AppRow(
+                    leading: const Icon(Icons.phone_iphone_outlined),
+                    title: '手机号',
+                    subtitle: me?.phone ?? '未绑定',
+                    onTap: () =>
+                        Navigator.of(context).pushNamed('/account-phone'),
+                  ),
                   AppRow(
                     leading: const Icon(Icons.password_outlined),
                     title: '修改密码',

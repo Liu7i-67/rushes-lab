@@ -25,12 +25,14 @@ import 'features/assets/trash_page.dart';
 import 'features/auth/change_password_page.dart';
 import 'features/approvals/approvals_page.dart';
 import 'features/auth/login_page.dart';
+import 'features/auth/forgot_password_page.dart';
 import 'features/baidu/baidu_new_task_page.dart';
 import 'features/baidu/baidu_page.dart';
 import 'features/baidu/bind_code_page.dart';
 import 'features/baidu/task_detail_page.dart';
 import 'features/error_report/error_report_page.dart';
 import 'features/me/about_page.dart';
+import 'features/me/account_phone_page.dart';
 import 'features/notifications/notifications_page.dart';
 import 'features/folders/folders_page.dart';
 import 'features/preview/preview_page.dart';
@@ -131,6 +133,17 @@ class _MsAppState extends State<MsApp> {
               final forced = (s.arguments as bool?) ?? false;
               return MaterialPageRoute(
                 builder: (_) => ChangePasswordPage(forced: forced),
+              );
+            case '/forgot-password':
+              // phone-bind 批 §7.2:忘记密码三态页(公开路由,未登录可达;
+              // 已登录改密场景同样允许,照 web 口径)
+              return MaterialPageRoute(
+                builder: (_) => const ForgotPasswordPage(),
+              );
+            case '/account-phone':
+              // phone-bind 批 §7.3:手机号绑定/换绑(我的→账号与安全入口)
+              return MaterialPageRoute(
+                builder: (_) => const AccountPhonePage(),
               );
             case '/folders':
               // B3:附带项目名(上传任务 where 显示路径「项目/文件夹」用);

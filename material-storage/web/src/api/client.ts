@@ -37,9 +37,10 @@ http.interceptors.response.use(
       // #149: 认证页(本地登录 / 改密 / dev)自身的 401 是业务响应(如密码错误),不跳转;
       // 其余页面 401(会话失效)→ 本地登录页。带 next 完整路径回业务前端
       // (注意 pathname 含 /ms-static/web basename,所以用 endsWith 判断)
+      // 2026-11-20: /forgot-password(短信找回密码)也是认证页,漏豁免会被 401 跳转打死
       const path = window.location.pathname;
       const onAuthPage = path.endsWith('/login') || path.endsWith('/change-password')
-        || path.endsWith('/dev-login');
+        || path.endsWith('/forgot-password') || path.endsWith('/dev-login');
       if (!onAuthPage) {
         const next = encodeURIComponent(path + window.location.search + window.location.hash);
         window.location.href = `/ms-static/web/login?next=${next}`;
@@ -75,4 +76,13 @@ export function errorMessage(err: unknown, fallback = '请求失败'): string {
     if (err.message) return err.message;
   }
   return fallback;
+}
+
+/** axios 错误体顶层 retry_after(方案 §5.2;429/502 部分携带)。>0 有效秒数,无则 0。
+ * (ForgotPasswordPage 与 SettingsPage 原各留一份逐字重复,与 errorMessage 同属
+ * 「从 axios error 抽信息」的客户端层工具,收敛于此单一导出。) */
+export function retryAfterOf(err: unknown): number {
+  const ra = (err as { response?: { data?: { retry_after?: unknown } } })
+    ?.response?.data?.retry_after;
+  return typeof ra === 'number' && Number.isFinite(ra) && ra > 0 ? Math.floor(ra) : 0;
 }

@@ -1,6 +1,7 @@
 /// Me — /api/v1/auth/me 契约(auth.py 实际返回;B6 补三组级旗标,
 /// B8 补 is_folder_template_manager 管理入口例外闸门;
-/// 用户模块组级授权开放补 is_user_manager + user_create_groups)。
+/// 用户模块组级授权开放补 is_user_manager + user_create_groups;
+/// phone-bind 批补 phone 可空解析,旧后端无此字段回落 null=未绑定)。
 library;
 
 import 'user.dart';
@@ -12,17 +13,18 @@ class Me {
     this.mustChangePassword = false,
     this.isSystemAdmin = false,
     this.baiduBackupEnabled = false,
+    this.phone,
     bool? isProjectCreator,
     bool? isProjectDeleter,
     bool? isArtistAccountCreator,
     bool? isFolderTemplateManager,
     bool? isUserManager,
     this.userCreateGroups = const [],
-  })  : isProjectCreator = isProjectCreator ?? isSystemAdmin,
-        isProjectDeleter = isProjectDeleter ?? isSystemAdmin,
-        isArtistAccountCreator = isArtistAccountCreator ?? isSystemAdmin,
-        isFolderTemplateManager = isFolderTemplateManager ?? isSystemAdmin,
-        isUserManager = isUserManager ?? isSystemAdmin;
+  }) : isProjectCreator = isProjectCreator ?? isSystemAdmin,
+       isProjectDeleter = isProjectDeleter ?? isSystemAdmin,
+       isArtistAccountCreator = isArtistAccountCreator ?? isSystemAdmin,
+       isFolderTemplateManager = isFolderTemplateManager ?? isSystemAdmin,
+       isUserManager = isUserManager ?? isSystemAdmin;
 
   factory Me.fromJson(Map<String, dynamic> j) {
     final sysAdmin = (j['is_system_admin'] ?? false) as bool;
@@ -32,6 +34,9 @@ class Me {
       mustChangePassword: (j['must_change_password'] ?? false) as bool,
       isSystemAdmin: sysAdmin,
       baiduBackupEnabled: (j['baidu_backup_enabled'] ?? false) as bool,
+      // 手机号(可空;null=未绑定或旧后端无此字段,web `phone?: string | null`
+      // 同口径,SPA/App 先于 API 上线不炸)。
+      phone: j['phone'] as String?,
       // 旧后端字段缺失回落 is_system_admin(web `?? is_system_admin` 同口径;
       // 现役后端恒回填,组级开关经 group#member 展开已并入字段值)。
       isProjectCreator: j['is_project_creator'] as bool?,
@@ -67,6 +72,9 @@ class Me {
 
   /// 百度网盘备份菜单显隐开关(B0① 入口置灰判断;关闭时后端 /baidu/* 统一 404)。
   final bool baiduBackupEnabled;
+
+  /// 绑定手机号(完整号展示 D13;null=未绑定,旧后端无此字段亦 null)。
+  final String? phone;
 
   /// 新建项目总闸门(B6;create_project 守门 require_project_creator 同口径:
   /// is_org_admin 或 组级 project_creator;构造时缺省回落 [isSystemAdmin])。

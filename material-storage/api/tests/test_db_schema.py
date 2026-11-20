@@ -157,6 +157,29 @@ def test_user_username_column() -> None:
     assert {i.name for i in User.__table__.indexes} >= {"ix_users_username"}
 
 
+def test_user_phone_column_and_unique_constraint() -> None:
+    """手机绑定列(迁移 0024,方案 §4.1):nullable varchar(20)+ 显式唯一约束。
+
+    唯一性用 UniqueConstraint 而非列定义 unique=True(0008/0010 前科:列定义只发
+    普通 ALTER 不渲染 UNIQUE),与迁移 uq_users_phone 对齐防模型/DB 漂移;且不用
+    unique index —— 下方 live db 的 pg_constraint contype='u' 防假绿断言只覆盖
+    constraint,不覆盖 index。
+    """
+    from sqlalchemy import String
+
+    col = User.__table__.c.phone
+    assert isinstance(col.type, String), f"phone 列类型应为 VARCHAR,实际 {col.type}"
+    assert col.type.length == 20
+    assert col.nullable is True
+    constraints = {c.name for c in User.__table__.constraints}
+    assert "uq_users_phone" in constraints, (
+        f"users 表必须显式定义 uq_users_phone UniqueConstraint,实际: {constraints}"
+    )
+    # 列定义不得走 unique=True / unique index 路线(见上)
+    assert col.unique is not True
+    assert "uq_users_phone" not in {i.name for i in User.__table__.indexes}
+
+
 # ─── 百度网盘备份三表(方案 §4,migration 20261008_0013)────────────────────────
 
 
@@ -275,12 +298,15 @@ def test_baidu_task_create_same_name_folder_column() -> None:
 
 # ─── 数据库层唯一约束(F3,容器测试)────────────────────────────────────────────
 async def test_live_db_unique_constraints_on_local_identity() -> None:
-    """F3:username / oidc_sub 的 UNIQUE 必须真实存在于数据库层。
+    """F3:username / oidc_sub / phone 的 UNIQUE 必须真实存在于数据库层。
 
     migration 0008/0010 的 `op.add_column(unique=True)` 不渲染 UNIQUE,
     ix_users_username / ix_users_oidc_sub 只是普通 btree —— 上面 ORM 元数据断言
-    是假绿。0009 迁移补了 uq_users_username / uq_users_oidc_sub,这里直接查
-    pg_constraint 验证。需要可连的 PG(容器测试,待 docker);本机无 DB 自动 skip。
+    是假绿。0009 迁移补了 uq_users_username / uq_users_oidc_sub;0024 按同一钉子
+    显式建 uq_users_phone(手机绑定/短信找回密码,方案 §4),一并并入本断言。
+    这里直接查 pg_constraint 验证(contype='u' 只覆盖 unique constraint,
+    不覆盖 unique index —— 0024 因此用 constraint 而非 index)。
+    需要可连的 PG(容器测试,待 docker);本机无 DB 自动 skip。
     """
     import pytest
     from sqlalchemy import text
@@ -306,3 +332,4 @@ async def test_live_db_unique_constraints_on_local_identity() -> None:
     uniques = set(rows)
     assert "uq_users_username" in uniques, f"缺 uq_users_username,实际: {uniques}"
     assert "uq_users_oidc_sub" in uniques, f"缺 uq_users_oidc_sub,实际: {uniques}"
+    assert "uq_users_phone" in uniques, f"缺 uq_users_phone(迁移 0024),实际: {uniques}"

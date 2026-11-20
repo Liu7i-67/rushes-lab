@@ -12,6 +12,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { errorMessage } from '../api/client';
 import { useLocalLogin } from '../api/hooks';
+import { BrandMark } from '../components/BrandMark';
 import { useCompactViewport } from '../lib/use-viewports';
 
 const BASENAME = '/ms-static/web';
@@ -74,28 +75,7 @@ export default function LoginPage() {
     <div style={{ maxWidth: 520, margin: compact ? '24px auto' : '64px auto', padding: 16 }}>
       <Card>
         {/* 品牌印记(与 AppHeader 一致的几何方块) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
-          <span style={{ position: 'relative', display: 'inline-block', width: 22, height: 22 }}>
-            <span style={{
-              position: 'absolute', left: 0, top: 0,
-              width: 14, height: 14, background: 'var(--ms-ink)', borderRadius: 2,
-            }} />
-            <span style={{
-              position: 'absolute', left: 4, top: 4,
-              width: 14, height: 14, background: 'var(--ms-accent)', borderRadius: 2, opacity: 0.85,
-            }} />
-            <span style={{
-              position: 'absolute', left: 8, top: 8,
-              width: 14, height: 14, background: 'var(--ms-emerald)', borderRadius: 2, opacity: 0.7,
-            }} />
-          </span>
-          <span style={{
-            fontFamily: 'var(--ms-font-display)', fontWeight: 500, fontSize: 16,
-            letterSpacing: '-0.01em', color: 'var(--ms-ink)',
-          }}>
-            material<span style={{ color: 'var(--ms-accent)' }}>·</span>storage
-          </span>
-        </div>
+        <BrandMark />
 
         <Typography.Title level={4} style={{ marginTop: 8, marginBottom: 4 }}>
           账号密码登录
@@ -124,9 +104,17 @@ export default function LoginPage() {
             name="password"
             label="密码"
             rules={[{ required: true, message: '请输入密码' }]}
+            style={{ marginBottom: 4 }}
           >
             <Input.Password prefix={<KeyRound size={14} />} placeholder="密码" />
           </Form.Item>
+          {/* 忘记密码入口(2026-11-20 方案 §6.1):密码框下方右侧,去短信找回密码三态页 */}
+          <div style={{ textAlign: 'right', marginBottom: 12 }}>
+            <Button type="link" size="small" style={{ padding: 0 }}
+                    onClick={() => navigate('/forgot-password')}>
+              忘记密码?
+            </Button>
+          </div>
           <Form.Item style={{ marginBottom: 8 }}>
             <Button type="primary" htmlType="submit" block loading={login.isPending}>
               登录

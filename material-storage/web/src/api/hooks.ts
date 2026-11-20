@@ -91,6 +91,51 @@ export const useChangePassword = () => {
   });
 };
 
+// ─── 手机号绑定 / 短信找回密码(2026-11-20 方案 §5.2 契约)───────────────────
+// 契约钉死:send-code 按 HTTP 200 判成功(勿引入 202);429/502 错误体顶层并列
+// retry_after(部分携带),页面层读 err.response.data.retry_after 决定倒计时初值。
+
+// 登录态发验证码(绑定/换绑场景):200 {retry_after};400 格式 / 403 PAT /
+// 409 已被占用 / 429 冷却·配额(带 retry_after)/ 502 发送失败 / 503 未配置
+export const useSendPhoneCode = () =>
+  useMutation({
+    mutationFn: async (body: { phone: string }) =>
+      (await http.post<{ retry_after: number }>('/api/v1/account/phone/send-code', body)).data,
+  });
+
+// 登录态绑定/换绑(D1:只凭短信验证码):200 {phone};400 格式/码错/过期 /
+// 403 PAT / 429 码作废 / 409 并发占用 / 503 未配置
+export const useBindPhone = () => {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: { phone: string; code: string }) =>
+      (await http.post<{ phone: string }>('/api/v1/account/phone/bind', body)).data,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['me'] }),
+  });
+};
+
+// 公开发验证码(找回密码场景):200 {retry_after};400 格式 / 400「无法发送验证码」
+// (未绑定/已禁用,不解释原因)/ 429 冷却·配额(带 retry_after)/ 502 / 503 未配置
+export const useResetSendCode = () =>
+  useMutation({
+    mutationFn: async (body: { phone: string }) =>
+      (await http.post<{ retry_after: number }>('/api/v1/auth/phone/reset/send-code', body)).data,
+  });
+
+// 公开确认重置(D2:系统随机密码一次性展示 + 首登强制再改):
+// 200 {username, email, name, new_password}(不落日志);400 码错/过期 /
+// 429 已作废 / 503 未配置
+export const useResetConfirm = () =>
+  useMutation({
+    mutationFn: async (body: { phone: string; code: string }) =>
+      (await http.post<{
+        username: string | null;
+        email: string | null;
+        name: string;
+        new_password: string;
+      }>('/api/v1/auth/phone/reset/confirm', body)).data,
+  });
+
 // ─── projects ──────────────────────────────────────────────────────────────
 export const useProjects = () =>
   useQuery({

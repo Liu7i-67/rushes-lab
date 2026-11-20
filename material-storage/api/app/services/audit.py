@@ -18,7 +18,10 @@
   (worker/CLI/后台任务)→ 用 contextvar**(``bind_auth_context`` 在
   ``get_current_user`` 成功时绑定;FastAPI BackgroundTasks 与请求同 task 执行,
   context 可继承)→ contextvar 无值 → NULL;
-- ``write()`` 的可选 ``auth_method`` / ``auth_token_id`` 参数**仅作显式覆盖**。
+- ``write()`` 的可选 ``auth_token_id`` 参数仅作显式覆盖;``auth_method`` 的默认值
+  是模块哨兵 ``_UNSET``(未传 = 走上方推导,既有调用点行为不变),**显式 ``None``
+  是可表达的覆盖值 = 强制落 NULL**(公开端点审计防误标 session;手机绑定/短信
+  找回密码方案 §5.7,2026-11-20)。
 """
 from __future__ import annotations
 
@@ -36,6 +39,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.tables import AuditEvent, User
 
 log = logging.getLogger(__name__)
+
+# auth_method 默认值哨兵(手机绑定方案 §5.7):默认(未传)走 _default_auth 推导,
+# 使「显式 None」成为可表达的覆盖值 = 强制落 NULL —— 公开端点(从未执行
+# get_current_user)若不显式传 None,推导会把无认证事件误标成 session。
+_UNSET = object()
 
 # 当前请求/任务的认证上下文(method, token_id);deps.get_current_user 成功时绑定。
 # 只在**无 request 上下文**的 AuditService 实例(worker / 后台任务 / CLI)生效。
@@ -108,7 +116,7 @@ class AuditService:
         user_agent: str | None = None,
         details: dict[str, Any] | None = None,
         event_time: datetime | None = None,
-        auth_method: str | None = None,
+        auth_method: str | object | None = _UNSET,
         auth_token_id: uuid_lib.UUID | None = None,
     ) -> AuditEvent:
         actor_snapshot = await self._resolve_actor_snapshot(actor_user_id)
@@ -124,8 +132,12 @@ class AuditService:
             "dedup_key": dedup_key or f"internal:{uuid_lib.uuid4()}",
             "trace_id": trace_id,
             "request_ip": request_ip,
-            # D4:认证方式两列 —— 显式参数仅作覆盖,默认走 request/contextvar
-            "auth_method": auth_method if auth_method is not None else default_method,
+            # D4:认证方式两列 —— 默认哨兵 _UNSET 走 request/contextvar 推导
+            # (既有调用点行为不变);显式字符串或显式 None(= 强制落 NULL,
+            # 公开端点防误标 session,方案 §5.7)直接落库
+            "auth_method": (
+                auth_method if isinstance(auth_method, str) or auth_method is None else default_method
+            ),
             "auth_token_id": (
                 auth_token_id if auth_token_id is not None else default_token_id
             ),
