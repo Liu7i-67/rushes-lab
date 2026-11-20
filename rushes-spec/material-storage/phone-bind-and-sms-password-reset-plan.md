@@ -7,7 +7,7 @@
 
 ## 0. 一句话
 
-给每个账号加**唯一手机号**(设置页绑定/换绑,凭短信验证码+当前密码),登录页新增「忘记密码」入口:输入手机号→短信验证码→验证通过后系统**直接重置密码**并把**账号+新密码一次性展示**给用户;附存量自动绑定脚本(登录账号即中国大陆手机号的用户自动绑定)。
+给每个账号加**唯一手机号**(设置页绑定/换绑,凭短信验证码),登录页新增「忘记密码」入口:输入手机号→短信验证码→验证通过后系统**直接重置密码**并把**账号+新密码一次性展示**给用户;附存量自动绑定脚本(登录账号即中国大陆手机号的用户自动绑定)。
 
 ## 1. 背景与目标
 
@@ -37,7 +37,7 @@
 
 - **手机号登录**:登录名匹配链(username→email→name)不动,手机号只是绑定属性+找回通道。
 - **解绑手机**:无产品诉求;手机号是找回通道,解绑会制造「无凭证账号」。
-- **换绑时验证旧手机**:短信只发新号(D16,当前密码已把关)。
+- **换绑时验证旧手机**:短信只发新号(D16;绑定/换绑有 `phone_bound` 审计留痕、新号机主收短信可感知)。
 - **国际手机号**:签名与模板均国内;只接受中国大陆号段。
 - **管理后台展示/编辑手机号**:脚本已满足运营诉求,管理端另行周期。
 - **重置后踢旧 session(session_version)**:与现行 `change-password` 行为对齐(改密也不踢 session,只吊销 PAT);会话失效机制是横切改造,列遗留(§13)。
@@ -88,8 +88,8 @@
 
 | # | 决策 | 理由 |
 | --- | --- | --- |
-| D1 | **绑定/换绑需同时提供「当前密码」,且仅限已设密码的用户**;`password_hash` 为 NULL(未设密码)的用户**不允许自助绑定**,提示「请先联系管理员设置密码后再绑定手机号」 | 超出需求字面的安全加固:若只验短信码,拿到会话(借用的手机/被窃 cookie)者可绑定自己的手机,再走忘记密码重置密码,**形成完整账号接管链**。加当前密码关隘切断该链;未设密码账号无密码可验、免验即重新敞开该链,故直接禁绑——与 `change-password` 对未设密码用户「拒绝盲改」的既有口径一致(`app/routers/auth.py:486-488`)。此类账号可由管理员经批量脚本 `--csv` 绑号(§9.4)。密码错 5 次锁 15 分钟(对齐登录锁参数) |
-| D2 | 忘记密码=**系统重置随机密码并一次性展示**(不让用户自设);`must_change_password` 置 **false** | 需求原文「直接使用重置密码操作…显示给他对应的账号和密码」。置 false 才能拿来即用;否则登录即被强制改密,与「刚拿到密码」的语境冲突。随机密码仅展示一次,风险可控 |
+| D1 | **绑定/换绑只凭短信验证码**(遵需求字面,**用户 2026-11-20 拍板**);无当前密码关隘、未设密码用户同样可绑 | 曾评估的接管链(拿到会话者绑自己手机→走忘记密码重置)已向用户如实呈现,**用户选择接受**;残留缓解=①会话本身的安全面(cookie SameSite=lax+7 天 TTL,与全站一致)②`phone_bound` 审计留 old/new 脱敏值可回溯③占用 409 预检与唯一约束④改密/重置即吊销 PAT。验证码只发新号=「新号机主同意」事实证明仍成立(§8.2) |
+| D2 | 忘记密码=**系统重置随机密码并一次性展示**(不让用户自设);`must_change_password` 置 **true**——用户拿展示密码登录后**强制再改** | 需求原文「直接使用重置密码操作…显示给他对应的账号和密码」;**用户 2026-11-20 拍板:仍走重置密码逻辑,首登强制再改**——与批量开号/管理员重置的临时密码口径完全一致,系统生成的随机密码不作长期凭证。双端登录后必经的 mustChange 引导(App 跳 /change-password、Web 路由守卫)天然衔接,无需前端特判 |
 | D3 | 验证码 **6 位字母数字组合,首位强制从字母子集抽取(保证 ≥1 个字母)**,整体去除易混淆字符(I/L/O/0/1);**HMAC-SHA256 哈希后存 Redis**(HKDF 从 `session_jwt_secret` 派生专用 key,info=`b"sms-code"`),比对用 `hmac.compare_digest` | 模板变量约束「数字+字母组合或仅字母」**排除纯数字**,纯随机有 (8/31)⁶≈0.03% 概率全数字被阿里云 `isv.SMS_TEMPLATE_ILLEGAL` 拒;首位置定字母根除(同思路先例:`app/services/passwords.py::generate_temp_password` 的三类各取一保底)。哈希存储使 Redis 泄露时无法离线穷举(沿用 email 分支 5 轮盲审定稿口径) |
 | D4 | 一号一账号 = DB 唯一约束 `uq_users_phone`;占用时绑定侧**明确 409**「该手机号已绑定其他账号」;忘记密码侧按需求报「无法发送验证码」 | 绑定是登录态操作,明确报错体验最好;忘记密码侧文案遵需求原文 |
 | D5 | 手机号归一化(绑定端点与批量脚本**共用同一函数规格**):strip 空格/连字符/点号 → 去 `+86`/`86` 前缀 → 校验 `^1[3-9]\d{9}$` | 兼容用户带前缀/分隔符输入;username pattern 允许连字符与点号(`app/models/__init__.py:37`),归一化必须覆盖点号,否则端点与脚本对同一 username 产出不同候选集;其余一律 400「手机号格式不正确」 |
@@ -103,7 +103,7 @@
 | D13 | `GET /auth/me` 回传**完整手机号**(自己可见);管理端列表/详情**不**回传 phone(本批) | 设置页需确认完整号码;管理端展示属非目标 |
 | D14 | 批量脚本默认 dry-run,容器内跑,幂等,冲突名单人工裁决后二跑 | 仓库脚本安全范式(backfill 先例) |
 | D15 | dev 与 prod 配同一套真实凭证 | 签名报备已全通过,dev 必须能真实送达才能验收;测试用指定真实手机号(短信计费可忽略) |
-| D16 | 换绑**不需要旧手机验证码**(短信只发新号) | 当前密码已把关(D1);省一条短信与一个交互步骤 |
+| D16 | 换绑**不需要旧手机验证码**(短信只发新号) | 省一条短信与一个交互步骤;绑定/换绑动作本身有 `phone_bound` 审计留痕(old/new 脱敏可回溯),且新号机主会收到短信可感知(D1 拍板后的残留缓解面,§8.2) |
 | D17 | 短信服务未配置(AK/SK/签名缺任一)时:相关端点返回 **503**「短信服务未配置」;**前端入口不做隐藏条件,常驻+503 文案原样透出** | 沿用 SMTP `smtp_enabled` 开关模式。设置页技术上可仿 `baidu_backup_enabled` 加能力 flag,但登录页/忘记密码页属未认证态无法先知——为双端入口行为一致+省一个探测接口,统一常驻,503 文案已足够指引 |
 | D18 | 绑定两端点挂 `require_session_auth`:**PAT 一律 403**,仅交互会话可操作(与 change-password 同口径);公开的重置两端点不挂任何闸 | 手机号是账号找回通道,变更属账号安全级操作,与改密同级;仓库惯例:PAT 可直调的 router 才需要 mcp_gate,本路由直接禁 PAT(`app/deps.py:176-188` 先例),无须挂闸 |
 
@@ -146,22 +146,22 @@ phone: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 中国�
 
 | 端点 | 方法/鉴权 | 入参 | 出参/错误 |
 | --- | --- | --- | --- |
-| `/api/v1/account/phone/send-code` | POST,登录态(get_current_user + require_session_auth) | `{phone}` | `200 {retry_after:<冷却秒数,取 sms_send_cooldown_seconds>}`;400 格式;403 PAT/未设密码用户;409 已被占用;429 冷却/配额(带 retry_after);502 短信发送失败(`isv.BUSINESS_LIMIT_CONTROL` 时文案「操作过于频繁,请一小时后再试」,body 带 retry_after);503 未配置 |
-| `/api/v1/account/phone/bind` | POST,登录态(同上) | `{phone, code, current_password}` | `200 {phone}`;400 验证码错误 / 验证码已过期,请重新获取 / **密码错=400「当前密码不正确」**(对齐 change-password 旧密码错 400 口径,`auth.py:490-498`;**不可用 401**——双端 401 全局语义是会话失效,会把输错密码的已登录用户整页踢回登录页/强制登出);403 PAT/未设密码用户;429 码已作废(5 次)或密码锁;409 并发占用;503 未配置 |
+| `/api/v1/account/phone/send-code` | POST,登录态(get_current_user + require_session_auth) | `{phone}` | `200 {retry_after:<冷却秒数,取 sms_send_cooldown_seconds>}`;400 格式;403 PAT;409 已被占用;429 冷却/配额(带 retry_after);502 短信发送失败(频控文案差异化同 bind 侧;**`isv.BUSINESS_LIMIT_CONTROL` 时不带 retry_after**,其余 502 带);503 未配置 |
+| `/api/v1/account/phone/bind` | POST,登录态(同上) | `{phone, code}` | `200 {phone}`;400 格式 / 验证码错误 / 验证码已过期,请重新获取;403 PAT;429 码已作废(5 次);409 并发占用;503 未配置 |
 | `/api/v1/auth/phone/reset/send-code` | POST,公开 | `{phone}` | `200 {retry_after:<冷却秒数,取 sms_send_cooldown_seconds>}`;400 格式;**400 detail=「无法发送验证码」**(未绑定/已禁用);429 冷却/配额;502 短信发送失败(频控文案差异化同 bind 侧,body 带 retry_after);503 未配置 |
 | `/api/v1/auth/phone/reset/confirm` | POST,公开 | `{phone, code}` | `200 {username, email, name, new_password}`(**一次性返回,不落日志**);400 码错/过期;429 已作废;503 未配置 |
 
 - 绑定两端点还会被既有 `must_change_password` 403 白名单机制拦截(deps.py:152-153,设计内,§12.8):强制改密用户先改密;前端不另造逻辑,依赖既有路由守卫。
 - 所有入参先过 D5 规范化;验证码入参服务端统一 `strip().upper()` 再比对(D3 字母表全大写,手输小写/带空格不烧 attempts);错误 `detail` 一律中文字符串(双端直接展示,FastAPI detail 语义)。
-- `bind` 的 `current_password` **必填**;未设密码(`password_hash IS NULL`)用户两个绑定端点均 403 detail=「请先联系管理员设置密码后再绑定手机号」(D1)。
-- 429/502 的响应体形状:**`{"detail": "<中文文案>", "retry_after": <秒>}`**(仅部分 429 携带,见下)——detail 保持字符串(双端 errorMessage 兼容),retry_after 为顶层并列字段;**Web 读取 `err.response.data.retry_after`,App 读取 `r.data['retry_after']`,无该字段的 429 不启动倒计时**。retry_after 按 429 类型分型:**冷却 429=冷却键 PTTL 毫秒上取整为秒**(仓内先例 `local_auth.py:293-310`,漏换算会把 12 分钟显示成 742000 秒);**配额 429(小时/日)=回填 `sms_send_cooldown_seconds` 配置值**(冷却键已 DEL,倒计时只是前端防抖,真实解锁由后端配额管);**码作废 429 与密码锁 429 不带 retry_after**(码作废须重新发码、受冷却管;密码锁文案自带时长)。502=冷却配置值(冷却保留)。
-- `reset/confirm` 返回 `username`(可空)、`email`(可空)、`name`;前端展示优先级 username → email → name,`username` 与 `email` 皆空时附「显示名重复可能无法登录,请联系管理员」提示(§6.2/§7.2)。
+- `bind` 只凭验证码(D1 用户拍板);无密码分支,未设密码用户与已设密码用户同权绑定。
+- 429/502 的响应体形状:**`{"detail": "<中文文案>", "retry_after": <秒>}`**(仅部分 429 携带,见下)——detail 保持字符串(双端 errorMessage 兼容),retry_after 为顶层并列字段;**Web 读取 `err.response.data.retry_after`,App 读取 `r.data['retry_after']`,无该字段的 429 不启动倒计时**。retry_after 按 429 类型分型:**冷却 429=冷却键 PTTL 毫秒上取整为秒**(仓内先例 `local_auth.py:293-310`,漏换算会把 12 分钟显示成 742000 秒);**配额 429(小时/日)=回填 `sms_send_cooldown_seconds` 配置值**(冷却键已 DEL,倒计时只是前端防抖,真实解锁由后端配额管);**码作废 429 不带 retry_after**(须重新发码、受冷却管)。502=冷却配置值(冷却保留),**但 `isv.BUSINESS_LIMIT_CONTROL` 的 502 不带 retry_after**(真实等待窗口是运营商 ~1 小时,回填 120s 只会放行后再吃一次 502;前端仅透出「操作过于频繁,请一小时后再试」文案,不启动倒计时)。
+- `reset/confirm` 返回 `username`(可空)、`email`(可空)、`name`;前端展示优先级 username → email → name,`username` 与 `email` 皆空时附提示,**文案钉死单一正本:「若显示名重复导致无法登录,请联系管理员」**(§6.2/§7.2 双端引用同一句)。
 
 ### 5.3 绑定/换绑状态机(bind 场景)
 
 **send-code 步骤顺序(router 钉死):**
 
-1. 登录态(`get_current_user` + `require_session_auth`,PAT 403);强制改密用户会被既有 403 白名单机制拦下,符合预期;**未设密码用户(`password_hash IS NULL`)403** detail=「请先联系管理员设置密码后再绑定手机号」(D1);**503 守卫:`settings.aliyun_sms_enabled` 为假 → 503「短信服务未配置」**(四端点统一首步守卫,防 `app.state.sms=None` 走到 AttributeError 500)。
+1. 登录态(`get_current_user` + `require_session_auth`,PAT 403);强制改密用户会被既有 403 白名单机制拦下,符合预期;**503 守卫:`settings.aliyun_sms_enabled` 为假 → 503「短信服务未配置」**(四端点统一首步守卫,防 `app.state.sms=None` 走到 AttributeError 500)。
 2. 规范化+格式校验 → 400。
 3. 冷却 `SET NX EX sms_send_cooldown_seconds` 未抢到 → 429 `{retry_after}`(PTTL 上取整)。
 4. 每用户每小时 ≤ `sms_bind_user_hourly` → 429 + DEL 冷却键(**先于占用预检**:409 探测同样消耗探测者自己的小时配额,登录态枚举「该号是否已绑定」被 10/h 兜住,§8.1)。
@@ -173,12 +173,11 @@ phone: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 中国�
 
 **bind 步骤顺序:**
 
-1. 登录态 + `require_session_auth` + 未设密码 403 + 503 守卫(同上);规范化;取 Redis 码 hash,缺失 → 400「验证码已过期,请重新获取」;**校验 hash 里 user_id == 当前用户,不一致 → 400「验证码已过期,请重新获取」**(发码与提交之间换账号登录的边角,与 reset 侧口径一致)。
-2. `hmac.compare_digest` 比对;不符 → `HINCRBY attempts`;≥5 → DEL 码键,429「错误次数过多,请重新获取」;否则 400「验证码错误」。
-3. 验 `current_password`(argon2,必填):先查锁 `sms:pwlock:{user_id}` 存在 → 429「尝试次数过多,请 {sms_bind_password_lock_seconds//60} 分钟后重试」(动态拼,登录锁 `auth.py:391` 同款);不符 → **400「当前密码不正确」** + `INCR sms:pwfail:{user_id}` 并**每次补 `EXPIRE sms_bind_password_lock_seconds`**(滑动窗口=锁时长,对齐 `local_auth.record_failure` 用同一 `auth_lock_seconds` 做窗口与锁的口径);计数 ≥5 → **同一原子操作里写锁 EX `sms_bind_password_lock_seconds` 并 DEL 计数**(锁到期后从零开始,不会一次锁死终身循环)+ **审计 `phone_bind_locked`**(锁触发瞬间留痕,对齐登录锁 W1 补审计先例),429 同动态文案;验过 → 清计数与锁残留。
-4. 单事务:`UPDATE users SET phone=:phone WHERE id=:me`;`IntegrityError` → 409「该手机号已绑定其他账号」(并发窗口由唯一约束兜底)。写库成功后 DEL 码键(消费;重放窗口内二次提交同值幂等,无危害)。
-5. 审计 `phone_bound`(details: old_masked/new_masked);DEL 计数键;返回 `{phone}`。
-6. 换绑即覆盖旧值,无额外流程(D16);不吊销 PAT、不动 session(手机号与凭证无关)。
+1. 登录态 + `require_session_auth` + 503 守卫(同上);规范化;取 Redis 码 hash,缺失 → 400「验证码已过期,请重新获取」;**校验 hash 里 user_id == 当前用户,不一致 → 400「验证码已过期,请重新获取」**(发码与提交之间换账号登录的边角,与 reset 侧口径一致)。
+2. `hmac.compare_digest` 比对;不符 → **原子计数 Lua**(单脚本完成 EXISTS 守卫+HINCRBY+条件 EXPIRE,键过期竞态按 missing 处理不重建,与 reset 侧原子消费 Lua 同一模式——pipeline 只是批量发送不保证原子,勿用);≥5 → DEL 码键,429「错误次数过多,请重新获取」;否则 400「验证码错误」。
+3. 单事务:`UPDATE users SET phone=:phone WHERE id=:me`;`IntegrityError` → 409「该手机号已绑定其他账号」(并发窗口由唯一约束兜底)。写库成功后 DEL 码键(消费;重放窗口内二次提交同值幂等,无危害)。
+4. 审计 `phone_bound`(details: old_masked/new_masked);返回 `{phone}`。
+5. 换绑即覆盖旧值,无额外流程(D16);不吊销 PAT、不动 session(手机号与凭证无关)。
 
 ### 5.4 忘记密码(reset 场景)
 
@@ -198,7 +197,7 @@ phone: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 中国�
 1. **503 守卫**;规范化;**原子消费式验码**:**Python 侧计算提交码的 HMAC digest → digest 作为 ARGV 传入 Lua,Lua 内做定长字符串比较 + DEL/HINCRBY,读-比-删一原子**:「读 stored hash → **key 不存在(missing/过期)直接返回 expired,不做 HINCRBY、不重建键(§5.5 口径,email 分支 `_ATTEMPT_INCR_LUA` 的 EXISTS 守卫同款)** → 等长比较 → 命中即 DEL 码键并返回 stored user_id / 未命中 HINCRBY attempts(≥5 连码键一起 DEL)并返回失败原因」。验码通过即消费,并发双提交只有一次能走到改密,**杜绝两个随机密码先后覆盖、用户拿到的展示密码与生效密码不一致**。(Lua 内等值比较非常数时间,此场景可接受:digest 由服务端密钥计算,攻击者无法借比较耗时反推;先例:email 分支的 Python 比对+独立 Lua `_ATTEMPT_INCR_LUA` 两段式,本设计在其上加 DEL 原子化。)
 2. 再查归属用户:`phone → active user` 未命中,或**发码时归属(码 hash 里的 user_id)≠ 当前归属**(15 分钟窗口内换绑/二次放号的镜像场景)→ 400「验证码已过期,请重新获取」(不泄露差异)。
 3. 生成 12 位临时密码(`secrets`,复用 `app/services/passwords.py::generate_temp_password` 的三类保底思路);argon2 哈希。
-4. 单事务:`UPDATE users SET password_hash=:hash, must_change_password=false WHERE id=:uid` + **吊销该用户全部 PAT**(对齐 change-password,`app/routers/auth.py:512-513` 同款)。
+4. 单事务:`UPDATE users SET password_hash=:hash, must_change_password=true WHERE id=:uid`(D2:临时密码首登强制再改,批量开号/管理员重置同口径)+ **吊销该用户全部 PAT**(对齐 change-password,`app/routers/auth.py:512-513` 同款)。
 5. 审计 `password_reset_via_phone`(actor=该用户,request_ip 走审计列,details: phone_masked;**绝不落密码材料**);**commit 后对每个被吊销 PAT 逐令牌写既有 `token_revoked`**(details reason="phone_reset",对齐 change-password 的逐令牌审计 `auth.py:522-535`——否则审计页无法追溯「哪些 PAT 因手机重置而失效」;复用既有事件,labels 不加项)。
 6. 返回 `{username, email, name, new_password}`——**一次性返回,不存明文、不进日志**;响应头加 `Cache-Control: no-store`。
 
@@ -211,9 +210,8 @@ phone: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 中国�
 | `sms:day:{scene}:{phone}:{yyyymmdd}` | int EX 至 UTC+8 当日 24:00 | 每号每日 ≤10 |
 | `sms:u:{user_id}:{epoch_hour}` | int EX 3600 | bind 场景每用户每小时 ≤10 |
 | `sms:ip:reset:{ip}:{epoch_hour}` | int EX 3600 | reset 场景每 IP 每小时 ≤20(可配置,内网同出口 IP 注意余量) |
-| `sms:pwfail:{user_id}` / `sms:pwlock:{user_id}` | int EX `sms_bind_password_lock_seconds`(每次 INCR 续 EXPIRE,滑动窗=锁时长)/ 锁 EX 同配置 | bind 密码错 5 次锁 15 分钟;**写锁同操作 DEL 计数**,锁到期从零开始 |
 
-- 尝试计数沿用 email 分支定稿口径(先例在 `feat/email-account-reset` 分支,未合入):Lua/管道原子 HINCRBY,仅 TTL<0 时补 EXPIRE(不续期,防止有效期漂移);key 过期竞态按 missing 处理不重建。
+- 尝试计数沿用 email 分支定稿口径(先例在 `feat/email-account-reset` 分支,未合入):**单 Lua 脚本**原子完成(EXISTS 守卫+HINCRBY+仅 TTL<0 补 EXPIRE 不续期,防有效期漂移);key 过期竞态按 missing 处理不重建。
 - 日界用固定偏移 `timezone(timedelta(hours=8))`,不用 ZoneInfo(slim 镜像无 tzdata,已知坑)。
 
 ### 5.6 短信发送基础设施(`app/services/aliyun_sms.py`)
@@ -227,18 +225,17 @@ phone: Mapped[str | None] = mapped_column(String(20), nullable=True)  # 中国�
   - 结构化日志:phone_masked/Code/BizId/TemplateCode;**AK/SK/验证码明文永不落日志**。
 - 排障(不入服务):管理员按技能用 `QuerySendDetails`(SendDate=yyyyMMdd,BizId 去留 `^0` 均可)手工查送达;本批不做常驻回执。
 
-### 5.7 审计事件(新增 6 个)
+### 5.7 审计事件(新增 5 个)
 
 | event_type | actor | details 要点 |
 | --- | --- | --- |
 | `phone_code_sent` | bind=当前用户 / reset=归属用户 | scene、phone_masked、biz_id、template_code、user_id(冗余,reset 侧) |
 | `sms_send_failed` | 同上 | scene、phone_masked、err_code、err_message(阿里云原文;**transport 类无阿里云原文,err_code 用哨兵值 `transport_timeout`/`transport_unparseable`,err_message 落本地异常摘要**) |
 | `phone_bound` | 当前用户 | old_masked、new_masked(首次绑定 old 为 null) |
-| `phone_bind_locked` | 当前用户 | phone_masked(bind 密码锁触发瞬间留痕,W1 先例;审计列 request_ip) |
 | `phone_reset_denied` | 无(未认证) | phone_masked(R2b 枚举面留痕;request_ip 走独立审计列) |
 | `password_reset_via_phone` | 归属用户 | phone_masked(无密码材料;request_ip 走独立审计列) |
 
-- **phone_masked 脱敏规格全文统一:前 3 位 + `****` + 后 4 位(如 138****8000)**——router×3 与批量脚本多写入点共用同一工具函数,双端审计页按此显示。
+- **phone_masked 脱敏规格全文统一:前 3 位 + `****` + 后 4 位(如 138****8000)**——两个新 router 共 5 处写入点+批量脚本写入点,共用同一脱敏工具函数,双端审计页按此显示。
 - **公开端点(reset send-code/confirm/denied)的审计写入显式传 `auth_method=None`**:`_default_auth` 对带 request 且非 PAT 的调用一律落 `("session", None)`(`app/services/audit.py:74-79`),公开端点上从未执行 `get_current_user`,不覆盖会把无认证事件误标 session。**现有 `write()` 的 `auth_method=None` 是默认值、无法表达「显式落 NULL」——B2 须给 `write()` 加模块级哨兵(如 `_UNSET` 默认值,`None` 变成可表达的覆盖值),这是本批对 audit.py 的一处小改造**。
 - **同步义务(四处,同在 B2 包落地)**:①`web/src/lib/labels.ts::tlabel` 映射;②`web/src/pages/AdminAuditPage.tsx` 的 `EVENT_TYPES` 过滤下拉数组**及其计数基线注释**(Select 未开 tags 模式,漏了就选不了新事件);③`AdminAuditPage.tsx` 的 `DETAIL_KEY_LABEL`(本批新 details 键 scene/phone_masked/biz_id/template_code/err_code/err_message/old_masked/new_masked/source,漏了按键名裸显英文,`labels.ts:89-91` 注释明示此义务);④App `audit_labels.dart` 映射+计数注释。四处计数一律按当时代码实数,勿沿用文档里的过时数字(2026-10-31 整体过期坑)。
 
@@ -262,8 +259,6 @@ sms_daily_per_phone: int = 10
 sms_bind_user_hourly: int = 10
 sms_reset_ip_hourly: int = 20
 sms_code_max_attempts: int = 5
-sms_bind_password_max_fails: int = 5
-sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对齐 auth_lock_seconds,env 可调)
 ```
 
 - `.env.example` / `.env.production.example` 补注释段(必填项、force-recreate 提示);未启用时四端点 503(D17)。
@@ -277,9 +272,9 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 ### 6.2 忘记密码页(新 `web/src/pages/ForgotPasswordPage.tsx`)
 
 - 单页三态(antd Form,卡片布局与 LoginPage 同款):
-  1. **输手机号**:`Input`(前置说明「请输入绑定的手机号」)+「获取验证码」按钮(提交 send-code;成功后进入态 2 并**以响应 `retry_after` 为初值启动倒计时**,默认 120s;按钮倒计时内 disabled 显示「重新获取(119s)」;502/429 透出 detail 文案,**响应带 `retry_after` 时以之为初值启动倒计时,不带(码作废/密码锁类 429)则不启动**(冷却/配额类拒绝的冷却键在后端存活或由配额管,立即可点只会再吃同码);400「无法发送验证码」用 `message.error` 原样透出,不解释原因(遵需求文案)。
+  1. **输手机号**:`Input`(前置说明「请输入绑定的手机号」)+「获取验证码」按钮(提交 send-code;成功后进入态 2 并**以响应 `retry_after` 为初值启动倒计时**,默认 120s;按钮倒计时内 disabled 显示「重新获取(119s)」;502/429 透出 detail 文案,**send-code 的 429 一律带 `retry_after`,以之为初值启动倒计时**(冷却/配额类拒绝的冷却键在后端存活或由配额管,立即可点只会再吃同码);400「无法发送验证码」用 `message.error` 原样透出,不解释原因(遵需求文案)。
   2. **输验证码**:`Input`(6 位,`maxLength=6`)+「重置密码」提交 confirm;附「换一个手机号」链接回态 1。
-  3. **结果态**:`Result(status="success")` 展示 **账号 + 新密码**(`Typography.Text copyable`,一键复制);账号显示优先级 username → email → name,`username`/`email` 皆空(仅 name)时附提示「若显示名重复导致无法登录,请联系管理员」;提示「请妥善保管,建议登录后在设置中修改为自己易记的密码」+「去登录」按钮回 /login。
+  3. **结果态**:`Result(status="success")` 展示 **账号 + 新密码**(`Typography.Text copyable`,一键复制);账号显示优先级 username → email → name,`username`/`email` 皆空(仅 name)时附提示「若显示名重复导致无法登录,请联系管理员」(§5.2 钉死正本);提示「请使用该密码登录,**首次登录后系统会引导你设置新密码**(D2)」+「去登录」按钮回 /login。
 - 失败/过期文案统一透出后端 detail;倒计时用 `useState+useEffect setInterval` 每秒递减(GrantCountdown 同款,cleanup 清除)。
 
 ### 6.3 路由与会话放行
@@ -292,9 +287,8 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 
 - 新区块「账号与安全」(BlockTitle + 卡片,置于「偏好」之上):展示「手机号」当前值(完整号,D13;未绑定显示「未绑定」+ 灰色 Tag)+ 按钮「绑定手机」/「更换手机」。
 - 点击开 `Modal`(antd Form):
-  - 新手机号 Input(必填,前端 D5 正则预校验);
-  - 验证码 Input(`maxLength=6`,防粘贴长串白烧 attempts)+ 行内「获取验证码」按钮(以响应 `retry_after` 为初值启动倒计时,200/502/部分 429 带该字段;409 占用/429 冷却文案透出,409 后按钮立即可再点——冷却已回滚;502/429 透出 detail,**带 `retry_after` 则启动倒计时,码作废/密码锁类 429 无此字段则不启动**;
-  - 当前密码 `Input.Password`(必填);**`me.password_set` 为 false 时整个入口禁用**,按钮置灰+提示「请先联系管理员设置密码后再绑定手机号」(D1,与后端 403 对应);
+  - 新手机号 Input(必填;前端**先做 D5 同款归一化再校验**(+86/连字符/点号/空格不拦),与后端口径一致);
+  - 验证码 Input(`maxLength=6`,防粘贴长串白烧 attempts)+ 行内「获取验证码」按钮(以响应 `retry_after` 为初值启动倒计时,200/502 与 send-code 的 429 均带该字段;409 占用/429 冷却文案透出,409 后按钮立即可再点——冷却已回滚;502/429 透出 detail 并以 `retry_after` 启动倒计时(send-code 场景 429 一律带该字段);
   - 提交 bind → 成功 `message.success` + 关 Modal + `queryClient.invalidateQueries(['me'])`。
 - hooks(`src/api/hooks.ts` 新增四个 mutation,模式照 useChangePassword):`useSendPhoneCode` / `useBindPhone` / `useResetSendCode` / `useResetConfirm`(send-code 按 **200** 判定,勿引入 202——App 侧 auth_api 的 `statusCode != 200` 判错惯例会误伤);`src/api/types.ts` 的 `Me` 加 `phone?: string | null`(可选+`??` 回落,沿用该文件「旧后端无此字段」的既有惯例,SPA 先于 API 上线不炸)。
 
@@ -307,9 +301,9 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 ### 7.2 忘记密码页(新 `lib/features/auth/forgot_password_page.dart`)
 
 - 三态页面(照 login_page 品牌壳+表单区+固定错误区范式):
-  1. 手机号 `AppTextField(keyboardType: TextInputType.phone)` +「获取验证码」按钮(倒计时 `GrantCountdown` 同款 Timer.periodic 模式,以响应 `retry_after` 为初值(200 必带;502/部分 429 带,**码作废/密码锁类 429 无则不启动**);「无法发送验证码」落固定错误区);
+  1. 手机号 `AppTextField(keyboardType: TextInputType.phone)` +「获取验证码」按钮(倒计时 `GrantCountdown` 同款 Timer.periodic 模式,以响应 `retry_after` 为初值(200 必带;502 与 send-code 的 429 均带);「无法发送验证码」落固定错误区);
   2. 验证码 `AppTextField(maxLength: 6)` +「重置密码」+「换个手机号」;
-  3. 结果视图:账号(大字,显示优先级 username → email → name,仅 name 时附「若显示名重复导致无法登录,请联系管理员」小字)+ 新密码(等宽字体 + 复制图标,`Clipboard.setData`+就地 toast)+「去登录」(`pushNamedAndRemoveUntil('/')`)。
+  3. 结果视图:账号(大字,显示优先级 username → email → name,仅 name 时附「若显示名重复导致无法登录,请联系管理员」小字(§5.2 正本))+ 新密码(等宽字体 + 复制图标,`Clipboard.setData`+就地 toast)+ 小字提示「请使用该密码登录,首次登录后系统会引导你设置新密码」(D2)+「去登录」(`pushNamedAndRemoveUntil('/')`)。
 - 错误处理:`ApiException` 透传 detail(errorMessage),其余中文 fallback;`/forgot-password` 加入 `app.dart` 路由表。
 
 ### 7.3 「我的 → 账号与安全 → 手机号」
@@ -319,10 +313,10 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 - `me_page.dart`「账号与安全」分组(现有「修改密码」行上方)加 `AppRow(手机号, subtitle: me.phone ?? '未绑定')` → `pushNamed('/account-phone')`。
 - 新页 `lib/features/me/account_phone_page.dart`(预估 ~300 行,超 500 拆 sheets 子文件,照 account_email_page 先例):
   - 顶部当前绑定展示(完整号;未绑定提示文案);
-  - 换绑/绑定表单:手机号 + 验证码(`AppTextField(maxLength: 6)`,「获取验证码」倒计时按钮,倒计时初值取响应 `retry_after`——**App 侧非 200 响应抛 `ApiException`,retry_after 经既有 `ApiException.raw` 字段读取 `raw['retry_after']`,勿另造返回通道**)+ 当前密码 `PasswordField`(必填);**`me.password_set` 为 false 时表单禁用**+同款提示(D1);
+  - 换绑/绑定表单:手机号(App 端不预校验,依赖后端 400 文案;两端均以服务端归一化为准)+ 验证码(`AppTextField(maxLength: 6)`,「获取验证码」倒计时按钮,倒计时初值取响应 `retry_after`——**App 侧非 200 响应抛 `ApiException`,retry_after 经既有 `ApiException.raw` 字段读取 `raw['retry_after']`,勿另造返回通道**)
   - 提交成功:toast + 刷新 me——`Session` 门面新增 `refreshMe()` 方法(把 `changePassword()` 内联的 `me = await api!.auth.me()` + 通知,抽成公共方法,`lib/core/session.dart` 现无此方法,属本批新增;**须保留失败→日志留痕+`_meStale=true` 标脏、下次 restore 强制重拉的兜底分支**(`session.dart:210-226` 现行为),changePassword 改为委托调用)+ pop;
-  - 409/429/502 文案透出;`session.me` 变更后「我的」页 subtitle 同步(invalidate 等价:页面可见时重取 me)。
-- `lib/core/api/auth_api.dart` 加四端点(与后端契约 §5.2 对齐,文件头注释同步);`lib/models/me.dart` 加 `phone`,**并补解析 `password_set`**(可空 bool,`?? false` 回落)——后端 `/auth/me` 已回传该字段(`auth.py:327`)但 App 模型从未解析,§7.3 的 D1 前端闸门(`me.password_set` 为 false 禁绑)依赖它。
+  - 409/429/502 文案透出;绑定成功后经 `refreshMe()` 的 notifyListeners 通知监听页重建(「我的」页 subtitle 随之同步),无需各页面自行重取。
+- `lib/core/api/auth_api.dart` 加四端点(与后端契约 §5.2 对齐,文件头注释同步);`lib/models/me.dart` 加 `phone`(password_set 本批无消费方,不额外补解析)。
 
 ### 7.4 测试与发版
 
@@ -338,8 +332,7 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 
 ### 8.2 接管链分析
 
-- **会话劫持者**(借用手机/窃取 cookie):绑自己手机被 D1 当前密码关隘拦住;密码错 5 次锁 15 分钟(滑动窗计数+锁到期归零,不会一次锁死终身循环)。
-- **未设密码账号的会话持有者**:D1 直接禁绑(403),无免验旁路——该类账号自助绑定通道整体关闭,只能管理员经脚本绑号;§5.4 忘记密码对其生效的前提是管理员已主动绑号,属受控运营动作。
+- **会话劫持者**(借用手机/窃取 cookie):可绑定自己的手机,再走忘记密码重置——该接管链已向用户如实呈现,**用户 2026-11-20 拍板接受(绑定只凭验证码,D1)**。残留缓解=会话安全面(cookie SameSite=lax+7 天 TTL,与全站一致)、`phone_bound` 审计留 old/new 脱敏可回溯、占用 409 与唯一约束、改密/重置吊销 PAT;号码机主可感知(绑定与重置短信都发到号码上)。
 - **PAT 通道**:绑定两端点 `require_session_auth` 一律 403(D18),泄漏的 MCP 令牌不能改绑定关系。
 - **手机持有者**(拿到别人手机+知道其手机号):reset send-code 会真发短信到机主手机(机主可察觉);confirm 需要码且验码即原子消费;审计全程留痕。
 - **并发竞态**:两账号同时绑同一号 → 唯一约束兜底,后写者 IntegrityError→409。
@@ -362,7 +355,7 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 - **reset 冷却/短信骚扰面**:知道他人手机号者可对其触发 reset send-code,令该号 120s 内冷却(本人合法重置被 429)+ 向其手机发真实短信(≤10 条/日,可感知);危害有界、当日自愈,审计有痕;与二次放号同列为已接受的低危面。
 - **号码占用死锁面**:占用预检不过滤 `is_active`——离职/禁用账号占用的号码对自助绑定永远 409,而本批无解绑(§1.3)、管理端编辑属遗留(§13),该号无释放通道,须管理员走 DB/临时脚本处理;列为已接受的运营面,遗留项 §13 收录。
 - **bind 侧骚扰/资损面**:任一已登录用户可对任意「格式合法且未占用」的手机号触发 bind send-code 发真实短信(≤10 条/日/号,消耗的是发起者自己的 10/h 与目标号日配额);属已接受面,防线=D6 三层配额+短信计费可忽略的内部用量。
-- `must_change_password=false`(D2):系统生成的随机密码可能被用户长期使用;结果页已引导修改,不强制。
+- **会话劫持→绑定→重置接管链**(D1 拍板接受,§8.2):缓解=审计回溯+会话安全面+号码机主短信可感知。
 
 ## 9. 部署与运维
 
@@ -390,7 +383,7 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 
 - 位置:`material-storage/api/scripts/bind_user_phones.py`,容器内跑:`docker exec ms-api python -m scripts.bind_user_phones [--apply] [--csv /path/to/pairs.csv] [--yes]`。
 - 默认扫描**只认 username**(email 形态如 `13800138000@139.com` 不自动绑:邮箱本地部分归一化会引入跨账号折叠歧义,且该形态存量极少,确有需要走 `--csv` 人工指定——口径已定,如有异议可在实施前提出):username **先做 D5 同款归一化**(strip 空格/连字符/点号、去 `+86`/`86` 前缀)再匹配 `^1[3-9]\d{9}$`(归一化后仍是 11 位合法号才命中,写入归一化值)→ 候选 phone;已有 phone 的跳过;**归一化折叠出的同号多候选**(§4.3:username pattern 允许连字符/点号,唯一约束不防归一化折叠)与候选号已被他人占用、`--csv` 双给,一律进冲突名单跳过;**`--csv` 二跑对「占用冲突」同样拒绝并输出名单(绝不覆盖唯一约束,须先人工解除原绑定)**。
-- `--csv`:额外人工指定对(格式 `identifier,phone`,identifier 支持 username/email/name/UUID,同 set_password 匹配口径;**phone 同样走 D5 归一化后写入**),用于冲突裁决与补充。**对未设密码用户经 csv 绑号时输出提示**:该用户绑定后即可走「忘记密码」自助获得登录密码(这是该类 dormant 账号回到本地登录的正路,也说明 D1 的自助禁绑不影响运营通道)。
+- `--csv`:额外人工指定对(格式 `identifier,phone`,identifier 支持 username/email/name/UUID,同 set_password 匹配口径;**phone 同样走 D5 归一化后写入**),用于冲突裁决与补充。(未设密码用户同样可自助绑定,D1 无禁绑分支;此类 dormant 账号绑号后即可走「忘记密码」自助获得登录密码,是回到本地登录的正路。)
 - dry-run 默认输出表格(用户/username/phone/动作:bind|skip|conflict);`--apply --yes` 实跑(幂等,可重跑);逐条写审计 `phone_bound`(details actor="cli",source="backfill",old/new masked,照 set_password.py 的独立 session 模式)。
 - 执行序:dev dry-run 核对 → dev apply → prod dry-run 核对 → prod apply;冲突名单人工裁决后 `--csv` 二跑。
 
@@ -408,15 +401,15 @@ sms_bind_password_lock_seconds: int = 900          # 密码锁时长(默认对�
 **本地纯单元(无 DB,照 test_local_auth.py 范式):**
 
 - `tests/test_aliyun_sms.py`:签名串构造纯函数(canonical query/头排序/TemplateParam JSON 串);SmsSendError/SmsTransportError 分类。(不发真实请求。)
-- `tests/test_phone_verification.py`(服务函数直调,FakeRedis 注入):码字符集与长度 + **1000 次采样无一纯数字(首位置定字母保底)**;HMAC 写读循环;attempts 5 次作废;冷却/日配额/小时配额边界;TTL 不续期口径;**密码锁到期后计数从零恢复**。
+- `tests/test_phone_verification.py`(服务函数直调,FakeRedis 注入):码字符集与长度 + **1000 次采样无一纯数字(首位置定字母保底)**;HMAC 写读循环;attempts 5 次作废;冷却/日配额/小时配额边界;TTL 不续期口径。
 - B5 脚本测试(`tests/test_bind_user_phones.py`,SQLite+桩,照 `test_backfill_script.py` 先例(monkeypatch 隔离+固定钟+内存 redis 替身)):D5 归一化折叠冲突名单/已有 phone 跳过/**候选号已被他人占用进冲突名单跳过**/`--csv` 双给冲突/**`--csv` 二跑对占用冲突拒绝(不覆盖唯一约束)**/幂等重跑零变更/审计 details(source=backfill,phone_masked 前3后4规格)/dry-run 不写库。
 - **FakeRedis 前置基建**:现有手写 FakeRedis/FakePipeline 只覆盖 get/set(ex)/delete/incr/expire/pipeline;本设计还需要 **SET NX EX(冷却)、HSET/HGET/HINCRBY(码 hash)、PTTL、条件 EXPIRE、eval**——B2 须先补齐命令面。「实现 Lua 解释器」不现实,采用**注入路径**:原子消费/计数 Lua 收敛为可注册的 Python 回调,FakeRedis.eval 按 key/argv 分派到回调(真 Redis 走真 Lua),两侧同一语义。
 
 **容器内路由级(照 test_local_auth_integration.py 范式,本地无 DB 自动 skip):**
 
 - FakeSms:测试 app 里以假实现替换 `app.state.sms`,记录调用参数(模板/手机号/码长度);**真实凭证零出现、零真实发送**。
-- `tests/test_phone_bind_api.py`:send-code 快乐路/格式 400/占用 409(409 后冷却键已回滚,同号再试不会翻成 429)/冷却 429/**配额 429 后冷却键已回滚(D9 通用原则)**/日配额 429(仅在占用预检通过后才计数)/未配置 503/PAT 403;bind 验码错/过期/作废 429/**发码后换账号登录再 bind → 400 过期(user_id 复核)**/密码错与锁(含锁到期恢复)/**未设密码用户 403**/并发 IntegrityError 409;me 回传 phone;**D9 失败统一语义自动化**:FakeSms 抛 `SmsSendError` 或 `SmsTransportError`(含「HTTP 响应无可解析 Code」)→ 断言**冷却键均保留**+配额均回滚。
-- `tests/test_phone_reset_api.py`:未知号 400「无法发送验证码」+冷却键已回滚+审计 denied(auth_method 显式 None)+ **denied 消耗 IP 配额(第 21 次/h 连合法号也 429)**/同号日配额 429(§5.4 步骤 5,冷却键已回滚);**同号重复点击在冷却层被拦且不烧 IP 配额(换号枚举才烧)**;未配置 503;D9 失败统一语义同 bind 侧;confirm 快乐路返回 {username,email,name,new_password} 且**新密码可登录**、`must_change_password=false`、PAT 全吊销、审计写入;错码 5 次作废;**并发双 confirm 只有一次生效(原子消费验码)**;**发码后换绑再 confirm → 400 过期(归属复核)**;confirm 后码键已删。
+- `tests/test_phone_bind_api.py`:send-code 快乐路/格式 400/占用 409(409 后冷却键已回滚,同号再试不会翻成 429)/冷却 429/**配额 429 后冷却键已回滚(D9 通用原则)**/日配额 429(仅在占用预检通过后才计数)/未配置 503/PAT 403;bind 验码错/过期/作废 429/**发码后换账号登录再 bind → 400 过期(user_id 复核)**/**未设密码用户可正常绑定(无密码分支)**/并发 IntegrityError 409;me 回传 phone;**审计断言**:`phone_bound` 落库(old/new 脱敏前3后4)、`sms_send_failed` 落库(transport 类 err_code 用哨兵值);**D9 失败统一语义自动化**:FakeSms 抛 `SmsSendError` 或 `SmsTransportError`(含「HTTP 响应无可解析 Code」)→ 断言**冷却键均保留**+配额均回滚;`isv.BUSINESS_LIMIT_CONTROL` 的 502 → 断言**响应不带 retry_after**。
+- `tests/test_phone_reset_api.py`:未知号 400「无法发送验证码」+冷却键已回滚+审计 denied(auth_method 显式 None)+ **denied 消耗 IP 配额(第 21 次/h 连合法号也 429)**/同号日配额 429(§5.4 步骤 5,冷却键已回滚);**同号重复点击在冷却层被拦且不烧 IP 配额(换号枚举才烧)**;未配置 503;D9 失败统一语义同 bind 侧;confirm 快乐路返回 {username,email,name,new_password} 且**新密码可登录、登录响应 `must_change_password=true`(首登强制再改,D2)**、PAT 全吊销、审计写入;错码 5 次作废;**并发双 confirm 只有一次生效(原子消费验码)**;**发码后换绑再 confirm → 400 过期(归属复核)**;confirm 后码键已删。
 - 容器集成与真机链路在 dev 部署后验证(本地 docker 禁跑,2026-10-20 立)。
 
 ### 10.2 Web 手工清单
@@ -439,9 +432,9 @@ widget 测试见 §7.4;真机:收码(移动/联通/电信各一)→ 绑定 → �
 | 包 | 内容 | 备注 |
 | --- | --- | --- |
 | B1 后端基建 | settings 配置组+`aliyun_sms.py`(签名移植)+迁移 0024+tables/models+`/auth/me` phone+**test_db_schema 补 `uq_users_phone` 防假绿断言**+`main.py` lifespan 接线(`app.state.sms`,未配置为 None)+服务单测 `test_aliyun_sms.py` | 独立可合,端点未上无行为变化 |
-| B2 后端端点 | `phone_verification.py`+`account_security.py`+`password_reset.py`+审计 6 事件(§5.7)+**audit.write() auth_method 哨兵改造**+**labels 四处与计数基线**(labels.ts+AdminAuditPage EVENT_TYPES+DETAIL_KEY_LABEL+audit_labels.dart,事件同包落地,基线只改一次)+**FakeRedis eval 基建+`test_phone_verification.py`**(被测模块同包,依赖 B2 的 FakeRedis 扩建)+**两套容器级 API 测试**(test_phone_bind_api/test_phone_reset_api,覆盖四端点;本地单测分布:B1=aliyun_sms、本包=phone_verification、B5=脚本) | 依赖 B1 |
+| B2 后端端点 | `phone_verification.py`+`account_security.py`+`password_reset.py`+审计 5 事件(§5.7)+**audit.write() auth_method 哨兵改造**+**labels 四处与计数基线**(labels.ts+AdminAuditPage EVENT_TYPES+DETAIL_KEY_LABEL+audit_labels.dart,事件同包落地,基线只改一次)+**FakeRedis eval 基建+`test_phone_verification.py`**(被测模块同包,依赖 B2 的 FakeRedis 扩建)+**main.py 挂载两个新 router**(§5.1 的 main.py 职责另一半)+**同步 tokens.py 模块 docstring 的 password_hash 写点清单(5→6,§12 钉子 13)**+**两套容器级 API 测试**(test_phone_bind_api/test_phone_reset_api,覆盖四端点;本地单测分布:B1=aliyun_sms、本包=phone_verification、B5=脚本) | 依赖 B1 |
 | B3 Web | types/hooks+设置「账号与安全」+忘记密码页+登录入口+路由与 401 豁免 | 依赖 B2 契约 |
-| B4 App | auth_api/me 模型+account_phone_page+forgot_password_page+登录入口+widget 测试 | 依赖 B2 契约(可与 B3 并行) |
+| B4 App | auth_api/me 模型+account_phone_page+forgot_password_page+登录入口+**me_page「账号与安全」加手机号入口行**+**session.refreshMe 改造(含 _meStale 兜底迁移,changePassword 改委托)**+widget 测试 | 依赖 B2 契约(可与 B3 并行) |
 | B5 脚本与运维 | `bind_user_phones.py`+其测试+.env example+ops-manual 节+changelog | 依赖 B1+B2(脚本写 `phone_bound` 审计,事件与标签须先就位,合并不早于 B2) |
 
 - qdev 派发约束沿用仓库惯例:worktree 基于 liuqi、子智能体不 commit、单文件 ≤500 行、只 format 自己的文件、本地 docker 禁跑。
@@ -460,7 +453,9 @@ widget 测试见 §7.4;真机:收码(移动/联通/电信各一)→ 绑定 → �
 10. `sms:ip:reset` 按内网同出口 IP 取 20/h;若 prod 出现误伤(真实办公并发),仅调 env 不动代码。
 11. Web `client.ts`/`AppShell` 两处豁免名单都要加 /forgot-password,漏一处=未登录访问被 401 跳转打死。
 12. 迁移链并行冲突:合入前 `alembic heads` 确认单头(0024 的 down_revision 以合入时实际 head 为准)。
-13. **上线前核实 hh2 nginx 对 /api 的 X-Forwarded-For 写法**:uvicorn 以 `--proxy-headers --forwarded-allow-ips '*'` 全信任运行(`Dockerfile:33`),若 nginx 是 `$proxy_add_x_forwarded_for` 追加而非覆盖,客户端可伪造 XFF 旋转 `sms:ip:reset` 与 `auth:fail:ip` 的 IP 桶——须确认覆盖写法(或改取 rightmost-untrusted);在此之前 IP 配额按「尽力而为」理解,真实防线=同号冷却+日配额+审计。
+13. **tokens.py 写点清单同步**:`app/services/tokens.py` 模块 docstring 钉死「grep password_hash\s*= 应命中 5 个生产写点」,confirm 的重置写入成为第 6 个命中点——B2 须同步更该注释,否则自检口径失真。
+14. **上线前核实 hh2 nginx 对 /api 的 X-Forwarded-For 写法**:uvicorn 以 `--proxy-headers --forwarded-allow-ips '*'` 全信任运行(`Dockerfile:33`),若 nginx 是 `$proxy_add_x_forwarded_for` 追加而非覆盖,客户端可伪造 XFF 旋转 `sms:ip:reset` 与 `auth:fail:ip` 的 IP 桶——须确认覆盖写法(或改取 rightmost-untrusted);在此之前 IP 配额按「尽力而为」理解,真实防线=同号冷却+日配额+审计。
+:uvicorn 以 `--proxy-headers --forwarded-allow-ips '*'` 全信任运行(`Dockerfile:33`),若 nginx 是 `$proxy_add_x_forwarded_for` 追加而非覆盖,客户端可伪造 XFF 旋转 `sms:ip:reset` 与 `auth:fail:ip` 的 IP 桶——须确认覆盖写法(或改取 rightmost-untrusted);在此之前 IP 配额按「尽力而为」理解,真实防线=同号冷却+日配额+审计。
 
 ## 13. 遗留项(不在本批)
 
