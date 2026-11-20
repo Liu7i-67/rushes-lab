@@ -289,6 +289,9 @@ async def me(
         "union_id": user.feishu_union_id,
         "name": user.name,
         "email": user.email,
+        # 手机绑定/短信找回密码(方案 §5.2/D13):完整手机号仅本人可见,NULL = 未绑定
+        # (上方 db.get(User) 已整行加载,无需补查询列)
+        "phone": user.phone,
         "organization_id": str(user.organization_id) if user.organization_id else None,
         "is_active": user.is_active,
         "is_system_admin": is_system_admin,

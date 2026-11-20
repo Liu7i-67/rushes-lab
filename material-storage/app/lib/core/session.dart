@@ -208,6 +208,7 @@ class Session extends ChangeNotifier {
   }
 
   /// 改密成功后刷新 Me(must_change_password 置否,cookie 会话不失效)。
+  /// 刷新走公共 [refreshMe](phone-bind 批抽出,绑定手机号同口径);
   /// 刷新失败不吞(B9 遗留清偿):日志留痕 + 会话标脏,下次 [restore] 强制
   /// 重拉兜底;改密本身已生效,此处失败不向调用方报错(页面语义=改密成功)。
   Future<void> changePassword(String oldPassword, String newPassword) async {
@@ -215,11 +216,21 @@ class Session extends ChangeNotifier {
       oldPassword: oldPassword,
       newPassword: newPassword,
     );
+    await refreshMe(reason: '改密');
+  }
+
+  /// 操作成功后刷新 Me 并 notifyListeners(改密/绑定手机号等公共方法):
+  /// 成功回填缓存并解除标脏;失败不向调用方报错(操作本身已生效)——日志
+  /// 留痕 + `_meStale=true` 标脏,下次 [restore] 强制重拉兜底(B9 遗留清偿
+  /// 口径,changePassword 内联段抽出,[reason] 供日志区分操作来源)。
+  /// notifyListeners 使监听页(如「我的」页 subtitle)自动重建,无需各页
+  /// 自行重取。
+  Future<void> refreshMe({String reason = '操作'}) async {
     try {
       me = await api!.auth.me();
       _meStale = false;
     } catch (e) {
-      AppLog.error('session', '改密成功但刷新 Me 失败(缓存标脏,下次访问兜底)', e);
+      AppLog.error('session', '$reason成功但刷新 Me 失败(缓存标脏,下次访问兜底)', e);
       _meStale = true;
     }
     notifyListeners();

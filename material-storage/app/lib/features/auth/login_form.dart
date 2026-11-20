@@ -84,6 +84,25 @@ class LoginForm extends StatelessWidget {
               if (_canSubmit) onSubmit();
             },
           ),
+          // 忘记密码入口(phone-bind 批,§7.1):密码框与登录按钮之间右对齐,
+          // 跳 /forgot-password 三态页(短信验证码找回,公开路由不鉴权)。
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton(
+              key: const Key('forgot_password_entry'),
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 0),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              onPressed: () =>
+                  Navigator.of(context).pushNamed('/forgot-password'),
+              child: Text(
+                '忘记密码?',
+                style: TextStyle(fontSize: Tk.fzMd, color: tk.ink2),
+              ),
+            ),
+          ),
           // 探活状态(原型位于字段与 CTA 之间):探测中金点脉冲 / 不可达暖色卡。
           if (phase == SessionPhase.probing) ...[
             const SizedBox(height: 14),

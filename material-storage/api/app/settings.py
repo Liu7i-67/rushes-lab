@@ -243,6 +243,39 @@ class Settings(BaseSettings):
             "(配 0/负值会静默砖死创建与复活、恒 409 且无启动报错,见并发方案 §3.2)"
         )
 
+    # ─── 阿里云短信(手机绑定/短信找回密码,方案 §5.8)────────────────────────
+    # 方案:rushes-spec/material-storage/phone-bind-and-sms-password-reset-plan.md
+    # 凭证不进仓库(D11):只进服务器 .env(dev/prod)+ 本地 scripts/env/aliyun-sms.env
+    # (gitignored);AK/SK/验证码明文永不落日志(发送服务 app/services/aliyun_sms.py)
+    aliyun_sms_ak: str | None = Field(None, description="阿里云 AccessKey ID(需 dysms:SendSms)")
+    aliyun_sms_sk: str | None = Field(None, description="阿里云 AccessKey Secret(仅存 .env,不进 git)")
+    aliyun_sms_sign_name: str | None = Field(
+        None, description="已过审短信签名,如「成都讨喜未来文化传媒」")
+    # 模板两码(2026-11-20 已过审走默认值,留 env 口子防换模板;变量 ${code} 约束
+    # 「数字+字母组合或仅字母」→ 验证码必须含字母,不能纯数字,方案钉子 6)
+    aliyun_sms_template_bind: str = Field(
+        "SMS_512538915", description="绑定/换绑验证码模板(已过审)")
+    aliyun_sms_template_reset: str = Field(
+        "SMS_512523885", description="忘记密码验证码模板(已过审)")
+
+    # 验证码/频控参数(默认值可被 .env 覆盖,便于不动代码调余量;D6/D7;方案 §5.5)
+    sms_code_ttl_seconds: int = Field(900, description="验证码有效期;需求 15 分钟")
+    sms_send_cooldown_seconds: int = Field(120, description="同号同场景发送冷却;需求 2 分钟一条")
+    sms_daily_per_phone: int = Field(10, description="同号同场景每日发送上限(UTC+8 当日)")
+    sms_bind_user_hourly: int = Field(10, description="bind 场景每用户每小时发送上限")
+    # 内网全员同一出口 IP,reset 场景 IP 配额取宽松值防误伤办公并发(D6,env 可调)
+    sms_reset_ip_hourly: int = Field(20, description="reset 场景每 IP 每小时发送上限")
+    sms_code_max_attempts: int = Field(5, description="单验证码最大错误尝试次数,超限作废(D7)")
+
+    @property
+    def aliyun_sms_enabled(self) -> bool:
+        """ak + sk + 签名齐备才算启用;模板两码有默认值不参与判定(D17,照 smtp_enabled 开关模式)。
+
+        未启用时 lifespan 不构造短信服务(app.state.sms = None),
+        相关端点统一 503「短信服务未配置」,前端入口常驻不隐藏。
+        """
+        return bool(self.aliyun_sms_ak and self.aliyun_sms_sk and self.aliyun_sms_sign_name)
+
 
 # 单例(import 时 lazy 创建)
 _settings: Settings | None = None

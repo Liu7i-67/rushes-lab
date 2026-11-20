@@ -54,6 +54,10 @@ export interface Me {
   must_change_password: boolean;
   // 百度网盘备份(方案 §5.2):功能开关,控制用户菜单入口显隐
   baidu_backup_enabled: boolean;
+  // 手机号绑定/换绑 + 短信找回密码(2026-11-20 方案 §4):唯一绑定手机号(完整号,
+  // D13;未绑定为 null)。可选 —— 旧后端无此字段,消费侧用 `?? null` 回落
+  // (照 is_project_creator 惯例,SPA 先于 API 上线不炸)。
+  phone?: string | null;
 }
 
 export interface AdminBrief {

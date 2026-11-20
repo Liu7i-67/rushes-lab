@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app import __version__
 from app.middleware.mcp_stats import MCPStatsMiddleware
 from app.routers import (
+    account_security,
     admin,
     approvals,
     assets,
@@ -27,6 +28,7 @@ from app.routers import (
     groups,
     maintenance,
     notifications,
+    password_reset,
     projects,
     request_links,
     risk,
@@ -78,6 +80,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.token_crypto = TokenCryptoService(settings)
     app.state.baidu_client = BaiduNetdiskClient(settings)
 
+    # 阿里云短信通道(手机绑定/短信找回密码,方案 §5.6/D17):AK/SK/签名任一缺失
+    # 时 app.state.sms = None 属正常 —— 相关端点首步做 503「短信服务未配置」守卫
+    # (守卫在 B2 的两个 router);SendSms 无幂等,服务内零自动重试
+    from app.services.aliyun_sms import AliyunSmsService
+    app.state.sms = AliyunSmsService(settings) if settings.aliyun_sms_enabled else None
+
     # MCP gate 启动自检:排除清单的 7 个路由模板必须存在(路由改名会让清单静默
     # 失效)。失败**只 log.error + PAT 一律 403**,绝不让 ms-api 启动失败 ——
     # 否则一次改名会让全站(含网页/App)崩溃循环,与「MCP 出问题不影响真人」相反。
@@ -93,6 +101,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await app.state.arq_pool.aclose()
     await app.state.redis.aclose()
     await app.state.baidu_client.close()
+    # 短信通道未配置时 app.state.sms 为 None(方案 D17),守卫后释放连接池
+    if app.state.sms is not None:
+        await app.state.sms.aclose()
 
 
 class _SpaStaticFiles(StaticFiles):
@@ -151,6 +162,16 @@ def create_app() -> FastAPI:
     #   「不过并发闸的 PAT 通道」。
     gate = [Depends(mcp_gate)]
     app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+    # 账号手机号绑定/换绑两端点(2026-11-20 手机绑定方案 §5.1/D18):登录态 +
+    # require_session_auth(PAT 一律 403),PAT 通道已被守卫封死,无须 mcp_gate
+    app.include_router(
+        account_security.router, prefix="/api/v1/account", tags=["account"],
+    )
+    # 忘记密码(短信找回)公开两端点(方案 §5.1/D18):无鉴权依赖(照 maintenance
+    # 公开声明先例),与 auth router 同挂 /api/v1/auth 前缀
+    app.include_router(
+        password_reset.router, prefix="/api/v1/auth", tags=["auth"],
+    )
     app.include_router(projects.router, prefix="/api/v1/projects", tags=["projects"], dependencies=gate)
     app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"], dependencies=gate)
     app.include_router(assets.router, prefix="/api/v1/assets", tags=["assets"], dependencies=gate)

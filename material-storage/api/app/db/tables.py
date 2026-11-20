@@ -69,6 +69,11 @@ class User(Base, TimestampMixin):
     username: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     email: Mapped[str | None] = mapped_column(String(255))
+    # 手机绑定/短信找回密码(2026-11-20 方案 §4.1):中国大陆手机号(11 位),
+    # NULL = 未绑定;一号一账号的唯一性由类尾 uq_users_phone 承担 —— 列定义
+    # unique=True 不渲染 UNIQUE(0008/0010 前科),且用 unique constraint 而非
+    # unique index(test_db_schema 的 pg_constraint contype='u' 防假绿断言才覆盖)
+    phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # 本地账号密码登录(ADR-0007,P1 #149 启用);password_hash NULL = 未设密码
     password_hash: Mapped[str | None] = mapped_column(String(255))
     must_change_password: Mapped[bool] = mapped_column(
@@ -86,6 +91,9 @@ class User(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL")
     )
+
+    # 一号一账号(迁移 0024 显式 create_unique_constraint 对齐,防模型/DB 漂移)
+    __table_args__ = (UniqueConstraint("phone", name="uq_users_phone"),)
 
 
 class Project(Base, TimestampMixin):

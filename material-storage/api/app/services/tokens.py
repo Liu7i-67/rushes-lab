@@ -53,12 +53,16 @@
   UPDATE ... WHERE revoked_at IS NULL RETURNING id, token_prefix,只返回本次
   真正被吊销的行 —— 审计由调用方在 commit 之后逐条写(无活跃 token 则不写)。
 
-★ 吊销挂钩钉子(D13):``grep -rn "password_hash\\s*=" --include=*.py app scripts``
-应命中 5 个生产写点(4 处赋值 + 1 处构造参数):
-  app/routers/auth.py(change-password)、app/routers/directory.py(reset-password)、
-  scripts/set_password.py、scripts/set_initial_admin.py(以上密码变更)、
-  app/routers/directory.py(disable,is_active 路径)。
-后续新增密码/禁用写点必须同步调用 ``revoke_user_tokens``。
+★ 吊销挂钩钉子(D13):``grep -rnE "password_hash\\s*=" --include=*.py app scripts``
+应命中 6 个生产写点(5 处赋值 + 1 处构造参数):
+  app/routers/auth.py(change-password)、
+  app/routers/directory.py(reset-password,管理员重置)、
+  app/routers/password_reset.py(手机号短信找回重置密码,2026-11-20 方案 §5.4/D8)、
+  app/services/user_provisioning.py(建号构造参数,开号即设初始密码)、
+  scripts/set_password.py、scripts/set_initial_admin.py(运维脚本改密)。
+另注:app/routers/directory.py 的 disable(is_active=false)路径**非本 grep 命中**
+(写的是 ``is_active`` 而非 ``password_hash``),但同属须挂 ``revoke_user_tokens``
+钩子的关联写点。后续新增密码/禁用写点必须同步调用 ``revoke_user_tokens``。
 """
 from __future__ import annotations
 

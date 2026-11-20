@@ -1273,3 +1273,107 @@ ssh hh2-prod 'docker exec poc-nginx nginx -t && docker exec poc-nginx nginx -s r
   (`restart` 不重读 env_file);回滚=改回 `ENV=dev` 再 force-recreate。
   dev 环境继续 `ENV=dev`(测试依赖 X-User-Id 夹具)。
 
+
+
+## 13. 手机号与短信找回(2026-11-20)
+
+> 方案正本:`rushes-spec/material-storage/phone-bind-and-sms-password-reset-plan.md`
+> (决策 D1-D18 / §9 部署运维);短信接入实测依据:全局技能 `aliyun-sms-integration`
+> (2026-11-19/20 三运营商实测闭环,签名报备全通过,排障手册以其为准)。
+> 状态:代码随 `feat-phone-bind-sms-reset` 分支合入;部署后回填实际 SPA 指纹与迁移核对结果。
+
+### 13.1 功能与入口
+
+- 设置页「账号与安全」:手机号展示(完整号,来自 `GET /auth/me` 的 `phone` 字段)+
+  绑定/换绑(短信验证码,绑定模板 SMS_512538915);换绑不验旧手机,短信只发新号。
+- 登录页「忘记密码」:手机号 + 短信验证码(重置模板 SMS_512523885)→ 系统重置随机
+  密码**一次性展示**(不落日志),首登强制再改;重置即吊销该用户全部 PAT(不踢旧 session)。
+- 一号一账号:`users.phone` 唯一约束 `uq_users_phone`(迁移 0024,纯增量列)。
+- 审计 5 事件:`phone_code_sent` / `sms_send_failed` / `phone_bound` /
+  `phone_reset_denied` / `password_reset_via_phone`;审计页详情键手机号一律脱敏
+  (前 3 + `****` + 后 4,如 138****8000)。
+
+### 13.2 配置项(两环境 `.env`,键相同)
+
+| env 键 | 说明 |
+|---|---|
+| `ALIYUN_SMS_AK` / `ALIYUN_SMS_SK` | 阿里云凭证。**只进服务器 `.env`**(本地备份 `scripts/env/aliyun-sms.env`,gitignored),不进仓库/代码/日志 |
+| `ALIYUN_SMS_SIGN_NAME` | 签名「成都讨喜未来文化传媒」 |
+| `ALIYUN_SMS_TEMPLATE_BIND` / `ALIYUN_SMS_TEMPLATE_RESET` | 模板码,默认 SMS_512538915 / SMS_512523885,一般无须配置 |
+| `SMS_*` 频控组 | 默认:码 TTL 900s / 同号冷却 120s / 日 10 条/号 / bind 每用户 10/h / reset 每 IP 20/h / 码错 5 次作废。**内网同出口 IP 误伤时只调 env 不动代码** |
+
+- **开关判定**:`aliyun_sms_enabled` = AK+SK+签名三者齐备;任一缺失时四个端点统一
+  503「短信服务未配置」,前端入口常驻不隐藏(方案 D17)。
+- 改 `.env` 后必须 `docker compose up -d --force-recreate ms-api ms-worker`
+  (`restart` 不重读 env_file),且**连带 `docker restart poc-nginx`**
+  (force-recreate 后容器 IP 变,静态 proxy_pass 持旧解析会全站 502,§2.4 同款钉子)。
+
+### 13.3 上线顺序(dev → prod,照方案 §9.2)
+
+1. 合并 feat 分支 → `deploy_lan.sh <env>`(不带 `--restart`,同步代码)。
+2. **alembic 对账**:`alembic current` vs `heads`(prod 两次踩过跨版本上代码没带迁移)
+   → `alembic upgrade head`(0024 纯增量,秒级)。
+3. `.env` 补三凭证(AK/SK/签名)→ force-recreate ms-api ms-worker → restart poc-nginx。
+4. SPA build 后单独 tar 同步(deploy_lan 不同步 static/web)。
+5. 验证清单:
+   - 三入口 SPA 指纹一致;`/healthz` 正常;登录正常;
+   - `GET /auth/me` 含 `"phone": null`(列已上、未绑定时应有);
+   - dev 真实手机发码送达(三运营商实测 5-16 秒);
+   - 忘记密码全链:收码 → 重置 → 用展示密码登录(响应 `must_change_password=true`)
+     → 引导改密;**MCP 令牌页确认该用户 PAT 已全部吊销**。
+6. prod 同序;发版窗口注意活动任务(百度备份)清零判据(仓库惯例)。
+
+### 13.4 回滚(§9.3)
+
+- 代码回滚:**0024 是纯增量列,旧代码不读 phone,直接回代码不须 downgrade**;
+  已绑定的 phone 数据保留在列里,再次上线即恢复。
+- 仅当 0024 **未写入任何数据**且确需回收列时才 `alembic downgrade -1`
+  (先 drop `uq_users_phone` 约束再 drop 列);有数据后一律走「保留列只回代码」。
+
+### 13.5 排障(QuerySendDetails 手工查法 + 常见错误码)
+
+送达状态不做常驻回执(方案 §1.3),需要时按技能同款 `QuerySendDetails` 手工查:
+
+```bash
+# SendDate 必须 yyyyMMdd(传 2026-11-20 这类格式接口不报错但查不到);
+# 回执通常 5~35 秒落地;BizId 实际返回带 ^0 后缀,查回执带不带后缀都能查到。
+# 详细步骤与签名串构造:全局技能 aliyun-sms-integration(实测正本)。
+python scripts/sms_api.py QuerySendDetails \
+  '{"PhoneNumber":"138xxxxxxxx","SendDate":"20261120","PageSize":10,"CurrentPage":1,"BizId":"<SendSms 返回的 BizId>"}'
+```
+
+| 阿里云 Code | 含义 | 用户侧表现 / 处置 |
+|---|---|---|
+| `Isv.BUSINESS_LIMIT_CONTROL` | 运营商同号频控(**按签名×手机号跨场景计数,约 5 条/h**;自家场景隔离 D12 不覆盖它) | 502「操作过于频繁,请一小时后再试」(不带 retry_after);等一小时自愈,无须处置 |
+| `isv.AMOUNT_NOT_ENOUGH` | 账户余额不足 | 全量发送失败;充值后自愈 |
+| `isv.SMS_SIGNATURE_ILLEGAL` / `isv.SMS_TEMPLATE_ILLEGAL` | 签名/模板问题(模板变量 `${code}` 须含字母,纯数字会被拒) | 核对签名报备与模板配置 |
+| `PORT_NOT_REGISTERED` | 端口未报备(运营商侧) | 按技能 `aliyun-sms-integration` 指引补报备 |
+
+- 本地先看 ms-api 日志(`phone_masked` / Code / BizId;AK/SK/验证码明文永不落日志);
+  审计 `sms_send_failed` 留 err_code/err_message(transport 类无阿里云原文,用
+  `transport_timeout` / `transport_unparseable` 哨兵值)。
+
+### 13.6 批量绑定脚本手册(`scripts/bind_user_phones.py`,§9.4)
+
+```bash
+# 容器内跑;默认 dry-run;--apply 必须显式搭配 --yes 才实跑(防误操作)
+docker exec ms-api python -m scripts.bind_user_phones
+docker exec ms-api python -m scripts.bind_user_phones --apply --yes
+docker cp pairs.csv ms-api:/tmp/pairs.csv   # 冲突人工裁决后走 --csv 二跑
+docker exec ms-api python -m scripts.bind_user_phones --apply --yes --csv /tmp/pairs.csv
+```
+
+- **扫描口径**:只认 username(email 形态如 13800138000@139.com 不自动绑);username
+  先 D5 归一化(去空格/连字符/点号、去 `+86`/`86` 前缀)再匹配 `^1[3-9]\d{9}$`,
+  命中即候选(写入归一化值);已有 phone 的用户跳过;is_active 不过滤。
+- **冲突一律进名单跳过、绝不写库**:①归一化折叠(`13800138000` 与 `138-0013-8000`
+  是两个合法 username 但折叠为同号);②候选号已被其他用户占用;③`--csv` 双给
+  (同一用户重复出现 / 同一 phone 指给多个用户);④`--csv` 二跑对「占用冲突」同样
+  拒绝并输出名单(**绝不覆盖 `uq_users_phone` 唯一约束,须先人工解除原绑定**)。
+- **`--csv` 人工裁决**:每行 `identifier,phone`(`#` 注释与空行忽略);identifier 支持
+  username/email/name/UUID(同 set_password 匹配口径,多行命中按歧义拒);phone
+  同样归一化后写入。
+- **幂等**:可重跑,已绑的仍 skip;实跑逐条 UPDATE + 审计 `phone_bound`
+  (details:actor=cli / source=backfill / old_masked / new_masked 脱敏)。
+- **执行序**:dev dry-run 核对 → dev apply → prod dry-run 核对 → prod apply;
+  冲突名单人工裁决归属后 `--csv` 二跑。
