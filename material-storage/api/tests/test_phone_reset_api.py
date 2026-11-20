@@ -164,10 +164,15 @@ async def _flush_reset_keys() -> AsyncIterator[None]:
 
 @pytest.fixture
 async def fake_sms() -> AsyncIterator[Any]:
-    """每用例独立 FakeSms,替换 lifespan 构造的服务(app.state.sms);用毕还原。"""
+    """每用例独立 FakeSms,替换 lifespan 构造的服务(app.state.sms);用毕还原。
+
+    state.sms 属性可能缺席(未配置形态 lifespan 不保证写入该属性,D17 容器实锤):
+    读走 getattr 兜底,写/还原走 setattr(原缺席时还原成 None 值即可,无须 del ——
+    守卫判 is None,None 与缺席等价)。
+    """
     assert _APP is not None, "client fixture 未就绪"
     fake = FakeSms()
-    prev = _APP.state.sms
+    prev = getattr(_APP.state, "sms", None)
     _APP.state.sms = fake
     yield fake
     _APP.state.sms = prev
@@ -336,7 +341,8 @@ async def test_send_code_503_when_sms_unconfigured(client, make_user, monkeypatc
     _pin_sms_disabled(monkeypatch)
     phone = _phone()
     await make_user(phone=phone)
-    prev = _APP.state.sms
+    # getattr 兜底:属性缺席(未配置形态 lifespan 不写入)时 prev=None,语义等价
+    prev = getattr(_APP.state, "sms", None)
     _APP.state.sms = None  # 照 lifespan 未配置形态
     try:
         r = await client.post(RESET_SEND, json={"phone": phone})
@@ -561,14 +567,19 @@ async def test_confirm_ownership_recheck_after_rebind(client, fake_sms, make_use
     assert r.status_code == 200
     code = fake_sms.calls[-1]["code"]
     # DB 直写等价态:A 换绑到 Y、B 接管 X(唯一约束下换绑=覆盖,与 bind 端点同效),
-    # 触发「发码时归属 ≠ 当前归属」复核分支
+    # 触发「发码时归属 ≠ 当前归属」复核分支。
+    # 顺序钉死、两次独立提交(先 A→Y 释放 X,再 B→X 认领):同事务批量 UPDATE
+    # 行序不保证,若 B→X 先落行此刻 073 仍被 A 持有 → 撞 uq_users_phone
+    # (dev 容器实锤);两个 phone 写点绝不能合并成一次批量写
     async with get_sessionmaker()() as db:
         ra = await db.get(User, a.id)
-        rb = await db.get(User, b.id)
-        assert ra is not None and rb is not None
+        assert ra is not None
         ra.phone = y
+        await db.commit()  # A→Y 先落库:X 此刻已释放
+        rb = await db.get(User, b.id)
+        assert rb is not None
         rb.phone = x
-        await db.commit()
+        await db.commit()  # B→X 后落库:认领 X
     r = await client.post(RESET_CONFIRM, json={"phone": x, "code": code})
     assert r.status_code == 400, r.text
     assert r.json()["detail"] == "验证码已过期,请重新获取"
@@ -603,7 +614,8 @@ async def test_confirm_edges_code_deleted_unbound_bad_format(client, fake_sms, r
 async def test_confirm_503_when_sms_unconfigured(client, monkeypatch):
     """条目 12(后半):confirm 的 503 未配置(四端点统一首步守卫)。"""
     _pin_sms_disabled(monkeypatch)
-    prev = _APP.state.sms
+    # getattr 兜底:属性缺席(未配置形态 lifespan 不写入)时 prev=None,语义等价
+    prev = getattr(_APP.state, "sms", None)
     _APP.state.sms = None
     try:
         r = await client.post(RESET_CONFIRM, json={"phone": _phone(), "code": "ABC234"})

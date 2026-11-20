@@ -212,10 +212,16 @@ def _sms_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 async def fake_sms():
-    """每用例换新 FakeSms 挂 app.state.sms(调用记录互不串)。"""
+    """每用例换新 FakeSms 挂 app.state.sms(调用记录互不串)。
+
+    state.sms 属性可能缺席(未配置形态 lifespan 不保证写入该属性,D17 容器实锤):
+    读一律 getattr 兜底,写/还原用 setattr(State 允许 setattr;原缺席时还原成
+    None 值即可,无须 del —— 属性语义上 None 与缺席等价(_sms_guard 判 is None),
+    后续用例仍由本 fixture 逐个覆盖)。
+    """
     sms = FakeSms()
     if _APP is not None:
-        old = _APP.state.sms
+        old = getattr(_APP.state, "sms", None)
         _APP.state.sms = sms
         yield sms
         _APP.state.sms = old
@@ -464,7 +470,8 @@ async def test_07_sms_unconfigured_503(
     _, uname = await make_user()
     await _login(client, uname)
     p = _phone()
-    monkeypatch.setattr(_APP.state, "sms", None)
+    # raising=False:属性缺席(未配置 lifespan 不写入)同样合法,undo 时按缺席还原
+    monkeypatch.setattr(_APP.state, "sms", None, raising=False)
     r = await client.post(SEND, json={"phone": p})
     assert r.status_code == 503
     assert r.json()["detail"] == "短信服务未配置"
