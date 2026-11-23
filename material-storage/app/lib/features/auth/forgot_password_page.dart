@@ -2,13 +2,19 @@
 /// +表单区+固定错误区范式):
 ///   ①手机号 → 获取验证码(CodeSendButton,retry_after 为倒计时初值;400
 ///     「无法发送验证码」等后端 detail 落固定错误区,原样透出不解释原因);
-///   ②验证码 → 重置密码(原子消费;失败 detail 透传;「换个手机号」回①);
+///   ②验证码 → 重置密码(原子消费;失败 detail 透传)+「重新获取」重发
+///     倒计时按钮(与态①共用同一 GlobalKey,同一时刻只挂载一个实例;用
+///     态①已填手机号直接重发)+「返回上一步」全宽次级按钮回①(保留已填
+///     手机号与倒计时剩余);
 ///   ③结果视图:账号大字(优先级 username → email → name,仅 name 时附
 ///     「若显示名重复导致无法登录,请联系管理员」小字)+ 新密码(mono +
 ///     CopyButton 就地图标反馈——SnackBar 会被遮挡,仓内既有钉子)+ 钉死
 ///     小字提示 +「去登录」(pushNamedAndRemoveUntil('/'))。
 /// retry_after 通道同绑定页:200 响应体直取;非 200 经 ApiException.raw 读
 /// (retryAfterOf),无该字段不启动倒计时。
+/// 倒计时跨态连续:页面持有截止时刻 `_cdDeadline`(发送成功/拿到
+/// retry_after 时写入),切态重挂后当帧末尾按剩余秒数 `CodeSendButton.start()`
+/// 恢复——态①↔态②来回都按剩余秒续走,不再重建为空闲态。
 library;
 
 import 'package:flutter/material.dart';
@@ -43,6 +49,11 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
   String? _error;
   PhoneResetResult? _result;
 
+  /// 倒计时截止时刻(跨态连续的唯一定时源):发送成功/拿到 retry_after 时
+  /// 写入;态①/态②共用同一 GlobalKey(同一时刻只挂载一个实例,切态由
+  /// ref 重挂),重挂后按剩余秒数恢复,修掉「切回态①倒计时重建为空闲态」。
+  DateTime? _cdDeadline;
+
   @override
   void dispose() {
     _phone.dispose();
@@ -50,6 +61,33 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     super.dispose();
   }
 
+  /// 统一布防倒计时:retry_after > 0 时写截止时刻,当帧末尾按剩余秒数启动
+  /// (200 成功与非 200 带 retry_after 同一条通道;当帧内可能切态重挂——
+  /// 态①→态②——postFrame 里按钮已就位,GlobalKey 命中同一 State)。
+  void _armCountdown(int retry) {
+    if (retry <= 0) return;
+    _cdDeadline = DateTime.now().add(Duration(seconds: retry));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _restoreCountdown();
+    });
+  }
+
+  /// 按截止时刻恢复按钮倒计时(切态重挂/返回态①后调用);已过期则清截止
+  /// 回空闲,不误启。
+  void _restoreCountdown() {
+    final d = _cdDeadline;
+    if (d == null) return;
+    final left = d.difference(DateTime.now()).inSeconds;
+    if (left <= 0) {
+      _cdDeadline = null;
+      return;
+    }
+    _sendKey.currentState?.start(left);
+  }
+
+  // 态①发码与态②重发共用:都用当前已填手机号(态②不重新输入);成功以
+  // 响应 retry_after、非 200 经 retryAfterOf(e.raw) 取值重启倒计时。
   Future<void> _sendCode() async {
     setState(() {
       _sending = true;
@@ -61,12 +99,11 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
       );
       if (!mounted) return;
       setState(() => _step = _ForgotStep.code);
-      if (retry > 0) _sendKey.currentState?.start(retry);
+      _armCountdown(retry);
     } on ApiException catch (e) {
-      // 429 冷却/配额与 502 带 retry_after → 启动倒计时;400「无法发送
-      // 验证码」等无该字段 → 只落固定错误区(不解释原因)。
-      final retry = retryAfterOf(e.raw);
-      if (retry > 0) _sendKey.currentState?.start(retry);
+      // 429 冷却/配额与 502 带 retry_after → 写截止重启倒计时;400「无法发送
+      // 验证码」等无该字段 → 只落固定错误区(不解释原因、不倒计时)。
+      _armCountdown(retryAfterOf(e.raw));
       if (mounted) setState(() => _error = e.message);
     } catch (e) {
       if (mounted) setState(() => _error = errorMessage(e, '发送失败,请稍后重试'));
@@ -108,6 +145,12 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
     setState(() {
       _step = _ForgotStep.phone;
       _error = null;
+    });
+    // 回态①按剩余秒数恢复倒计时(GlobalKey 跨态重挂本可自续,此处统一以
+    // 截止时刻重启,顺带校正漂移;已过期则清截止回空闲)。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _restoreCountdown();
     });
   }
 
@@ -229,6 +272,17 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
         textInputAction: TextInputAction.done,
       ),
       const SizedBox(height: Tk.spaceLg),
+      // 重发倒计时按钮(与态①/绑定页同款:同一 GlobalKey,切态按截止时刻
+      // 恢复剩余秒数;点击用已填手机号直接重发)。
+      SizedBox(
+        height: 48,
+        child: CodeSendButton(
+          key: _sendKey,
+          onPressed: _sendCode,
+          busy: _sending,
+        ),
+      ),
+      const SizedBox(height: Tk.spaceLg),
       SizedBox(
         height: 48,
         child: FilledButton(
@@ -245,8 +299,15 @@ class _ForgotPasswordPageState extends State<ForgotPasswordPage> {
               : const Text('重置密码'),
         ),
       ),
-      Center(
-        child: TextButton(onPressed: _backToPhone, child: const Text('换个手机号')),
+      const SizedBox(height: Tk.spaceSm),
+      // 返回上一步(原「换个手机号」小字升级为显眼全宽次级按钮;保留已填
+      // 手机号与倒计时剩余)。
+      SizedBox(
+        height: 48,
+        child: OutlinedButton(
+          onPressed: _backToPhone,
+          child: const Text('返回上一步'),
+        ),
       ),
       _errorArea(tk),
     ],

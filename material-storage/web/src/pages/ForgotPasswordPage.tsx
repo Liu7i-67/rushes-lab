@@ -4,9 +4,12 @@
  *
  * 单页三态(卡片布局与 LoginPage 同款):
  * ① 输手机号 → 「获取验证码」(400「无法发送验证码」原样透出,不解释原因);
- * ② 输验证码 → 「重置密码」+「换一个手机号」链接回态 ①;
+ * ② 输验证码 → 「重新获取」倒计时按钮(原地重发,不清已输入验证码)+
+ *    「重置密码」+「返回上一步」次要按钮回态 ①(保留手机号与剩余倒计时);
  * ③ 结果态 → 账号(username → email → name)+ 新密码 copyable +「去登录」。
  * 倒计时统一规则:有 retry_after 就以之为初值启动;无则不启动(方案 §5.2 分型)。
+ * 倒计时跨态连续:态 ① / ② 复用同一 SendCodeButton ref(任一时刻只挂一个),
+ * 进态或 cdSeed 变化都按剩余秒数 start(),① → ② → 返回 ① 全程不中断。
  */
 import { App, Button, Card, Form, Input, Result, Typography } from 'antd';
 import { useEffect, useRef, useState } from 'react';
@@ -39,18 +42,21 @@ export default function ForgotPasswordPage() {
   const [phase, setPhase] = useState<Phase>('phone');
   const [phone, setPhone] = useState('');          // 态 ② / ③ 展示用(已归一化)
   const [result, setResult] = useState<ResetResult | null>(null);
-  // 发码成功的冷却种子:回态 ① 时按剩余秒数恢复倒计时(后端冷却键仍存活)
+  // 发码成功的冷却种子:进态 ① / ② 时按剩余秒数恢复倒计时(后端冷却键仍存活)
   const [cdSeed, setCdSeed] = useState<{ at: number; total: number } | null>(null);
 
   const sendCode = useResetSendCode();
   const confirm = useResetConfirm();
   const [form] = Form.useForm();
+  // 态 ① / ② 的 SendCodeButton 共用同一 ref:两态互斥渲染,任一时刻只挂一个实例,
+  // phase 切换后新实例经 useImperativeHandle 接管 ref,effect 里调用即作用于当前按钮
   const sendBtnRef = useRef<SendCodeButtonHandle>(null);
 
-  // 回到态 ①(换一个手机号)时恢复倒计时:成功 / 429·502 拿到的 retry_after
-  // 均记入 cdSeed,剩余 >1s 才续,烧完自然放行(真实解锁以后端冷却 / 配额为准)
+  // 跨态倒计时连续:进入态 ① / ②(useEffect 在 phase 切换提交后跑,ref 已挂新实例)
+  // 或 cdSeed 刷新(态 ② 原地重发)时按剩余秒数续;剩余 >1s 才续,烧完自然放行
+  // (真实解锁以后端冷却 / 配额为准)。成功 / 429·502 拿到的 retry_after 均记入 cdSeed
   useEffect(() => {
-    if (phase !== 'phone' || !cdSeed) return;
+    if ((phase !== 'phone' && phase !== 'code') || !cdSeed) return;
     const left = cdSeed.total - (Date.now() - cdSeed.at) / 1000;
     if (left >= 1) sendBtnRef.current?.start(Math.ceil(left));
   }, [phase, cdSeed]);
@@ -71,6 +77,19 @@ export default function ForgotPasswordPage() {
       if (res.retry_after > 0) setCdSeed({ at: Date.now(), total: res.retry_after });
     } catch (err) {
       // 失败文案统一原样透出后端 detail(400「无法发送验证码」不解释原因)
+      message.error(errorMessage(err, '发送失败,请稍后重试'));
+      const ra = retryAfterOf(err); // 429 冷却/配额、502(非 BUSINESS_LIMIT_CONTROL)带 → 启动
+      if (ra > 0) setCdSeed({ at: Date.now(), total: ra });
+    }
+  };
+
+  // 态 ②:重新获取(用当前已填手机号原地重发;留在态 ②,不清已输入的验证码,
+  // 倒计时统一走 cdSeed → useEffect,与态 ① 发码同一套 retry_after 规则)
+  const onResend = async () => {
+    try {
+      const res = await sendCode.mutateAsync({ phone });
+      if (res.retry_after > 0) setCdSeed({ at: Date.now(), total: res.retry_after });
+    } catch (err) {
       message.error(errorMessage(err, '发送失败,请稍后重试'));
       const ra = retryAfterOf(err); // 429 冷却/配额、502(非 BUSINESS_LIMIT_CONTROL)带 → 启动
       if (ra > 0) setCdSeed({ at: Date.now(), total: ra });
@@ -157,14 +176,22 @@ export default function ForgotPasswordPage() {
                        inputMode="text" style={{ letterSpacing: '0.3em' }} />
               </Form.Item>
               <Form.Item style={{ marginBottom: 8 }}>
+                <SendCodeButton
+                  ref={sendBtnRef}
+                  htmlType="button"
+                  block
+                  loading={sendCode.isPending}
+                  onClick={onResend}
+                />
+              </Form.Item>
+              <Form.Item style={{ marginBottom: 8 }}>
                 <Button type="primary" htmlType="submit" block loading={confirm.isPending}>
                   重置密码
                 </Button>
               </Form.Item>
             </Form>
-            <Button type="link" size="small" style={{ padding: 0 }}
-                    onClick={() => setPhase('phone')}>
-              换一个手机号
+            <Button block onClick={() => setPhase('phone')}>
+              返回上一步
             </Button>
           </>
         )}
