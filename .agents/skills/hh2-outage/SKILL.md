@@ -30,6 +30,7 @@ ssh aliyun-swas 'ss -tln | grep -E ":(12222|8081|18081)\b"'
 ssh aliyun-swas 'journalctl -u sshd --since "<事发日>" --no-pager | grep "for tunnel" | tail -20'
 # ③b 服务器侧定性(可达时):挂起还是挂死,一条命令见分晓(必须 sudo,见 §7)
 ssh hh2-prod 'sudo journalctl -b 0 -k --no-pager | grep -E "PM: suspend"'
+# ④ 本机在公司且需区分「服务器死 vs 出口链路断」:agent 自连 WiFi 直连 .221 定性(见 §2.6,无需用户动手)
 ```
 
 ## 2. 定位决策树
@@ -42,7 +43,7 @@ ssh hh2-prod 'sudo journalctl -b 0 -k --no-pager | grep -E "PM: suspend"'
 | ①502 但 ②正常 | **不一定是隧道**——先做 §2.5 分层定位(502 错误页由哪层生成=故障在哪层);2026-11-19 实战:隧道正常,真凶=hh2 侧 poc-nginx-dev 持旧 IP 解析 | §2.5 |
 | 公网通、仅内网不通 | 本机网段/网卡选择问题(见下方"双网卡"事实) | — |
 
-**本机双网卡事实(2026-11-17 实测)**:运维机**常态下有线+WiFi 同时连接**——有线在 192.168.1.x 网段(**到不了服务器**),WiFi 拿 192.168.110.x(与服务器同段)。**直连内网服务器只能走 WiFi**,无需断开有线,显式绑定源地址已实测可通:`ping -S 192.168.110.14 192.168.110.221`。若 WiFi 拿到的地址不同,`ipconfig` 现查再绑。
+**本机双网卡事实(2026-11-17 实测)**:运维机**常态下有线+WiFi 同时连接**——有线在 192.168.1.x 网段(**到不了服务器**),WiFi 拿 192.168.110.x(与服务器同段)。**直连内网服务器只能走 WiFi**,无需断开有线,显式绑定源地址已实测可通:`ping -S 192.168.110.14 192.168.110.221`。若 WiFi 拿到的地址不同,`ipconfig` 现查再绑。**内网 WiFi SSID=「服务器」,profile 已存密码,agent 可自连(§2.6)**。
 
 **内网侧二层定位**(本机需在 110.x 网段):
 `Reply from <本机IP>: Destination host unreachable` = **本机 ARP 解析失败,改网关/加路由无效,别动网络配置**。
@@ -64,6 +65,28 @@ for p in 80 8080 8090; do printf "$p: "; curl -sS -o /dev/null -w '%{http_code} 
 - **157B 的 nginx 502 页由哪台 nginx 生成 = 故障在它的上游**:跳板机错误页→隧道/hh2 断;`hh2:8090` 上的 157B 页=poc-nginx-dev 生成→它的上游(ms-api-dev)断。
 - **头号陷阱:poc-nginx(±-dev) 持旧 IP 解析**。nginx 静态 proxy_pass 在配置加载时解析一次;**ms-api(ms-api-dev) 容器 restart/force-recreate/重建都可能换 IP**(2026-11-19 实证:普通 restart 也换),47h 未重启的 poc-nginx-dev 就持旧 IP → 它代理的路径全 502,而它本地自答的路径(/ 302、/auth/me 403)看起来"半好半坏"。**处方:凡动 ms-api/ms-api-dev 容器,一律连带 `docker restart poc-nginx poc-nginx-dev`**(restart 本身秒级,无窗口顾虑)。
 - 隧道是否活的快速判据:跳板机 `ss -tln` 三口在 + hh2 发布端口有应答 = 隧道大概率没事;**隧道进程受 jump-tunnel.service 看护,断线 10s 自动重连——2026-11-19 的 502 事件中隧道从头到尾都是活的,勿条件反射怀疑隧道**。
+
+## 2.6 本机自连 WiFi 直连服务器(agent 可自主执行,2026-11-20 实战)
+
+跳板机失联 / 疑似公司出口断链时,**agent 无需用户动手即可把本机连上内网 WiFi 直连 .221 做分层定性**(前提:本机在公司,且 WiFi profile「服务器」已存密码——2026-11-20 实测):
+
+```bash
+netsh wlan connect name="服务器" interface="WLAN"          # 连接即 DHCP 拿 110.x(地址会变:.14/.30 都见过)
+sleep 8; ipconfig | grep "110\."                            # 确认拿到 110.x 地址;现查现绑,勿沿用旧地址
+ping -n 2 -w 1500 192.168.110.1                            # 先验网关:通=WiFi 链路活;不通=本机 WiFi 侧问题,别怪服务器
+ping -S <本机110地址> -n 2 192.168.110.221                  # 双网卡下显式绑 WiFi 源(有线 1.x 抢路由时必绑)
+ssh -o ConnectTimeout=6 -o StrictHostKeyChecking=accept-new file_service 'hostname; docker ps -q | wc -l'  # 终点:24=容器全在
+```
+
+**定性结论**:
+- **直连通**(ping/ssh 皆通)→ 服务器与内网无恙,故障在**公司出口链路或隧道侧**(2026-11-19 夜案:出口黑洞 2h13m,服务器全程无辜;配合跳板机 sshd 零 Accepted + 服务器侧 jump-tunnel 卡 `kex_exchange_identification: read: Connection timed out` 即可定案出口断链)。
+- **网关通但 .221 ARP 无应答** → 服务器自身问题(挂死/挂起/断电),走 §2 决策树 + §1 ③b 定性。
+
+**钉子(2026-11-20 实测)**:
+1. **Ugreen USB WiFi 断开再连后可能「关联成功拿到 IP→几秒内掉线」**:现象=ipconfig 一度有 110.x,随后 ping 全超时且 `arp -a` 连网关条目都没了(WLAN 媒体已断开)。处置=**原命令再 connect 一次**即稳;**验证以 ping 网关为准,拿到 IP ≠ 链路稳定**。
+2. `netsh wlan show interfaces` 连接后查询可能报「需要位置权限/错误 5」——**不必去开位置服务**,用 ipconfig+ping 验证即可。
+3. `ipconfig | grep -A 6 "适配器 WLAN"` 抓 IPv4 偶尔落空(标题段紧跟空行),直接 `grep "110\."` 更稳。
+4. 本法只覆盖「本机在公司」的情形;人不在公司时只能靠 §1 跳板机侧探针远程判别。
 
 ## 3. 处置
 
