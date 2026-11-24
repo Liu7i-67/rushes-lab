@@ -165,6 +165,65 @@ class AssetGridTile extends StatelessWidget {
   }
 }
 
+/// AssetTileSkeleton — 宫格未加载区占位骨(快速滚动批 F3):与 AssetGridTile
+/// 同尺寸结构(1:1.06 媒体块 + 两行文字条),灰底圆角取 ListSkeleton 同款
+/// surface3;纯静态不做 shimmer(D7);不可点按(骨架命中只经 body 触发补齐)。
+/// 统一 key 供测试定位(同屏多枚同 key,断言用 findsWidgets/first)。
+class AssetTileSkeleton extends StatelessWidget {
+  const AssetTileSkeleton({super.key = const Key('asset_tile_skeleton')});
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    final radius = BorderRadius.circular(assetMediaRadius);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(
+          child: Center(
+            child: AspectRatio(
+              aspectRatio: 1 / 1.06,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: tk.surface3,
+                  borderRadius: radius,
+                ),
+              ),
+            ),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(top: 6, left: 2, right: 2),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 文件名/元信息两行条:高度近似 AssetGridTile 文字区。
+              Container(
+                height: 13,
+                margin: const EdgeInsets.only(bottom: 4),
+                decoration: BoxDecoration(
+                  color: tk.surface3,
+                  borderRadius: BorderRadius.circular(Tk.rSm),
+                ),
+              ),
+              FractionallySizedBox(
+                widthFactor: 0.55,
+                child: Container(
+                  height: 11,
+                  decoration: BoxDecoration(
+                    color: tk.surface3,
+                    borderRadius: BorderRadius.circular(Tk.rSm),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 /// 左上选中圆勾:22 直径,选中金底深墨勾;未选中多选态白描边半透明底。
 class _SelectCheck extends StatelessWidget {
   const _SelectCheck({required this.selected});
