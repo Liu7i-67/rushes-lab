@@ -11,6 +11,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
+import '../../core/ensure_planner.dart';
 import '../../core/paged_window.dart';
 import '../../core/refresh_bus.dart';
 import '../../core/session.dart';
@@ -67,6 +68,7 @@ class _AssetsPageState extends State<AssetsPage> {
   var _fetchEpoch = 0;
 
   /// 补齐加载在途时记下的续补目标(骨架命中/滚动条定位二次触发不丢):
+  /// 裸 displayEnd(不含余量,P2-3 统一语义;消费时再 + 一页余量换算缺口),
   /// 本轮完成后按新状态续拉;去重守卫防骨架 tile 反复 setState 造成请求风暴。
   int? _pendingTarget;
 
@@ -171,32 +173,47 @@ class _AssetsPageState extends State<AssetsPage> {
   }
 
   /// 补齐显示序 [0, displayEnd + 一页余量) 覆盖的未加载缺口(快速滚动批 F3,
-  /// 原 _loadMore 泛化):经 PagedWindow.offsetWindowFor 换算成后端 offset 窗口,
-  /// 缺口按后端上限 500 分批(offset 累进、Future.wait 并行),按 offset 序
-  /// append、id 去重,再按当前 _sortDesc 全量重排。_items 恒为 offset 域连续
-  /// 前缀(D5),故 ASC 头部缺口补齐会连带拉齐至列表尾(模型一致的最小拉法)。
-  /// 在途守卫:_loadingMore 期间只记 pendingTarget,完成后续补一轮;失败走
-  /// 既有 _loadMoreFailed + toast 通道;触发入口:滚到底(onLoadMore)、滚动条
-  /// 释放定位(onSeek)、骨架命中(onEnsureVisible),三者共用本方法去重防风暴。
+  /// 原 _loadMore 泛化):在途守卫/pending 续补语义走 EnsurePlanner 决策
+  /// (P2-3 抽取,裸 displayEnd 统一语义,消费时再加余量),本页保留 fetch
+  /// 策略——缺口按后端上限 500 分批(offset 累进、Future.wait 并行),见
+  /// [_fetchGap]。_items 恒为 offset 域连续前缀(D5),故 ASC 头部缺口补齐
+  /// 会连带拉齐至列表尾(模型一致的最小拉法)。失败走既有 _loadMoreFailed
+  /// + toast 通道;触发入口:滚到底(onLoadMore)、滚动条释放定位(onSeek)、
+  /// 骨架命中(onEnsureVisible),三者共用本方法去重防风暴。
   Future<void> _ensureVisibleLoaded(int displayEnd) async {
-    if (_loading || _error != null) return;
-    if (_loadingMore || _items.length >= _total) {
-      // 在途:只记更大的续补目标(非更大目标完成后必被 gap=null 去重)。
-      if (_loadingMore &&
-          (_pendingTarget == null || displayEnd > _pendingTarget!)) {
-        _pendingTarget = displayEnd;
-      }
-      return;
+    // 失败闸不在决策核心:宫格页失败闸在骨架命中入口(_onSkeletonHit:失败
+    // 不自动重试,防失败循环风暴),滚动到底/重试入口有意放行(F5 滚动重滑
+    // 重试语义),故 loadMoreFailed/force 走默认值(不闸)。
+    final decision = EnsurePlanner.decide(
+      window: _window,
+      displayEnd: displayEnd,
+      margin: _pageSize,
+      loading: _loading,
+      hasError: _error != null,
+      loadingMore: _loadingMore,
+      pendingTarget: _pendingTarget,
+    );
+    switch (decision) {
+      case EnsureIgnore():
+        return;
+      case EnsureRecordPending(displayEnd: final target):
+        _pendingTarget = target; // 裸显示序;续补消费时再 + 一页余量
+        return;
+      case EnsureFetch(:final start, :final end):
+        await _fetchGap(start, end);
     }
-    final gap = _window.offsetWindowFor(0, displayEnd + _pageSize);
-    if (gap == null) return; // 目标区间已全覆盖(含ASC已拉齐至尾)
-    final (start, end) = gap;
+  }
+
+  /// 缺口拉取(宫格 fetch 策略,窗口 [start, end) 由决策层换算):缺口按
+  /// 500 分批,offset 累进;并行发出、按 offset 序收拢,append、id 去重,
+  /// 再按当前 _sortDesc 全量重排。在途期间记录的续补目标:有进展才续补
+  /// 一轮(gap=null 即空转返回;无进展清 pending 防死循环)。
+  Future<void> _fetchGap(int start, int end) async {
     setState(() {
       _loadingMore = true;
       _loadMoreFailed = false;
     });
     try {
-      // 缺口按 500 分批,offset 累进;并行发出、按 offset 序收拢。
       final pages = await Future.wait([
         for (var o = start; o < end; o += _batchLimit)
           session.api!.assets.list(
@@ -206,6 +223,7 @@ class _AssetsPageState extends State<AssetsPage> {
           ),
       ]);
       if (!mounted) return;
+      var progressed = false;
       setState(() {
         final before = _items.length;
         final seen = <String>{};
@@ -220,7 +238,7 @@ class _AssetsPageState extends State<AssetsPage> {
           );
         _loadingMore = false;
         // 防御:缺口响应为空时不续补(免死循环),目标作废待再触发。
-        if (_items.length == before) _pendingTarget = null;
+        progressed = _items.length > before;
       });
       // thumb-variant 批 D1:同挂点①,增量页逐页预热 small(与宫格 cell 同规格)
       for (final page in pages) {
@@ -228,7 +246,10 @@ class _AssetsPageState extends State<AssetsPage> {
       }
       // W3 #17 挂点②(merge 后;不经 _applyPage)
       // 在途期间记录的续补目标:以最新状态再补一轮(gap=null 即空转返回)。
-      final pending = _pendingTarget;
+      final pending = EnsurePlanner.nextRound(
+        pendingTarget: _pendingTarget,
+        progressed: progressed,
+      );
       _pendingTarget = null;
       if (pending != null) await _ensureVisibleLoaded(pending);
     } catch (e) {

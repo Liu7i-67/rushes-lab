@@ -5,12 +5,14 @@
 /// 视觉迁移:PageHeader(17 标题 + 返回)+ 卡片行(AppCard/AppRow)。
 /// 快速滚动(app-fast-scroll F4):itemCount=_total 正确高度 + PagedWindow
 /// 取数(恒 DESC,无排序切换)+ 未加载区骨架行 + 右缘 FastScrollBar;
-/// 滚到底/骨架命中/onSeek 三路都汇入 _ensureVisibleLoaded(单批 500)。
+/// 滚到底/骨架命中/onSeek 三路都汇入 _ensureVisibleLoaded(单批 500;
+/// 在途守卫/pending 续补决策核心抽至 core/ensure_planner.dart,P2-3)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
+import '../../core/ensure_planner.dart';
 import '../../core/fmt.dart';
 import '../../core/paged_window.dart';
 import '../../core/preview_kind.dart';
@@ -94,7 +96,8 @@ class _TrashPageState extends State<TrashPage> {
   var _restoringId = '';
   String? _error;
 
-  /// 在途期间的更远补齐目标(显示序;完成后由 _fetchGap 续批)。
+  /// 在途期间的更远补齐目标(裸显示序,不含一页余量——P2-3 统一语义,
+  /// 消费时再 + 一页余量换算缺口;完成后由 _fetchGap 续批)。
   int? _pendingTarget;
 
   /// 显示序 ↔ offset 窗口模型(回收站恒 DESC、无排序切换;_refresh/恢复
@@ -151,9 +154,11 @@ class _TrashPageState extends State<TrashPage> {
     }
   }
 
-  /// 泛化的补齐加载(原 _loadMore):把「显示序 [0, displayEnd + 一页余量]」
-  /// 内的未加载缺口经 offsetWindowFor 换算后拉取。滚动到底/骨架命中/onSeek
-  /// 三路都汇到这里;在途守卫见 [_ensureVisibleLoaded]。
+  /// 泛化的补齐加载(原 _loadMore):决策核心(整页在途/错误闸、失败闸
+  /// force 放行、在途记 pending、全量加载短路)由 EnsurePlanner 决定
+  /// (P2-3 抽取;pending 统一存裸 displayEnd,消费时再 + 一页余量换算
+  /// 缺口),本页保留单批 fetch 策略与失败 UI。滚动到底/骨架命中/onSeek
+  /// 三路都汇到这里。
   ///
   /// [force] = 显式用户动作(重试条点按 / 重新 seek):失败态也放行。
   /// 失败态(_loadMoreFailed)拦住自动触发——骨架行命中随每次重建重放,
@@ -162,37 +167,50 @@ class _TrashPageState extends State<TrashPage> {
     int displayEnd, {
     bool force = false,
   }) async {
-    if (_loading || _error != null) return;
-    if (_loadMoreFailed && !force) return;
-    final target = displayEnd + _pageSize; // 一页余量,越过视口尾部
-    if (_loadingMore) {
-      // 在途:只把更远目标记入 pending,本批完成后由 _fetchGap 续批(防风暴)。
-      final pending = _pendingTarget;
-      if (pending == null || target > pending) _pendingTarget = target;
-      return;
+    final decision = EnsurePlanner.decide(
+      window: _window,
+      displayEnd: displayEnd,
+      margin: _pageSize,
+      loading: _loading,
+      hasError: _error != null,
+      loadMoreFailed: _loadMoreFailed,
+      force: force,
+      loadingMore: _loadingMore,
+      pendingTarget: _pendingTarget,
+    );
+    switch (decision) {
+      case EnsureIgnore():
+        return;
+      case EnsureRecordPending(displayEnd: final target):
+        _pendingTarget = target; // 裸显示序;续补消费时再 + 一页余量
+        return;
+      case EnsureFetch(:final start, :final end):
+        await _fetchGap(start, end);
     }
-    await _fetchGap(target);
   }
 
-  /// 拉取显示序 [0, target) 内尚未加载的缺口(offsetWindowFor 换算,恒 DESC
-  /// 即 offset=显示序;单批封顶 500,后端单窗口上限即 500)。失败置
-  /// _loadMoreFailed + toast(重试条入口不变);成功后若目标被推远则续批。
-  Future<void> _fetchGap(int target) async {
-    final gap = _window.offsetWindowFor(0, target);
-    if (gap == null) return;
+  /// 拉取后端 offset 窗口 [start, end)(决策层已换算的缺口,恒 DESC 即
+  /// offset=显示序;单批封顶 500,后端单窗口上限即 500)。失败置
+  /// _loadMoreFailed + 清 pending + toast(重试条入口不变);成功后若在途
+  /// 期间目标被推远则续批(有进展才续,无进展清 pending 防死循环;缺口
+  /// 已尽时 gapFor 返回 null,空转返回)。
+  Future<void> _fetchGap(int start, int end) async {
     setState(() {
       _loadingMore = true;
       _loadMoreFailed = false;
     });
+    var progressed = false; // 本批合并是否有新增(决定是否续批,防死循环)
     try {
       final page = await session.api!.ops.listTrash(
         widget.folderId,
         limit: _pageSize,
-        offset: gap.$1,
+        offset: start,
       );
       if (!mounted) return;
       setState(() {
+        final before = _items.length;
         _mergeLoaded(page.items);
+        progressed = _items.length > before;
         _loadingMore = false;
       });
     } catch (e) {
@@ -205,12 +223,22 @@ class _TrashPageState extends State<TrashPage> {
       toast(context, errorMessage(e, '加载失败,请重试'), tone: ToastTone.error);
       return;
     }
-    final pending = _pendingTarget;
+    final pending = EnsurePlanner.nextRound(
+      pendingTarget: _pendingTarget,
+      progressed: progressed,
+    );
     _pendingTarget = null;
-    if (pending != null) await _fetchGap(pending); // 缺口已尽时内部返回 null
+    if (pending != null) {
+      final gap = EnsurePlanner.gapFor(_window, pending, _pageSize);
+      if (gap != null) await _fetchGap(gap.$1, gap.$2); // 缺口已尽时空转返回
+    }
   }
 
   /// append + 按 id 去重兜底(D6:恢复/静默刷新与补齐并发时防重复行)。
+  /// offset 天然对齐前提(P2-4/需求 D12,未观测到,记前提):在途响应反映
+  /// 请求时点的后端状态——恢复提交前后端同步移除、补齐响应按请求时点切片,
+  /// 拼接边界才能无缝;若后端在恢复提交后才计算响应窗口,拼接边界会缺一行
+  /// 且尾行骨架永久残留。
   void _mergeLoaded(List<Asset> incoming) {
     final seen = <String>{for (final a in _items) a.id};
     for (final a in incoming) {
