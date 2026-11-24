@@ -3,12 +3,16 @@
 /// 入口显隐三态(web ProjectDetailPage canSeeTrash 实码对齐):
 /// 普通夹 = my_can_admin 或 my_delete_grant;sensitive 夹仅系统 admin。
 /// 视觉迁移:PageHeader(17 标题 + 返回)+ 卡片行(AppCard/AppRow)。
+/// 快速滚动(app-fast-scroll F4):itemCount=_total 正确高度 + PagedWindow
+/// 取数(恒 DESC,无排序切换)+ 未加载区骨架行 + 右缘 FastScrollBar;
+/// 滚到底/骨架命中/onSeek 三路都汇入 _ensureVisibleLoaded(单批 500)。
 library;
 
 import 'package:flutter/material.dart';
 
 import '../../core/api/ms_api.dart' show errorMessage;
 import '../../core/fmt.dart';
+import '../../core/paged_window.dart';
 import '../../core/preview_kind.dart';
 import '../../core/session.dart';
 import '../../models/models.dart';
@@ -19,6 +23,7 @@ import '../../widgets/app_card.dart';
 import '../../widgets/app_row.dart';
 import '../../widgets/empty_state.dart';
 import '../../widgets/error_view.dart';
+import '../../widgets/fast_scroll_bar.dart';
 import '../../widgets/page_header.dart';
 import '../../widgets/toast.dart';
 import 'asset_writeback.dart';
@@ -37,6 +42,9 @@ bool canSeeTrash({
 
 /// 距底部不足该像素即触发自动加载。
 const _loadMoreThreshold = 200.0;
+
+/// 快速滚动条显隐阈值(D4:小列表滚动条是噪音)。
+const _barMinItems = 100;
 
 /// 音频扩展名(preview_kind 八类判定不含音频,就地补判)。
 const _kAudioExts = <String>['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'];
@@ -86,6 +94,14 @@ class _TrashPageState extends State<TrashPage> {
   var _restoringId = '';
   String? _error;
 
+  /// 在途期间的更远补齐目标(显示序;完成后由 _fetchGap 续批)。
+  int? _pendingTarget;
+
+  /// 显示序 ↔ offset 窗口模型(回收站恒 DESC、无排序切换;_refresh/恢复
+  /// 改动 _total/_items 后随派生值自然更新,无需显式重建)。
+  PagedWindow get _window =>
+      PagedWindow(total: _total, loaded: _items.length, descending: true);
+
   @override
   void initState() {
     super.initState();
@@ -102,7 +118,8 @@ class _TrashPageState extends State<TrashPage> {
   void _maybeLoadMore() {
     if (!_scroll.hasClients) return;
     if (_scroll.position.extentAfter < _loadMoreThreshold) {
-      _loadMore();
+      // 视口贴近全量列表尾部:补齐到末尾(途中骨架由逐行命中兜底)。
+      _ensureVisibleLoaded(_total);
     }
   }
 
@@ -134,8 +151,35 @@ class _TrashPageState extends State<TrashPage> {
     }
   }
 
-  Future<void> _loadMore() async {
-    if (_loadingMore || _items.length >= _total) return;
+  /// 泛化的补齐加载(原 _loadMore):把「显示序 [0, displayEnd + 一页余量]」
+  /// 内的未加载缺口经 offsetWindowFor 换算后拉取。滚动到底/骨架命中/onSeek
+  /// 三路都汇到这里;在途守卫见 [_ensureVisibleLoaded]。
+  ///
+  /// [force] = 显式用户动作(重试条点按 / 重新 seek):失败态也放行。
+  /// 失败态(_loadMoreFailed)拦住自动触发——骨架行命中随每次重建重放,
+  /// 不拦会形成「失败→重建→重试」风暴;失败后走重试条手动重试。
+  Future<void> _ensureVisibleLoaded(
+    int displayEnd, {
+    bool force = false,
+  }) async {
+    if (_loading || _error != null) return;
+    if (_loadMoreFailed && !force) return;
+    final target = displayEnd + _pageSize; // 一页余量,越过视口尾部
+    if (_loadingMore) {
+      // 在途:只把更远目标记入 pending,本批完成后由 _fetchGap 续批(防风暴)。
+      final pending = _pendingTarget;
+      if (pending == null || target > pending) _pendingTarget = target;
+      return;
+    }
+    await _fetchGap(target);
+  }
+
+  /// 拉取显示序 [0, target) 内尚未加载的缺口(offsetWindowFor 换算,恒 DESC
+  /// 即 offset=显示序;单批封顶 500,后端单窗口上限即 500)。失败置
+  /// _loadMoreFailed + toast(重试条入口不变);成功后若目标被推远则续批。
+  Future<void> _fetchGap(int target) async {
+    final gap = _window.offsetWindowFor(0, target);
+    if (gap == null) return;
     setState(() {
       _loadingMore = true;
       _loadMoreFailed = false;
@@ -144,11 +188,11 @@ class _TrashPageState extends State<TrashPage> {
       final page = await session.api!.ops.listTrash(
         widget.folderId,
         limit: _pageSize,
-        offset: _items.length,
+        offset: gap.$1,
       );
       if (!mounted) return;
       setState(() {
-        _items.addAll(page.items);
+        _mergeLoaded(page.items);
         _loadingMore = false;
       });
     } catch (e) {
@@ -156,9 +200,31 @@ class _TrashPageState extends State<TrashPage> {
       setState(() {
         _loadingMore = false;
         _loadMoreFailed = true;
+        _pendingTarget = null;
       });
       toast(context, errorMessage(e, '加载失败,请重试'), tone: ToastTone.error);
+      return;
     }
+    final pending = _pendingTarget;
+    _pendingTarget = null;
+    if (pending != null) await _fetchGap(pending); // 缺口已尽时内部返回 null
+  }
+
+  /// append + 按 id 去重兜底(D6:恢复/静默刷新与补齐并发时防重复行)。
+  void _mergeLoaded(List<Asset> incoming) {
+    final seen = <String>{for (final a in _items) a.id};
+    for (final a in incoming) {
+      if (seen.add(a.id)) _items.add(a);
+    }
+  }
+
+  /// 骨架行命中 → 帧末补齐一次(post-frame,不在 build 期 setState;
+  /// 在途/无缺口由守卫挡住,逐行命中不会风暴)。
+  void _scheduleEnsureFromSkeleton(int displayIndex) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _ensureVisibleLoaded(displayIndex + 1);
+    });
   }
 
   Future<void> _restore(Asset a) async {
@@ -171,6 +237,7 @@ class _TrashPageState extends State<TrashPage> {
         _items.removeWhere((x) => x.id == a.id);
         _total = (_total - 1).clamp(0, 1 << 31);
         _restoringId = '';
+        // 窗口模型随派生值更新:前后端同步移除,offset 天然对齐(F4)。
       });
       notifyAssetMutation(widget.folderId); // 列表计数恢复 → 宫格+folders 刷新
       toast(
@@ -214,52 +281,84 @@ class _TrashPageState extends State<TrashPage> {
   }
 
   Widget _list(BuildContext context) {
+    // 滚动条显隐(D4):total≥100;loading/error/empty 三态根本走不到
+    // 本方法,天然无滚动条。
+    final barVisible = _total >= _barMinItems;
     return Column(
       children: [
         Expanded(
-          child: RefreshIndicator(
-            onRefresh: _refresh,
-            child: ListView.separated(
-              controller: _scroll,
-              physics: const AlwaysScrollableScrollPhysics(),
-              padding: const EdgeInsets.fromLTRB(
-                Tk.spacePage,
-                Tk.spaceMd,
-                Tk.spacePage,
-                Tk.spaceXl,
-              ),
-              itemCount: _items.length,
-              separatorBuilder: (_, _) => const SizedBox(height: Tk.spaceSm),
-              itemBuilder: (context, i) {
-                final a = _items[i];
-                return AppCard(
-                  padding: EdgeInsets.zero,
-                  child: AppRow(
-                    leading: Icon(
-                      trashKindIcon(
-                        filename: a.filename,
-                        contentType: a.contentType,
-                      ),
-                    ),
-                    title: a.filename,
-                    subtitle:
-                        '${fmtBytes(a.sizeBytes)} · 删除于 ${a.deletedAt == null ? '—' : fmtDate(a.deletedAt!)}',
-                    showChevron: false,
-                    trailing: _restoringId == a.id
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : IconButton(
-                            icon: const Icon(Icons.restore_outlined),
-                            tooltip: '恢复到文件夹',
-                            onPressed: () => _restore(a),
-                          ),
+          child: Stack(
+            children: [
+              RefreshIndicator(
+                onRefresh: _refresh,
+                child: ListView.separated(
+                  controller: _scroll,
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.fromLTRB(
+                    Tk.spacePage,
+                    Tk.spaceMd,
+                    Tk.spacePage,
+                    Tk.spaceXl,
                   ),
-                );
-              },
-            ),
+                  itemCount: _total,
+                  separatorBuilder: (_, _) =>
+                      const SizedBox(height: Tk.spaceSm),
+                  itemBuilder: (context, i) {
+                    final a = _window.assetAt(i, _items);
+                    if (a == null) {
+                      // 未加载区:骨架行 + 帧末补齐(F4;不可点/不可恢复)。
+                      _scheduleEnsureFromSkeleton(i);
+                      return const TrashRowSkeleton(
+                        key: Key('trash_row_skeleton'),
+                      );
+                    }
+                    return AppCard(
+                      padding: EdgeInsets.zero,
+                      child: AppRow(
+                        leading: Icon(
+                          trashKindIcon(
+                            filename: a.filename,
+                            contentType: a.contentType,
+                          ),
+                        ),
+                        title: a.filename,
+                        subtitle:
+                            '${fmtBytes(a.sizeBytes)} · 删除于 ${a.deletedAt == null ? '—' : fmtDate(a.deletedAt!)}',
+                        showChevron: false,
+                        trailing: _restoringId == a.id
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.restore_outlined),
+                                tooltip: '恢复到文件夹',
+                                onPressed: () => _restore(a),
+                              ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              // 右缘滚动条(F2):Positioned 钉满右缘高,FastScrollBar 自身
+              // 吃 28 热区;visible=false 时组件内部渲染 shrink。
+              Positioned(
+                right: 0,
+                top: 0,
+                bottom: 0,
+                child: FastScrollBar(
+                  controller: _scroll,
+                  total: _total,
+                  visible: barVisible,
+                  // seek 是显式动作:失败态也重试(force)。
+                  onSeek: (displayIndex) =>
+                      _ensureVisibleLoaded(displayIndex + 1, force: true),
+                ),
+              ),
+            ],
           ),
         ),
         if (_loadingMore) const LinearProgressIndicator(minHeight: 2),
@@ -271,7 +370,7 @@ class _TrashPageState extends State<TrashPage> {
   Widget _retryBar(BuildContext context) {
     final color = context.tk.danger;
     return InkWell(
-      onTap: _loadMore,
+      onTap: () => _ensureVisibleLoaded(_total, force: true),
       child: SizedBox(
         height: 28,
         child: Row(
@@ -284,6 +383,63 @@ class _TrashPageState extends State<TrashPage> {
               style: TextStyle(fontSize: Tk.fzXs, color: color),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 回收站骨架行(F4/D7):未加载区灰条占位,静态无动画。骨面色取
+/// ListSkeleton 同款 surface3;结构对齐 AppCard 行(34 图标底 + 标题 13 /
+/// 副标题 11 双条),minHeight 56 与 AppRow 一致。
+class TrashRowSkeleton extends StatelessWidget {
+  const TrashRowSkeleton({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final tk = context.tk;
+    Widget bone({double? widthFactor, required double height}) {
+      final block = Container(
+        height: height,
+        decoration: BoxDecoration(
+          color: tk.surface3,
+          borderRadius: BorderRadius.circular(Tk.rSm),
+        ),
+      );
+      if (widthFactor == null) return block;
+      return FractionallySizedBox(widthFactor: widthFactor, child: block);
+    }
+
+    return AppCard(
+      padding: EdgeInsets.zero,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 56),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: tk.surface3,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              const SizedBox(width: Tk.spaceMd),
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    bone(height: 13),
+                    const SizedBox(height: Tk.spaceSm),
+                    bone(height: 11, widthFactor: 0.55),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

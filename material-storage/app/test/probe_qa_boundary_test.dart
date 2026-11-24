@@ -280,6 +280,21 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    // 快速滚动批(itemCount=total)改因:第二页请求由骨架命中触发,拖动
+    // 落点已在显示序 50+;a31 在显示序 30(宫格中部),滚回半程可见。
+    final pos = tester
+        .state<ScrollableState>(
+          find
+              .descendant(
+                of: find.byType(GridView),
+                matching: find.byType(Scrollable),
+              )
+              .first,
+        )
+        .position;
+    pos.jumpTo(pos.maxScrollExtent * 0.5);
+    await tester.pump();
+    await tester.pump();
     expect(find.text('a31.jpg'), findsOneWidget, reason: '第二页头部内容拼接');
     expect(api.assets.listCalls.length, 2, reason: '全程仅两次请求');
   });
@@ -288,7 +303,10 @@ void main() {
   testWidgets('B3 补查:加载失败出底部重试条,点重试成功拼接第二页', (tester) async {
     final api = _ProbePagedMsApi();
     api.assets.page1 = [for (var i = 1; i <= 30; i++) fakeAsset('a$i')];
-    api.assets.total = 33;
+    // 快速滚动批改因:total 由 33 调到 31——新模型按 offset 窗口补齐,夹具
+    // 只编排到 a31(缺口 [30,31) 恰好一页);留着 33 会造出永远补不满的
+    // [31,33) 缺口,令骨架命中反复重发(真后端分片精确,无此形态)。
+    api.assets.total = 31;
     final probe = api.assets;
     probe.page2 = ApiException(500, '网络开小差');
     await _pumpAssets(tester, api);
@@ -310,7 +328,7 @@ void main() {
         createdAt: '2026-10-20T10:00:00Z',
       ),
     ];
-    probe.total = 33;
+    probe.total = 31;
     await tester.tap(find.text('加载失败,点击重试'));
     await tester.pumpAndSettle();
     expect(find.text('a31.jpg'), findsOneWidget, reason: 'B3:重试成功拼接');
