@@ -18,6 +18,9 @@
  * 仅「解锁」仍 admin-only;EditUserModal 组选项非 admin 改走 me.user_create_groups
  * 静态集合(GroupSearchSelect 打的 /admin/directory/groups 对非 admin 403),
  * 回显/全量同步提交体不变。
+ * 建号自动绑定手机号增量(2026-11-25 方案 F6/F7):EditUserModal 增「绑定手机号」
+ * 只读回显(detail.phone,完整号明文不脱敏 D1,未绑显示「—」);CreateUserModal
+ * 登录名 extra 增自动绑定提示(新建弹窗不出现手机号输入项,D7)。
  */
 import {
   Alert, App, Button, Empty, Form, Input, Modal, Pagination, Popconfirm, Select, Skeleton, Tooltip,
@@ -389,7 +392,7 @@ function CreateUserModal({ open, onClose }: { open: boolean; onClose: () => void
                        { required: true, min: 2, max: 64 },
                        { pattern: /^[a-zA-Z0-9._-]+$/, message: '仅字母/数字/._- 组成' },
                      ]}
-                     extra="提交后不可改;本地用户无飞书身份,登录名是唯一标识">
+                     extra="提交后不可改;本地用户无飞书身份,登录名是唯一标识。登录名为大陆手机号时,将自动绑定为该账号的登录手机号。">
             <Input placeholder="zhangsan / 10086" autoFocus />
           </Form.Item>
           <Form.Item name="name" label="姓名" rules={[{ required: true, max: 128 }]}>
@@ -501,6 +504,12 @@ function EditUserModal({ user, onClose }: { user: DirectoryUser; onClose: () => 
               }}>
           <Form.Item label="登录名" extra="创建后不可改">
             <Input value={user.username || '—'} disabled />
+          </Form.Item>
+          {/* 建号自动绑定(2026-11-25 F6):绑定手机号只读回显(与「登录名」同款 disabled
+              Input;完整号明文不脱敏 — D1 用户拍板;未绑定显示「—」。Form 只在 detail
+              就位后渲染,展示天然在数据就位后出现) */}
+          <Form.Item label="绑定手机号" extra="登录名为大陆手机号时建号即自动绑定;此处不可修改">
+            <Input value={detail.phone ?? '—'} disabled />
           </Form.Item>
           <Form.Item name="name" label="姓名" rules={[{ required: true, max: 128 }]}>
             <Input placeholder="张三" autoFocus />

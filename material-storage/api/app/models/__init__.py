@@ -710,6 +710,9 @@ class DirectoryUserOut(BaseModel):
     # 账号创建人姓名(user-delegation,2026-11-15):列表端点按 created_by 一次
     # join 批量回显(勿 N+1);NULL(无来源,如存量未回填/创建人被删)→ 前端显示「—」
     created_by_name: str | None = None
+    # 绑定手机号(建号 username=大陆手机号自动绑定,2026-11-25):完整号回显给
+    # 管理侧(编辑弹窗只读展示;列表/创建/PATCH 响应同字段,前端列表不展示)
+    phone: str | None = None
 
 
 class UserCreateIn(BaseModel):

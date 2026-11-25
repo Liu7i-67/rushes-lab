@@ -211,6 +211,7 @@ async def list_directory_users(
                 created_by_name=(
                     creator_names.get(u.created_by) if u.created_by is not None else None
                 ),
+                phone=u.phone,
             )
             for u in users
         ],
@@ -292,6 +293,8 @@ async def create_directory_user(
         # W1:真实态单查(新号一般未锁,但 name 形态 key 跨同名用户共享,可能带出)
         login_locked=(await local_auth.users_login_locked([new_user]))[new_user.id],
         created_by_name=user.name,
+        # 自动绑定结果随响应回(命中=归一化号,冲突跳过=null)
+        phone=new_user.phone,
         temporary_password=temp_pw,
     )
 
@@ -338,6 +341,7 @@ async def get_directory_user(
         created_at=target.created_at, resigned_at=target.resigned_at,
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
         created_by_name=creator_name,
+        phone=target.phone,
         group_ids=[g.id for _gm, g in rows],
         group_names=[g.name for _gm, g in rows],
     )
@@ -453,6 +457,7 @@ async def update_directory_user(
         created_at=target.created_at, resigned_at=target.resigned_at,
         login_locked=(await local_auth.users_login_locked([target]))[target.id],
         created_by_name=creator_name,
+        phone=target.phone,
     )
 
 

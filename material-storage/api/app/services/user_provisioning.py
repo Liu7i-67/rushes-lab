@@ -4,6 +4,7 @@
 (密码策略改一处漏一处):
 
   - provision_local_user(...)      — 重名预检 → 临时密码 → 哈希 → User 落库 →
+                                     username 命中大陆手机号 → 自动绑定(冲突跳过)→
                                      org member tuple(尽力而为)→ 逐组入组 →
                                      user_created 审计 → ops 日志
   - add_user_to_group_audited(...) — 原 directory.py 私有 _add_membership 平移为
@@ -28,7 +29,8 @@ import logging
 import uuid
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.tables import Group, GroupMembership, User
@@ -36,6 +38,7 @@ from app.services.audit import AuditService
 from app.services.org import get_default_organization
 from app.services.passwords import generate_temp_password, hash_password
 from app.services.permissions import PermissionsService
+from app.services.phone_verification import InvalidPhone, mask_phone, normalize_phone
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +122,13 @@ async def provision_local_user(
       group_member_added details.source(语义见模块 docstring)。
     - commit 后 db.refresh(new_user) 保留:created_at 依赖 server_default 回填,
       漏掉则调用方构造响应即 ValidationError 500。
+    - 自动绑定(phone-auto-bind,2026-11-25):username 归一化(normalize_phone)
+      命中大陆手机号且预检无冲突 → 单独事务直接写 users.phone(不发短信不验码),
+      并写 phone_bound 审计(details.source="auto_bind"、old_masked=null,与
+      backfill 脚本 / 用户自主 bind 区分);冲突(候选号已被他人 phone 持有,或
+      他人 username 去 ./- 折叠后同号)或竞态撞 uq_users_phone → 跳过不绑定,
+      建号照常成功(决策 D2,绝不 raise)。user_created details 增
+      auto_phone_bound: bool(自动绑定成功 true / 未命中或冲突跳过 false)对账。
 
     返回 (new_user, temp_password);临时密码只回显一次,不落 audit / log。
     """
@@ -154,6 +164,58 @@ async def provision_local_user(
     await db.commit()
     await db.refresh(new_user)
 
+    # ── 建号自动绑定大陆手机号(phone-auto-bind,2026-11-25)───────────────────
+    # username 归一化后命中大陆手机号 → 直接绑定 users.phone(不发短信、无 Redis);
+    # 冲突即跳过、建号照常成功(决策 D2,绝不 raise)。预检一条 SQL 双查:候选号被
+    # 他人 phone 占用 + 他人 username 归一化折叠(去 -/. 后同号;双层 func.replace
+    # 兼容 SQLite,勿 regexp_replace —— username pattern ^[a-zA-Z0-9._-]+$ 保证
+    # 无空格无 +,折叠只需去 - 和 .;username 为 NULL 时 replace 结果 NULL 不匹配)。
+    candidate: str | None = None
+    try:
+        candidate = normalize_phone(username)
+    except InvalidPhone:
+        candidate = None
+    auto_bound = False
+    if candidate is not None:
+        folded = func.replace(func.replace(User.username, "-", ""), ".", "")
+        hit = (
+            await db.execute(
+                select(User.id).where(
+                    or_(User.phone == candidate, folded == candidate),
+                    User.id != new_user.id,
+                ).limit(1)
+            )
+        ).first()
+        if hit is not None:
+            log.info("phone auto bind skip occupied user=%s phone=%s holder=%s",
+                     new_user.id, mask_phone(candidate), hit[0])
+        else:
+            # 单独事务:绑定失败不牵连已落库的账号(DB 中 phone 保持 NULL)
+            new_user.phone = candidate
+            try:
+                await db.commit()
+            except IntegrityError:
+                # 竞态撞 uq_users_phone:rollback 该 UPDATE,账号完好,视为跳过
+                await db.rollback()
+                # rollback 会过期 ORM 实例(expire_on_commit=False 只豁免 commit 不
+                # 豁免 rollback,同 folder_templates.py 头部注释的坑):不 refresh 则
+                # 下方 new_user.id 等属性访问触发同步懒加载 → async 下 MissingGreenlet。
+                # refresh 重载后 phone 回到 DB 真值 NULL,后续属性访问安全。
+                await db.refresh(new_user)
+                log.info("phone auto bind skip race user=%s phone=%s",
+                         new_user.id, mask_phone(candidate))
+            else:
+                auto_bound = True
+                await audit.write(
+                    event_type="phone_bound",
+                    actor_user_id=actor_user_id,
+                    details={"old_masked": None, "new_masked": mask_phone(candidate),
+                             "source": "auto_bind"},
+                    **ctx,
+                )
+                log.info("phone auto bound user=%s phone=%s",
+                         new_user.id, mask_phone(candidate))
+
     if org:
         _, tenant_key = org
         try:
@@ -177,7 +239,9 @@ async def provision_local_user(
         details={"user_id": str(new_user.id), "username": username,
                  "name": name, "group_ids": [str(g.id) for g in groups],
                  "source": source,
-                 "created_by": str(actor_user_id)},
+                 "created_by": str(actor_user_id),
+                 # 建号自动绑定结果对账(phone-auto-bind,2026-11-25)
+                 "auto_phone_bound": auto_bound},
         **ctx,
     )
     log.info("user created id=%s username=%s by admin=%s groups=%d",
