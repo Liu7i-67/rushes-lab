@@ -1,10 +1,15 @@
 /**
  * workspace:compact(<1024)单栏骨架(树 Drawer + AssetCardList + 详情 bottom Drawer +
  * 批量操作栏)/ 桌面三栏(左 FolderTree / 中 AssetTable / 右 AssetSummaryPanel,顶 ActionsBar)。
+ * PC 三视图切换(2026-11-25 方案 docs/qdev/2026-11-25-pc-folder-view-modes.md §3.1 E,
+ * PC-only 决策 D5):桌面 actions bar Segmented 切 详情/小图/大图,small/large 中栏走
+ * AssetWaterfallList(瓦片点击=表格行点击同款选中切换,选中/批量/右栏 summary 状态全复用);
+ * compact(<1024)不渲染切换器恒为详情,现状零改动。存量 1586 行超 500 行上限,
+ * 决策 D7:本次只最小增量不重构。
  */
 import {
-  App, Button, Checkbox, Drawer, Layout, Modal, Pagination, Popconfirm, Select, Skeleton,
-  Space, Table, Tooltip,
+  App, Button, Checkbox, Drawer, Layout, Modal, Pagination, Popconfirm, Select,
+  Skeleton, Space, Table, Tooltip,
 } from 'antd';
 import {
   Archive, ChevronDown, ChevronLeft, ChevronRight, Download, FileText,
@@ -22,6 +27,8 @@ import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { FolderTree } from '../components/FolderTree';
 import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
 import { AssetCardList } from '../components/AssetCardList';
+import { AssetWaterfallList } from '../components/AssetWaterfallList';
+import { FolderViewModeSwitch } from '../components/FolderViewModeSwitch';
 import { AssetTagEditor } from '../components/AssetTagEditor';
 import { AssetThumbnail } from '../components/AssetThumbnail';
 import { BatchMoveAssetsModal } from '../components/BatchMoveAssetsModal';
@@ -33,6 +40,7 @@ import { RenameFolderModal } from '../components/RenameFolderModal';
 import { RequestAccessModal } from '../components/RequestAccessModal';
 import { RequestLinkCreateModal } from '../components/RequestLinkCreateModal';
 import { NewFolderModal } from '../components/NewFolderModal';
+import { useViewMode } from '../hooks/use-view-mode';
 import { useCompactViewport } from '../lib/use-viewports';
 import { scrollMainToTop } from '../lib/main-scroll';
 import { useKeyboardVisible, useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
@@ -60,6 +68,8 @@ export default function ProjectDetailPage() {
   const compact = useCompactViewport();
   const kbVisible = useKeyboardVisible();
   const kbViewportHeight = useKeyboardViewportHeight();
+  // 三视图模式(localStorage 持久化,hooks 置顶):compact 分支不消费,仅桌面分支读写
+  const [viewMode, setViewMode] = useViewMode();
 
   const { data: project } = useProject(projectId);
   // 项目级上传权限(uploader/admin):建根目录、FolderTree 新建入口用;
@@ -1306,6 +1316,9 @@ export default function ProjectDetailPage() {
             )}
           </span>
           <div style={{ flex: 1 }} />
+          {/* PC 三视图切换(方案 §2.2,决策 D5 PC-only):本 bar 只在桌面分支渲染
+              (compact 分支提前 return),模式持久化 localStorage,切换即时生效 */}
+          <FolderViewModeSwitch value={viewMode} onChange={setViewMode} />
           <Space size={6}>
             {/* 上传/打标需 folder can_upload(uploader),删除需 can_admin 或组织级
                 删除授权(my_delete_grant)—— 后端对每个操作都强制;这里禁用按钮
@@ -1370,8 +1383,35 @@ export default function ProjectDetailPage() {
           </Space>
         </div>
 
-        {/* asset table — 表格区内滚,分页器钉在下方不随行滚动 */}
+        {/* asset table / 三视图中栏(方案 §3.1 E)—— 表格区内滚,分页器钉在下方不随行滚动。
+            详情模式:现有 Table 一行不动(仅加模式闸门);小图/大图:AssetWaterfallList,
+            瓦片点击=表格行点击同款切换选中(Table onRow onClick 镜像),selectedIds 与表格
+            互通 → 批量操作栏/右栏 summary 联动照常,切模式不丢选中;表头排序器是 Table
+            专属,瀑布流不提供列排序(决策 D6) */}
         <div ref={tableScrollRef} style={{ flex: 1, overflow: 'auto', padding: '0 8px' }}>
+          {viewMode !== 'detail' && (
+            <div style={{ padding: '12px 8px 16px' }}>
+              <AssetWaterfallList
+                assets={assetItems}
+                variant={viewMode}
+                loading={assetsLoading || isFetching}
+                selectable
+                selectedIds={selectedIds}
+                onToggle={(id) => setSelectedIds(prev =>
+                  prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
+                emptyText={(
+                  <div style={{ padding: '60px 16px' }}>
+                    <FileText size={32} strokeWidth={1.3}
+                              style={{ color: 'var(--ms-hairline)' }} />
+                    <div style={{
+                      marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
+                    }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
+                  </div>
+                )}
+              />
+            </div>
+          )}
+          {viewMode === 'detail' && (
           <Table
             dataSource={assetItems}
             rowKey="id"
@@ -1406,6 +1446,7 @@ export default function ProjectDetailPage() {
               ),
             }}
           />
+          )}
         </div>
 
         {/* 分页器钉底:翻页后表格自动回顶,不用来回拖滚动条 */}
