@@ -9,6 +9,9 @@
     username 的表征行为(normalize_phone 剥空格 → 命中;UserCreateIn/
     ArtistAccountIn pattern 拒空格,两 API 链路不可达,仅直调可见);
     username=None 直调在重名预检 .lower() 即 AttributeError,零落库零审计。
+  - 冲突(P2-2):折叠预检 IN 等值双形态(11 位裸号 / 13 位 86 前缀),他人
+    username 折叠后与候选号任一形态等值即跳过(正反两向);新建者自己是 86
+    形态且无冲突仍绑,由 86 前缀表征用例回归保护。
   - 审计:phone_bound / user_created 的 actor_user_id 恰为建号人入参
     (既有 FakeAuditService 用 **_kw 吞掉了 actor,从未断言过);user_created
     的 auto_phone_bound 两态在新边界用例下再验一遍。
@@ -20,6 +23,9 @@
   test_ext_12_prefix_eleven_digits_not_hit            边界:12 开头不命中
   test_ext_dot_variant_username_binds                 边界:点号变体命中
   test_ext_86_prefix_username_binds                   边界:86 前缀命中(表征)
+  test_ext_holder_86_prefix_username_blocks_new_bind  冲突:他人持 86 形态(P2-2)
+  test_ext_reverse_86_form_new_user_skips_on_folded_conflict
+                                                      冲突:反向 86 形态新建(P2-2)
   test_ext_whitespace_username_direct_call_characterization
                                                       边界:直调带空格(表征)
   test_ext_username_none_raises_before_any_write      边界:None 直调零副作用
@@ -201,6 +207,66 @@ async def test_ext_86_prefix_username_binds(
     assert user.phone == CANDIDATE
     assert one(audit, "phone_bound")["details"]["new_masked"] == MASKED
     assert one(audit, "user_created")["details"]["auto_phone_bound"] is True
+
+
+# ─── P2-2 冲突:他人 username=86 前缀形态(phone=NULL)→ 新建裸号跳过 ──────────
+async def test_ext_holder_86_prefix_username_blocks_new_bind(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: Any,
+    perms: StubPermissions,
+    audit: RecordingAuditService,
+) -> None:
+    """P2-2 主场景(修复前折叠预检只比 11 位裸号 → 误绑 → 两账号「同号」并存):
+    存量 username=8613800138000(phone=NULL),新建 username=13800138000 → 候选
+    13800138000,他人折叠后 8613800138000 ∈ {candidate, 86+candidate} → 命中
+    跳过:照常建号、phone=None、无 phone_bound。与 test_ext_86_prefix_username_binds
+    (新建者自己是 86 形态、无冲突仍绑)互补,彼用例即「无冲突仍绑」的回归保护。"""
+    holder = User(name="86 形态持有者", username="8613800138000", phone=None)
+    async with factory() as db:
+        db.add(holder)
+        await db.commit()
+
+    user, _pw, _ = await provision(
+        monkeypatch, factory, perms, audit, username=CANDIDATE
+    )
+
+    assert user.username == CANDIDATE
+    assert user.phone is None, "他人持 86 前缀折叠同号 → 跳过绑定(P2-2)"
+    assert await users_count(factory) == 2, "冲突跳过但建号照常成功"
+    async with factory() as db:
+        kept = await db.get(User, holder.id)
+    assert kept is not None and kept.phone is None, "冲突不回填既有持有者"
+    assert events_of(audit, "phone_bound") == []
+    assert one(audit, "user_created")["details"]["auto_phone_bound"] is False
+
+
+# ─── P2-2 反向:存量 username=裸号,新建 username=86 前缀形态 → 折叠命中跳过 ───
+async def test_ext_reverse_86_form_new_user_skips_on_folded_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: Any,
+    perms: StubPermissions,
+    audit: RecordingAuditService,
+) -> None:
+    """反向:存量 username=13800138000(phone=NULL),新建 username=
+    8613800138000 → 新建者候选剥 86 前缀后 13800138000,他人折叠结果(裸号
+    本身)∈ IN 双形态 → 命中跳过:照常建号、phone=None、无 phone_bound。"""
+    holder = User(name="裸号持有者", username=CANDIDATE, phone=None)
+    async with factory() as db:
+        db.add(holder)
+        await db.commit()
+
+    user, _pw, _ = await provision(
+        monkeypatch, factory, perms, audit, username="8613800138000"
+    )
+
+    assert user.username == "8613800138000"
+    assert user.phone is None, "他人折叠裸号与候选同号 → 跳过绑定"
+    assert await users_count(factory) == 2, "冲突跳过但建号照常成功"
+    async with factory() as db:
+        kept = await db.get(User, holder.id)
+    assert kept is not None and kept.phone is None
+    assert events_of(audit, "phone_bound") == []
+    assert one(audit, "user_created")["details"]["auto_phone_bound"] is False
 
 
 # ─── 边界:直调传带空格 username(表征;两 API 链路不可达)────────────────────

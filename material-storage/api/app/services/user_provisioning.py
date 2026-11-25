@@ -167,9 +167,11 @@ async def provision_local_user(
     # ── 建号自动绑定大陆手机号(phone-auto-bind,2026-11-25)───────────────────
     # username 归一化后命中大陆手机号 → 直接绑定 users.phone(不发短信、无 Redis);
     # 冲突即跳过、建号照常成功(决策 D2,绝不 raise)。预检一条 SQL 双查:候选号被
-    # 他人 phone 占用 + 他人 username 归一化折叠(去 -/. 后同号;双层 func.replace
-    # 兼容 SQLite,勿 regexp_replace —— username pattern ^[a-zA-Z0-9._-]+$ 保证
-    # 无空格无 +,折叠只需去 - 和 .;username 为 NULL 时 replace 结果 NULL 不匹配)。
+    # 他人 phone 占用 + 他人 username 归一化折叠(去 -/. 后与候选号的 11 位裸号
+    # 或 13 位 86 前缀形态等值;双层 func.replace 兼容 SQLite,勿 regexp_replace ——
+    # username pattern ^[a-zA-Z0-9._-]+$ 保证无空格无 +,折叠后可达形态恰两种,
+    # IN 等值双查对齐 normalize_phone 全维度(P2-2);username 为 NULL 时
+    # replace 结果 NULL 不匹配)。
     candidate: str | None = None
     try:
         candidate = normalize_phone(username)
@@ -178,10 +180,16 @@ async def provision_local_user(
     auto_bound = False
     if candidate is not None:
         folded = func.replace(func.replace(User.username, "-", ""), ".", "")
+        # username 归一化可达形态仅两种(11 位裸号 / 13 位 86 前缀;pattern 无空格
+        # 无 +,D5):IN 等值双查对齐 normalize_phone 全维度,消除 86 前缀账号与
+        # 新绑号并存(P2-2)
         hit = (
             await db.execute(
                 select(User.id).where(
-                    or_(User.phone == candidate, folded == candidate),
+                    or_(
+                        User.phone == candidate,
+                        folded.in_([candidate, f"86{candidate}"]),
+                    ),
                     User.id != new_user.id,
                 ).limit(1)
             )
