@@ -84,6 +84,10 @@ export interface DirectoryUser {
   // 反查 join,列表批量回填非 N+1;存量无审计来源 / 创建人已删 → null,UI 显示「—」)。
   // 可选 —— 旧后端无此字段,消费侧 `?? '—'` 回落。DirectoryUserDetail 继承同名字段。
   created_by_name?: string | null;
+  // 绑定手机号(建号 username=大陆手机号自动绑定,2026-11-25):完整号回显,
+  // 编辑弹窗只读展示;列表/创建响应同字段但列表 UI 不展示。
+  // 可选 —— 旧后端无此字段,消费侧 falsy 回落(未绑显示「—」)。
+  phone?: string | null;
 }
 
 export interface DirectoryUserCreateOut extends DirectoryUser {
