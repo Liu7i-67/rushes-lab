@@ -12,6 +12,13 @@ import { useState } from 'react';
 import { http } from '../api/client';
 import type { Asset } from '../api/types';
 
+// color-mix() 支持检测(P2-1 渐变回退门控):老浏览器(<Chrome 111)不支持时,
+// 含 color-mix 的 background 声明会在 CSS 解析期整条丢弃。检测一次存模块级常量,
+// 不随渲染重复求值
+const supportsColorMix = typeof CSS !== 'undefined'
+  && typeof CSS.supports === 'function'
+  && CSS.supports('color', 'color-mix(in srgb, red 50%, transparent)');
+
 interface Props {
   asset: Asset;
   /** 点击打开详情时的下标(容器传入,语义与 AssetCardList.onOpen 的 index 一致) */
@@ -52,7 +59,13 @@ export function AssetWaterfallItem({
   const showImg = hasThumb && data?.url && !imgError;
 
   const handleClick = () => {
-    // selectable 时点击=多选切换(项目详情页语义);否则=打开详情(独立文件夹页语义)
+    // selectable 时点击=多选切换(项目详情页语义);否则=打开详情(独立文件夹页语义)。
+    // dev-only 漏配告警(P2-3):selectable 传了但 onToggle 未传(或反之)时点击会
+    // 静默 no-op,开发期直接提示;生产构建 DEV 恒 false 被静态消除,零行为变化
+    if (import.meta.env.DEV
+        && ((selectable && !onToggle) || (!selectable && !onOpen))) {
+      console.warn('[AssetWaterfallItem] selectable/onOpen 回调缺失', asset.id);
+    }
     if (selectable) onToggle?.(asset.id);
     else onOpen?.(index);
   };
@@ -61,7 +74,17 @@ export function AssetWaterfallItem({
     <div
       data-asset-id={asset.id}
       title={asset.filename}
+      role="button"
+      tabIndex={0}
       onClick={handleClick}
+      onKeyDown={(e) => {
+        // 键盘可达性(P2-4):Enter/Space 与点击同款 handleClick;Space 需
+        // preventDefault,否则按键会滚动页面。仅改交互,视觉零变化
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          handleClick();
+        }
+      }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       style={{
@@ -119,15 +142,25 @@ export function AssetWaterfallItem({
       )}
 
       {hover && (
-        // hover 浮层:底部渐变 + 文件名单行截断(渐变基于 --ms-ink 的 color-mix,不硬编码色值)
+        // hover 浮层:底部渐变 + 文件名单行截断。两层同位(P2-1):外层浮层带纯色
+        // 半透明回退底(rgba 硬编码:无令牌对应的遮罩色,非主题色),内层满尺寸 span
+        // 叠 --ms-ink 的 color-mix 渐变。老浏览器不支持 color-mix → 渐变整条声明
+        // 被丢弃,显示外层纯色;支持 color-mix 的浏览器按 supportsColorMix 跳过外层
+        // 纯色只渲染渐变(两层同显会让渐变顶部透明段透出纯色,柔和渐变变硬边色块)。
+        // 渐变层 zIndex:-1 落在外层背景之上、文件名文字之下,两种情况下都可读;
+        // 单行截断与现有视觉不变
         <span style={{
           position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 1,
           padding: '22px 10px 8px',
-          background: 'linear-gradient(to top, color-mix(in srgb, var(--ms-ink) 78%, transparent), transparent)',
+          background: supportsColorMix ? undefined : 'rgba(26, 26, 26, 0.72)',
           color: 'var(--ms-canvas)',
           fontSize: 12.5, lineHeight: 1.4,
           whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
         }}>
+          <span aria-hidden style={{
+            position: 'absolute', inset: 0, zIndex: -1,
+            background: 'linear-gradient(to top, color-mix(in srgb, var(--ms-ink) 78%, transparent), transparent)',
+          }} />
           {asset.filename}
         </span>
       )}

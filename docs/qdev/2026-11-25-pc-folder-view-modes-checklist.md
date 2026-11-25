@@ -82,7 +82,9 @@
     `repeat(2, minmax(0, 1fr))`(variant=large),gap 12px;列宽 = 容器等分,不随图片变形(决策 D4)。
 - [ ] **S-11** loading 占位
   - 命令:`grep -n "loading" src/components/AssetWaterfallList.tsx`
-  - 期望:`loading` 为 true 时渲染与列数一致的灰色占位瓦片(small→5 个、large→2 个)。
+  - 期望(口径已按实现修订 2026-11-25 修复轮):`loading` 为 true 时按列数均分渲染灰色占位
+    瓦片骨架,每列 2 片、共 small→10 个 / large→4 个(近似每页 30 条首屏的瀑布流观感;
+    原清单措辞「5 个/2 个」按实现更优口径修订,功能语义不变:等列数灰瓦片骨架)。
 - [ ] **S-12** compact 门控:两页面切换器仅在非 compact 渲染
   - 命令:`grep -n "useCompactViewport\|Segmented" src/pages/FolderDetailPage.tsx src/pages/ProjectDetailPage.tsx`
   - 期望:两页面均消费 `useCompactViewport()`(唯一定义在 `lib/use-viewports.ts`,页面内**不得**出现
@@ -143,7 +145,9 @@
 - [ ] **M-04** 详情模式渲染与改造前完全一致
   - 前置:可与改造前版本(主仓)同页面对照截图。
   - 步骤:独立文件夹页与项目详情页均切回「详情」档,逐块比对页顶、列表、分页器、Drawer。
-  - 期望:DOM 结构、样式、交互与改造前一致(回归红线,零视觉漂移)。
+  - 期望:列表/分页器/Drawer 区与改造前一致(回归红线,零视觉漂移);**页顶操作区按「上传
+    按钮区不变 + 右侧新增 Segmented 切换器」口径验收**(切换器在详情档必须常驻可见才能
+    切回,属需求自身使然,不算漂移;2026-11-25 修复轮注记)。
 
 ### 小图模式(功能点 4)
 
@@ -236,8 +240,10 @@
 - [ ] **M-18** 瀑布流模式分页正常
   - 前置:文件夹内文件 >30(至少 2 页);Network 开启。
   - 步骤:切「小图」→ 翻到第 2 页 → 翻回第 1 页;「大图」重复一遍;观察翻页瞬间。
-  - 期望:沿用 useAssets 每页 30 + 钉底 Pagination;翻页期间旧内容保留不白屏(keepPreviousData),
-    翻页后页码/总数正确,滚动回顶,Drawer 若开着则关闭;瓦片重新挂载时缩略图按缓存命中率
+  - 期望:沿用 useAssets 每页 30 + 钉底 Pagination;翻页期间**按「占位不白屏」口径验收**
+    (数据层 keepPreviousData,UI 层与详情模式口径一致地切换灰色占位瓦片,与 AssetCardList
+    的 Skeleton 同语义;2026-11-25 修复轮注记),翻页后页码/总数正确,滚动回顶,Drawer 若
+    开着则关闭;瓦片重新挂载时缩略图按缓存命中率
     正常显示。
 - [ ] **M-19** compact(<1024)视口无切换器、恒详情
   - 步骤:窗口缩到 <1024(或 DevTools 设备模拟),分别打开两个入口页面;再放大回 ≥1024。

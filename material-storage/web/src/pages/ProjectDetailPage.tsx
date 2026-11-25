@@ -17,7 +17,7 @@ import {
   Settings, Tags, Trash2, Type, Upload, Users as UsersIcon,
 } from 'lucide-react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ASSETS_PAGE_SIZE, useAssets, useDeleteAsset, useDeleteFolder, useDeleteProject,
   useDownloadLink, useFolder, useFolders, useMe, useMoveFolder, useProject, useTrashAssets,
@@ -107,6 +107,18 @@ export default function ProjectDetailPage() {
   // useMemo 包稳 `?? []` 兜底数组的引用(兜底时每 render 新建导致下游 useMemo 失效,规则建议的等价变换)
   const assetItems = useMemo(() => assets?.items ?? [], [assets]);
   const assetTotal = assets?.total ?? 0;
+  // 空态 JSX:桌面三视图的瀑布流 emptyText 与 Table locale.emptyText 共用同一常量
+  // (P2-2,照 FolderDetailPage emptyDesc 模式去重);文案与结构与拆分前逐字一致。
+  // compact 分支 AssetCardList 的空态是另一形态(带 textAlign),不在本次范围
+  const tableEmpty: ReactNode = (
+    <div style={{ padding: '60px 16px' }}>
+      <FileText size={32} strokeWidth={1.3}
+                style={{ color: 'var(--ms-hairline)' }} />
+      <div style={{
+        marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
+      }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
+    </div>
+  );
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   // PR-1: 批量文件名前缀 — 选中多个文件时统一加/去前缀
@@ -1399,15 +1411,7 @@ export default function ProjectDetailPage() {
                 selectedIds={selectedIds}
                 onToggle={(id) => setSelectedIds(prev =>
                   prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])}
-                emptyText={(
-                  <div style={{ padding: '60px 16px' }}>
-                    <FileText size={32} strokeWidth={1.3}
-                              style={{ color: 'var(--ms-hairline)' }} />
-                    <div style={{
-                      marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
-                    }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
-                  </div>
-                )}
+                emptyText={tableEmpty}
               />
             </div>
           )}
@@ -1434,17 +1438,7 @@ export default function ProjectDetailPage() {
               },
               style: { cursor: 'pointer' },
             })}
-            locale={{
-              emptyText: (
-                <div style={{ padding: '60px 16px' }}>
-                  <FileText size={32} strokeWidth={1.3}
-                            style={{ color: 'var(--ms-hairline)' }} />
-                  <div style={{
-                    marginTop: 12, fontSize: 13, color: 'var(--ms-ink-muted)',
-                  }}>{folder?.my_can_upload ? '空文件夹 — 上传文件开始' : '空文件夹(无上传权限,如需上传请联系项目管理员)'}</div>
-                </div>
-              ),
-            }}
+            locale={{ emptyText: tableEmpty }}
           />
           )}
         </div>
