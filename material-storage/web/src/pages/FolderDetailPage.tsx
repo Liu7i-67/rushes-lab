@@ -3,6 +3,9 @@
  * tap=open 单文件详情 bottom Drawer(‹ n/N › 切张,两端尺寸通用,不分分支)。
  * 盲搜跳转定位方案 B(§4.2):URL ?asset=<id> 深链 → locate_index 定位正确页码 →
  * 跳页 + 滚动 + 高亮 + 自动开详情 Drawer;一次性消费防重弹,刷新/分享可完整重放。
+ * PC 三视图切换(2026-11-25 方案 docs/qdev/2026-11-25-pc-folder-view-modes.md §3.1 D,
+ * PC-only 决策 D5):≥1024 视口顶部 Segmented 切 详情/小图/大图,small/large 走
+ * AssetWaterfallList(模式持久化 localStorage);compact(<1024)不渲染切换器恒为详情,现状零改动。
  */
 import { App, Button, Drawer, Empty, Pagination, Skeleton, Space, Tag, Tooltip, Typography } from 'antd';
 import { KeyOutlined, UploadOutlined } from '@ant-design/icons';
@@ -13,6 +16,9 @@ import { ASSETS_PAGE_SIZE, UUID_RE, useAssets, useFolder, useLocateAsset, useMe 
 import { AppBreadcrumb } from '../components/AppBreadcrumb';
 import { AssetCardList } from '../components/AssetCardList';
 import { AssetSummaryPanel } from '../components/AssetSummaryPanel';
+import { AssetWaterfallList } from '../components/AssetWaterfallList';
+import { FolderViewModeSwitch } from '../components/FolderViewModeSwitch';
+import { useViewMode } from '../hooks/use-view-mode';
 import { useKeyboardViewportHeight } from '../lib/use-keyboard-visible';
 import { useCompactViewport } from '../lib/use-viewports';
 import { scrollMainToTop } from '../lib/main-scroll';
@@ -24,6 +30,8 @@ export default function FolderDetailPage() {
   const { data: me } = useMe();
   const { message } = App.useApp();
   const compact = useCompactViewport();
+  // 视图模式(持久化 localStorage):compact 下恒 'detail' 走现有卡片分支,只切 JSX 不切 hook
+  const [viewMode, setViewMode] = useViewMode();
   // 服务端分页:此前列表被后端默认 limit=100 静默截断,超出的旧文件看不见。
   // 切夹回第一页用 render 期比较旧值重置(不走 setState-in-effect)
   const [page, setPage] = useState(1);
@@ -65,6 +73,10 @@ export default function FolderDetailPage() {
   // 后端 /assets/uploads 对每个上传都强制 can_upload;这里按 folder 权限禁用按钮,
   // 避免无权限用户(select 完文件才被 403)白走流程
   const canUpload = folder?.my_can_upload === true;
+  // 空态文案:外层 total===0 Empty 与瀑布流 emptyText 共用(口径与现状一致)
+  const emptyDesc = canUpload
+    ? '空文件夹 — 点上传文件添加内容'
+    : '空文件夹(无上传权限,如需上传请联系项目管理员)';
   // 键盘弹起:Drawer 收缩为 visualViewport.height - 顶栏(56)
   const drawerHeight = kbViewportHeight != null ? kbViewportHeight - 56 : 'min(72vh, 72dvh)';
   const detailAsset = detailIndex != null ? items[detailIndex] : null;
@@ -153,32 +165,57 @@ export default function FolderDetailPage() {
         ...(compact ? { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } : {}),
       }}>{folder?.minio_prefix}</Typography.Paragraph>
 
-      <Space style={{ marginBottom: 12 }}>
-        <Tooltip title={canUpload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
-          <Button type="primary" icon={<UploadOutlined />} disabled={!canUpload}
-                  onClick={() => folderId && upload.open(folderId)}>
-            上传文件
-          </Button>
-        </Tooltip>
-        {canUpload && (
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            后台上传:关掉抽屉/换页面不打断,右下浮窗可查进度
-          </Typography.Text>
+      {/* 顶部操作区:上传按钮(左)+ PC 三视图切换器(右对齐);compact 不渲染切换器、
+          恒为详情模式现状(决策 D5,PC-only) */}
+      <div style={{
+        marginBottom: 12,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        gap: 12, flexWrap: 'wrap',
+      }}>
+        <Space>
+          <Tooltip title={canUpload ? '' : '无上传权限 — 请联系项目管理员授 uploader 角色'}>
+            <Button type="primary" icon={<UploadOutlined />} disabled={!canUpload}
+                    onClick={() => folderId && upload.open(folderId)}>
+              上传文件
+            </Button>
+          </Tooltip>
+          {canUpload && (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              后台上传:关掉抽屉/换页面不打断,右下浮窗可查进度
+            </Typography.Text>
+          )}
+        </Space>
+        {!compact && (
+          <FolderViewModeSwitch value={viewMode} onChange={setViewMode} />
         )}
-      </Space>
+      </div>
 
       {isLoading ? (
         <Skeleton active />
       ) : total === 0 ? (
-        <Empty description={canUpload ? '空文件夹 — 点上传文件添加内容' : '空文件夹(无上传权限,如需上传请联系项目管理员)'} />
+        <Empty description={emptyDesc} />
       ) : (
         <>
-          <AssetCardList
-            assets={items}
-            loading={isFetching}
-            onOpen={setDetailIndex}
-            highlightId={highlightId ?? undefined}
-          />
+          {/* compact(<1024)或详情模式:现有 AssetCardList 分支现状零改动;
+              PC 小图/大图:AssetWaterfallList(onOpen/highlightId 与卡片列表同 index 语义,
+              瀑布流瓦片自带 data-asset-id,深链 scrollIntoView 定位逻辑无需改) */}
+          {compact || viewMode === 'detail' ? (
+            <AssetCardList
+              assets={items}
+              loading={isFetching}
+              onOpen={setDetailIndex}
+              highlightId={highlightId ?? undefined}
+            />
+          ) : (
+            <AssetWaterfallList
+              assets={items}
+              variant={viewMode}
+              loading={isFetching}
+              onOpen={setDetailIndex}
+              highlightId={highlightId ?? undefined}
+              emptyText={<Empty description={emptyDesc} />}
+            />
+          )}
           {/* 分页器吸附滚动容器底:翻页后自动回顶,不用滚到底找页码;
               compact 下滚动容器是 main(钉底 = TabBar 上沿),PC 是 window,语义一致 */}
           <div style={{
