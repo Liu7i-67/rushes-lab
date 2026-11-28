@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     # ─── presigned URL TTL ────────────────────────────────────────────────────
     presigned_normal_ttl_seconds: int = 900       # 15 min,普通文件
     presigned_sensitive_ttl_seconds: int = 600    # 10 min,敏感文件(配合 OpenFGA grant duration)
+    # 仅分片 PUT 签名(GET /uploads/{id}/parts/{n});7200s 支撑 iOS 后台预签窗口
+    # (挂起期间分片可能在签名后较久才真正发起 PUT,900s 极端限速下不够,
+    # 见 docs/qdev/2026-11-27-ios-bg-upload.md §3 F8);普通下载/缩略图仍用
+    # presigned_normal_ttl_seconds,不随本次放宽
+    presigned_part_ttl_seconds: int = 7200        # 2 h,分片上传 PUT 签名
 
     # ─── audit 留存 ───────────────────────────────────────────────────────────
     audit_retention_days: int = 365

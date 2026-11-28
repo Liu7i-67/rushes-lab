@@ -10,6 +10,12 @@
 /// 前台服务联动(R4d):活跃任务数(queued+running)经 [TransferForeground.sync]
 /// 上报,入队/收尾/取消/移除/清理/恢复全状态机变化点覆盖,全终态必停。
 ///
+/// feat/ios-bg-upload F5/D6 起上传任务带**会话三元组**:enqueue 时把
+/// req.onSessionCreated 包装为「写回 task 三字段+调度持久化+调原回调」,
+/// worker 内 create 成功即写回入快照;恢复路径对「本次恢复的中断 ∧ 有
+/// uploadId」任务经 [setInterruptedAbort] 注入的回调尽力 DELETE abort 服务端
+/// multipart(fire-and-forget,失败只记日志,绝不阻塞恢复)。
+///
 /// 不引状态管理框架,裸 ChangeNotifier;worker 注入 + 时钟注入 + 无真实 IO,
 /// PC 可用假时钟单测状态机/FIFO/取消/重试。测试可自建实例(store/去抖定时器
 /// 可注入),页面默认挂 [I]。
@@ -35,9 +41,9 @@ class TransferQueue extends ChangeNotifier {
     DateTime Function()? now,
     TransferStore? store,
     void Function(Duration, void Function())? schedule,
-  })  : _now = now ?? DateTime.now,
-        _schedule = schedule ?? _defaultSchedule,
-        _concurrency = concurrency ?? 2 {
+  }) : _now = now ?? DateTime.now,
+       _schedule = schedule ?? _defaultSchedule,
+       _concurrency = concurrency ?? 2 {
     _store = store;
   }
 
@@ -69,21 +75,38 @@ class TransferQueue extends ChangeNotifier {
   final _tokens = <String, CancelToken>{};
   var _seq = 0;
 
+  // ── F5/D6(feat/ios-bg-upload):会话三元组写回与恢复中断 abort ──────────
+
+  /// 「恢复中断尽力 abort 服务端会话」回调(可注入;null=未接线/关闭)。
+  /// main 侧在 session api 就绪(探活激活+登录/cookie 恢复)后注入。
+  Future<void> Function(String uploadId, String bucket, String key)?
+  _interruptedAbort;
+
+  /// 待 abort 的恢复中断会话。恢复(attachStore)早于 session api 就绪是常态
+  /// (冷启动先读快照、后探活/登录),此时无回调可发——先挂起,接线即补发;
+  /// 始终未接线(如一直未登录)则自然滞留不发,不崩、不阻塞任何路径。
+  final _pendingInterruptedAborts =
+      <({String uploadId, String bucket, String key})>[];
+
+  /// req 入队时的**原始** onSessionCreated(包装前)。retry 重入队前归还,
+  /// 再按新任务重新包装——防旧包装闭包把三元组写回已移除的旧任务。
+  final _originalSessionCallbacks =
+      <String, void Function(TransferUploadSession)>{};
+
   List<TransferTask> get tasks => List.unmodifiable(_tasks);
 
-  TransferTask? byId(String id) =>
-      _tasks.where((t) => t.id == id).firstOrNull;
+  TransferTask? byId(String id) => _tasks.where((t) => t.id == id).firstOrNull;
 
   // ── 派生计数(宫格迷你条 / TabBar badge 的唯一数据源,单测钉死口径)────
 
   /// running 总数(上/下载混排)= TabBar 传输格 badge。
   int get runningCount => _countOf(TransferStatus.running);
 
-  int runningCountOf(TransferKind kind) =>
-      _tasks.where((t) => t.kind == kind && t.status == TransferStatus.running).length;
+  int runningCountOf(TransferKind kind) => _tasks
+      .where((t) => t.kind == kind && t.status == TransferStatus.running)
+      .length;
 
-  int _countOf(TransferStatus s) =>
-      _tasks.where((t) => t.status == s).length;
+  int _countOf(TransferStatus s) => _tasks.where((t) => t.status == s).length;
 
   /// 上传任务总数(全状态)——迷你条分母 m。
   int get uploadCount =>
@@ -91,16 +114,19 @@ class TransferQueue extends ChangeNotifier {
 
   /// 已完成(done)上传数——迷你条分子 n。
   int get uploadDoneCount => _tasks
-      .where((t) =>
-          t.kind == TransferKind.upload && t.status == TransferStatus.done)
+      .where(
+        (t) => t.kind == TransferKind.upload && t.status == TransferStatus.done,
+      )
       .length;
 
   /// 活动上传(queued+running)数——迷你条显隐条件(有活动上传才显示)。
   int get activeUploadCount => _tasks
-      .where((t) =>
-          t.kind == TransferKind.upload &&
-          (t.status == TransferStatus.queued ||
-              t.status == TransferStatus.running))
+      .where(
+        (t) =>
+            t.kind == TransferKind.upload &&
+            (t.status == TransferStatus.queued ||
+                t.status == TransferStatus.running),
+      )
       .length;
 
   /// 迷你条字节进度 0..1:done 上传按满格计 + 活动上传按 doneBytes,
@@ -151,9 +177,19 @@ class TransferQueue extends ChangeNotifier {
           final n = int.parse(m.group(1)!);
           if (n > _seq) _seq = n;
         }
+        // F5/D6:本次恢复的中断任务且带会话三元组 → 挂起待 abort(无 uploadId
+        // 的历史中断记录/终态带会话记录均不触发;回调就绪即补发,见下方 [_tryFireInterruptedAborts])
+        if (t.interruptedByRestore && t.uploadId != null) {
+          _pendingInterruptedAborts.add((
+            uploadId: t.uploadId!,
+            bucket: t.uploadBucket ?? '',
+            key: t.uploadKey ?? '',
+          ));
+        }
       }
       AppLog.info('transfer', '快照恢复 ${restored.length} 条历史记录');
     }
+    _tryFireInterruptedAborts(); // F5/D6:回调已接线(晚恢复场景)则立即补发
     if (raw != null) {
       // 快照原文存在即重写一份一致快照(终态 roundtrip 恒等:encode∘decode 对
       // 纯终态快照=identity;坏 JSON → 空快照;非终态改写 → 一致快照——均绕过
@@ -162,6 +198,31 @@ class TransferQueue extends ChangeNotifier {
     }
     _syncForeground();
     notifyListeners();
+  }
+
+  /// 注入「恢复中断尽力 abort」回调(F5/D6,两平台通用;null=关闭)。
+  /// 注入非空回调即补发挂起中的待 abort 会话:main 在 session api 就绪后才
+  /// 接线,而快照恢复(attachStore)先于其发生——挂起→接线补发保证恢复路径
+  /// 最终拿得到;始终未注入则不 abort,不影响恢复。
+  void setInterruptedAbort(
+    Future<void> Function(String uploadId, String bucket, String key)? cb,
+  ) {
+    _interruptedAbort = cb;
+    if (cb != null) _tryFireInterruptedAborts();
+  }
+
+  /// 补发挂起的中断会话 abort(fire-and-forget:失败只记 AppLog,绝不向上
+  /// 传播;无回调或无挂起则跳过)。发过即清,不重复 abort 同一会话。
+  void _tryFireInterruptedAborts() {
+    final cb = _interruptedAbort;
+    if (cb == null || _pendingInterruptedAborts.isEmpty) return;
+    final batch = List.of(_pendingInterruptedAborts);
+    _pendingInterruptedAborts.clear();
+    for (final s in batch) {
+      cb(s.uploadId, s.bucket, s.key).catchError((Object e) {
+        AppLog.error('transfer', '恢复中断:abort 服务端会话失败(忽略)', e);
+      });
+    }
   }
 
   /// 状态变化点统一走此:**变化时刻即编码**快照入 [_pendingSnapshot](状态=
@@ -195,7 +256,9 @@ class TransferQueue extends ChangeNotifier {
   /// /未初始化时 no-op。
   void _syncForeground() {
     TransferForeground.I
-        .sync(_countOf(TransferStatus.queued) + _countOf(TransferStatus.running))
+        .sync(
+          _countOf(TransferStatus.queued) + _countOf(TransferStatus.running),
+        )
         .ignore();
   }
 
@@ -205,16 +268,36 @@ class TransferQueue extends ChangeNotifier {
   String enqueue(TransferRequest req) {
     _seq += 1;
     final id = 't$_seq';
-    _tasks.insert(
-        0,
-        TransferTask(
-          id: id,
-          kind: req.kind,
-          filename: req.filename,
-          where: req.where,
-          totalBytes: req.totalBytes,
-          startedAt: _now(),
-        ));
+    final task = TransferTask(
+      id: id,
+      kind: req.kind,
+      filename: req.filename,
+      where: req.where,
+      totalBytes: req.totalBytes,
+      startedAt: _now(),
+    );
+    _tasks.insert(0, task);
+    // F5(ios-bg-upload):包装会话回写钩子——worker 内 create 成功桥接三元组
+    // 时,写回 task 三字段并调度快照持久化(仅值变化时;三元组只建一次,同值
+    // 重复回调不重排写盘),再调入队方原回调。原回调留存 [_originalSessionCallbacks],
+    // retry 重入队前归还后按新任务重新包装(旧闭包捕获旧任务,不归还会把
+    // 三元组写回已移除的任务)。
+    final originalSessionCb = req.onSessionCreated;
+    if (originalSessionCb != null) {
+      _originalSessionCallbacks[id] = originalSessionCb;
+      req.onSessionCreated = (session) {
+        final changed =
+            task.uploadId != session.uploadId ||
+            task.uploadBucket != session.bucket ||
+            task.uploadKey != session.key;
+        task
+          ..uploadId = session.uploadId
+          ..uploadBucket = session.bucket
+          ..uploadKey = session.key;
+        if (changed) _schedulePersist(); // R4c:三元组入快照(变化点去抖口径)
+        originalSessionCb(session);
+      };
+    }
     _requests[id] = req;
     _waiting.add(id);
     // P8(mobile-ux-polish):首次建传输任务才请求系统通知权限(app 启动不弹;
@@ -262,6 +345,9 @@ class TransferQueue extends ChangeNotifier {
     }
     _tasks.remove(task);
     _requests.remove(id);
+    // F5:归还原始会话回调,重入队按新任务重新包装(见 enqueue 注)
+    final originalSessionCb = _originalSessionCallbacks.remove(id);
+    if (originalSessionCb != null) req.onSessionCreated = originalSessionCb;
     _schedulePersist(); // R4c:旧任务移出列表,快照更新(新任务由 enqueue 落)
     return enqueue(req);
   }
@@ -272,6 +358,7 @@ class TransferQueue extends ChangeNotifier {
     if (task == null || !task.status.isTerminal) return;
     _tasks.remove(task);
     _requests.remove(id);
+    _originalSessionCallbacks.remove(id); // F5:防映射随任务残留累积
     _tokens.remove(id);
     _schedulePersist(); // R4c
     notifyListeners();
@@ -282,6 +369,7 @@ class TransferQueue extends ChangeNotifier {
     _tasks.removeWhere((t) {
       if (!t.status.isTerminal) return false;
       _requests.remove(t.id);
+      _originalSessionCallbacks.remove(t.id); // F5:防映射随任务残留累积
       return true;
     });
     _schedulePersist(); // R4c
@@ -326,19 +414,21 @@ class TransferQueue extends ChangeNotifier {
       _settle(id, TransferStatus.failed, _errMsg(e));
       return;
     }
-    running.then((_) {
-      _settle(id, TransferStatus.done, null);
-    }).catchError((Object e) {
-      // 取消竞态:取消已落终态,worker 的事后异常(含 abort 失败)不覆盖取消态
-      if (task.status == TransferStatus.canceled) return;
-      if (e is UploadAmbiguousException) {
-        // §4.1:complete 响应丢失 → failed+特定文案,禁自动重传(本队列本就
-        // 无自动重试;文案提醒用户先核实再手动操作)
-        _settle(id, TransferStatus.failed, '可能已上传,请先在素材列表核实');
-      } else {
-        _settle(id, TransferStatus.failed, _errMsg(e));
-      }
-    });
+    running
+        .then((_) {
+          _settle(id, TransferStatus.done, null);
+        })
+        .catchError((Object e) {
+          // 取消竞态:取消已落终态,worker 的事后异常(含 abort 失败)不覆盖取消态
+          if (task.status == TransferStatus.canceled) return;
+          if (e is UploadAmbiguousException) {
+            // §4.1:complete 响应丢失 → failed+特定文案,禁自动重传(本队列本就
+            // 无自动重试;文案提醒用户先核实再手动操作)
+            _settle(id, TransferStatus.failed, '可能已上传,请先在素材列表核实');
+          } else {
+            _settle(id, TransferStatus.failed, _errMsg(e));
+          }
+        });
   }
 
   void _settle(String id, TransferStatus status, String? error) {
@@ -349,7 +439,9 @@ class TransferQueue extends ChangeNotifier {
       task
         ..status = status
         ..error = error
-        ..doneBytes = status == TransferStatus.done ? task.totalBytes : task.doneBytes;
+        ..doneBytes = status == TransferStatus.done
+            ? task.totalBytes
+            : task.doneBytes;
       if (status == TransferStatus.failed) {
         AppLog.error('transfer', '任务失败 ${task.filename}', error);
       }
@@ -358,14 +450,18 @@ class TransferQueue extends ChangeNotifier {
       // downloads.dart 收尾处带保存摘要上报,此处不再重复(防双份)。
       if (status == TransferStatus.failed) {
         Notifier.I.taskFinished(
-            kind: task.kind,
-            ok: false,
-            filename: task.filename,
-            detail: error ?? '传输失败');
+          kind: task.kind,
+          ok: false,
+          filename: task.filename,
+          detail: error ?? '传输失败',
+        );
       } else if (status == TransferStatus.done &&
           task.kind == TransferKind.upload) {
         Notifier.I.taskFinished(
-            kind: task.kind, ok: true, filename: task.filename);
+          kind: task.kind,
+          ok: true,
+          filename: task.filename,
+        );
       }
     }
     _pump();
@@ -379,8 +475,8 @@ class TransferQueue extends ChangeNotifier {
   /// 其余(DioException 断网/超时、StateError 等)统一落中文兜底——传输队列
   /// 卡片不再出现「DioException …」英文裸渲染。
   static String _errMsg(Object e) => switch (e) {
-        ApiException(:final message) => message,
-        SaveAbortException(:final message) => message,
-        _ => errorMessage(e, '传输失败,请稍后重试'),
-      };
+    ApiException(:final message) => message,
+    SaveAbortException(:final message) => message,
+    _ => errorMessage(e, '传输失败,请稍后重试'),
+  };
 }

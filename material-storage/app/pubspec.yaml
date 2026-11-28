@@ -52,6 +52,13 @@ dependencies:
   # open_filex — F2-6 APK 下载完成后调系统安装器(type=application/vnd.android.package-archive)
   open_filex: ^5.0.0
   flutter_live_motion: ^0.1.0
+  # feat/ios-bg-upload 批新增(F2,用途+批次):
+  # background_downloader — iOS 分片 PUT 走系统 background URLSession:App 切后台
+  #   被挂起后传输由系统网络进程接管,修复 dio 切后台断流。iOS 经
+  #   bg_part_put_channel 构造 binary PUT UploadTask 入队原生队列;Android/
+  #   其他平台仍走 dio_part_put_channel 零行为变化。经典 API
+  #   (enqueue+registerCallbacks);9.6.x 无需 UIBackgroundModes。
+  background_downloader: ^9.6.6
 
 dev_dependencies:
   flutter_test:
