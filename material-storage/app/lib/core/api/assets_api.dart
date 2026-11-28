@@ -24,6 +24,8 @@ class AssetsApi {
   // ── 上传三步编排(B3)→ assets_upload_api.dart 同名委托(API 面不变)──
 
   /// livp 小包直传;签名/清理/complete 丢失语义见 [AssetsUploadApi.uploadBytes]。
+  /// onSessionCreated(feat/ios-bg-upload 包 D 会话持久化桥):create 成功后
+  /// 回调一次(uploadId/bucket/key 三元组)。
   Future<Asset> uploadBytes({
     required String folderId,
     required String filename,
@@ -31,6 +33,7 @@ class AssetsApi {
     String contentType = 'application/zip',
     CancelToken? cancelToken,
     void Function(int done, int total)? onPartsDone,
+    void Function(String uploadId, String bucket, String key)? onSessionCreated,
   }) => _upload.uploadBytes(
     folderId: folderId,
     filename: filename,
@@ -38,6 +41,7 @@ class AssetsApi {
     contentType: contentType,
     cancelToken: cancelToken,
     onPartsDone: onPartsDone,
+    onSessionCreated: onSessionCreated,
   );
 
   /// 流式分片上传;[AssetsUploadApi.uploadFile]。
@@ -49,6 +53,7 @@ class AssetsApi {
     CancelToken? cancelToken,
     int partSize = MsApi.partSize,
     void Function(int done, int total)? onProgress,
+    void Function(String uploadId, String bucket, String key)? onSessionCreated,
   }) => _upload.uploadFile(
     folderId: folderId,
     filename: filename,
@@ -57,7 +62,14 @@ class AssetsApi {
     cancelToken: cancelToken,
     partSize: partSize,
     onProgress: onProgress,
+    onSessionCreated: onSessionCreated,
   );
+
+  /// 尽力 abort 悬挂 multipart(feat/ios-bg-upload 包 D 恢复中断接线:
+  /// main.dart `setInterruptedAbort` → `api.assets.abortUpload`)。
+  /// 语义见 [AssetsUploadApi.abortUpload]。
+  Future<void> abortUpload(String uploadId, String bucket, String key) =>
+      _upload.abortUpload(uploadId, bucket, key);
 
   /// 分片区间表(纯函数)→ [AssetsUploadApi.partRanges]。
   static List<(int, int, int)> partRanges(int size, int partSize) =>

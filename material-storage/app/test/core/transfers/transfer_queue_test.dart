@@ -2,6 +2,8 @@
 /// (第 3 个任务等待,完成即补位)/ 取消语义(token 触发,abort 失败不阻塞
 /// 取消态)/ 重试=从头重新入队(非续传)/ 清已完成只清终态 / complete 响应
 /// 丢失文案+禁自动重传 / 迷你条 n/m 与 badge 口径。注入 worker+假时钟,无真实 IO。
+/// feat/ios-bg-upload F5 追加:会话三元组写回包装(running 中桥接不扰状态机,
+/// 取消后三元组保留供对账;retry 后新任务重新包装)。
 library;
 
 import 'dart:async';
@@ -21,13 +23,15 @@ void main() {
     TransferKind kind = TransferKind.upload,
     int total = 100,
     required TransferWorker worker,
-  }) =>
-      TransferRequest(
-          kind: kind,
-          filename: name,
-          where: '项目A/夹B',
-          totalBytes: total,
-          worker: worker);
+    void Function(TransferUploadSession session)? onSessionCreated,
+  }) => TransferRequest(
+    kind: kind,
+    filename: name,
+    where: '项目A/夹B',
+    totalBytes: total,
+    worker: worker,
+    onSessionCreated: onSessionCreated,
+  );
 
   /// 排空微任务:worker 的 then/catchError 落地
   Future<void> drain([int ticks = 6]) async {
@@ -40,13 +44,18 @@ void main() {
     final q = TransferQueue(now: () => fixedNow);
     final gate = Completer<void>();
     final progressSeen = <int>[];
-    final id = q.enqueue(req('a', worker: (p, token) async {
-      // worker 在 enqueue 返回前已同步启动:此刻队列唯一任务即本任务且已 running
-      expect(q.tasks.single.status, TransferStatus.running);
-      p(40);
-      progressSeen.add(q.tasks.single.doneBytes);
-      await gate.future;
-    }));
+    final id = q.enqueue(
+      req(
+        'a',
+        worker: (p, token) async {
+          // worker 在 enqueue 返回前已同步启动:此刻队列唯一任务即本任务且已 running
+          expect(q.tasks.single.status, TransferStatus.running);
+          p(40);
+          progressSeen.add(q.tasks.single.doneBytes);
+          await gate.future;
+        },
+      ),
+    );
     expect(q.tasks.single.status, TransferStatus.running);
     expect(progressSeen, [40]);
     expect(q.byId(id)!.startedAt, fixedNow);
@@ -59,22 +68,27 @@ void main() {
 
   test('状态机:worker 抛 ApiException → failed,error 透传 detail', () async {
     final q = TransferQueue(now: () => fixedNow);
-    final id = q.enqueue(req('b',
-        worker: (_, _) async => throw ApiException(409, '该文件夹已存在同名文件')));
+    final id = q.enqueue(
+      req('b', worker: (_, _) async => throw ApiException(409, '该文件夹已存在同名文件')),
+    );
     await drain();
     expect(q.byId(id)!.status, TransferStatus.failed);
     expect(q.byId(id)!.error, '该文件夹已存在同名文件');
   });
 
-  test('worker 同步抛(P2-5 防御):落该任务 failed,不沿 enqueue 炸穿,队列照常可用',
-      () async {
+  test('worker 同步抛(P2-5 防御):落该任务 failed,不沿 enqueue 炸穿,队列照常可用', () async {
     final q = TransferQueue(now: () => fixedNow);
     Object? leaked;
     try {
       // 非 async 闭包首行同步 throw:修复前会沿 _pump→enqueue 同步抛出
-      q.enqueue(req('sync', worker: (p, t) {
-        throw StateError('同步抛');
-      }));
+      q.enqueue(
+        req(
+          'sync',
+          worker: (p, t) {
+            throw StateError('同步抛');
+          },
+        ),
+      );
     } catch (e) {
       leaked = e;
     }
@@ -82,8 +96,11 @@ void main() {
     expect(leaked, isNull, reason: '同步异常不得炸穿入队方');
     expect(q.byId(q.tasks.single.id)!.status, TransferStatus.failed);
     // P2-5:非 ApiException 异常统一中文兜底,不再裸渲染英文异常对象文案
-    expect(q.tasks.single.error, '传输失败,请稍后重试',
-        reason: 'StateError 等传输层异常落中文兜底(无英文异常字样)');
+    expect(
+      q.tasks.single.error,
+      '传输失败,请稍后重试',
+      reason: 'StateError 等传输层异常落中文兜底(无英文异常字样)',
+    );
     // 队列状态机未破:后续任务正常跑满生命周期
     final ok = q.enqueue(req('ok', worker: (p, t) async {}));
     await drain();
@@ -99,10 +116,13 @@ void main() {
       'd': Completer<void>(),
     };
     final ids = <String, String>{};
-    TransferRequest gated(String n) => req(n, worker: (p, t) async {
-          p(10);
-          await gates[n]!.future;
-        });
+    TransferRequest gated(String n) => req(
+      n,
+      worker: (p, t) async {
+        p(10);
+        await gates[n]!.future;
+      },
+    );
     ids['a'] = q.enqueue(gated('a'));
     ids['b'] = q.enqueue(gated('b'));
     ids['c'] = q.enqueue(gated('c'));
@@ -131,21 +151,31 @@ void main() {
     final tokens = <String, CancelToken>{};
     final ids = <String, String>{};
     void cancellable(String name) {
-      ids[name] = q.enqueue(req(name, worker: (p, token) async {
-        tokens[name] = token;
-        p(10);
-        while (!token.isCancelled) {
-          await Future<void>.delayed(const Duration(milliseconds: 1));
-        }
-        throw StateError('模拟 abort 清理也失败'); // 尽力 abort 失败
-      }));
+      ids[name] = q.enqueue(
+        req(
+          name,
+          worker: (p, token) async {
+            tokens[name] = token;
+            p(10);
+            while (!token.isCancelled) {
+              await Future<void>.delayed(const Duration(milliseconds: 1));
+            }
+            throw StateError('模拟 abort 清理也失败'); // 尽力 abort 失败
+          },
+        ),
+      );
     }
 
     cancellable('a');
     cancellable('b');
-    final c = q.enqueue(req('c', worker: (p, t) async {
-      await Completer<void>().future; // 永不完成
-    }));
+    final c = q.enqueue(
+      req(
+        'c',
+        worker: (p, t) async {
+          await Completer<void>().future; // 永不完成
+        },
+      ),
+    );
     expect(q.runningCount, 2);
     expect(q.byId(c)!.status, TransferStatus.queued);
 
@@ -184,15 +214,20 @@ void main() {
     final q = TransferQueue(now: () => fixedNow);
     var runs = 0;
     final second = Completer<void>();
-    final id = q.enqueue(req('a', worker: (p, token) async {
-      runs += 1;
-      if (runs == 1) {
-        p(60);
-        throw StateError('boom'); // 首跑推进到 60 后失败
-      }
-      p(30); // 重跑从零重报(非从 60 续传)
-      await second.future;
-    }));
+    final id = q.enqueue(
+      req(
+        'a',
+        worker: (p, token) async {
+          runs += 1;
+          if (runs == 1) {
+            p(60);
+            throw StateError('boom'); // 首跑推进到 60 后失败
+          }
+          p(30); // 重跑从零重报(非从 60 续传)
+          await second.future;
+        },
+      ),
+    );
     await drain();
     expect(q.byId(id)!.status, TransferStatus.failed);
     expect(q.byId(id)!.doneBytes, 60);
@@ -223,14 +258,17 @@ void main() {
   test('清已完成只清终态:queued/running 保留,done/failed/canceled 移除', () async {
     final q = TransferQueue(now: () => fixedNow);
     final gates = List.generate(2, (_) => Completer<void>());
-    final running1 = q.enqueue(req('r1',
-        total: 100, worker: (p, t) async => await gates[0].future));
-    final running2 = q.enqueue(req('r2',
-        total: 100, worker: (p, t) async => await gates[1].future));
+    final running1 = q.enqueue(
+      req('r1', total: 100, worker: (p, t) async => await gates[0].future),
+    );
+    final running2 = q.enqueue(
+      req('r2', total: 100, worker: (p, t) async => await gates[1].future),
+    );
     // 两个槽位已占满 → 以下均排队
     final doneId = q.enqueue(req('done', worker: (p, t) async {}));
     final failedId = q.enqueue(
-        req('failed', worker: (p, t) async => throw StateError('x')));
+      req('failed', worker: (p, t) async => throw StateError('x')),
+    );
     await q.cancel(doneId); // 排队期取消 → 直接终态,worker 不启动
     expect(q.byId(doneId)!.status, TransferStatus.canceled);
 
@@ -243,8 +281,7 @@ void main() {
     expect(q.byId(doneId), isNull, reason: 'canceled 清除');
     expect(q.byId(failedId), isNull, reason: 'failed 清除');
     expect(q.byId(running1), isNull, reason: 'done 清除');
-    expect(q.byId(running2)!.status, TransferStatus.running,
-        reason: '活动任务保留');
+    expect(q.byId(running2)!.status, TransferStatus.running, reason: '活动任务保留');
     gates[1].complete();
     await drain();
   });
@@ -252,9 +289,14 @@ void main() {
   test('remove 仅终态可移除', () async {
     final q = TransferQueue(now: () => fixedNow);
     final gate = Completer<void>();
-    final running = q.enqueue(req('r', worker: (p, t) async {
-      await gate.future;
-    }));
+    final running = q.enqueue(
+      req(
+        'r',
+        worker: (p, t) async {
+          await gate.future;
+        },
+      ),
+    );
     q.remove(running); // 活动态拒绝
     expect(q.byId(running), isNotNull);
     await q.cancel(running);
@@ -265,11 +307,14 @@ void main() {
 
   test('complete 响应丢失(§4.1):failed+「可能已上传」文案,禁自动重传', () async {
     final q = TransferQueue(now: () => fixedNow);
-    final id = q.enqueue(req(
-      'v.mp4',
-      worker: (p, t) async => throw UploadAmbiguousException(DioException(
-          requestOptions: RequestOptions(path: '/complete'))),
-    ));
+    final id = q.enqueue(
+      req(
+        'v.mp4',
+        worker: (p, t) async => throw UploadAmbiguousException(
+          DioException(requestOptions: RequestOptions(path: '/complete')),
+        ),
+      ),
+    );
     await drain();
     final t = q.byId(id)!;
     expect(t.status, TransferStatus.failed);
@@ -284,13 +329,17 @@ void main() {
     var i = 0;
     String add({TransferKind kind = TransferKind.upload}) {
       final n = i++;
-      return q.enqueue(req('f$n',
+      return q.enqueue(
+        req(
+          'f$n',
           kind: kind,
           total: 100,
           worker: (p, t) async {
             p(n == 0 ? 50 : 0);
             await gates[n].future;
-          }));
+          },
+        ),
+      );
     }
 
     add();
@@ -307,8 +356,11 @@ void main() {
     gates[0].complete();
     await drain();
     expect(q.uploadDoneCount, 1);
-    expect(q.uploadByteProgress, closeTo(100 / 300, 1e-9),
-        reason: 'done 按满格计(f0 totalBytes 100)');
+    expect(
+      q.uploadByteProgress,
+      closeTo(100 / 300, 1e-9),
+      reason: 'done 按满格计(f0 totalBytes 100)',
+    );
 
     gates[1].complete();
     await drain();
@@ -319,5 +371,93 @@ void main() {
     await drain();
     expect(q.activeUploadCount, 0, reason: '无活动上传 → 迷你条隐藏');
     expect(q.uploadCount, 3, reason: 'm 恒为列表内上传任务总数');
+  });
+
+  test('F5 会话写回:running 中桥接写回三字段+原回调触达,状态机不扰;'
+      '取消后三元组保留(恢复对账/worker 尽力 abort 语义不受影响)', () async {
+    final q = TransferQueue(now: () => fixedNow);
+    final gate = Completer<void>();
+    final originalSeen = <String>[];
+    final r = req(
+      'a',
+      onSessionCreated: (s) => originalSeen.add(s.uploadId),
+      worker: (p, t) async {
+        p(30);
+        await gate.future;
+      },
+    );
+    final id = q.enqueue(r);
+    expect(q.byId(id)!.status, TransferStatus.running);
+    // 模拟 worker 内 create 成功桥接(enqueue 后 req.onSessionCreated 已是
+    // 队列包装层,同 upload_sheet 桥接调用形态)
+    r.onSessionCreated!(
+      const TransferUploadSession(uploadId: 'u-1', bucket: 'ms', key: 'k'),
+    );
+    expect(q.byId(id)!.uploadId, 'u-1');
+    expect(q.byId(id)!.uploadBucket, 'ms');
+    expect(q.byId(id)!.uploadKey, 'k');
+    expect(q.byId(id)!.status, TransferStatus.running, reason: '写回不改状态机');
+    expect(originalSeen, ['u-1'], reason: '原回调照常触达');
+
+    await q.cancel(id);
+    expect(q.byId(id)!.status, TransferStatus.canceled);
+    expect(
+      q.byId(id)!.uploadId,
+      'u-1',
+      reason: '取消保留三元组(尽力 abort 由 worker 内部负责)',
+    );
+    gate.complete();
+    await drain();
+    expect(
+      q.byId(id)!.status,
+      TransferStatus.canceled,
+      reason: 'worker 收尾不覆盖取消态(现状语义)',
+    );
+  });
+
+  test('F5 retry 重新包装:会话写回落到新任务(非已移除的旧任务),原回调每轮触达', () async {
+    final q = TransferQueue(now: () => fixedNow);
+    final originalSeen = <String>[];
+    final gate = Completer<void>();
+    var run = 0;
+    final r = req(
+      'a',
+      onSessionCreated: (s) => originalSeen.add(s.uploadId),
+      worker: (p, t) async {
+        run += 1;
+        if (run == 1) throw StateError('boom'); // 首跑失败
+        await gate.future;
+      },
+    );
+    final id1 = q.enqueue(r);
+    await drain();
+    expect(q.byId(id1)!.status, TransferStatus.failed);
+    // 首跑失败后(模拟建会话晚于失败点竞态)桥接:写回旧任务
+    r.onSessionCreated!(
+      const TransferUploadSession(uploadId: 'u-1', bucket: 'ms', key: 'k1'),
+    );
+    expect(q.byId(id1)!.uploadId, 'u-1');
+
+    final id2 = q.retry(id1)!;
+    expect(q.byId(id1), isNull, reason: '旧任务移出列表');
+    expect(r.onSessionCreated, isNotNull, reason: '重入队后重新包装完成');
+    // 第二轮桥接 → 写回新任务(旧包装若未归还,此处会写回已移除的旧任务)
+    r.onSessionCreated!(
+      const TransferUploadSession(uploadId: 'u-2', bucket: 'ms', key: 'k2'),
+    );
+    expect(q.byId(id2)!.uploadId, 'u-2');
+    expect(q.byId(id2)!.uploadKey, 'k2');
+    expect(originalSeen, ['u-1', 'u-2'], reason: '原回调每轮触达');
+    gate.complete();
+    await drain();
+    expect(q.byId(id2)!.status, TransferStatus.done);
+  });
+
+  test('F5 无会话回调的任务不受影响:onSessionCreated 为空不包装,行为同现状', () async {
+    final q = TransferQueue(now: () => fixedNow);
+    final id = q.enqueue(req('a', worker: (p, t) async {}));
+    await drain();
+    expect(q.byId(id)!.status, TransferStatus.done);
+    expect(q.byId(id)!.uploadId, isNull);
   });
 }

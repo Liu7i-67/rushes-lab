@@ -4,6 +4,9 @@
 /// 登录页不再有地址切换 UI(§4 定稿)。
 library;
 
+import 'dart:io' show Platform;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'app.dart';
@@ -15,6 +18,7 @@ import 'core/session.dart';
 import 'core/thumb_disk_store.dart';
 import 'core/thumb_pipeline.dart';
 import 'core/thumbnail_cache.dart';
+import 'core/transfers/bg_part_put_channel.dart';
 import 'core/transfers/transfer_queue.dart';
 import 'services/app_log.dart';
 import 'services/notifier.dart';
@@ -35,10 +39,7 @@ const kAppBuildStamp = String.fromEnvironment(
 /// bump 后的 pubspec 版本)、随 User-Agent 上报供后端使用统计识别三端:
 ///   flutter build apk --release --dart-define=APP_VERSION=0.1.11
 /// 未注入(本地 flutter run/test)为空 → UA 输出 `msapp/ (<platform>)`。
-const kAppVersion = String.fromEnvironment(
-  'APP_VERSION',
-  defaultValue: '',
-);
+const kAppVersion = String.fromEnvironment('APP_VERSION', defaultValue: '');
 
 /// 会话清空钩子注册(B2 遗留 core→features 环引用解耦:Session 暴露回调,
 /// core 层资源在此挂载)。**幂等**:重复调用不重复累积(T14 断言),抽函数
@@ -53,6 +54,25 @@ void registerSessionClearHooks() {
   session.addSessionClearHook(thumbPipeline.clear);
   session.addSessionClearHook(thumbnailCache.clear);
   session.addSessionClearHook(ThumbDiskStore.I.clear);
+}
+
+/// F5/D6(feat/ios-bg-upload):「恢复中断尽力 abort 服务端会话」接线。
+/// session.api 探活激活才建、会话认证(me,登录/cookie 恢复)后才有——均晚于
+/// 队列快照恢复(main 里 attachDefaultStore 先行),故挂监听等双条件就绪再注入
+/// [TransferQueue.setInterruptedAbort](队列侧对恢复时回调未就绪的中断会话
+/// 挂起待发,接线即补发);始终未就绪则不注入,恢复路径跳过 abort,不崩。
+/// 回调运行期再读 session.api(会话中途被清则尽力语义跳过),不捕获旧实例。
+void _wireInterruptedAbortOnSessionReady() {
+  var wired = false;
+  session.addListener(() {
+    if (wired || session.api == null || session.me == null) return;
+    wired = true;
+    TransferQueue.I.setInterruptedAbort((uploadId, bucket, key) async {
+      final api = session.api;
+      if (api == null) return; // 会话已清:尽力 abort 跳过
+      await api.assets.abortUpload(uploadId, bucket, key);
+    });
+  });
 }
 
 Future<void> main() async {
@@ -87,6 +107,15 @@ Future<void> main() async {
   // transfers.json)并恢复历史记录(终态原样/非终态标「进程中断」;存储打开
   // 失败如测试环境无插件通道,静默降级仅内存)
   TransferQueue.I.attachDefaultStore().ignore();
+  // iOS 后台持续上传(feat/ios-bg-upload 包 D 接线):
+  // - F2/F6:iOS 初始化 bg 分片上传通道(幂等:注册状态回调 + 清残留分片
+  //   临时目录);非 iOS 平台不触达,dio 通道行为不变;
+  // - F5/D6:「进程中断恢复尽力 abort 服务端会话」两平台通用(session 就绪
+  //   后接线,见 _wireInterruptedAbortOnSessionReady 注)。
+  if (!kIsWeb && Platform.isIOS) {
+    BgPartPutChannel.ensureInit().ignore(); // 失败静默(put 时幂等重试,降级哲学同 R4d)
+  }
+  _wireInterruptedAbortOnSessionReady();
   // 包 B(app-polish-3):缩略图位图磁盘缓存目录就绪(建目录 + 150MB LRU 清理),
   // 异步不阻塞启动;失败静默降级为纯网络链路(测试环境无插件通道同此)
   ThumbDiskStore.I.init().ignore();

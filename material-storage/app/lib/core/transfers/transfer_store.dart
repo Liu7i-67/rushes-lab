@@ -6,6 +6,9 @@
 ///   livp 小包临时轨、百度/文件选择器的临时路径等源信息不可序列化(会过期/跨
 ///   进程失效),恢复记录的「重试」降级为提示重新发起(见 TransferQueue.retry),
 ///   不做断点续传。
+/// - feat/ios-bg-upload F5 起追加可空会话三元组 uploadId/uploadBucket/
+///   uploadKey(仅非 null 写入,缺失键=旧快照兼容),供「进程中断」恢复时
+///   尽力 abort 服务端 multipart 会话(D6 对账);恢复中断口径不变。
 /// - 写入时机=入队/状态变化(队列侧去抖合并,高频进度回调不写盘,进度字段
 ///   只在状态变化点落当时值,收尾即终值)。
 /// - 启动恢复=终态(done/failed/canceled)原样还原;非终态(queued/running)
@@ -41,17 +44,28 @@ const kPersistDebounce = Duration(milliseconds: 500);
 /// 任务列表 → 快照 JSON(纯函数,单测钉字段)。列表序=展示序(index 0 最新),
 /// 超 [kMaxSnapshotTasks] 截尾(丢最旧)。
 String encodeTasks(List<TransferTask> tasks) {
-  final rows = tasks.take(kMaxSnapshotTasks).map((t) => <String, Object?>{
-        'id': t.id,
-        'kind': t.kind.name,
-        'filename': t.filename,
-        'where': t.where,
-        'totalBytes': t.totalBytes,
-        'doneBytes': t.doneBytes,
-        'status': t.status.name,
-        if (t.error != null) 'error': t.error,
-        'startedAt': t.startedAt.toIso8601String(),
-      }).toList();
+  final rows = tasks
+      .take(kMaxSnapshotTasks)
+      .map(
+        (t) => <String, Object?>{
+          'id': t.id,
+          'kind': t.kind.name,
+          'filename': t.filename,
+          'where': t.where,
+          'totalBytes': t.totalBytes,
+          'doneBytes': t.doneBytes,
+          'status': t.status.name,
+          if (t.error != null) 'error': t.error,
+          'startedAt': t.startedAt.toIso8601String(),
+          // F5(feat/ios-bg-upload):上传会话三元组,仅非 null 写入(缺失键=
+          // 旧快照兼容,不视为残缺);终态任务照写(下次启动还原展示,历史
+          // 中断记录不再触发 abort,见 transfer_task.interruptedByRestore)
+          if (t.uploadId != null) 'uploadId': t.uploadId,
+          if (t.uploadBucket != null) 'uploadBucket': t.uploadBucket,
+          if (t.uploadKey != null) 'uploadKey': t.uploadKey,
+        },
+      )
+      .toList();
   return jsonEncode(rows);
 }
 
@@ -75,12 +89,19 @@ List<TransferTask>? decodeTasks(String raw) {
         error: map['error'] as String?,
         startedAt:
             DateTime.tryParse(map['startedAt'] as String? ?? '') ??
-                DateTime.fromMillisecondsSinceEpoch(0),
+            DateTime.fromMillisecondsSinceEpoch(0),
+        // F5:会话三元组缺失=旧快照兼容(读取口径与 error 同:仅非 null 写入)
+        uploadId: map['uploadId'] as String?,
+        uploadBucket: map['uploadBucket'] as String?,
+        uploadKey: map['uploadKey'] as String?,
       );
       if (!status.isTerminal) {
         task
           ..status = TransferStatus.failed
-          ..error = kInterruptedError;
+          ..error = kInterruptedError
+          // F5/D6:标记「本次恢复的中断任务」,队列恢复路径据此尽力 abort
+          // 服务端会话(见 transfer_queue.dart);口径(status/error)不变
+          ..interruptedByRestore = true;
       }
       restored.add(task);
     }
@@ -96,8 +117,10 @@ List<TransferTask>? decodeTasks(String raw) {
 class TransferStore {
   /// 测试注入:文本读写件(null=真实文件系统,应用支持目录 transfers.json)。
   @visibleForTesting
-  TransferStore(
-      {Future<String?> Function()? read, FutureOr<void> Function(String)? write}) {
+  TransferStore({
+    Future<String?> Function()? read,
+    FutureOr<void> Function(String)? write,
+  }) {
     _read = read;
     _write = write;
   }
@@ -112,7 +135,8 @@ class TransferStore {
       final dir = await getApplicationSupportDirectory();
       final file = File('${dir.path}/$kTransfersSnapshotName');
       return TransferStore(
-        read: () async => await file.exists() ? await file.readAsString() : null,
+        read: () async =>
+            await file.exists() ? await file.readAsString() : null,
         write: (content) async => file.writeAsString(content, flush: true),
       );
     } catch (e) {

@@ -221,10 +221,10 @@ async def sign_part(
     # 动态签发:分片 PUT URL 的 host 跟随浏览器入口(https 入口否则被混合内容拦)
     url = presign.sign_part_url(
         bucket, key, upload_id, part_number,
-        expires_seconds=settings.presigned_normal_ttl_seconds,
+        expires_seconds=settings.presigned_part_ttl_seconds,
         request_base=request_base_from(request),
     )
-    return UploadPartUrlOut(url=url, expires_in=settings.presigned_normal_ttl_seconds)
+    return UploadPartUrlOut(url=url, expires_in=settings.presigned_part_ttl_seconds)
 
 
 @router.post("/uploads/{upload_id}/complete", response_model=AssetOut)

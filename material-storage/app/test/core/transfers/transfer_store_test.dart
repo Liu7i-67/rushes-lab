@@ -4,6 +4,8 @@
 /// - decodeTasks 纯函数:终态原样还原;非终态(queued/running)标 failed
 ///   「进程中断」(kInterruptedError);字段残缺容错(where/totalBytes/startedAt
 ///   缺失有兜底);坏 JSON/条目残缺 → null(调用方按空快照重来);
+/// - 会话三元组(feat/ios-bg-upload F5):uploadId/uploadBucket/uploadKey 仅非
+///   null 写入/读取,旧快照(无三字段键)兼容,恢复中断口径不变;
 /// - openDefault:应用支持目录 transfers.json 真实读写(path_provider 通道
 ///   mock);通道失败 → null(队列整体降级仅内存,不崩溃)。
 library;
@@ -24,27 +26,26 @@ TransferTask task(
   String? error,
   int totalBytes = 100,
   int doneBytes = 100,
-}) =>
-    TransferTask(
-      id: id,
-      kind: kind,
-      filename: filename,
-      where: '项目A/夹B',
-      totalBytes: totalBytes,
-      doneBytes: doneBytes,
-      status: status,
-      error: error,
-      startedAt: DateTime(2026, 10, 21, 9, 30),
-    );
+}) => TransferTask(
+  id: id,
+  kind: kind,
+  filename: filename,
+  where: '项目A/夹B',
+  totalBytes: totalBytes,
+  doneBytes: doneBytes,
+  status: status,
+  error: error,
+  startedAt: DateTime(2026, 10, 21, 9, 30),
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized(); // openDefault 通道 mock 依赖
 
   group('encodeTasks(R4c 快照字段口径)', () {
     test('字段齐:id/kind/filename/where/status/error/进度/startedAt', () {
-      final rows =
-          (jsonDecode(encodeTasks([task('t1', error: '空间不足')])) as List)
-              .cast<Map<String, dynamic>>();
+      final rows = (jsonDecode(
+        encodeTasks([task('t1', error: '空间不足')]),
+      ) as List).cast<Map<String, dynamic>>();
       expect(rows, hasLength(1));
       expect(rows.single['id'], 't1');
       expect(rows.single['kind'], 'upload');
@@ -55,20 +56,24 @@ void main() {
       expect(rows.single['totalBytes'], 100);
       expect(rows.single['doneBytes'], 100);
       expect(rows.single['startedAt'], '2026-10-21T09:30:00.000');
-      expect(DateTime.parse(rows.single['startedAt'] as String).year, 2026,
-          reason: 'startedAt 为 ISO8601 可解析');
+      expect(
+        DateTime.parse(rows.single['startedAt'] as String).year,
+        2026,
+        reason: 'startedAt 为 ISO8601 可解析',
+      );
     });
 
     test('error 为空不落键(恢复后展示无原因行)', () {
-      final rows =
-          (jsonDecode(encodeTasks([task('t1')])) as List)
-              .cast<Map<String, dynamic>>();
+      final rows = (jsonDecode(encodeTasks([task('t1')])) as List)
+          .cast<Map<String, dynamic>>();
       expect(rows.single.containsKey('error'), isFalse);
     });
 
     test('超 kMaxSnapshotTasks 截尾:列表序=展示序,丢最旧留最新 200 条', () {
-      final tasks =
-          List.generate(kMaxSnapshotTasks + 30, (i) => task('t${i + 1}'));
+      final tasks = List.generate(
+        kMaxSnapshotTasks + 30,
+        (i) => task('t${i + 1}'),
+      );
       final rows = (jsonDecode(encodeTasks(tasks)) as List)
           .cast<Map<String, dynamic>>();
       expect(rows, hasLength(kMaxSnapshotTasks));
@@ -95,29 +100,31 @@ void main() {
     });
 
     test('非终态(queued/running)标 failed「进程中断」,允许重试展示', () {
-      final restored = decodeTasks(encodeTasks([
-        task('t1', status: TransferStatus.running, doneBytes: 40),
-        task('t2', status: TransferStatus.queued),
-      ]))!;
+      final restored = decodeTasks(
+        encodeTasks([
+          task('t1', status: TransferStatus.running, doneBytes: 40),
+          task('t2', status: TransferStatus.queued),
+        ]),
+      )!;
       for (final t in restored) {
-        expect(t.status, TransferStatus.failed,
-            reason: '上次运行被杀,任务实际已中断');
+        expect(t.status, TransferStatus.failed, reason: '上次运行被杀,任务实际已中断');
         expect(t.error, kInterruptedError);
         expect(t.error, '进程中断', reason: '需求文档口径文案');
       }
     });
 
-    test('字段残缺容错:where/totalBytes/doneBytes 缺失有兜底,startedAt 乱值落 epoch',
-        () {
-      final restored = decodeTasks(jsonEncode([
-        {
-          'id': 't9',
-          'kind': 'download',
-          'filename': 'v.mp4',
-          'status': 'done',
-          'startedAt': 'not-a-date',
-        },
-      ]))!;
+    test('字段残缺容错:where/totalBytes/doneBytes 缺失有兜底,startedAt 乱值落 epoch', () {
+      final restored = decodeTasks(
+        jsonEncode([
+          {
+            'id': 't9',
+            'kind': 'download',
+            'filename': 'v.mp4',
+            'status': 'done',
+            'startedAt': 'not-a-date',
+          },
+        ]),
+      )!;
       expect(restored.single.where, '');
       expect(restored.single.totalBytes, 0);
       expect(restored.single.doneBytes, 0);
@@ -132,11 +139,110 @@ void main() {
 
     test('条目残缺(缺 status/id 等必填)→ 整体 null,不做半截恢复', () {
       expect(
-        decodeTasks(jsonEncode([
-          {'id': 't1', 'kind': 'upload', 'filename': 'a.jpg'},
-        ])),
+        decodeTasks(
+          jsonEncode([
+            {'id': 't1', 'kind': 'upload', 'filename': 'a.jpg'},
+          ]),
+        ),
         isNull,
-        reason: '缺 status:解析抛 → 整体 null(空快照口径,防半截状态)');
+        reason: '缺 status:解析抛 → 整体 null(空快照口径,防半截状态)',
+      );
+    });
+  });
+
+  group('会话三元组(F5 ios-bg-upload:encode/decode roundtrip)', () {
+    test('encode 仅非 null 写入三字段;roundtrip 原样还原', () {
+      final withSession = task('t1')
+        ..uploadId = 'u-1'
+        ..uploadBucket = 'ms-media'
+        ..uploadKey = 'assets/2026/a.jpg';
+      final rows = (jsonDecode(encodeTasks([withSession, task('t2')])) as List)
+          .cast<Map<String, dynamic>>();
+      expect(rows, hasLength(2));
+      expect(rows[0]['uploadId'], 'u-1');
+      expect(rows[0]['uploadBucket'], 'ms-media');
+      expect(rows[0]['uploadKey'], 'assets/2026/a.jpg');
+      expect(
+        rows[1].containsKey('uploadId'),
+        isFalse,
+        reason: 'null 三元组不落键(与 error 同口径,缺失=无会话)',
+      );
+      expect(rows[1].containsKey('uploadBucket'), isFalse);
+      expect(rows[1].containsKey('uploadKey'), isFalse);
+
+      final restored = decodeTasks(encodeTasks([withSession]))!;
+      expect(restored.single.uploadId, 'u-1');
+      expect(restored.single.uploadBucket, 'ms-media');
+      expect(restored.single.uploadKey, 'assets/2026/a.jpg');
+      expect(
+        restored.single.status,
+        TransferStatus.done,
+        reason: '三元组还原不扰终态口径',
+      );
+    });
+
+    test('旧快照(无三字段键)兼容:decode 得 null 三元组,其余口径不变', () {
+      final legacy = jsonEncode([
+        {
+          'id': 't1',
+          'kind': 'upload',
+          'filename': 'a.jpg',
+          'where': '项目A',
+          'totalBytes': 10,
+          'doneBytes': 10,
+          'status': 'done',
+          'startedAt': '2026-10-21T09:30:00.000',
+        },
+      ]);
+      final restored = decodeTasks(legacy)!;
+      expect(restored.single.uploadId, isNull);
+      expect(restored.single.uploadBucket, isNull);
+      expect(restored.single.uploadKey, isNull);
+      expect(restored.single.status, TransferStatus.done);
+      expect(restored.single.error, isNull);
+      expect(restored.single.interruptedByRestore, isFalse);
+    });
+
+    test('非终态恢复标「进程中断」口径不变,interruptedByRestore 置位(有无三元组均然)', () {
+      final restored = decodeTasks(
+        encodeTasks([
+          task('t1', status: TransferStatus.running)
+            ..uploadId = 'u-1'
+            ..uploadBucket = 'ms-media'
+            ..uploadKey = 'k',
+          task('t2', status: TransferStatus.queued),
+        ]),
+      )!;
+      expect(restored[0].status, TransferStatus.failed);
+      expect(restored[0].error, kInterruptedError);
+      expect(
+        restored[0].interruptedByRestore,
+        isTrue,
+        reason: '本次恢复的中断任务标记置位(队列 abort 对账依据)',
+      );
+      expect(restored[0].uploadId, 'u-1', reason: '三元组字段保留(abort 对账需要)');
+      expect(restored[1].status, TransferStatus.failed);
+      expect(restored[1].error, kInterruptedError);
+      expect(restored[1].interruptedByRestore, isTrue);
+      expect(restored[1].uploadId, isNull);
+    });
+
+    test('终态快照里的历史中断记录(error=进程中断)不置位(上次恢复已处理)', () {
+      final restored = decodeTasks(
+        encodeTasks([
+          task('t1', status: TransferStatus.failed, error: kInterruptedError)
+            ..uploadId = 'u-1'
+            ..uploadBucket = 'ms-media'
+            ..uploadKey = 'k',
+        ]),
+      )!;
+      expect(restored.single.status, TransferStatus.failed);
+      expect(restored.single.error, kInterruptedError);
+      expect(
+        restored.single.interruptedByRestore,
+        isFalse,
+        reason: '终态原样还原不置位,不重复 abort',
+      );
     });
   });
 
@@ -146,13 +252,16 @@ void main() {
       addTearDown(() => tmp.delete(recursive: true));
       final binding = TestWidgetsFlutterBinding.instance;
       binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (call) async =>
+            call.method == 'getApplicationSupportDirectory' ? tmp.path : null,
+      );
+      addTearDown(
+        () => binding.defaultBinaryMessenger.setMockMethodCallHandler(
           const MethodChannel('plugins.flutter.io/path_provider'),
-          (call) async => call.method == 'getApplicationSupportDirectory'
-              ? tmp.path
-              : null);
-      addTearDown(() => binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-              const MethodChannel('plugins.flutter.io/path_provider'), null));
+          null,
+        ),
+      );
 
       final store = await TransferStore.openDefault();
       expect(store, isNotNull);
@@ -160,19 +269,28 @@ void main() {
 
       await store.write(encodeTasks([task('t1')]));
       expect(File('${tmp.path}/transfers.json').existsSync(), isTrue);
-      expect(await store.read(), encodeTasks([task('t1')]),
-          reason: '写读一致(roundtrip)');
+      expect(
+        await store.read(),
+        encodeTasks([task('t1')]),
+        reason: '写读一致(roundtrip)',
+      );
     });
 
     test('通道失败(无插件环境)→ null,队列整体降级仅内存不崩溃', () async {
       final binding = TestWidgetsFlutterBinding.instance;
       binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        const MethodChannel('plugins.flutter.io/path_provider'),
+        (call) async => throw PlatformException(
+          code: 'missing-plugin',
+          message: 'no channel in test',
+        ),
+      );
+      addTearDown(
+        () => binding.defaultBinaryMessenger.setMockMethodCallHandler(
           const MethodChannel('plugins.flutter.io/path_provider'),
-          (call) async => throw PlatformException(
-              code: 'missing-plugin', message: 'no channel in test'));
-      addTearDown(() => binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-              const MethodChannel('plugins.flutter.io/path_provider'), null));
+          null,
+        ),
+      );
 
       expect(await TransferStore.openDefault(), isNull);
     });
